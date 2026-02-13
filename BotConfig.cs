@@ -19,6 +19,15 @@ public class BotConfig
     /// <summary>Rolling window in days for activity tracking.</summary>
     public int WindowDays { get; set; } = 28;
 
+    /// <summary>Shorter rolling window in days for roles listed in ShortWindowRoles.</summary>
+    public int ShortWindowDays { get; set; } = 14;
+
+    /// <summary>
+    /// Comma-separated list of role names that use the shorter activity window.
+    /// e.g. "Guest,RCT"
+    /// </summary>
+    public string ShortWindowRoles { get; set; } = "Guest,RCT";
+    
     /// <summary>Minimum messages required within the window to stay active.</summary>
     public int MinMessages { get; set; } = 5;
 
@@ -39,4 +48,19 @@ public class BotConfig
 
     public List<string> GetExemptRolesList() =>
         ExemptRoles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+    
+    public List<string> GetShortWindowRolesList() =>
+        ShortWindowRoles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+    
+    /// <summary>
+    /// Returns the appropriate window days for a guild member based on their roles.
+    /// Members with any role in ShortWindowRoles get ShortWindowDays; others get WindowDays.
+    /// </summary>
+    public int GetWindowDaysForRoles(IEnumerable<string> memberRoleNames)
+    {
+        var shortRoles = GetShortWindowRolesList();
+        return memberRoleNames.Any(r => shortRoles.Contains(r, StringComparer.OrdinalIgnoreCase))
+            ? ShortWindowDays
+            : WindowDays;
+    }
 }
