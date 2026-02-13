@@ -44,7 +44,7 @@ public class BotConfig
     /// Comma-separated list of role names that are exempt from AWOL tracking.
     /// Officers, admins, bots, etc.
     /// </summary>
-    public string ExemptRoles { get; set; } = "Admin,Moderator,Officer,Bot";
+    public string ExemptRoles { get; set; } = "Admin,Moderator,Retired,Bot";
 
     public List<string> GetExemptRolesList() =>
         ExemptRoles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
