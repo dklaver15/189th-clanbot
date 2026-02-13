@@ -117,6 +117,57 @@ public class AwolCheckService : BackgroundService
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
         // ------------------------------------------------------------------
+        // Step 0: Remove AWOL role from users who are now active
+        // (must run BEFORE window resets, or the counters get wiped first)
+        // ------------------------------------------------------------------
+        var awolMembers = guild.Users
+            .Where(m => !m.IsBot && m.Roles.Any(r => r.Id == awolRole.Id));
+
+        foreach (var member in awolMembers)
+        {
+            var activity = await db.UserActivities
+                .FirstOrDefaultAsync(a => a.GuildId == guild.Id && a.UserId == member.Id, ct);
+
+            if (activity is null) continue;
+
+            var meetsMessages = activity.MessageCount >= _config.MinMessages;
+            var meetsVoice = activity.VoiceSeconds >= minVoiceSeconds;
+
+            if (meetsMessages || meetsVoice)
+            {
+                try
+                {
+                    await member.RemoveRoleAsync(awolRole);
+                    _logger.LogInformation(
+                        "Removed AWOL role from {Username} ({UserId}) in {Guild} — " +
+                        "Messages: {Messages}, Voice: {VoiceHours:F1}h",
+                        member.Username, member.Id, guild.Name,
+                        activity.MessageCount, activity.VoiceSeconds / 3600.0);
+
+                    // Mark any pending AWOL records as resolved
+                    var pendingRecords = await db.AwolRecords
+                        .Where(r => r.GuildId == guild.Id
+                                 && r.UserId == member.Id
+                                 && !r.NotificationSent)
+                        .ToListAsync(ct);
+
+                    foreach (var record in pendingRecords)
+                    {
+                        record.NotificationSent = true;
+                        record.NotificationSentAt = DateTime.UtcNow;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to remove AWOL role from {Username} in {Guild}",
+                        member.Username, guild.Name);
+                }
+            }
+        }
+
+        await db.SaveChangesAsync(ct);
+        
+        // ------------------------------------------------------------------
         // Step 1: Reset windows that have expired (check per-user window)
         // ------------------------------------------------------------------
         var allActivities = await db.UserActivities
@@ -172,7 +223,7 @@ public class AwolCheckService : BackgroundService
         await db.SaveChangesAsync(ct);
 
         // ------------------------------------------------------------------
-        // Step 3a: Check for users below thresholds and assign AWOL
+        // Step 3: Check for users below thresholds and assign AWOL
         // ------------------------------------------------------------------
         // Only check users whose window has been open for at least their full window period
         var allActivitiesForCheck = await db.UserActivities
@@ -232,56 +283,6 @@ public class AwolCheckService : BackgroundService
             }
         }
         await db.SaveChangesAsync(ct);
-        
-        // ------------------------------------------------------------------
-            // Step 3b: Remove AWOL role from users who are now active
-            // ------------------------------------------------------------------
-            var awolMembers = guild.Users
-                .Where(m => !m.IsBot && m.Roles.Any(r => r.Id == awolRole.Id));
-
-            foreach (var member in awolMembers)
-            {
-                var activity = await db.UserActivities
-                    .FirstOrDefaultAsync(a => a.GuildId == guild.Id && a.UserId == member.Id, ct);
-
-                if (activity is null) continue;
-
-                var meetsMessages = activity.MessageCount >= _config.MinMessages;
-                var meetsVoice = activity.VoiceSeconds >= minVoiceSeconds;
-
-                if (meetsMessages || meetsVoice)
-                {
-                    try
-                    {
-                        await member.RemoveRoleAsync(awolRole);
-                        _logger.LogInformation(
-                            "Removed AWOL role from {Username} ({UserId}) in {Guild} — " +
-                            "Messages: {Messages}, Voice: {VoiceHours:F1}h",
-                            member.Username, member.Id, guild.Name,
-                            activity.MessageCount, activity.VoiceSeconds / 3600.0);
-
-                        // Mark any pending AWOL records as resolved
-                        var pendingRecords = await db.AwolRecords
-                            .Where(r => r.GuildId == guild.Id
-                                     && r.UserId == member.Id
-                                     && !r.NotificationSent)
-                            .ToListAsync(ct);
-
-                        foreach (var record in pendingRecords)
-                        {
-                            record.NotificationSent = true;
-                            record.NotificationSentAt = DateTime.UtcNow;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Failed to remove AWOL role from {Username} in {Guild}",
-                            member.Username, guild.Name);
-                    }
-                }
-            }
-
-            await db.SaveChangesAsync(ct);
 
         // ------------------------------------------------------------------
         // Step 4: Post HQ notifications for users past the grace period
