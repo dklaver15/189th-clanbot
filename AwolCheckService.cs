@@ -137,10 +137,11 @@ public class AwolCheckService : BackgroundService
         // ------------------------------------------------------------------
         // Step 2: Ensure all guild members have an activity record
         // ------------------------------------------------------------------
-        var existingUserIds = await db.UserActivities
-            .Where(a => a.GuildId == guild.Id)
-            .Select(a => a.UserId)
-            .ToHashSetAsync(ct);
+        var existingUserIds = (await db.UserActivities
+                .Where(a => a.GuildId == guild.Id)
+                .Select(a => a.UserId)
+                .ToListAsync(ct))
+                .ToHashSet();
 
         foreach (var member in guild.Users)
         {
