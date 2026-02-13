@@ -1,0 +1,26 @@
+version: "3.8"
+
+services:
+  clanguard:
+    build: .
+    container_name: clanguard-bot
+    restart: unless-stopped
+    environment:
+      - DOTNET_ENVIRONMENT=Production
+      - BotConfig__Token=${DISCORD_BOT_TOKEN}
+      # Override any config values via environment variables:
+      # - BotConfig__HqChannelName=headquarters
+      # - BotConfig__MinMessages=10
+      # - BotConfig__ExemptRoles=Admin,Moderator,Officer,Bot,VIP
+    volumes:
+      - bot-data:/app/data
+      - bot-logs:/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  bot-data:
+  bot-logs:
