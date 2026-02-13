@@ -38,7 +38,7 @@ public class BotConfig
     public int AwolGraceDays { get; set; } = 2;
 
     /// <summary>How often (in minutes) the background check runs.</summary>
-    public int CheckIntervalMinutes { get; set; } = 60;
+    public int CheckIntervalMinutes { get; set; } = 180;
 
     /// <summary>
     /// Comma-separated list of role names that are exempt from AWOL tracking.
