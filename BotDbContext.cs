@@ -1,5 +1,6 @@
 using ClanGuardBot.Models;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Design;
 
 namespace ClanGuardBot.Data;
 
@@ -34,5 +35,19 @@ public class BotDbContext : DbContext
         {
             e.HasIndex(v => new { v.GuildId, v.UserId, v.JoinedAt });
         });
+    }
+}
+
+/// <summary>
+/// Allows EF Core tools (dotnet ef migrations, etc.) to create the DbContext
+/// without running Program.cs.
+/// </summary>
+public class BotDbContextFactory : IDesignTimeDbContextFactory<BotDbContext>
+{
+    public BotDbContext CreateDbContext(string[] args)
+    {
+        var optionsBuilder = new DbContextOptionsBuilder<BotDbContext>();
+        optionsBuilder.UseSqlite("Data Source=clanguard.db");
+        return new BotDbContext(optionsBuilder.Options);
     }
 }
