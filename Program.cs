@@ -52,6 +52,7 @@ try
 
     // Hosted services
     builder.Services.AddHostedService<DiscordBotService>();
+    builder.Services.AddHostedService<HistoryBackfillService>();
     builder.Services.AddHostedService<AwolCheckService>();
 
     var app = builder.Build();
