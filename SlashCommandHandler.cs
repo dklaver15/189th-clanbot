@@ -74,6 +74,11 @@ public class SlashCommandHandler
             return;
         }
 
+        var guildUser = command.User as SocketGuildUser;
+        var userWindowDays = guildUser is not null
+            ? _config.GetWindowDaysForRoles(guildUser.Roles.Select(r => r.Name))
+            : _config.WindowDays;
+
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
@@ -100,7 +105,7 @@ public class SlashCommandHandler
                 ? Color.Green : Color.Orange)
             .AddField($"{msgStatus} Messages", $"{activity.MessageCount} / {_config.MinMessages} required", true)
             .AddField($"{voiceStatus} Voice Time", $"{voiceHours:F1}h / {_config.MinVoiceHours}h required", true)
-            .AddField("Window Started", $"{activity.WindowStart:yyyy-MM-dd HH:mm} UTC\n({windowAge:F0} days ago)")
+            .AddField("Window", $"{userWindowDays}-day window started {activity.WindowStart:yyyy-MM-dd HH:mm} UTC\n({windowAge:F0} days ago)")
             .WithFooter("Stay active to avoid the AWOL role!")
             .Build();
 
