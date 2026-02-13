@@ -38,7 +38,6 @@ public class ActivityTrackingHandler
 
     private async Task OnMessageReceived(SocketMessage message)
     {
-        // Ignore bots and system messages
         if (message.Author.IsBot || message is not SocketUserMessage userMessage)
             return;
 
@@ -54,6 +53,7 @@ public class ActivityTrackingHandler
             using var scope = _services.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
+            // Ensure user activity record exists
             var activity = await db.UserActivities
                 .FirstOrDefaultAsync(a => a.GuildId == guildId && a.UserId == userId);
 
@@ -63,18 +63,22 @@ public class ActivityTrackingHandler
                 {
                     GuildId = guildId,
                     UserId = userId,
-                    Username = username,
-                    MessageCount = 1,
-                    VoiceSeconds = 0,
-                    WindowStart = DateTime.UtcNow
+                    Username = username
                 };
                 db.UserActivities.Add(activity);
             }
             else
             {
                 activity.Username = username;
-                activity.MessageCount++;
             }
+
+            // Record the message event
+            db.MessageEvents.Add(new MessageEvent
+            {
+                GuildId = guildId,
+                UserId = userId,
+                Timestamp = DateTime.UtcNow
+            });
 
             await db.SaveChangesAsync();
         }
@@ -91,7 +95,6 @@ public class ActivityTrackingHandler
     {
         if (user.IsBot) return;
 
-        // Determine the guild from whichever state has a channel
         var guild = (beforeState.VoiceChannel as SocketGuildChannel)?.Guild
                  ?? (afterState.VoiceChannel as SocketGuildChannel)?.Guild;
         if (guild is null) return;
@@ -117,10 +120,7 @@ public class ActivityTrackingHandler
                 {
                     GuildId = guildId,
                     UserId = userId,
-                    Username = username,
-                    MessageCount = 0,
-                    VoiceSeconds = 0,
-                    WindowStart = DateTime.UtcNow
+                    Username = username
                 };
                 db.UserActivities.Add(activity);
             }
@@ -131,23 +131,33 @@ public class ActivityTrackingHandler
 
             if (!wasInVoice && isInVoice)
             {
-                // User joined voice — record the timestamp
+                // User joined voice — start a new session
                 activity.VoiceJoinedAt = DateTime.UtcNow;
+                db.VoiceSessions.Add(new VoiceSession
+                {
+                    GuildId = guildId,
+                    UserId = userId,
+                    JoinedAt = DateTime.UtcNow,
+                    LeftAt = null
+                });
                 _logger.LogDebug("User {Username} joined voice in guild {GuildId}", username, guildId);
             }
             else if (wasInVoice && !isInVoice)
             {
-                // User left voice — accumulate the duration
-                if (activity.VoiceJoinedAt.HasValue)
+                // User left voice — close the open session
+                activity.VoiceJoinedAt = null;
+                var openSession = await db.VoiceSessions
+                    .Where(v => v.GuildId == guildId && v.UserId == userId && v.LeftAt == null)
+                    .OrderByDescending(v => v.JoinedAt)
+                    .FirstOrDefaultAsync();
+
+                if (openSession is not null)
                 {
-                    var duration = (long)(DateTime.UtcNow - activity.VoiceJoinedAt.Value).TotalSeconds;
-                    activity.VoiceSeconds += duration;
-                    activity.VoiceJoinedAt = null;
+                    openSession.LeftAt = DateTime.UtcNow;
                     _logger.LogDebug("User {Username} left voice after {Duration}s in guild {GuildId}",
-                        username, duration, guildId);
+                        username, (DateTime.UtcNow - openSession.JoinedAt).TotalSeconds, guildId);
                 }
             }
-            // If they switched channels (wasInVoice && isInVoice), no action needed — still in voice.
 
             await db.SaveChangesAsync();
         }

@@ -78,48 +78,41 @@ public class SlashCommandHandler
         var userWindowDays = guildUser is not null
             ? _config.GetWindowDaysForRoles(guildUser.Roles.Select(r => r.Name))
             : _config.WindowDays;
+        var windowStart = DateTime.UtcNow.AddDays(-userWindowDays);
 
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
-        var activity = await db.UserActivities
-            .FirstOrDefaultAsync(a => a.GuildId == command.GuildId.Value
-                                   && a.UserId == command.User.Id);
+        var messageCount = await db.MessageEvents
+            .CountAsync(m => m.GuildId == command.GuildId.Value
+                          && m.UserId == command.User.Id
+                          && m.Timestamp >= windowStart);
 
-        if (activity is null)
-        {
-            await command.FollowupAsync(
-                "No activity recorded for you yet. Start chatting or hop in voice!",
-                ephemeral: true);
-            return;
-        }
+        var voiceSeconds = await GetVoiceSecondsAsync(db, command.GuildId.Value, command.User.Id, windowStart);
+        var voiceHours = voiceSeconds / 3600.0;
 
-        var voiceHours = activity.VoiceSeconds / 3600.0;
-        var windowAge = (DateTime.UtcNow - activity.WindowStart).TotalDays;
-        var msgStatus = activity.MessageCount >= _config.MinMessages ? "✅" : "⚠️";
+        var msgStatus = messageCount >= _config.MinMessages ? "✅" : "⚠️";
         var voiceStatus = voiceHours >= _config.MinVoiceHours ? "✅" : "⚠️";
 
         var embed = new EmbedBuilder()
             .WithTitle("📊 Your Activity Stats")
-            .WithColor(activity.MessageCount >= _config.MinMessages || voiceHours >= _config.MinVoiceHours
+            .WithColor(messageCount >= _config.MinMessages || voiceHours >= _config.MinVoiceHours
                 ? Color.Green : Color.Orange)
-            .AddField($"{msgStatus} Messages", $"{activity.MessageCount} / {_config.MinMessages} required", true)
+            .AddField($"{msgStatus} Messages", $"{messageCount} / {_config.MinMessages} required", true)
             .AddField($"{voiceStatus} Voice Time", $"{voiceHours:F1}h / {_config.MinVoiceHours}h required", true)
-            .AddField("Window", $"{userWindowDays}-day window started {activity.WindowStart:yyyy-MM-dd HH:mm} UTC\n({windowAge:F0} days ago)")
+            .AddField("Window", $"Last {userWindowDays} days")
             .WithFooter("Stay active to avoid the AWOL role!")
             .Build();
 
         await command.FollowupAsync(embed: embed, ephemeral: true);
     }
 
-    /// <summary>/clanguard-check — look up another user (officer+ only).</summary>
     private async Task HandleCheck(SocketSlashCommand command)
     {
         await command.DeferAsync(ephemeral: true);
 
         if (command.GuildId is null) return;
 
-        // Permission check: caller must have ManageRoles or be in an exempt role
         var caller = command.User as SocketGuildUser;
         if (caller is null || !HasElevatedPermissions(caller))
         {
@@ -134,28 +127,31 @@ public class SlashCommandHandler
             return;
         }
 
+        var userWindowDays = _config.GetWindowDaysForRoles(targetUser.Roles.Select(r => r.Name));
+        var windowStart = DateTime.UtcNow.AddDays(-userWindowDays);
+
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+        var messageCount = await db.MessageEvents
+            .CountAsync(m => m.GuildId == command.GuildId.Value
+                          && m.UserId == targetUser.Id
+                          && m.Timestamp >= windowStart);
+
+        var voiceSeconds = await GetVoiceSecondsAsync(db, command.GuildId.Value, targetUser.Id, windowStart);
+        var voiceHours = voiceSeconds / 3600.0;
 
         var activity = await db.UserActivities
             .FirstOrDefaultAsync(a => a.GuildId == command.GuildId.Value
                                    && a.UserId == targetUser.Id);
 
-        if (activity is null)
-        {
-            await command.FollowupAsync($"No activity recorded for {targetUser.Mention}.", ephemeral: true);
-            return;
-        }
-
-        var voiceHours = activity.VoiceSeconds / 3600.0;
-
         var embed = new EmbedBuilder()
             .WithTitle($"📊 Activity Report — {targetUser.Username}")
             .WithColor(Color.Blue)
-            .AddField("Messages", activity.MessageCount.ToString(), true)
+            .AddField("Messages", messageCount.ToString(), true)
             .AddField("Voice Time", $"{voiceHours:F1} hours", true)
-            .AddField("Window Start", activity.WindowStart.ToString("yyyy-MM-dd HH:mm UTC"))
-            .AddField("Currently in Voice", activity.VoiceJoinedAt.HasValue ? "Yes" : "No", true)
+            .AddField("Window", $"Last {userWindowDays} days")
+            .AddField("Currently in Voice", activity?.VoiceJoinedAt.HasValue == true ? "Yes" : "No", true)
             .AddField("Has AWOL Role",
                 targetUser.Roles.Any(r => r.Name.Equals(_config.AwolRoleName, StringComparison.OrdinalIgnoreCase))
                     ? "Yes" : "No", true)
@@ -200,18 +196,6 @@ public class SlashCommandHandler
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
-        // Reset their activity window
-        var activity = await db.UserActivities
-            .FirstOrDefaultAsync(a => a.GuildId == command.GuildId.Value
-                                   && a.UserId == targetUser.Id);
-
-        if (activity is not null)
-        {
-            activity.MessageCount = 0;
-            activity.VoiceSeconds = 0;
-            activity.WindowStart = DateTime.UtcNow;
-        }
-
         // Mark any pending AWOL records as handled
         var awolRecords = await db.AwolRecords
             .Where(r => r.GuildId == command.GuildId.Value
@@ -228,11 +212,44 @@ public class SlashCommandHandler
         await db.SaveChangesAsync();
 
         await command.FollowupAsync(
-            $"✅ {targetUser.Mention} has been exempted. AWOL role removed and activity window reset.",
+            $"✅ {targetUser.Mention} has been exempted. AWOL role removed.",
             ephemeral: true);
 
         _logger.LogInformation("{Caller} exempted {Target} from AWOL in {Guild}",
             caller.Username, targetUser.Username, guild.Name);
+    }
+    
+    private static async Task<long> GetVoiceSecondsAsync(
+        BotDbContext db, ulong guildId, ulong userId, DateTime windowStart, CancellationToken ct = default)
+    {
+        var sessions = await db.VoiceSessions
+            .Where(v => v.GuildId == guildId
+                        && v.UserId == userId
+                        && v.JoinedAt >= windowStart)
+            .ToListAsync(ct);
+
+        long totalSeconds = 0;
+        foreach (var session in sessions)
+        {
+            var end = session.LeftAt ?? DateTime.UtcNow;
+            var start = session.JoinedAt < windowStart ? windowStart : session.JoinedAt;
+            totalSeconds += (long)(end - start).TotalSeconds;
+        }
+
+        var overlapping = await db.VoiceSessions
+            .Where(v => v.GuildId == guildId
+                        && v.UserId == userId
+                        && v.JoinedAt < windowStart
+                        && (v.LeftAt == null || v.LeftAt > windowStart))
+            .ToListAsync(ct);
+
+        foreach (var session in overlapping)
+        {
+            var end = session.LeftAt ?? DateTime.UtcNow;
+            totalSeconds += (long)(end - windowStart).TotalSeconds;
+        }
+
+        return totalSeconds;
     }
 
     private bool HasElevatedPermissions(SocketGuildUser user)

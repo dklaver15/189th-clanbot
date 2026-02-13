@@ -7,6 +7,8 @@ public class BotDbContext : DbContext
 {
     public DbSet<UserActivity> UserActivities => Set<UserActivity>();
     public DbSet<AwolRecord> AwolRecords => Set<AwolRecord>();
+    public DbSet<MessageEvent> MessageEvents => Set<MessageEvent>();
+    public DbSet<VoiceSession> VoiceSessions => Set<VoiceSession>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -21,6 +23,16 @@ public class BotDbContext : DbContext
         {
             entity.HasIndex(e => new { e.GuildId, e.UserId });
             entity.HasIndex(e => new { e.NotificationSent, e.AssignedAt });
+        });
+        
+        modelBuilder.Entity<MessageEvent>(e =>
+        {
+            e.HasIndex(m => new { m.GuildId, m.UserId, m.Timestamp });
+        });
+
+        modelBuilder.Entity<VoiceSession>(e =>
+        {
+            e.HasIndex(v => new { v.GuildId, v.UserId, v.JoinedAt });
         });
     }
 }

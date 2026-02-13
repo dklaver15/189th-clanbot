@@ -83,12 +83,35 @@ public class AwolCheckService : BackgroundService
             }
         }
 
+        // Prune events older than the longest window + a buffer
+        try
+        {
+            using var scope = _services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+            var pruneDate = DateTime.UtcNow.AddDays(-(_config.WindowDays + 7));
+
+            var oldMessages = await db.MessageEvents
+                .Where(m => m.Timestamp < pruneDate)
+                .ExecuteDeleteAsync(ct);
+
+            var oldSessions = await db.VoiceSessions
+                .Where(v => v.LeftAt != null && v.LeftAt < pruneDate)
+                .ExecuteDeleteAsync(ct);
+
+            if (oldMessages > 0 || oldSessions > 0)
+                _logger.LogInformation("Pruned {Messages} old message events and {Sessions} old voice sessions",
+                    oldMessages, oldSessions);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error pruning old events");
+        }
+
         _logger.LogInformation("AWOL check cycle complete");
     }
 
     private async Task ProcessGuildAsync(SocketGuild guild, CancellationToken ct)
     {
-        // Ensure we have fresh member data
         await guild.DownloadUsersAsync();
 
         var awolRole = guild.Roles.FirstOrDefault(r =>
@@ -117,84 +140,7 @@ public class AwolCheckService : BackgroundService
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
         // ------------------------------------------------------------------
-        // Step 0: Remove AWOL role from users who are now active
-        // (must run BEFORE window resets, or the counters get wiped first)
-        // ------------------------------------------------------------------
-        var awolMembers = guild.Users
-            .Where(m => !m.IsBot && m.Roles.Any(r => r.Id == awolRole.Id));
-
-        foreach (var member in awolMembers)
-        {
-            var activity = await db.UserActivities
-                .FirstOrDefaultAsync(a => a.GuildId == guild.Id && a.UserId == member.Id, ct);
-
-            if (activity is null) continue;
-
-            var meetsMessages = activity.MessageCount >= _config.MinMessages;
-            var meetsVoice = activity.VoiceSeconds >= minVoiceSeconds;
-
-            if (meetsMessages || meetsVoice)
-            {
-                try
-                {
-                    await member.RemoveRoleAsync(awolRole);
-                    _logger.LogInformation(
-                        "Removed AWOL role from {Username} ({UserId}) in {Guild} — " +
-                        "Messages: {Messages}, Voice: {VoiceHours:F1}h",
-                        member.Username, member.Id, guild.Name,
-                        activity.MessageCount, activity.VoiceSeconds / 3600.0);
-
-                    // Mark any pending AWOL records as resolved
-                    var pendingRecords = await db.AwolRecords
-                        .Where(r => r.GuildId == guild.Id
-                                 && r.UserId == member.Id
-                                 && !r.NotificationSent)
-                        .ToListAsync(ct);
-
-                    foreach (var record in pendingRecords)
-                    {
-                        record.NotificationSent = true;
-                        record.NotificationSentAt = DateTime.UtcNow;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Failed to remove AWOL role from {Username} in {Guild}",
-                        member.Username, guild.Name);
-                }
-            }
-        }
-
-        await db.SaveChangesAsync(ct);
-        
-        // ------------------------------------------------------------------
-        // Step 1: Reset windows that have expired (check per-user window)
-        // ------------------------------------------------------------------
-        var allActivities = await db.UserActivities
-            .Where(a => a.GuildId == guild.Id)
-            .ToListAsync(ct);
-
-        foreach (var activity in allActivities)
-        {
-            var member = guild.GetUser(activity.UserId);
-            var userWindowDays = member is not null
-                ? _config.GetWindowDaysForRoles(member.Roles.Select(r => r.Name))
-                : _config.WindowDays;
-
-            var userCutoff = DateTime.UtcNow.AddDays(-userWindowDays);
-            if (activity.WindowStart < userCutoff)
-            {
-                activity.MessageCount = 0;
-                activity.VoiceSeconds = 0;
-                activity.WindowStart = DateTime.UtcNow;
-                _logger.LogDebug("Reset activity window ({WindowDays}d) for user {Username} in guild {Guild}",
-                    userWindowDays, activity.Username, guild.Name);
-            }
-        }
-        await db.SaveChangesAsync(ct);
-
-        // ------------------------------------------------------------------
-        // Step 2: Ensure all guild members have an activity record
+        // Step 1: Ensure all guild members have an activity record
         // ------------------------------------------------------------------
         var existingUserIds = (await db.UserActivities
                 .Where(a => a.GuildId == guild.Id)
@@ -213,79 +159,115 @@ public class AwolCheckService : BackgroundService
                 {
                     GuildId = guild.Id,
                     UserId = member.Id,
-                    Username = member.ToString() ?? member.Username,
-                    MessageCount = 0,
-                    VoiceSeconds = 0,
-                    WindowStart = DateTime.UtcNow
+                    Username = member.ToString() ?? member.Username
                 });
             }
         }
         await db.SaveChangesAsync(ct);
 
         // ------------------------------------------------------------------
-        // Step 3: Check for users below thresholds and assign AWOL
+        // Step 2: Check each non-exempt member's activity in their window
         // ------------------------------------------------------------------
-        // Only check users whose window has been open for at least their full window period
-        var allActivitiesForCheck = await db.UserActivities
-            .Where(a => a.GuildId == guild.Id
-                        && (a.MessageCount < _config.MinMessages && a.VoiceSeconds < minVoiceSeconds))
-            .ToListAsync(ct);
-
-        // Filter to those whose window has actually expired, based on their role-specific window
-        var inactiveUsers = allActivitiesForCheck.Where(a =>
+        foreach (var member in guild.Users)
         {
-            var member = guild.GetUser(a.UserId);
-            if (member is null) return false;
-            var userWindowDays = _config.GetWindowDaysForRoles(member.Roles.Select(r => r.Name));
-            return a.WindowStart <= DateTime.UtcNow.AddDays(-userWindowDays);
-        }).ToList();
-
-        foreach (var inactive in inactiveUsers)
-        {
-            var member = guild.GetUser(inactive.UserId);
-            if (member is null || member.IsBot) continue;
+            if (member.IsBot) continue;
             if (IsExempt(member, exemptRoles)) continue;
 
-            // Skip if they already have the AWOL role
-            if (member.Roles.Any(r => r.Id == awolRole.Id)) continue;
+            var userWindowDays = _config.GetWindowDaysForRoles(member.Roles.Select(r => r.Name));
+            var windowStart = DateTime.UtcNow.AddDays(-userWindowDays);
 
-            try
+            // Must have been in the server long enough for a full window
+            if (member.JoinedAt.HasValue &&
+                member.JoinedAt.Value.UtcDateTime > windowStart)
+                continue;
+
+            var messageCount = await db.MessageEvents
+                .CountAsync(m => m.GuildId == guild.Id
+                              && m.UserId == member.Id
+                              && m.Timestamp >= windowStart, ct);
+
+            var voiceSeconds = await GetVoiceSecondsAsync(db, guild.Id, member.Id, windowStart, ct);
+
+            var meetsMessages = messageCount >= _config.MinMessages;
+            var meetsVoice = voiceSeconds >= minVoiceSeconds;
+            var hasAwolRole = member.Roles.Any(r => r.Id == awolRole.Id);
+
+            if (meetsMessages || meetsVoice)
             {
-                await member.AddRoleAsync(awolRole);
-                _logger.LogInformation(
-                    "Assigned AWOL role to {Username} ({UserId}) in {Guild} — " +
-                    "Messages: {Messages}, Voice: {VoiceHours:F1}h",
-                    inactive.Username, inactive.UserId, guild.Name,
-                    inactive.MessageCount, inactive.VoiceSeconds / 3600.0);
-
-                // Create AWOL record for the grace period
-                var existingRecord = await db.AwolRecords
-                    .FirstOrDefaultAsync(r => r.GuildId == guild.Id
-                                           && r.UserId == inactive.UserId
-                                           && !r.NotificationSent, ct);
-
-                if (existingRecord is null)
+                // Active — remove AWOL if they have it
+                if (hasAwolRole)
                 {
-                    db.AwolRecords.Add(new AwolRecord
+                    try
                     {
-                        GuildId = guild.Id,
-                        UserId = inactive.UserId,
-                        Username = inactive.Username,
-                        AssignedAt = DateTime.UtcNow,
-                        NotificationSent = false
-                    });
+                        await member.RemoveRoleAsync(awolRole);
+                        _logger.LogInformation(
+                            "Removed AWOL role from {Username} ({UserId}) in {Guild} — " +
+                            "Messages: {Messages}, Voice: {VoiceHours:F1}h (window: {Window}d)",
+                            member.Username, member.Id, guild.Name,
+                            messageCount, voiceSeconds / 3600.0, userWindowDays);
+
+                        var pendingRecords = await db.AwolRecords
+                            .Where(r => r.GuildId == guild.Id
+                                     && r.UserId == member.Id
+                                     && !r.NotificationSent)
+                            .ToListAsync(ct);
+
+                        foreach (var record in pendingRecords)
+                        {
+                            record.NotificationSent = true;
+                            record.NotificationSentAt = DateTime.UtcNow;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Failed to remove AWOL role from {Username} in {Guild}",
+                            member.Username, guild.Name);
+                    }
                 }
             }
-            catch (Exception ex)
+            else
             {
-                _logger.LogError(ex, "Failed to assign AWOL role to {Username} in {Guild}",
-                    inactive.Username, guild.Name);
+                // Inactive — assign AWOL if they don't have it
+                if (!hasAwolRole)
+                {
+                    try
+                    {
+                        await member.AddRoleAsync(awolRole);
+                        _logger.LogInformation(
+                            "Assigned AWOL role to {Username} ({UserId}) in {Guild} — " +
+                            "Messages: {Messages}, Voice: {VoiceHours:F1}h (window: {Window}d)",
+                            member.Username, member.Id, guild.Name,
+                            messageCount, voiceSeconds / 3600.0, userWindowDays);
+
+                        var existingRecord = await db.AwolRecords
+                            .FirstOrDefaultAsync(r => r.GuildId == guild.Id
+                                                   && r.UserId == member.Id
+                                                   && !r.NotificationSent, ct);
+
+                        if (existingRecord is null)
+                        {
+                            db.AwolRecords.Add(new AwolRecord
+                            {
+                                GuildId = guild.Id,
+                                UserId = member.Id,
+                                Username = member.ToString() ?? member.Username,
+                                AssignedAt = DateTime.UtcNow,
+                                NotificationSent = false
+                            });
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Failed to assign AWOL role to {Username} in {Guild}",
+                            member.Username, guild.Name);
+                    }
+                }
             }
         }
         await db.SaveChangesAsync(ct);
 
         // ------------------------------------------------------------------
-        // Step 4: Post HQ notifications for users past the grace period
+        // Step 3: Post HQ notifications for users past the grace period
         // ------------------------------------------------------------------
         if (hqChannel is null) return;
 
@@ -299,8 +281,18 @@ public class AwolCheckService : BackgroundService
         foreach (var record in pendingNotifications)
         {
             var member = guild.GetUser(record.UserId);
+            var activityWindowDays = member is not null
+                ? _config.GetWindowDaysForRoles(member.Roles.Select(r => r.Name))
+                : _config.WindowDays;
+            var windowStart = DateTime.UtcNow.AddDays(-activityWindowDays);
 
-            // Build the notification embed
+            var messageCount = await db.MessageEvents
+                .CountAsync(m => m.GuildId == guild.Id
+                              && m.UserId == record.UserId
+                              && m.Timestamp >= windowStart, ct);
+
+            var voiceSeconds = await GetVoiceSecondsAsync(db, guild.Id, record.UserId, windowStart, ct);
+
             var embed = new EmbedBuilder()
                 .WithTitle("⚠️ AWOL Member — Ready for Review")
                 .WithColor(Color.Red)
@@ -311,21 +303,10 @@ public class AwolCheckService : BackgroundService
                 .AddField("AWOL Since", record.AssignedAt.ToString("yyyy-MM-dd HH:mm UTC"), inline: true)
                 .AddField("Grace Period Expired",
                     record.AssignedAt.AddDays(_config.AwolGraceDays).ToString("yyyy-MM-dd HH:mm UTC"),
-                    inline: true);
-
-            // Pull their activity stats for context
-            var activity = await db.UserActivities
-                .FirstOrDefaultAsync(a => a.GuildId == guild.Id && a.UserId == record.UserId, ct);
-
-            if (activity is not null)
-            {
-                var activityWindowDays = member is not null
-                    ? _config.GetWindowDaysForRoles(member.Roles.Select(r => r.Name))
-                    : _config.WindowDays;
-                embed.AddField($"Messages ({activityWindowDays}d)", activity.MessageCount.ToString(), inline: true);
-                embed.AddField($"Voice Time ({activityWindowDays}d)",
-                    $"{activity.VoiceSeconds / 3600.0:F1} hours", inline: true);
-            }
+                    inline: true)
+                .AddField($"Messages ({activityWindowDays}d)", messageCount.ToString(), inline: true)
+                .AddField($"Voice Time ({activityWindowDays}d)",
+                    $"{voiceSeconds / 3600.0:F1} hours", inline: true);
 
             if (member is not null)
             {
@@ -355,6 +336,43 @@ public class AwolCheckService : BackgroundService
         }
 
         await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Calculates total voice seconds within the window, including any currently-open session.
+    /// </summary>
+    private static async Task<long> GetVoiceSecondsAsync(
+        BotDbContext db, ulong guildId, ulong userId, DateTime windowStart, CancellationToken ct)
+    {
+        var sessions = await db.VoiceSessions
+            .Where(v => v.GuildId == guildId
+                        && v.UserId == userId
+                        && v.JoinedAt >= windowStart)
+            .ToListAsync(ct);
+
+        long totalSeconds = 0;
+        foreach (var session in sessions)
+        {
+            var end = session.LeftAt ?? DateTime.UtcNow;
+            var start = session.JoinedAt < windowStart ? windowStart : session.JoinedAt;
+            totalSeconds += (long)(end - start).TotalSeconds;
+        }
+
+        // Also check for sessions that started before the window but are still open or ended within it
+        var overlapping = await db.VoiceSessions
+            .Where(v => v.GuildId == guildId
+                        && v.UserId == userId
+                        && v.JoinedAt < windowStart
+                        && (v.LeftAt == null || v.LeftAt > windowStart))
+            .ToListAsync(ct);
+
+        foreach (var session in overlapping)
+        {
+            var end = session.LeftAt ?? DateTime.UtcNow;
+            totalSeconds += (long)(end - windowStart).TotalSeconds;
+        }
+
+        return totalSeconds;
     }
 
     private static bool IsExempt(SocketGuildUser member, List<string> exemptRoles)

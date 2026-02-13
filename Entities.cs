@@ -11,17 +11,31 @@ public class UserActivity
     public ulong UserId { get; set; }
     public string Username { get; set; } = string.Empty;
 
-    /// <summary>Messages sent in the current 28-day window.</summary>
-    public int MessageCount { get; set; }
-
-    /// <summary>Total voice channel seconds in the current 28-day window.</summary>
-    public long VoiceSeconds { get; set; }
-
-    /// <summary>When this user's current tracking window started.</summary>
-    public DateTime WindowStart { get; set; }
-
     /// <summary>When the user last joined a voice channel (null if not currently in voice).</summary>
     public DateTime? VoiceJoinedAt { get; set; }
+}
+
+/// <summary>
+/// A single recorded message event.
+/// </summary>
+public class MessageEvent
+{
+    public int Id { get; set; }
+    public ulong GuildId { get; set; }
+    public ulong UserId { get; set; }
+    public DateTime Timestamp { get; set; }
+}
+
+/// <summary>
+/// A single recorded voice session (join → leave).
+/// </summary>
+public class VoiceSession
+{
+    public int Id { get; set; }
+    public ulong GuildId { get; set; }
+    public ulong UserId { get; set; }
+    public DateTime JoinedAt { get; set; }
+    public DateTime? LeftAt { get; set; }
 }
 
 /// <summary>
