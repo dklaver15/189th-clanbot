@@ -45,6 +45,15 @@ public class BotConfig
     /// Officers, admins, bots, etc.
     /// </summary>
     public string ExemptRoles { get; set; } = "Admin,Moderator,Retired,Bot";
+    
+    /// <summary>Path to the Google service account credentials JSON file.</summary>
+    public string GoogleCredentialsPath { get; set; } = "google-credentials.json";
+
+    /// <summary>The Google Spreadsheet ID (from the sheet URL).</summary>
+    public string GoogleSpreadsheetId { get; set; } = string.Empty;
+
+    /// <summary>The sheet/tab name to write gamertags to.</summary>
+    public string GoogleSheetName { get; set; } = "Gamertags";
 
     public List<string> GetExemptRolesList() =>
         ExemptRoles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
