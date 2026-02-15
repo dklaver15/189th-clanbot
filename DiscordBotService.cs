@@ -68,19 +68,19 @@ public class DiscordBotService : IHostedService
             var commands = new[]
             {
                 new SlashCommandBuilder()
-                    .WithName("clanguard-status")
+                    .WithName("awol-status")
                     .WithDescription("Show your current activity stats for this server")
                     .Build(),
 
                 new SlashCommandBuilder()
-                    .WithName("clanguard-check")
+                    .WithName("awol-check")
                     .WithDescription("Check another user's activity stats (Officer+ only)")
                     .AddOption("user", ApplicationCommandOptionType.User,
                         "The user to check", isRequired: true)
                     .Build(),
 
                 new SlashCommandBuilder()
-                    .WithName("clanguard-exempt")
+                    .WithName("awol-exempt")
                     .WithDescription("Remove a user's AWOL role and reset their window (Officer+ only)")
                     .AddOption("user", ApplicationCommandOptionType.User,
                         "The user to exempt", isRequired: true)
