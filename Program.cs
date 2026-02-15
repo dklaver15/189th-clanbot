@@ -42,7 +42,9 @@ try
         new DiscordSocketClient(sp.GetRequiredService<DiscordSocketConfig>()));
 
     // Database
-    var dbPath = Path.Combine(AppContext.BaseDirectory, "clanguard.db");
+    var dataDir = Path.Combine(AppContext.BaseDirectory, "data");
+    Directory.CreateDirectory(dataDir);
+    var dbPath = Path.Combine(dataDir, "clanguard.db");
     builder.Services.AddDbContext<BotDbContext>(options =>
         options.UseSqlite($"Data Source={dbPath}"));
 
