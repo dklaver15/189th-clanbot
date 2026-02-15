@@ -49,6 +49,8 @@ try
     // Handlers (singleton so event registrations persist)
     builder.Services.AddSingleton<ActivityTrackingHandler>();
     builder.Services.AddSingleton<SlashCommandHandler>();
+    builder.Services.AddSingleton<GoogleSheetsService>();
+    builder.Services.AddSingleton<GamertagCommandHandler>();
 
     // Hosted services
     builder.Services.AddHostedService<DiscordBotService>();
@@ -69,6 +71,10 @@ try
     var slashHandler = app.Services.GetRequiredService<SlashCommandHandler>();
     var discordClient = app.Services.GetRequiredService<DiscordSocketClient>();
     slashHandler.Register(discordClient);
+    
+    // Ensure the Google Sheet has a header row
+    var sheetsService = app.Services.GetRequiredService<GoogleSheetsService>();
+    await sheetsService.EnsureHeaderRowAsync();
 
     await app.RunAsync();
 }

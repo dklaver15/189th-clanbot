@@ -16,17 +16,20 @@ public class DiscordBotService : IHostedService
 {
     private readonly DiscordSocketClient _client;
     private readonly ActivityTrackingHandler _activityHandler;
+    private readonly GamertagCommandHandler _gamertagHandler;
     private readonly ILogger<DiscordBotService> _logger;
     private readonly BotConfig _config;
 
     public DiscordBotService(
         DiscordSocketClient client,
         ActivityTrackingHandler activityHandler,
+        GamertagCommandHandler gamertagHandler,
         ILogger<DiscordBotService> logger,
         IOptions<BotConfig> config)
     {
         _client = client;
         _activityHandler = activityHandler;
+        _gamertagHandler = gamertagHandler;
         _logger = logger;
         _config = config.Value;
     }
@@ -38,6 +41,9 @@ public class DiscordBotService : IHostedService
 
         // Register the activity tracking event handlers
         _activityHandler.Register(_client);
+        
+        // Register the gamertag command handler
+        _gamertagHandler.Register(_client);
 
         await _client.LoginAsync(TokenType.Bot, _config.Token);
         await _client.StartAsync();
@@ -78,6 +84,11 @@ public class DiscordBotService : IHostedService
                     .WithDescription("Remove a user's AWOL role and reset their window (Officer+ only)")
                     .AddOption("user", ApplicationCommandOptionType.User,
                         "The user to exempt", isRequired: true)
+                    .Build(),
+                
+                new SlashCommandBuilder()
+                    .WithName("gamertags")
+                    .WithDescription("Enter your gamertags for EA, Steam, PSN, Xbox, Embark, and Bungie")
                     .Build()
             };
 
