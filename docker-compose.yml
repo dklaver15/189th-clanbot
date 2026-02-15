@@ -15,6 +15,7 @@ services:
     volumes:
       - bot-data:/app/data
       - bot-logs:/app/logs
+      - ./google-credentials.json:/app/google-credentials.json:ro
     logging:
       driver: "json-file"
       options:
