@@ -41,13 +41,13 @@ public class SlashCommandHandler
         {
             switch (command.Data.Name)
             {
-                case "clanguard-status":
+                case "awol-status":
                     await HandleStatus(command);
                     break;
-                case "clanguard-check":
+                case "awol-check":
                     await HandleCheck(command);
                     break;
-                case "clanguard-exempt":
+                case "awol-exempt":
                     await HandleExempt(command);
                     break;
             }
@@ -63,7 +63,7 @@ public class SlashCommandHandler
         }
     }
 
-    /// <summary>/clanguard-status — show your own activity for this server.</summary>
+    /// <summary>/awol-status — show your own activity for this server.</summary>
     private async Task HandleStatus(SocketSlashCommand command)
     {
         await command.DeferAsync(ephemeral: true);
@@ -160,7 +160,7 @@ public class SlashCommandHandler
         await command.FollowupAsync(embed: embed, ephemeral: true);
     }
 
-    /// <summary>/clanguard-exempt — remove AWOL and reset a user's window (officer+ only).</summary>
+    /// <summary>/awol-exempt — remove AWOL and reset a user's window (officer+ only).</summary>
     private async Task HandleExempt(SocketSlashCommand command)
     {
         await command.DeferAsync(ephemeral: true);
