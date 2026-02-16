@@ -54,11 +54,11 @@ All settings are in `appsettings.json` and can be overridden via environment var
 
 ## Slash Commands
 
-| Command | Who Can Use | Description |
-|---------|------------|-------------|
-| `/clanguard-status` | Everyone | Check your own activity stats |
-| `/clanguard-check @user` | Officers+ | Check another user's activity |
-| `/clanguard-exempt @user` | Officers+ | Remove AWOL role and reset their window |
+| Command              | Who Can Use | Description |
+|----------------------|------------|-------------|
+| `/awol-status`       | Everyone | Check your own activity stats |
+| `/awol-check @user`  | Officers+ | Check another user's activity |
+| `/awol-exempt @user` | Officers+ | Remove AWOL role and reset their window |
 
 ## Deploy to Digital Ocean
 
