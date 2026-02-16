@@ -44,9 +44,9 @@ public class GamertagCommandHandler
         var modal = new ModalBuilder()
             .WithTitle("Enter Gamertags (1/2)")
             .WithCustomId("gamertags_modal_1")
-            .AddTextInput("EA Gamertag", "ea_tag", TextInputStyle.Short, placeholder: "e.g. MyEAName", required: false)
-            .AddTextInput("Steam Gamertag", "steam_tag", TextInputStyle.Short, placeholder: "e.g. MySteamName", required: false)
-            .AddTextInput("PSN Gamertag", "psn_tag", TextInputStyle.Short, placeholder: "e.g. MyPSNName", required: false)
+            .AddTextInput("EA Gamertag", "ea_tag", TextInputStyle.Short, placeholder: "(leave blank if n/a)", required: false)
+            .AddTextInput("Steam Gamertag", "steam_tag", TextInputStyle.Short, placeholder: "(leave blank if n/a)", required: false)
+            .AddTextInput("PSN Gamertag", "psn_tag", TextInputStyle.Short, placeholder: "(leave blank if n/a)", required: false)
             .Build();
 
         await command.RespondWithModalAsync(modal);
@@ -60,9 +60,9 @@ public class GamertagCommandHandler
         var modal2 = new ModalBuilder()
             .WithTitle("Enter Gamertags (2/2)")
             .WithCustomId("gamertags_modal_2")
-            .AddTextInput("Xbox Gamertag", "xbox_tag", TextInputStyle.Short, placeholder: "e.g. MyXboxTag", required: false)
-            .AddTextInput("Embark Gamertag", "embark_tag", TextInputStyle.Short, placeholder: "e.g. MyEmbarkName", required: false)
-            .AddTextInput("Bungie Gamertag", "bungie_tag", TextInputStyle.Short, placeholder: "e.g. Guardian#1234", required: false)
+            .AddTextInput("Xbox Gamertag", "xbox_tag", TextInputStyle.Short, placeholder: "(leave blank if n/a)", required: false)
+            .AddTextInput("Embark Gamertag", "embark_tag", TextInputStyle.Short, placeholder: "(leave blank if n/a)", required: false)
+            .AddTextInput("Bungie Gamertag", "bungie_tag", TextInputStyle.Short, placeholder: "(leave blank if n/a)", required: false)
             .Build();
 
         await component.RespondWithModalAsync(modal2);
