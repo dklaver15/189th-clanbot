@@ -64,6 +64,9 @@ public class DiscordBotService : IHostedService
 
         try
         {
+            // Clear any stale global commands
+            await _client.BulkOverwriteGlobalApplicationCommandsAsync(Array.Empty<ApplicationCommandProperties>());
+            
             // Register guild slash commands (instant update, unlike global commands)
             var commands = new[]
             {
