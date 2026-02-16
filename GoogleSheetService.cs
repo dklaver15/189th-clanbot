@@ -67,6 +67,7 @@ public class GoogleSheetsService
                     await updateRequest.ExecuteAsync();
 
                     _logger.LogInformation("Updated gamertags for {DiscordName} in row {Row}", discordName, i + 1);
+                    await SortSheetByFirstColumnAsync(service, spreadsheetId, sheetName);
                     return;
                 }
             }
