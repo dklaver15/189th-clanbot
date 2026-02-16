@@ -42,21 +42,27 @@ public class HistoryBackfillService : BackgroundService
         }
         await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
 
-        // Check if we've already backfilled (simple flag in the DB)
+        // Determine cutoff: last recorded message (with 1-min overlap) or full window
+        DateTime cutoff;
         using (var scope = _services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-            if (await db.MessageEvents.AnyAsync(stoppingToken))
+            var latestTimestamp = await db.MessageEvents
+                .OrderByDescending(m => m.Timestamp)
+                .Select(m => (DateTime?)m.Timestamp)
+                .FirstOrDefaultAsync(stoppingToken);
+
+            if (latestTimestamp.HasValue)
             {
-                _logger.LogInformation("Message history already has data — skipping backfill.");
-                return;
+                cutoff = latestTimestamp.Value.AddMinutes(-1); // small overlap to avoid gaps
+                _logger.LogInformation("Incremental backfill from {Cutoff}", cutoff);
+            }
+            else
+            {
+                cutoff = DateTime.UtcNow.AddDays(-_config.WindowDays);
+                _logger.LogInformation("Full backfill: last {Days} days", _config.WindowDays);
             }
         }
-
-        _logger.LogInformation("Starting message history backfill...");
-
-        // Go back as far as the longest window
-        var cutoff = DateTime.UtcNow.AddDays(-_config.WindowDays);
 
         foreach (var guild in _client.Guilds)
         {
@@ -81,52 +87,73 @@ public class HistoryBackfillService : BackgroundService
     }
 
     private async Task BackfillChannelAsync(
-        SocketTextChannel channel, ulong guildId, DateTime cutoff, CancellationToken ct)
+    SocketTextChannel channel, ulong guildId, DateTime cutoff, CancellationToken ct)
+{
+    var count = 0;
+    var skipped = 0;                          // ← add this
+    var batch = new List<MessageEvent>();
+
+    // ── NEW: load existing event keys for dedup ──────────────────
+    HashSet<(ulong userId, long ticks)> existing;
+    using (var scope = _services.CreateScope())
     {
-        var count = 0;
-        var batch = new List<MessageEvent>();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+        existing = (await db.MessageEvents
+            .Where(m => m.GuildId == guildId && m.Timestamp >= cutoff)
+            .Select(m => new { m.UserId, m.Timestamp })
+            .ToListAsync(ct))
+            .Select(m => (m.UserId, m.Timestamp.Ticks))
+            .ToHashSet();
+    }
+    // ── END NEW ──────────────────────────────────────────────────
 
-        // Discord returns messages newest-first
-        var messages = channel.GetMessagesAsync(limit: int.MaxValue).Flatten();
+    // Discord returns messages newest-first
+    var messages = channel.GetMessagesAsync(limit: int.MaxValue).Flatten();
 
-        await foreach (var msg in messages.WithCancellation(ct))
+    await foreach (var msg in messages.WithCancellation(ct))
+    {
+        if (msg.Timestamp.UtcDateTime < cutoff)
+            break;
+
+        if (msg.Author.IsBot) continue;
+
+        // ── NEW: skip duplicates ─────────────────────────────────
+        var key = (msg.Author.Id, msg.Timestamp.UtcDateTime.Ticks);
+        if (existing.Contains(key))
         {
-            // Stop once we've gone past the window
-            if (msg.Timestamp.UtcDateTime < cutoff)
-                break;
-
-            // Skip bots and system messages
-            if (msg.Author.IsBot) continue;
-
-            batch.Add(new MessageEvent
-            {
-                GuildId = guildId,
-                UserId = msg.Author.Id,
-                Timestamp = msg.Timestamp.UtcDateTime
-            });
-            count++;
-
-            // Save in batches of 500 to avoid memory buildup
-            if (batch.Count >= 500)
-            {
-                using var scope = _services.CreateScope();
-                var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-                db.MessageEvents.AddRange(batch);
-                await db.SaveChangesAsync(ct);
-                batch.Clear();
-            }
+            skipped++;
+            continue;
         }
+        // ── END NEW ──────────────────────────────────────────────
 
-        // Save any remaining
-        if (batch.Count > 0)
+        batch.Add(new MessageEvent
+        {
+            GuildId = guildId,
+            UserId = msg.Author.Id,
+            Timestamp = msg.Timestamp.UtcDateTime
+        });
+        count++;
+
+        if (batch.Count >= 500)
         {
             using var scope = _services.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
             db.MessageEvents.AddRange(batch);
             await db.SaveChangesAsync(ct);
+            batch.Clear();
         }
-
-        if (count > 0)
-            _logger.LogInformation("  #{Channel}: backfilled {Count} messages", channel.Name, count);
     }
+
+    if (batch.Count > 0)
+    {
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+        db.MessageEvents.AddRange(batch);
+        await db.SaveChangesAsync(ct);
+    }
+
+    if (count > 0 || skipped > 0)                // ← updated condition
+        _logger.LogInformation("  #{Channel}: backfilled {Count} new messages (skipped {Skipped} duplicates)",
+            channel.Name, count, skipped);         // ← updated log
+}
 }
