@@ -37,6 +37,9 @@ public class SlashCommandHandler
 
     private async Task HandleCommandAsync(SocketSlashCommand command)
     {
+        if (command.Data.Name is not ("awol-status" or "awol-check" or "awol-exempt"))
+            return;
+        
         try
         {
             switch (command.Data.Name)
