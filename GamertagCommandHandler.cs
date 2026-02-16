@@ -44,9 +44,6 @@ public class GamertagCommandHandler
         var modal = new ModalBuilder()
             .WithTitle("Enter Gamertags (1/2) (leave field blank if not applicable)")
             .WithCustomId("gamertags_modal_1")
-            .AddTextInput("ℹ️ Instructions", "instructions", TextInputStyle.Paragraph,
-                placeholder: "Leave any field blank if you don't have an account on that platform.",
-                required: false)
             .AddTextInput("EA Gamertag", "ea_tag", TextInputStyle.Short, placeholder: "e.g. MyEAName", required: false)
             .AddTextInput("Steam Gamertag", "steam_tag", TextInputStyle.Short, placeholder: "e.g. MySteamName", required: false)
             .AddTextInput("PSN Gamertag", "psn_tag", TextInputStyle.Short, placeholder: "e.g. MyPSNName", required: false)
@@ -63,9 +60,6 @@ public class GamertagCommandHandler
         var modal2 = new ModalBuilder()
             .WithTitle("Enter Gamertags (2/2) (leave field blank if not applicable)")
             .WithCustomId("gamertags_modal_2")
-            .AddTextInput("ℹ️ Instructions", "instructions", TextInputStyle.Paragraph,
-                placeholder: "Leave any field blank if you don't have an account on that platform.",
-                required: false)
             .AddTextInput("Xbox Gamertag", "xbox_tag", TextInputStyle.Short, placeholder: "e.g. MyXboxTag", required: false)
             .AddTextInput("Embark Gamertag", "embark_tag", TextInputStyle.Short, placeholder: "e.g. MyEmbarkName", required: false)
             .AddTextInput("Bungie Gamertag", "bungie_tag", TextInputStyle.Short, placeholder: "e.g. Guardian#1234", required: false)
