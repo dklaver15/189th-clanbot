@@ -42,7 +42,7 @@ public class GamertagCommandHandler
 
         // Show the first modal (EA, Steam, PSN)
         var modal = new ModalBuilder()
-            .WithTitle("Enter Gamertags (1/2) (leave field blank if not applicable)")
+            .WithTitle("Enter Gamertags (1/2)")
             .WithCustomId("gamertags_modal_1")
             .AddTextInput("EA Gamertag", "ea_tag", TextInputStyle.Short, placeholder: "e.g. MyEAName", required: false)
             .AddTextInput("Steam Gamertag", "steam_tag", TextInputStyle.Short, placeholder: "e.g. MySteamName", required: false)
@@ -58,7 +58,7 @@ public class GamertagCommandHandler
 
         // Show the second modal (Xbox, Embark, Bungie) — triggered from a button, which IS allowed
         var modal2 = new ModalBuilder()
-            .WithTitle("Enter Gamertags (2/2) (leave field blank if not applicable)")
+            .WithTitle("Enter Gamertags (2/2)")
             .WithCustomId("gamertags_modal_2")
             .AddTextInput("Xbox Gamertag", "xbox_tag", TextInputStyle.Short, placeholder: "e.g. MyXboxTag", required: false)
             .AddTextInput("Embark Gamertag", "embark_tag", TextInputStyle.Short, placeholder: "e.g. MyEmbarkName", required: false)
