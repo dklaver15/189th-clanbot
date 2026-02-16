@@ -89,49 +89,50 @@ public class GoogleSheetsService
     /// </summary>
     private async Task SortSheetByFirstColumnAsync(SheetsService service, string spreadsheetId, string sheetName)
     {
-        try
+        // Get the sheet ID by name
+        var spreadsheet = await service.Spreadsheets.Get(spreadsheetId).ExecuteAsync();
+        var sheet = spreadsheet.Sheets.FirstOrDefault(s => s.Properties.Title == sheetName);
+        if (sheet is null)
         {
-            // Get the sheet ID by name
-            var spreadsheet = await service.Spreadsheets.Get(spreadsheetId).ExecuteAsync();
-            var sheet = spreadsheet.Sheets.FirstOrDefault(s => s.Properties.Title == sheetName);
-            if (sheet is null) return;
+            _logger.LogWarning("Sheet {SheetName} not found — skipping sort", sheetName);
+            return;
+        }
 
-            var sheetId = sheet.Properties.SheetId ?? 0;
+        var sheetId = sheet.Properties.SheetId ?? 0;
+        var rowCount = sheet.Properties.GridProperties.RowCount ?? 1000;
+        var colCount = sheet.Properties.GridProperties.ColumnCount ?? 7;
 
-            var sortRequest = new Request
+        var sortRequest = new Request
+        {
+            SortRange = new SortRangeRequest
             {
-                SortRange = new SortRangeRequest
+                Range = new GridRange
                 {
-                    Range = new GridRange
+                    SheetId = sheetId,
+                    StartRowIndex = 1, // skip header row
+                    EndRowIndex = rowCount,
+                    StartColumnIndex = 0,
+                    EndColumnIndex = colCount
+                },
+                SortSpecs = new List<SortSpec>
+                {
+                    new SortSpec
                     {
-                        SheetId = sheetId,
-                        StartRowIndex = 1, // skip header row
-                        StartColumnIndex = 0,
-                        EndColumnIndex = 7  // columns A–G
-                    },
-                    SortSpecs = new List<SortSpec>
-                    {
-                        new SortSpec
-                        {
-                            DimensionIndex = 0, // column A
-                            SortOrder = "ASCENDING"
-                        }
+                        DimensionIndex = 0, // column A
+                        SortOrder = "ASCENDING"
                     }
                 }
-            };
+            }
+        };
 
-            var batchUpdate = new BatchUpdateSpreadsheetRequest
-            {
-                Requests = new List<Request> { sortRequest }
-            };
-
-            await service.Spreadsheets.BatchUpdate(batchUpdate, spreadsheetId).ExecuteAsync();
-            _logger.LogInformation("Sorted sheet {SheetName} alphabetically by Discord Name", sheetName);
-        }
-        catch (Exception ex)
+        var batchUpdate = new BatchUpdateSpreadsheetRequest
         {
-            _logger.LogWarning(ex, "Failed to sort sheet after appending row");
-        }
+            Requests = new List<Request> { sortRequest }
+        };
+
+        var response = await service.Spreadsheets.BatchUpdate(batchUpdate, spreadsheetId).ExecuteAsync();
+        _logger.LogInformation("Sorted sheet {SheetName} alphabetically by Discord Name (replies: {Count})",
+            sheetName, response.Replies?.Count ?? 0);
     }
 
     /// <summary>
