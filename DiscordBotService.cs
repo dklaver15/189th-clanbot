@@ -64,7 +64,7 @@ public class DiscordBotService : IHostedService
 
         try
         {
-            // Register global slash commands
+            // Register guild slash commands (instant update, unlike global commands)
             var commands = new[]
             {
                 new SlashCommandBuilder()
@@ -92,9 +92,11 @@ public class DiscordBotService : IHostedService
                     .Build()
             };
 
-            foreach (var command in commands)
+            // Register to each guild the bot is in (updates instantly)
+            foreach (var guild in _client.Guilds)
             {
-                await _client.CreateGlobalApplicationCommandAsync(command);
+                await guild.BulkOverwriteApplicationCommandAsync(commands);
+                _logger.LogInformation("Slash commands registered to guild {GuildName}", guild.Name);
             }
 
             _logger.LogInformation("Slash commands registered");
