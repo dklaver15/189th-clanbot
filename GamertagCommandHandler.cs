@@ -1,3 +1,4 @@
+
 using System.Collections.Concurrent;
 using ClanGuardBot.Services;
 using Discord;
@@ -8,8 +9,8 @@ namespace ClanGuardBot.Handlers;
 
 /// <summary>
 /// Handles the /gamertags slash command using a two-step modal flow.
-/// Modal 1: EA, Steam, PSN (Discord modals support max 5 fields, we use 3+3)
-/// Modal 2: Xbox, Embark, Bungie
+/// Modal 1 (from slash command): EA, Steam, PSN
+/// Modal 2 (from button click): Xbox, Embark, Bungie
 /// </summary>
 public class GamertagCommandHandler
 {
@@ -32,6 +33,7 @@ public class GamertagCommandHandler
     {
         client.SlashCommandExecuted += OnSlashCommandAsync;
         client.ModalSubmitted += OnModalSubmittedAsync;
+        client.ButtonExecuted += OnButtonExecutedAsync;
     }
 
     private async Task OnSlashCommandAsync(SocketSlashCommand command)
@@ -48,6 +50,22 @@ public class GamertagCommandHandler
             .Build();
 
         await command.RespondWithModalAsync(modal);
+    }
+
+    private async Task OnButtonExecutedAsync(SocketMessageComponent component)
+    {
+        if (component.Data.CustomId != "gamertags_continue") return;
+
+        // Show the second modal (Xbox, Embark, Bungie) — triggered from a button, which IS allowed
+        var modal2 = new ModalBuilder()
+            .WithTitle("Enter Gamertags (2/2)")
+            .WithCustomId("gamertags_modal_2")
+            .AddTextInput("Xbox Gamertag", "xbox_tag", TextInputStyle.Short, placeholder: "e.g. MyXboxTag", required: false)
+            .AddTextInput("Embark Gamertag", "embark_tag", TextInputStyle.Short, placeholder: "e.g. MyEmbarkName", required: false)
+            .AddTextInput("Bungie Gamertag", "bungie_tag", TextInputStyle.Short, placeholder: "e.g. Guardian#1234", required: false)
+            .Build();
+
+        await component.RespondWithModalAsync(modal2);
     }
 
     private async Task OnModalSubmittedAsync(SocketModal modal)
@@ -75,16 +93,15 @@ public class GamertagCommandHandler
             PSN = components.GetValueOrDefault("psn_tag", "")
         };
 
-        // Immediately show the second modal
-        var modal2 = new ModalBuilder()
-            .WithTitle("Enter Gamertags (2/2)")
-            .WithCustomId("gamertags_modal_2")
-            .AddTextInput("Xbox Gamertag", "xbox_tag", TextInputStyle.Short, placeholder: "e.g. MyXboxTag", required: false)
-            .AddTextInput("Embark Gamertag", "embark_tag", TextInputStyle.Short, placeholder: "e.g. MyEmbarkName", required: false)
-            .AddTextInput("Bungie Gamertag", "bungie_tag", TextInputStyle.Short, placeholder: "e.g. Guardian#1234", required: false)
+        // Send an ephemeral message with a button to open Modal 2
+        var button = new ComponentBuilder()
+            .WithButton("Continue to Xbox / Embark / Bungie →", "gamertags_continue", ButtonStyle.Primary)
             .Build();
 
-        await modal.RespondWithModalAsync(modal2);
+        await modal.RespondAsync(
+            "✅ Got your EA, Steam, and PSN tags! Click the button below to enter the rest.",
+            components: button,
+            ephemeral: true);
     }
 
     private async Task HandleModal2Async(SocketModal modal)
