@@ -55,11 +55,29 @@ public class BotConfig
     /// <summary>The sheet/tab name to write gamertags to.</summary>
     public string GoogleSheetName { get; set; } = "Gamertags";
 
+    /// <summary>The sheet/tab name for the nightly roster export.</summary>
+    public string RosterSheetName { get; set; } = "Roster";
+
+    /// <summary>Name of the voice channel to track for "Last Events" column.</summary>
+    public string EventsVoiceChannelName { get; set; } = "Events";
+
+    /// <summary>Hour of day (UTC, 0-23) to run the nightly roster export.</summary>
+    public int RosterExportHourUtc { get; set; } = 6;
+
+    /// <summary>
+    /// Comma-separated list of rank role names in order from lowest to highest.
+    /// Used to identify a user's current rank and track time-in-rank.
+    /// </summary>
+    public string RankRoles { get; set; } = "RCT,PVT,PFC,SPC,CPL,SGT,SSG,SFC,MSG,1SG,SGM,CSM,SMA,2ndLT,1stLT,CPT,MAJ,LTC,COL,BG,MG,LTG,GEN,GoA";
+
     public List<string> GetExemptRolesList() =>
         ExemptRoles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
     
     public List<string> GetShortWindowRolesList() =>
         ShortWindowRoles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+
+    public List<string> GetRankRolesList() =>
+        RankRoles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
     
     /// <summary>
     /// Returns the appropriate window days for a guild member based on their roles.
