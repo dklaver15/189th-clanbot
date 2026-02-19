@@ -191,7 +191,9 @@ public class GoogleSheetsService
             ApplicationName = "ClanGuardBot"
         });
 
-        var spreadsheetId = _config.GoogleSpreadsheetId;
+        var spreadsheetId = string.IsNullOrWhiteSpace(_config.RosterSpreadsheetId)
+            ? _config.GoogleSpreadsheetId
+            : _config.RosterSpreadsheetId;
         var sheetName = _config.RosterSheetName;
 
         // Ensure the Roster tab exists

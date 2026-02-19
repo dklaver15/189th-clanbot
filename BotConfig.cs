@@ -58,6 +58,9 @@ public class BotConfig
     /// <summary>The sheet/tab name for the nightly roster export.</summary>
     public string RosterSheetName { get; set; } = "Roster";
 
+    /// <summary>The Google Spreadsheet ID for the roster export (separate from gamertags). If empty, uses GoogleSpreadsheetId.</summary>
+    public string RosterSpreadsheetId { get; set; } = string.Empty;
+
     /// <summary>Name of the voice channel to track for "Last Events" column.</summary>
     public string EventsVoiceChannelName { get; set; } = "Events";
 
