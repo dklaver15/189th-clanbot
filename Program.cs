@@ -58,6 +58,7 @@ try
     builder.Services.AddHostedService<DiscordBotService>();
     builder.Services.AddHostedService<HistoryBackfillService>();
     builder.Services.AddHostedService<AwolCheckService>();
+    builder.Services.AddHostedService<RosterExportService>();
 
     var app = builder.Build();
 

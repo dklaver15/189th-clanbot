@@ -8,6 +8,8 @@ using Microsoft.Extensions.Options;
 
 namespace ClanGuardBot.Services;
 
+// RosterRow is defined in RosterExportService.cs
+
 /// <summary>
 /// Writes gamertag data to a Google Sheet.
 /// Expects a service account credentials JSON file.
@@ -172,5 +174,124 @@ public class GoogleSheetsService
         {
             _logger.LogWarning(ex, "Could not ensure header row in Google Sheet (sheet may not be configured yet)");
         }
+    }
+
+    /// <summary>
+    /// Writes the full roster to the Roster sheet, replacing all existing data.
+    /// </summary>
+    public async Task WriteRosterAsync(string guildName, List<RosterRow> rows)
+    {
+        var credential = GoogleCredential
+            .FromFile(_config.GoogleCredentialsPath)
+            .CreateScoped(SheetsService.Scope.Spreadsheets);
+
+        using var service = new SheetsService(new BaseClientService.Initializer
+        {
+            HttpClientInitializer = credential,
+            ApplicationName = "ClanGuardBot"
+        });
+
+        var spreadsheetId = _config.GoogleSpreadsheetId;
+        var sheetName = _config.RosterSheetName;
+
+        // Ensure the Roster tab exists
+        await EnsureSheetTabExistsAsync(service, spreadsheetId, sheetName);
+
+        // Build the data: header + rows
+        var allRows = new List<IList<object>>();
+
+        // Header
+        allRows.Add(new List<object>
+        {
+            "Discord Name", "Username", "Rank", "Roles", "Join Date",
+            "Messages", "Voice Hours", "Window", "AWOL",
+            "Time in Rank", "Last Events VC",
+            $"Last Updated: {DateTime.UtcNow:yyyy-MM-dd HH:mm} UTC"
+        });
+
+        // Data rows
+        foreach (var row in rows)
+        {
+            var timeInRank = row.RankSince.HasValue
+                ? FormatDuration(DateTime.UtcNow - row.RankSince.Value)
+                : "—";
+
+            var lastEvents = row.LastEventsVc.HasValue
+                ? row.LastEventsVc.Value.ToString("yyyy-MM-dd")
+                : "Never";
+
+            allRows.Add(new List<object>
+            {
+                row.DiscordName,
+                row.Username,
+                row.Rank,
+                row.Roles,
+                row.JoinDate?.ToString("yyyy-MM-dd") ?? "Unknown",
+                row.Messages,
+                row.VoiceHours.ToString("F1"),
+                $"{row.WindowDays}d",
+                row.IsAwol ? "YES" : "",
+                timeInRank,
+                lastEvents
+            });
+        }
+
+        // Clear existing data and write fresh
+        var fullRange = $"{sheetName}!A1:L{allRows.Count + 10}";
+        var clearRequest = service.Spreadsheets.Values.Clear(
+            new ClearValuesRequest(), spreadsheetId, fullRange);
+        await clearRequest.ExecuteAsync();
+
+        var writeRange = $"{sheetName}!A1:L{allRows.Count}";
+        var body = new ValueRange { Values = allRows };
+        var updateRequest = service.Spreadsheets.Values.Update(body, spreadsheetId, writeRange);
+        updateRequest.ValueInputOption =
+            SpreadsheetsResource.ValuesResource.UpdateRequest.ValueInputOptionEnum.USERENTERED;
+        await updateRequest.ExecuteAsync();
+
+        _logger.LogInformation("Wrote {Count} roster rows to sheet {SheetName}", rows.Count, sheetName);
+    }
+
+    /// <summary>
+    /// Creates a sheet tab if it doesn't already exist in the spreadsheet.
+    /// </summary>
+    private async Task EnsureSheetTabExistsAsync(SheetsService service, string spreadsheetId, string sheetName)
+    {
+        var spreadsheet = await service.Spreadsheets.Get(spreadsheetId).ExecuteAsync();
+        if (spreadsheet.Sheets.Any(s => s.Properties.Title == sheetName))
+            return;
+
+        var addSheetRequest = new Request
+        {
+            AddSheet = new AddSheetRequest
+            {
+                Properties = new SheetProperties { Title = sheetName }
+            }
+        };
+
+        var batchUpdate = new BatchUpdateSpreadsheetRequest
+        {
+            Requests = new List<Request> { addSheetRequest }
+        };
+
+        await service.Spreadsheets.BatchUpdate(batchUpdate, spreadsheetId).ExecuteAsync();
+        _logger.LogInformation("Created sheet tab {SheetName}", sheetName);
+    }
+
+    /// <summary>Formats a TimeSpan as a human-readable duration like "45d" or "3mo 12d".</summary>
+    private static string FormatDuration(TimeSpan duration)
+    {
+        var totalDays = (int)duration.TotalDays;
+        if (totalDays < 1) return "< 1d";
+        if (totalDays < 30) return $"{totalDays}d";
+
+        var months = totalDays / 30;
+        var remainingDays = totalDays % 30;
+        if (months < 12)
+            return remainingDays > 0 ? $"{months}mo {remainingDays}d" : $"{months}mo";
+
+        var years = months / 12;
+        var remainingMonths = months % 12;
+        return remainingMonths > 0 ? $"{years}y {remainingMonths}mo" : $"{years}y";
     }
 }

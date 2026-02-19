@@ -36,6 +36,29 @@ public class VoiceSession
     public ulong UserId { get; set; }
     public DateTime JoinedAt { get; set; }
     public DateTime? LeftAt { get; set; }
+
+    /// <summary>The voice channel ID (for filtering by specific channels like Events).</summary>
+    public ulong? ChannelId { get; set; }
+
+    /// <summary>The voice channel name at time of join.</summary>
+    public string? ChannelName { get; set; }
+}
+
+/// <summary>
+/// Tracks when a user was assigned their current rank role.
+/// Only the latest record per user/guild matters for "time in rank".
+/// </summary>
+public class RankHistory
+{
+    public int Id { get; set; }
+    public ulong GuildId { get; set; }
+    public ulong UserId { get; set; }
+
+    /// <summary>The rank role name (e.g. "PVT", "SGT").</summary>
+    public string RankName { get; set; } = string.Empty;
+
+    /// <summary>When this rank was first detected on the user.</summary>
+    public DateTime AssignedAt { get; set; }
 }
 
 /// <summary>

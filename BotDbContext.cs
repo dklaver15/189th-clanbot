@@ -10,6 +10,7 @@ public class BotDbContext : DbContext
     public DbSet<AwolRecord> AwolRecords => Set<AwolRecord>();
     public DbSet<MessageEvent> MessageEvents => Set<MessageEvent>();
     public DbSet<VoiceSession> VoiceSessions => Set<VoiceSession>();
+    public DbSet<RankHistory> RankHistories => Set<RankHistory>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -34,6 +35,12 @@ public class BotDbContext : DbContext
         modelBuilder.Entity<VoiceSession>(e =>
         {
             e.HasIndex(v => new { v.GuildId, v.UserId, v.JoinedAt });
+            e.HasIndex(v => new { v.GuildId, v.UserId, v.ChannelId });
+        });
+
+        modelBuilder.Entity<RankHistory>(e =>
+        {
+            e.HasIndex(r => new { r.GuildId, r.UserId }).IsUnique();
         });
     }
 }

@@ -138,7 +138,9 @@ public class ActivityTrackingHandler
                     GuildId = guildId,
                     UserId = userId,
                     JoinedAt = DateTime.UtcNow,
-                    LeftAt = null
+                    LeftAt = null,
+                    ChannelId = afterState.VoiceChannel?.Id,
+                    ChannelName = afterState.VoiceChannel?.Name
                 });
                 _logger.LogDebug("User {Username} joined voice in guild {GuildId}", username, guildId);
             }
