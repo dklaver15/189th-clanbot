@@ -53,6 +53,7 @@ try
     builder.Services.AddSingleton<SlashCommandHandler>();
     builder.Services.AddSingleton<GoogleSheetsService>();
     builder.Services.AddSingleton<GamertagCommandHandler>();
+    builder.Services.AddSingleton<RankTrackingHandler>();
 
     // Hosted services
     builder.Services.AddHostedService<DiscordBotService>();

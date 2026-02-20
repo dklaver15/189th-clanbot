@@ -17,6 +17,7 @@ public class DiscordBotService : IHostedService
     private readonly DiscordSocketClient _client;
     private readonly ActivityTrackingHandler _activityHandler;
     private readonly GamertagCommandHandler _gamertagHandler;
+    private readonly RankTrackingHandler _rankHandler;
     private readonly ILogger<DiscordBotService> _logger;
     private readonly BotConfig _config;
 
@@ -24,12 +25,14 @@ public class DiscordBotService : IHostedService
         DiscordSocketClient client,
         ActivityTrackingHandler activityHandler,
         GamertagCommandHandler gamertagHandler,
+        RankTrackingHandler rankHandler,
         ILogger<DiscordBotService> logger,
         IOptions<BotConfig> config)
     {
         _client = client;
         _activityHandler = activityHandler;
         _gamertagHandler = gamertagHandler;
+        _rankHandler = rankHandler;
         _logger = logger;
         _config = config.Value;
     }
@@ -44,6 +47,9 @@ public class DiscordBotService : IHostedService
         
         // Register the gamertag command handler
         _gamertagHandler.Register(_client);
+
+        // Register the rank tracking handler
+        _rankHandler.Register(_client);
 
         await _client.LoginAsync(TokenType.Bot, _config.Token);
         await _client.StartAsync();
