@@ -12,14 +12,14 @@ jobs:
           host: ${{ secrets.DROPLET_HOST }}
           username: root
           key: ${{ secrets.DROPLET_SSH_KEY }}
-          envs: GOOGLE_CREDENTIALS_BASE64,GITHUB_PAT
+          envs: GOOGLE_CREDENTIALS_BASE64,GH_PAT
           script: |
             cd /opt/clanguard
-            git remote set-url origin https://$GITHUB_PAT@github.com/dklaver15/189th-clanbot.git
+            git remote set-url origin https://$GH_PAT@github.com/dklaver15/189th-clanbot.git
             git fetch origin main
             git reset --hard origin/main
             echo "$GOOGLE_CREDENTIALS_BASE64" | base64 --decode > google-credentials.json
             docker compose up -d --build
         env:
           GOOGLE_CREDENTIALS_BASE64: ${{ secrets.GOOGLE_CREDENTIALS_BASE64 }}
-          GITHUB_PAT: ${{ secrets.GITHUB_PAT }}
+          GITHUB_PAT: ${{ secrets.GH_PAT }}
