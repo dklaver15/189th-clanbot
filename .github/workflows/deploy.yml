@@ -15,7 +15,7 @@ jobs:
           envs: GOOGLE_CREDENTIALS_BASE64,GITHUB_PAT
           script: |
             cd /opt/clanguard
-            git remote set-url origin https://$GITHUB_PAT@github.com/YOUR_USERNAME/YOUR_REPO.git
+            git remote set-url origin https://$GITHUB_PAT@github.com/dklaver15/189th-clanbot.git
             git fetch origin main
             git reset --hard origin/main
             echo "$GOOGLE_CREDENTIALS_BASE64" | base64 --decode > google-credentials.json
