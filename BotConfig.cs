@@ -67,6 +67,9 @@ public class BotConfig
     /// <summary>Hour of day (UTC, 0-23) to run the nightly roster export.</summary>
     public int RosterExportHourUtc { get; set; } = 6;
 
+    /// <summary>Rolling window in days for the roster export activity stats. Independent of AWOL window.</summary>
+    public int RosterWindowDays { get; set; } = 14;
+
     /// <summary>
     /// Comma-separated list of rank role names in order from lowest to highest.
     /// Used to identify a user's current rank and track time-in-rank.
