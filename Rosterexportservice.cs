@@ -124,13 +124,13 @@ public class RosterExportService : BackgroundService
 
                     if (rankRecord is null)
                     {
-                        // First time seeing this user — record their rank
+                        // First time seeing this user — seed with join date as best approximation
                         rankRecord = new RankHistory
                         {
                             GuildId = guild.Id,
                             UserId = member.Id,
                             RankName = currentRank,
-                            AssignedAt = now
+                            AssignedAt = member.JoinedAt?.UtcDateTime ?? now
                         };
                         db.RankHistories.Add(rankRecord);
                     }
