@@ -146,9 +146,8 @@ public class RosterExportService : BackgroundService
                     rankSince = rankRecord.AssignedAt;
                 }
 
-                // Activity stats within window
-                var userWindowDays = _config.GetWindowDaysForRoles(memberRoleNames);
-                var windowStart = now.AddDays(-userWindowDays);
+                // Activity stats within roster window
+                var windowStart = now.AddDays(-_config.RosterWindowDays);
 
                 var messageCount = await db.MessageEvents
                     .CountAsync(m => m.GuildId == guild.Id
@@ -186,7 +185,7 @@ public class RosterExportService : BackgroundService
                     JoinDate = member.JoinedAt?.UtcDateTime,
                     Messages = messageCount,
                     VoiceHours = voiceHours,
-                    WindowDays = userWindowDays,
+                    WindowDays = _config.RosterWindowDays,
                     IsAwol = hasAwolRole,
                     RankSince = rankSince,
                     LastEventsVc = lastEventsSession?.JoinedAt
