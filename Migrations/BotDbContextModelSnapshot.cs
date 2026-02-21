@@ -48,7 +48,7 @@ namespace ClanGuardBot.Migrations
 
                     b.HasIndex("NotificationSent", "AssignedAt");
 
-                    b.ToTable("AwolRecords");
+                    b.ToTable("AwolRecords", (string)null);
                 });
 
             modelBuilder.Entity("ClanGuardBot.Models.MessageEvent", b =>
@@ -70,7 +70,7 @@ namespace ClanGuardBot.Migrations
 
                     b.HasIndex("GuildId", "UserId", "Timestamp");
 
-                    b.ToTable("MessageEvents");
+                    b.ToTable("MessageEvents", (string)null);
                 });
 
             modelBuilder.Entity("ClanGuardBot.Models.RankHistory", b =>
@@ -97,7 +97,7 @@ namespace ClanGuardBot.Migrations
                     b.HasIndex("GuildId", "UserId")
                         .IsUnique();
 
-                    b.ToTable("RankHistories");
+                    b.ToTable("RankHistories", (string)null);
                 });
 
             modelBuilder.Entity("ClanGuardBot.Models.UserActivity", b =>
@@ -124,7 +124,7 @@ namespace ClanGuardBot.Migrations
                     b.HasIndex("GuildId", "UserId")
                         .IsUnique();
 
-                    b.ToTable("UserActivities");
+                    b.ToTable("UserActivities", (string)null);
                 });
 
             modelBuilder.Entity("ClanGuardBot.Models.VoiceSession", b =>
@@ -157,7 +157,7 @@ namespace ClanGuardBot.Migrations
 
                     b.HasIndex("GuildId", "UserId", "JoinedAt");
 
-                    b.ToTable("VoiceSessions");
+                    b.ToTable("VoiceSessions", (string)null);
                 });
 #pragma warning restore 612, 618
         }
