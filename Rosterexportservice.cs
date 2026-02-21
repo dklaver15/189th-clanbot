@@ -79,10 +79,13 @@ public class RosterExportService : BackgroundService
         }
     }
 
+    /// <summary>Publicly callable entry point for manual exports (e.g. from /roster-export command).</summary>
+    public Task RunManualExportAsync(CancellationToken ct = default) => RunExportAsync(ct);
+
     /// <summary>Builds the roster data and writes it to the Google Sheet.</summary>
     private async Task RunExportAsync(CancellationToken ct)
     {
-        _logger.LogInformation("Starting nightly roster export...");
+        _logger.LogInformation("Starting roster export...");
 
         var rankRoles = _config.GetRankRolesList();
         var now = DateTime.UtcNow;
