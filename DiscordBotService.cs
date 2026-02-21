@@ -98,6 +98,11 @@ public class DiscordBotService : IHostedService
                 new SlashCommandBuilder()
                     .WithName("gamertags")
                     .WithDescription("Enter your gamertags for EA, Steam, PSN, Xbox, Embark, and Bungie")
+                    .Build(),
+
+                new SlashCommandBuilder()
+                    .WithName("roster-export")
+                    .WithDescription("Manually trigger a roster export to Google Sheets (Officer+ only)")
                     .Build()
             };
 

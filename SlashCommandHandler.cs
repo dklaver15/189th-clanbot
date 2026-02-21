@@ -1,5 +1,6 @@
 using ClanGuardBot.Data;
 using ClanGuardBot.Models;
+using ClanGuardBot.Services;
 using Discord;
 using Discord.WebSocket;
 using Microsoft.EntityFrameworkCore;
@@ -11,22 +12,26 @@ namespace ClanGuardBot.Handlers;
 
 /// <summary>
 /// Handles slash commands with full database integration for
-/// checking activity stats, looking up other users, and exempting users from AWOL.
+/// checking activity stats, looking up other users, exempting users from AWOL,
+/// and manually triggering a roster export.
 /// </summary>
 public class SlashCommandHandler
 {
     private readonly IServiceProvider _services;
     private readonly ILogger<SlashCommandHandler> _logger;
     private readonly BotConfig _config;
+    private readonly RosterExportService _rosterExport;
 
     public SlashCommandHandler(
         IServiceProvider services,
         ILogger<SlashCommandHandler> logger,
-        IOptions<BotConfig> config)
+        IOptions<BotConfig> config,
+        RosterExportService rosterExport)
     {
         _services = services;
         _logger = logger;
         _config = config.Value;
+        _rosterExport = rosterExport;
     }
 
     /// <summary>Register on the Discord client.</summary>
@@ -37,7 +42,7 @@ public class SlashCommandHandler
 
     private async Task HandleCommandAsync(SocketSlashCommand command)
     {
-        if (command.Data.Name is not ("awol-status" or "awol-check" or "awol-exempt"))
+        if (command.Data.Name is not ("awol-status" or "awol-check" or "awol-exempt" or "roster-export"))
             return;
         
         try
@@ -52,6 +57,9 @@ public class SlashCommandHandler
                     break;
                 case "awol-exempt":
                     await HandleExempt(command);
+                    break;
+                case "roster-export":
+                    await HandleRosterExport(command);
                     break;
             }
         }
@@ -221,7 +229,39 @@ public class SlashCommandHandler
         _logger.LogInformation("{Caller} exempted {Target} from AWOL in {Guild}",
             caller.Username, targetUser.Username, guild.Name);
     }
-    
+
+    /// <summary>/roster-export — manually trigger a roster export (officer+ only).</summary>
+    private async Task HandleRosterExport(SocketSlashCommand command)
+    {
+        await command.DeferAsync(ephemeral: true);
+
+        if (command.GuildId is null)
+        {
+            await command.FollowupAsync("This command can only be used in a server.", ephemeral: true);
+            return;
+        }
+
+        var caller = command.User as SocketGuildUser;
+        if (caller is null || !HasElevatedPermissions(caller))
+        {
+            await command.FollowupAsync("You don't have permission to use this command.", ephemeral: true);
+            return;
+        }
+
+        await command.FollowupAsync("⏳ Roster export started...", ephemeral: true);
+
+        try
+        {
+            await _rosterExport.RunManualExportAsync();
+            await command.FollowupAsync("✅ Roster export complete! Check the Google Sheet.", ephemeral: true);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Manual roster export failed");
+            await command.FollowupAsync($"❌ Export failed: {ex.Message}", ephemeral: true);
+        }
+    }
+
     private static async Task<long> GetVoiceSecondsAsync(
         BotDbContext db, ulong guildId, ulong userId, DateTime windowStart, CancellationToken ct = default)
     {

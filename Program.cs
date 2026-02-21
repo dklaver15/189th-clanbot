@@ -59,7 +59,11 @@ try
     builder.Services.AddHostedService<DiscordBotService>();
     builder.Services.AddHostedService<HistoryBackfillService>();
     builder.Services.AddHostedService<AwolCheckService>();
-    builder.Services.AddHostedService<RosterExportService>();
+
+    // RosterExportService: registered as singleton so SlashCommandHandler can inject it,
+    // and also registered as a hosted service so its background loop runs automatically.
+    builder.Services.AddSingleton<RosterExportService>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<RosterExportService>());
 
     var app = builder.Build();
 
