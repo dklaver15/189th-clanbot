@@ -44,7 +44,7 @@ public class BotConfig
     /// Comma-separated list of role names that are exempt from AWOL tracking.
     /// Officers, admins, bots, etc.
     /// </summary>
-    public string ExemptRoles { get; set; } = "Admin,Moderator,Retired,Bot";
+    public string ExemptRoles { get; set; } = "Admin,Moderator,Retired,Bot,Bot Whisperer";
     
     /// <summary>Path to the Google service account credentials JSON file.</summary>
     public string GoogleCredentialsPath { get; set; } = "google-credentials.json";

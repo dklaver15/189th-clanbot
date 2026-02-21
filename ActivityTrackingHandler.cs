@@ -128,7 +128,7 @@ public class ActivityTrackingHandler
             {
                 activity.Username = username;
             }
-
+            
             if (!wasInVoice && isInVoice)
             {
                 // User joined voice — start a new session
@@ -159,6 +159,32 @@ public class ActivityTrackingHandler
                     _logger.LogDebug("User {Username} left voice after {Duration}s in guild {GuildId}",
                         username, (DateTime.UtcNow - openSession.JoinedAt).TotalSeconds, guildId);
                 }
+            }
+            else if (wasInVoice && isInVoice
+                     && beforeState.VoiceChannel?.Id != afterState.VoiceChannel?.Id)
+            {
+                // User switched channels — close old session, open new one
+                var openSession = await db.VoiceSessions
+                    .Where(v => v.GuildId == guildId && v.UserId == userId && v.LeftAt == null)
+                    .OrderByDescending(v => v.JoinedAt)
+                    .FirstOrDefaultAsync();
+
+                if (openSession is not null)
+                {
+                    openSession.LeftAt = DateTime.UtcNow;
+                }
+
+                activity.VoiceJoinedAt = DateTime.UtcNow;
+                db.VoiceSessions.Add(new VoiceSession
+                {
+                    GuildId = guildId,
+                    UserId = userId,
+                    JoinedAt = DateTime.UtcNow,
+                    LeftAt = null,
+                    ChannelId = afterState.VoiceChannel?.Id,
+                    ChannelName = afterState.VoiceChannel?.Name
+                });
+                _logger.LogDebug("User {Username} switched voice channels in guild {GuildId}", username, guildId);
             }
 
             await db.SaveChangesAsync();
