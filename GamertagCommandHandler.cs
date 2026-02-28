@@ -3,7 +3,7 @@ using System.Collections.Concurrent;
 using ClanGuardBot.Services;
 using Discord;
 using Discord.WebSocket;
-using Microsoft.Extensions.Logging;
+using System.Text.RegularExpressions;
 
 namespace ClanGuardBot.Handlers;
 
@@ -12,10 +12,11 @@ namespace ClanGuardBot.Handlers;
 /// Modal 1 (from slash command): EA, Steam, PSN
 /// Modal 2 (from button click): Xbox, Embark, Bungie
 /// </summary>
-public class GamertagCommandHandler
+public partial class GamertagCommandHandler
 {
     private readonly GoogleSheetsService _sheetsService;
     private readonly ILogger<GamertagCommandHandler> _logger;
+    private static readonly Regex DiscriminatorPattern = MyRegex();
 
     /// <summary>
     /// Temporary storage for partial submissions (Modal 1 data waiting for Modal 2).
@@ -61,8 +62,10 @@ public class GamertagCommandHandler
             .WithTitle("Enter Gamertags (2/2)")
             .WithCustomId("gamertags_modal_2")
             .AddTextInput("Xbox Gamertag", "xbox_tag", TextInputStyle.Short, placeholder: "(leave blank if n/a)", required: false)
-            .AddTextInput("Embark Gamertag", "embark_tag", TextInputStyle.Short, placeholder: "(leave blank if n/a)", required: false)
-            .AddTextInput("Bungie Gamertag", "bungie_tag", TextInputStyle.Short, placeholder: "(leave blank if n/a)", required: false)
+            .AddTextInput("Embark Gamertag", "embark_tag", TextInputStyle.Short, 
+                placeholder: "e.g. Guardian#7028", required: false)
+            .AddTextInput("Bungie Gamertag", "bungie_tag", TextInputStyle.Short, 
+                placeholder: "e.g. Guardian#1234", required: false)
             .Build();
 
         await component.RespondWithModalAsync(modal2);
@@ -122,6 +125,26 @@ public class GamertagCommandHandler
             var xbox = components.GetValueOrDefault("xbox_tag", "");
             var embark = components.GetValueOrDefault("embark_tag", "");
             var bungie = components.GetValueOrDefault("bungie_tag", "");
+            
+            // Validate Embark
+            if (!string.IsNullOrWhiteSpace(embark) && !DiscriminatorPattern.IsMatch(embark))
+            {
+                _pendingSubmissions[modal.User.Id] = partial; // put it back
+                await modal.FollowupAsync(
+                    "⚠️ Invalid **Embark** gamertag. Expected format: `Name#1234`. Please click the button and try again.",
+                    ephemeral: true);
+                return;
+            }
+
+            // Validate Bungie format
+            if (!string.IsNullOrWhiteSpace(bungie) && !DiscriminatorPattern.IsMatch(bungie))
+            {
+                _pendingSubmissions[modal.User.Id] = partial; // put it back
+                await modal.FollowupAsync(
+                    "⚠️ Invalid **Bungie** gamertag format. Expected format: `Name#1234` (name followed by # and 4 digits).",
+                    ephemeral: true);
+                return;
+            }
 
             var discordName = modal.User.GlobalName ?? modal.User.Username;
 
@@ -158,4 +181,7 @@ public class GamertagCommandHandler
         public string Steam { get; set; } = "";
         public string PSN { get; set; } = "";
     }
+
+    [GeneratedRegex(@"^.+#\d{4}$", RegexOptions.Compiled)]
+    private static partial Regex MyRegex();
 }
