@@ -173,6 +173,13 @@ public class RosterExportService : BackgroundService
                     .OrderByDescending(v => v.JoinedAt)
                     .FirstOrDefaultAsync(ct);
 
+                // Events attendance count at current rank (with 30-min debounce)
+                var eventsAtRank = await GetEventsAttendanceCountAsync(
+                    db, guild.Id, member.Id,
+                    _config.EventsVoiceChannelName,
+                    rankSince ?? member.JoinedAt?.UtcDateTime ?? now,
+                    ct);
+
                 // All roles (sorted, excluding @everyone)
                 var rolesDisplay = string.Join(", ", member.Roles
                     .Where(r => !r.IsEveryone)
@@ -191,7 +198,8 @@ public class RosterExportService : BackgroundService
                     WindowDays = _config.RosterWindowDays,
                     IsAwol = hasAwolRole,
                     RankSince = rankSince,
-                    LastEventsVc = lastEventsSession?.JoinedAt
+                    LastEventsVc = lastEventsSession?.JoinedAt,
+                    EventsAtRank = eventsAtRank
                 });
             }
 
@@ -208,6 +216,48 @@ public class RosterExportService : BackgroundService
 
             _logger.LogInformation("Roster export complete for {Guild}: {Count} members", guild.Name, rows.Count);
         }
+    }
+
+    /// <summary>
+    /// Counts distinct Events VC entries for a user since a given date,
+    /// ignoring re-entries within 30 minutes of the previous session ending.
+    /// </summary>
+    private static async Task<int> GetEventsAttendanceCountAsync(
+        BotDbContext db, ulong guildId, ulong userId, string eventsChannelName,
+        DateTime since, CancellationToken ct = default)
+    {
+        var sessions = await db.VoiceSessions
+            .Where(v => v.GuildId == guildId
+                        && v.UserId == userId
+                        && v.ChannelName != null
+                        && v.ChannelName == eventsChannelName
+                        && v.JoinedAt >= since)
+            .OrderBy(v => v.JoinedAt)
+            .Select(v => new { v.JoinedAt, v.LeftAt })
+            .ToListAsync(ct);
+
+        if (sessions.Count == 0)
+            return 0;
+
+        int count = 1; // First session always counts
+        var lastSessionEnd = sessions[0].LeftAt ?? sessions[0].JoinedAt;
+
+        for (int i = 1; i < sessions.Count; i++)
+        {
+            var gap = sessions[i].JoinedAt - lastSessionEnd;
+
+            if (gap.TotalMinutes > 30)
+            {
+                count++;
+            }
+
+            // Always update the end marker to the latest session's end
+            var thisEnd = sessions[i].LeftAt ?? sessions[i].JoinedAt;
+            if (thisEnd > lastSessionEnd)
+                lastSessionEnd = thisEnd;
+        }
+
+        return count;
     }
 
     private static async Task<long> GetVoiceSecondsAsync(
@@ -260,4 +310,5 @@ public class RosterRow
     public bool IsAwol { get; set; }
     public DateTime? RankSince { get; set; }
     public DateTime? LastEventsVc { get; set; }
+    public int EventsAtRank { get; set; }
 }
