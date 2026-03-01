@@ -65,7 +65,8 @@ public class GoogleSheetsService
                     var updateRange = $"{sheetName}!A{i + 1}:G{i + 1}";
                     var updateBody = new ValueRange { Values = new List<IList<object>> { newRow } };
                     var updateRequest = service.Spreadsheets.Values.Update(updateBody, spreadsheetId, updateRange);
-                    updateRequest.ValueInputOption = SpreadsheetsResource.ValuesResource.UpdateRequest.ValueInputOptionEnum.USERENTERED;
+                    updateRequest.ValueInputOption = SpreadsheetsResource.ValuesResource.UpdateRequest
+                        .ValueInputOptionEnum.USERENTERED;
                     await updateRequest.ExecuteAsync();
 
                     _logger.LogInformation("Updated gamertags for {DiscordName} in row {Row}", discordName, i + 1);
@@ -78,15 +79,17 @@ public class GoogleSheetsService
         // Append new row
         var appendBody = new ValueRange { Values = new List<IList<object>> { newRow } };
         var appendRequest = service.Spreadsheets.Values.Append(appendBody, spreadsheetId, range);
-        appendRequest.ValueInputOption = SpreadsheetsResource.ValuesResource.AppendRequest.ValueInputOptionEnum.USERENTERED;
-        appendRequest.InsertDataOption = SpreadsheetsResource.ValuesResource.AppendRequest.InsertDataOptionEnum.INSERTROWS;
+        appendRequest.ValueInputOption =
+            SpreadsheetsResource.ValuesResource.AppendRequest.ValueInputOptionEnum.USERENTERED;
+        appendRequest.InsertDataOption =
+            SpreadsheetsResource.ValuesResource.AppendRequest.InsertDataOptionEnum.INSERTROWS;
         await appendRequest.ExecuteAsync();
 
         _logger.LogInformation("Appended gamertags for {DiscordName}", discordName);
-        
+
         await SortSheetByFirstColumnAsync(service, spreadsheetId, sheetName);
     }
-    
+
     /// <summary>
     /// Sorts all data rows (excluding the header) alphabetically by the first column.
     /// </summary>
@@ -164,7 +167,8 @@ public class GoogleSheetsService
                 var header = new List<object> { "Discord Name", "EA", "Steam", "PSN", "Xbox", "Embark", "Bungie" };
                 var body = new ValueRange { Values = new List<IList<object>> { header } };
                 var updateRequest = service.Spreadsheets.Values.Update(body, _config.GoogleSpreadsheetId, range);
-                updateRequest.ValueInputOption = SpreadsheetsResource.ValuesResource.UpdateRequest.ValueInputOptionEnum.USERENTERED;
+                updateRequest.ValueInputOption =
+                    SpreadsheetsResource.ValuesResource.UpdateRequest.ValueInputOptionEnum.USERENTERED;
                 await updateRequest.ExecuteAsync();
 
                 _logger.LogInformation("Created header row in Gamertags sheet");
@@ -252,6 +256,95 @@ public class GoogleSheetsService
         updateRequest.ValueInputOption =
             SpreadsheetsResource.ValuesResource.UpdateRequest.ValueInputOptionEnum.USERENTERED;
         await updateRequest.ExecuteAsync();
+
+        // Apply alternate row shading
+        var spreadsheet = await service.Spreadsheets.Get(spreadsheetId).ExecuteAsync();
+        var sheetId = spreadsheet.Sheets
+            .First(s => s.Properties.Title == sheetName)
+            .Properties.SheetId;
+
+        var formatRequests = new List<Request>();
+
+        // Light gray for even data rows (0-indexed: row 0 = header, row 1 = first data row)
+        var shadedColor = new Color { Red = 0.95f, Green = 0.95f, Blue = 0.95f, Alpha = 1f };
+        var whiteColor = new Color { Red = 1f, Green = 1f, Blue = 1f, Alpha = 1f };
+
+        for (int i = 1; i <= rows.Count; i++)
+        {
+            var bgColor = (i % 2 == 0) ? shadedColor : whiteColor;
+
+            formatRequests.Add(new Request
+            {
+                AddConditionalFormatRule = new AddConditionalFormatRuleRequest
+                {
+                    Rule = new ConditionalFormatRule
+                    {
+                        Ranges = new List<GridRange>
+                        {
+                            new GridRange
+                            {
+                                SheetId = sheetId,
+                                StartRowIndex = 1,
+                                EndRowIndex = rows.Count + 1,
+                                StartColumnIndex = 0,
+                                EndColumnIndex = 14
+                            }
+                        },
+                        BooleanRule = new BooleanRule
+                        {
+                            Condition = new BooleanCondition
+                            {
+                                Type = "CUSTOM_FORMULA",
+                                Values = new List<ConditionValue>
+                                {
+                                    new ConditionValue { UserEnteredValue = "=MOD(ROW(),2)=0" }
+                                }
+                            },
+                            Format = new CellFormat
+                            {
+                                BackgroundColor = new Color { Red = 0.95f, Green = 0.95f, Blue = 0.95f }
+                            }
+                        }
+                    },
+                    Index = 0
+                }
+            });
+        }
+
+        // Also style the header row
+        formatRequests.Add(new Request
+        {
+            RepeatCell = new RepeatCellRequest
+            {
+                Range = new GridRange
+                {
+                    SheetId = sheetId,
+                    StartRowIndex = 0,
+                    EndRowIndex = 1,
+                    StartColumnIndex = 0,
+                    EndColumnIndex = 14
+                },
+                Cell = new CellData
+                {
+                    UserEnteredFormat = new CellFormat
+                    {
+                        BackgroundColor = new Color { Red = 0.2f, Green = 0.2f, Blue = 0.2f, Alpha = 1f },
+                        TextFormat = new TextFormat
+                        {
+                            Bold = true,
+                            ForegroundColor = new Color { Red = 1f, Green = 1f, Blue = 1f, Alpha = 1f }
+                        }
+                    }
+                },
+                Fields = "userEnteredFormat(backgroundColor,textFormat)"
+            }
+        });
+
+        var batchFormatRequest = new BatchUpdateSpreadsheetRequest
+        {
+            Requests = formatRequests
+        };
+        await service.Spreadsheets.BatchUpdate(batchFormatRequest, spreadsheetId).ExecuteAsync();
 
         _logger.LogInformation("Wrote {Count} roster rows to sheet {SheetName}", rows.Count, sheetName);
     }
