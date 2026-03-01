@@ -193,7 +193,7 @@ public class RosterExportService : BackgroundService
                 }
                 else if (messageCount <= 10)
                 {
-                    isPromotable = voiceHours >= 15.0;
+                    isPromotable = voiceHours >= 10.0;
                 }
 
                 rows.Add(new RosterRow
