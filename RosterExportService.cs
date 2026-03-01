@@ -200,7 +200,7 @@ public class RosterExportService : BackgroundService
                     RankSince = rankSince,
                     LastEventsVc = lastEventsSession?.JoinedAt,
                     EventsAtRank = eventsAtRank,
-                    IsPromotable = messageCount >= 10 && voiceHours >= 5.0
+                    IsPromotable = messageCount >= 40 && voiceHours >= 15.0
                 });
             }
 
