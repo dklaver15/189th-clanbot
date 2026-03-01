@@ -287,7 +287,7 @@ public class GoogleSheetsService
                                 StartRowIndex = 1,
                                 EndRowIndex = rows.Count + 1,
                                 StartColumnIndex = 0,
-                                EndColumnIndex = 14
+                                EndColumnIndex = 13
                             }
                         },
                         BooleanRule = new BooleanRule
