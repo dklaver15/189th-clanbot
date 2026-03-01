@@ -186,7 +186,7 @@ public class RosterExportService : BackgroundService
                     .OrderByDescending(r => r.Position)
                     .Select(r => r.Name));
 
-                var isPromotable = false;
+                var isPromotable = true;
                 if (voiceHours <= 5.0)
                 {
                     isPromotable = messageCount >= 40;
@@ -194,7 +194,7 @@ public class RosterExportService : BackgroundService
                 else if (messageCount <= 10)
                 {
                     isPromotable = voiceHours >= 10.0;
-                }
+                } 
 
                 rows.Add(new RosterRow
                 {
