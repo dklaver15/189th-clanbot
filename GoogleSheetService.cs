@@ -207,7 +207,7 @@ public class GoogleSheetsService
         {
             "Discord Name", "Username", "Rank", "Roles", "Join Date",
             "Messages", "Voice Hours", "Window", "AWOL",
-            "Time in Rank", "Last Events VC", "Events At Rank",
+            "Time in Rank", "Last Events VC", "Events At Rank", "Promotable",
             $"Last Updated: {DateTime.UtcNow:yyyy-MM-dd HH:mm} UTC"
         });
 
@@ -235,17 +235,18 @@ public class GoogleSheetsService
                 row.IsAwol ? "YES" : "",
                 timeInRank,
                 lastEvents,
-                row.EventsAtRank
+                row.EventsAtRank,
+                row.IsPromotable ? "YES" : ""
             });
         }
 
         // Clear existing data and write fresh
-        var fullRange = $"{sheetName}!A1:M{allRows.Count + 10}";
+        var fullRange = $"{sheetName}!A1:N{allRows.Count + 10}";
         var clearRequest = service.Spreadsheets.Values.Clear(
             new ClearValuesRequest(), spreadsheetId, fullRange);
         await clearRequest.ExecuteAsync();
 
-        var writeRange = $"{sheetName}!A1:M{allRows.Count}";
+        var writeRange = $"{sheetName}!A1:N{allRows.Count}";
         var body = new ValueRange { Values = allRows };
         var updateRequest = service.Spreadsheets.Values.Update(body, spreadsheetId, writeRange);
         updateRequest.ValueInputOption =

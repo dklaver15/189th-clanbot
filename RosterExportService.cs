@@ -199,7 +199,8 @@ public class RosterExportService : BackgroundService
                     IsAwol = hasAwolRole,
                     RankSince = rankSince,
                     LastEventsVc = lastEventsSession?.JoinedAt,
-                    EventsAtRank = eventsAtRank
+                    EventsAtRank = eventsAtRank,
+                    IsPromotable = messageCount >= 10 && voiceHours >= 5.0
                 });
             }
 
@@ -311,4 +312,5 @@ public class RosterRow
     public DateTime? RankSince { get; set; }
     public DateTime? LastEventsVc { get; set; }
     public int EventsAtRank { get; set; }
+    public bool IsPromotable { get; set; }
 }
