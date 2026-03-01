@@ -322,7 +322,7 @@ public class GoogleSheetsService
                     StartRowIndex = 0,
                     EndRowIndex = 1,
                     StartColumnIndex = 0,
-                    EndColumnIndex = 14
+                    EndColumnIndex = 13
                 },
                 Cell = new CellData
                 {
