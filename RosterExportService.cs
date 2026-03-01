@@ -186,6 +186,16 @@ public class RosterExportService : BackgroundService
                     .OrderByDescending(r => r.Position)
                     .Select(r => r.Name));
 
+                var isPromotable = false;
+                if (voiceHours <= 5.0)
+                {
+                    isPromotable = messageCount >= 40;
+                }
+                else if (messageCount <= 10)
+                {
+                    isPromotable = voiceHours >= 15.0;
+                }
+
                 rows.Add(new RosterRow
                 {
                     DiscordName = member.DisplayName,
@@ -200,7 +210,7 @@ public class RosterExportService : BackgroundService
                     RankSince = rankSince,
                     LastEventsVc = lastEventsSession?.JoinedAt,
                     EventsAtRank = eventsAtRank,
-                    IsPromotable = messageCount >= 40 && voiceHours >= 15.0
+                    IsPromotable = isPromotable
                 });
             }
 
