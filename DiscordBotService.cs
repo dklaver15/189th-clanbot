@@ -19,6 +19,7 @@ public class DiscordBotService : IHostedService
     private readonly GamertagCommandHandler _gamertagHandler;
     private readonly RankTrackingHandler _rankHandler;
     private readonly TicketReminderHandler _ticketReminderHandler;
+    private readonly GuestReminderHandler _guestReminderHandler;
     private readonly ILogger<DiscordBotService> _logger;
     private readonly BotConfig _config;
 
@@ -28,6 +29,7 @@ public class DiscordBotService : IHostedService
         GamertagCommandHandler gamertagHandler,
         RankTrackingHandler rankHandler,
         TicketReminderHandler ticketReminderHandler,
+        GuestReminderHandler guestReminderHandler,
         ILogger<DiscordBotService> logger,
         IOptions<BotConfig> config)
     {
@@ -36,6 +38,7 @@ public class DiscordBotService : IHostedService
         _gamertagHandler = gamertagHandler;
         _rankHandler = rankHandler;
         _ticketReminderHandler = ticketReminderHandler;
+        _guestReminderHandler = guestReminderHandler;
         _logger = logger;
         _config = config.Value;
     }
@@ -56,6 +59,9 @@ public class DiscordBotService : IHostedService
 
         // Register the ticket reminder handler
         _ticketReminderHandler.Register(_client);
+
+        // Register the guest reminder handler
+        _guestReminderHandler.Register(_client);
 
         await _client.LoginAsync(TokenType.Bot, _config.Token);
         await _client.StartAsync();

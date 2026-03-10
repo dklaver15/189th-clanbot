@@ -60,6 +60,11 @@ try
     builder.Services.AddSingleton<TicketReminderHandler>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<TicketReminderHandler>());
 
+    // GuestReminderHandler: same pattern — singleton for event registration,
+    // hosted service for startup recovery of pending reminders.
+    builder.Services.AddSingleton<GuestReminderHandler>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<GuestReminderHandler>());
+
     // Hosted services
     builder.Services.AddHostedService<DiscordBotService>();
     builder.Services.AddHostedService<HistoryBackfillService>();

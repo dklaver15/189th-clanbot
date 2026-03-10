@@ -82,6 +82,12 @@ public class BotConfig
     /// <summary>How many hours to wait before sending a ticket reminder (default: 24).</summary>
     public double TicketReminderDelayHours { get; set; } = 24.0;
 
+    /// <summary>How many days to wait before reminding a Guest who hasn't created a ticket.</summary>
+    public int GuestReminderDelayDays { get; set; } = 7;
+
+    /// <summary>Name of the text channel where guest reminders are posted.</summary>
+    public string GuestReminderChannelName { get; set; } = "general-chat";
+
     public List<string> GetExemptRolesList() =>
         ExemptRoles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
     

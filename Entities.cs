@@ -98,3 +98,23 @@ public class TicketReminder
     /// <summary>When the reminder should fire.</summary>
     public DateTime ReminderAt { get; set; }
 }
+
+/// <summary>
+/// Persists a pending guest reminder so it survives bot restarts.
+/// When a new user joins and receives the Guest role, a record is created.
+/// After the configured delay, if they still have the Guest role (haven't
+/// created a ticket), a nudge is posted in general chat.
+/// Removed once the reminder fires or is no longer needed.
+/// </summary>
+public class GuestReminder
+{
+    public int Id { get; set; }
+    public ulong GuildId { get; set; }
+    public ulong UserId { get; set; }
+
+    /// <summary>When the user joined the server.</summary>
+    public DateTime JoinedAt { get; set; }
+
+    /// <summary>When the reminder should fire.</summary>
+    public DateTime ReminderAt { get; set; }
+}
