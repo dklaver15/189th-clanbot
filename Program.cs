@@ -54,6 +54,7 @@ try
     builder.Services.AddSingleton<GoogleSheetsService>();
     builder.Services.AddSingleton<GamertagCommandHandler>();
     builder.Services.AddSingleton<RankTrackingHandler>();
+    builder.Services.AddSingleton<TicketReminderHandler>();
 
     // Hosted services
     builder.Services.AddHostedService<DiscordBotService>();

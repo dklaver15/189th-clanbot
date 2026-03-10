@@ -76,6 +76,12 @@ public class BotConfig
     /// </summary>
     public string RankRoles { get; set; } = "RCT,PVT,PFC,SPC,CPL,SGT,SSG,SFC,MSG,1SG,SGM,CSM,SMA,2ndLT,1stLT,CPT,MAJ,LTC,COL,BG,MG,LTG,GEN,GoA";
 
+    /// <summary>Name of the Discord category where ticket channels are created.</summary>
+    public string TicketCategoryName { get; set; } = "TICKET CENTER";
+
+    /// <summary>How many hours to wait before sending a ticket reminder (default: 24).</summary>
+    public double TicketReminderDelayHours { get; set; } = 24.0;
+
     public List<string> GetExemptRolesList() =>
         ExemptRoles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
     
