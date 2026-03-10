@@ -81,3 +81,20 @@ public class AwolRecord
     /// <summary>When the HQ notification was posted (null if not yet).</summary>
     public DateTime? NotificationSentAt { get; set; }
 }
+
+/// <summary>
+/// Persists a pending ticket reminder so it survives bot restarts.
+/// Removed once the reminder fires or is cancelled.
+/// </summary>
+public class TicketReminder
+{
+    public int Id { get; set; }
+    public ulong GuildId { get; set; }
+    public ulong ChannelId { get; set; }
+
+    /// <summary>When the ticket channel was created.</summary>
+    public DateTime CreatedAt { get; set; }
+
+    /// <summary>When the reminder should fire.</summary>
+    public DateTime ReminderAt { get; set; }
+}
