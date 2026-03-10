@@ -13,6 +13,7 @@ public class BotDbContext : DbContext
     public DbSet<RankHistory> RankHistories => Set<RankHistory>();
     public DbSet<TicketReminder> TicketReminders => Set<TicketReminder>();
     public DbSet<GuestReminder> GuestReminders => Set<GuestReminder>();
+    public DbSet<OnboardingReminder> OnboardingReminders => Set<OnboardingReminder>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -53,6 +54,11 @@ public class BotDbContext : DbContext
         modelBuilder.Entity<GuestReminder>(e =>
         {
             e.HasIndex(g => new { g.GuildId, g.UserId }).IsUnique();
+        });
+
+        modelBuilder.Entity<OnboardingReminder>(e =>
+        {
+            e.HasIndex(o => new { o.GuildId, o.UserId }).IsUnique();
         });
     }
 }

@@ -118,3 +118,25 @@ public class GuestReminder
     /// <summary>When the reminder should fire.</summary>
     public DateTime ReminderAt { get; set; }
 }
+
+/// <summary>
+/// Persists a pending onboarding step reminder so it survives bot restarts.
+/// Created when a Guest completes an onboarding step (rules, platoon, gamertag)
+/// but hasn't yet created a ticket. Fires after 24 hours if they still have
+/// the Guest role. Only one record per user/guild at a time.
+/// </summary>
+public class OnboardingReminder
+{
+    public int Id { get; set; }
+    public ulong GuildId { get; set; }
+    public ulong UserId { get; set; }
+
+    /// <summary>Which onboarding step triggered this reminder (e.g. "rules", "platoon", "gamertag").</summary>
+    public string TriggerStep { get; set; } = string.Empty;
+
+    /// <summary>When the onboarding step was completed.</summary>
+    public DateTime CreatedAt { get; set; }
+
+    /// <summary>When the reminder should fire.</summary>
+    public DateTime ReminderAt { get; set; }
+}
