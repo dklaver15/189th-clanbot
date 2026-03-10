@@ -1,6 +1,11 @@
+using ClanGuardBot.Data;
 using ClanGuardBot.Models;
 using Discord;
 using Discord.WebSocket;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
 
@@ -8,23 +13,27 @@ namespace ClanGuardBot.Handlers;
 
 /// <summary>
 /// Watches for new channels created in the "TICKET CENTER" category.
-/// When a ticket channel appears, schedules a 24-hour reminder that posts
-/// in the ticket if it's still open, nudging the user to complete onboarding.
+/// When a ticket channel appears, persists a reminder record to the database
+/// and schedules a delayed message. On startup, recovers any pending reminders
+/// that were scheduled before the last shutdown.
 /// </summary>
-public class TicketReminderHandler
+public class TicketReminderHandler : BackgroundService
 {
+    private readonly IServiceProvider _services;
     private readonly DiscordSocketClient _client;
     private readonly ILogger<TicketReminderHandler> _logger;
     private readonly BotConfig _config;
 
-    /// <summary>Tracks pending reminders so we can cancel if the channel is deleted early.</summary>
+    /// <summary>Tracks in-flight reminder tasks so we can cancel if the channel is deleted early.</summary>
     private readonly ConcurrentDictionary<ulong, CancellationTokenSource> _pendingReminders = new();
 
     public TicketReminderHandler(
+        IServiceProvider services,
         DiscordSocketClient client,
         ILogger<TicketReminderHandler> logger,
         IOptions<BotConfig> config)
     {
+        _services = services;
         _client = client;
         _logger = logger;
         _config = config.Value;
@@ -35,6 +44,22 @@ public class TicketReminderHandler
     {
         client.ChannelCreated += OnChannelCreated;
         client.ChannelDestroyed += OnChannelDestroyed;
+    }
+
+    /// <summary>
+    /// On startup, wait for Discord to connect, then recover any pending reminders
+    /// that were persisted before the last shutdown.
+    /// </summary>
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        // Wait for Discord to be ready
+        while (_client.ConnectionState != ConnectionState.Connected || !_client.Guilds.Any())
+        {
+            await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+        }
+        await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+
+        await RecoverPendingRemindersAsync(stoppingToken);
     }
 
     private Task OnChannelCreated(SocketChannel channel)
@@ -53,11 +78,8 @@ public class TicketReminderHandler
             "Ticket channel created: #{Channel} in {Guild} — scheduling 24h reminder",
             textChannel.Name, textChannel.Guild.Name);
 
-        // Fire-and-forget the delayed reminder (tracked via CTS for cancellation)
-        var cts = new CancellationTokenSource();
-        _pendingReminders[textChannel.Id] = cts;
-
-        _ = ScheduleReminderAsync(textChannel.Id, textChannel.Guild.Id, cts.Token);
+        // Fire-and-forget: persist to DB then schedule
+        _ = PersistAndScheduleAsync(textChannel.Guild.Id, textChannel.Id);
 
         return Task.CompletedTask;
     }
@@ -69,17 +91,123 @@ public class TicketReminderHandler
         {
             cts.Cancel();
             cts.Dispose();
-            _logger.LogDebug("Cancelled pending reminder for deleted channel {ChannelId}", channel.Id);
         }
+
+        // Fire-and-forget: remove from DB
+        _ = RemoveReminderFromDbAsync(channel.Id);
 
         return Task.CompletedTask;
     }
 
-    private async Task ScheduleReminderAsync(ulong channelId, ulong guildId, CancellationToken ct)
+    /// <summary>
+    /// Saves a reminder record to the database, then starts the delayed task.
+    /// </summary>
+    private async Task PersistAndScheduleAsync(ulong guildId, ulong channelId)
     {
         try
         {
-            await Task.Delay(TimeSpan.FromHours(_config.TicketReminderDelayHours), ct);
+            var now = DateTime.UtcNow;
+            var reminderAt = now.AddHours(_config.TicketReminderDelayHours);
+
+            using var scope = _services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+            // Avoid duplicates (e.g. race condition)
+            var existing = await db.TicketReminders
+                .FirstOrDefaultAsync(t => t.ChannelId == channelId);
+
+            if (existing is null)
+            {
+                db.TicketReminders.Add(new TicketReminder
+                {
+                    GuildId = guildId,
+                    ChannelId = channelId,
+                    CreatedAt = now,
+                    ReminderAt = reminderAt
+                });
+                await db.SaveChangesAsync();
+            }
+
+            ScheduleReminder(guildId, channelId, reminderAt);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to persist ticket reminder for channel {ChannelId}", channelId);
+        }
+    }
+
+    /// <summary>
+    /// Loads all pending reminders from the database and re-schedules them.
+    /// Any that are already past due fire immediately.
+    /// </summary>
+    private async Task RecoverPendingRemindersAsync(CancellationToken ct)
+    {
+        try
+        {
+            using var scope = _services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+            var pendingReminders = await db.TicketReminders.ToListAsync(ct);
+
+            if (pendingReminders.Count == 0)
+            {
+                _logger.LogInformation("No pending ticket reminders to recover");
+                return;
+            }
+
+            _logger.LogInformation("Recovering {Count} pending ticket reminder(s)", pendingReminders.Count);
+
+            // Clean out any reminders whose channels no longer exist
+            var toRemove = new List<TicketReminder>();
+            foreach (var reminder in pendingReminders)
+            {
+                var channel = _client.GetChannel(reminder.ChannelId) as SocketTextChannel;
+                if (channel is null)
+                {
+                    toRemove.Add(reminder);
+                    continue;
+                }
+
+                ScheduleReminder(reminder.GuildId, reminder.ChannelId, reminder.ReminderAt);
+            }
+
+            if (toRemove.Count > 0)
+            {
+                db.TicketReminders.RemoveRange(toRemove);
+                await db.SaveChangesAsync(ct);
+                _logger.LogInformation("Cleaned up {Count} stale ticket reminder(s) for deleted channels",
+                    toRemove.Count);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error recovering pending ticket reminders");
+        }
+    }
+
+    /// <summary>
+    /// Starts a delayed task that will fire the reminder at the specified time.
+    /// If the time is already in the past, fires immediately.
+    /// </summary>
+    private void ScheduleReminder(ulong guildId, ulong channelId, DateTime reminderAtUtc)
+    {
+        var cts = new CancellationTokenSource();
+        _pendingReminders[channelId] = cts;
+
+        _ = ExecuteReminderAsync(guildId, channelId, reminderAtUtc, cts.Token);
+    }
+
+    private async Task ExecuteReminderAsync(
+        ulong guildId, ulong channelId, DateTime reminderAtUtc, CancellationToken ct)
+    {
+        try
+        {
+            // Wait until it's time (if the reminder is past due, delay is zero)
+            var delay = reminderAtUtc - DateTime.UtcNow;
+            if (delay > TimeSpan.Zero)
+            {
+                await Task.Delay(delay, ct);
+            }
 
             // Re-fetch the channel — it may have been deleted
             var channel = _client.GetChannel(channelId) as SocketTextChannel;
@@ -156,6 +284,30 @@ public class TicketReminderHandler
         finally
         {
             _pendingReminders.TryRemove(channelId, out _);
+            await RemoveReminderFromDbAsync(channelId);
+        }
+    }
+
+    /// <summary>Removes a reminder record from the database after it fires or is cancelled.</summary>
+    private async Task RemoveReminderFromDbAsync(ulong channelId)
+    {
+        try
+        {
+            using var scope = _services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+            var record = await db.TicketReminders
+                .FirstOrDefaultAsync(t => t.ChannelId == channelId);
+
+            if (record is not null)
+            {
+                db.TicketReminders.Remove(record);
+                await db.SaveChangesAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to remove ticket reminder record for channel {ChannelId}", channelId);
         }
     }
 }

@@ -54,7 +54,11 @@ try
     builder.Services.AddSingleton<GoogleSheetsService>();
     builder.Services.AddSingleton<GamertagCommandHandler>();
     builder.Services.AddSingleton<RankTrackingHandler>();
+
+    // TicketReminderHandler: registered as singleton so DiscordBotService can inject it
+    // for event registration, and also as a hosted service for startup recovery.
     builder.Services.AddSingleton<TicketReminderHandler>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<TicketReminderHandler>());
 
     // Hosted services
     builder.Services.AddHostedService<DiscordBotService>();
