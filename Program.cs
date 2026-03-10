@@ -52,8 +52,14 @@ try
     builder.Services.AddSingleton<ActivityTrackingHandler>();
     builder.Services.AddSingleton<SlashCommandHandler>();
     builder.Services.AddSingleton<GoogleSheetsService>();
-    builder.Services.AddSingleton<GamertagCommandHandler>();
     builder.Services.AddSingleton<RankTrackingHandler>();
+
+    // OnboardingReminderHandler: registered before GamertagCommandHandler because
+    // the gamertag handler depends on it to notify when a Guest saves gamertags.
+    builder.Services.AddSingleton<OnboardingReminderHandler>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<OnboardingReminderHandler>());
+
+    builder.Services.AddSingleton<GamertagCommandHandler>();
 
     // TicketReminderHandler: registered as singleton so DiscordBotService can inject it
     // for event registration, and also as a hosted service for startup recovery.

@@ -1,4 +1,3 @@
-
 using System.Collections.Concurrent;
 using ClanGuardBot.Services;
 using Discord;
@@ -15,6 +14,7 @@ namespace ClanGuardBot.Handlers;
 public partial class GamertagCommandHandler
 {
     private readonly GoogleSheetsService _sheetsService;
+    private readonly OnboardingReminderHandler _onboardingReminder;
     private readonly ILogger<GamertagCommandHandler> _logger;
     private static readonly Regex DiscriminatorPattern = MyRegex();
 
@@ -24,9 +24,13 @@ public partial class GamertagCommandHandler
     /// </summary>
     private readonly ConcurrentDictionary<ulong, PartialGamertags> _pendingSubmissions = new();
 
-    public GamertagCommandHandler(GoogleSheetsService sheetsService, ILogger<GamertagCommandHandler> logger)
+    public GamertagCommandHandler(
+        GoogleSheetsService sheetsService,
+        OnboardingReminderHandler onboardingReminder,
+        ILogger<GamertagCommandHandler> logger)
     {
         _sheetsService = sheetsService;
+        _onboardingReminder = onboardingReminder;
         _logger = logger;
     }
 
@@ -165,6 +169,12 @@ public partial class GamertagCommandHandler
                 .Build();
 
             await modal.FollowupAsync(embed: embed, ephemeral: true);
+
+            // Notify the onboarding reminder handler (triggers a 24h reminder if still a Guest)
+            if (modal.GuildId.HasValue)
+            {
+                _onboardingReminder.NotifyGamertagCompleted(modal.GuildId.Value, modal.User.Id);
+            }
         }
         catch (Exception ex)
         {

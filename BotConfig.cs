@@ -88,6 +88,17 @@ public class BotConfig
     /// <summary>Name of the text channel where guest reminders are posted.</summary>
     public string GuestReminderChannelName { get; set; } = "general-chat";
 
+    /// <summary>
+    /// Comma-separated list of platoon role names used to detect platoon assignment.
+    /// </summary>
+    public string PlatoonRoles { get; set; } = "Airborne Platoon,Barbarian Platoon,Commando Platoon,Dreadnought Platoon,Executioner Platoon,Firestorm Platoon,Guardian Platoon,Havoc Platoon";
+
+    /// <summary>Name of the rules channel where the Accept Rules button lives.</summary>
+    public string RulesChannelName { get; set; } = "rules";
+
+    /// <summary>Hours to wait after a Guest completes an onboarding step before reminding them to create a ticket.</summary>
+    public double OnboardingReminderDelayHours { get; set; } = 24.0;
+
     public List<string> GetExemptRolesList() =>
         ExemptRoles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
     
@@ -96,6 +107,9 @@ public class BotConfig
 
     public List<string> GetRankRolesList() =>
         RankRoles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+
+    public List<string> GetPlatoonRolesList() =>
+        PlatoonRoles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
     
     /// <summary>
     /// Returns the appropriate window days for a guild member based on their roles.
