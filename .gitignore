@@ -1,2 +1,5 @@
 /google-credentials.json
 .env
+bin/
+obj/
+logs/
