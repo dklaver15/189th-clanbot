@@ -399,7 +399,7 @@ public class GoogleSheetsService
         // Ensure the tab exists
         await EnsureSheetTabExistsAsync(service, spreadsheetId, sheetName);
 
-        var range = $"{sheetName}!A:D";
+        var range = $"'{sheetName}'!A:D";
 
         var newRow = new List<object>
         {
@@ -445,7 +445,7 @@ public class GoogleSheetsService
             // Ensure the tab exists
             await EnsureSheetTabExistsAsync(service, spreadsheetId, sheetName);
 
-            var range = $"{sheetName}!A1:D1";
+            var range = $"'{sheetName}'!A1:D1";
             var getRequest = service.Spreadsheets.Values.Get(spreadsheetId, range);
             var response = await getRequest.ExecuteAsync();
 
