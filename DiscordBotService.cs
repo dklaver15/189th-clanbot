@@ -23,6 +23,7 @@ public class DiscordBotService : IHostedService
     private readonly OnboardingReminderHandler _onboardingReminderHandler;
     private readonly ILogger<DiscordBotService> _logger;
     private readonly BotConfig _config;
+    private readonly RecruitCommandHandler _recruitHandler;
 
     public DiscordBotService(
         DiscordSocketClient client,
@@ -32,6 +33,7 @@ public class DiscordBotService : IHostedService
         TicketReminderHandler ticketReminderHandler,
         GuestReminderHandler guestReminderHandler,
         OnboardingReminderHandler onboardingReminderHandler,
+        RecruitCommandHandler recruitHandler,
         ILogger<DiscordBotService> logger,
         IOptions<BotConfig> config)
     {
@@ -44,6 +46,7 @@ public class DiscordBotService : IHostedService
         _onboardingReminderHandler = onboardingReminderHandler;
         _logger = logger;
         _config = config.Value;
+        _recruitHandler = recruitHandler;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -68,6 +71,9 @@ public class DiscordBotService : IHostedService
 
         // Register the onboarding reminder handler
         _onboardingReminderHandler.Register(_client);
+        
+        // Register the recruit command handler
+        _recruitHandler.Register(_client);
 
         await _client.LoginAsync(TokenType.Bot, _config.Token);
         await _client.StartAsync();
@@ -121,6 +127,11 @@ public class DiscordBotService : IHostedService
                 new SlashCommandBuilder()
                     .WithName("roster-export")
                     .WithDescription("Manually trigger a roster export to Google Sheets (Officer+ only)")
+                    .Build(),
+                
+                new SlashCommandBuilder()
+                    .WithName("recruit")
+                    .WithDescription("Log a new recruit's name to the roster sheet")
                     .Build()
             };
 

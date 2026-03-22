@@ -98,6 +98,12 @@ public class BotConfig
 
     /// <summary>Hours to wait after a Guest completes an onboarding step before reminding them to create a ticket.</summary>
     public double OnboardingReminderDelayHours { get; set; } = 24.0;
+    
+    /// <summary>The sheet/tab name for the recruit log.</summary>
+    public string RecruitSheetName { get; set; } = "Recruit Log";
+
+    /// <summary>The Google Spreadsheet ID for the recruit log. If empty, uses GoogleSpreadsheetId.</summary>
+    public string RecruitSpreadsheetId { get; set; } = string.Empty;
 
     public List<string> GetExemptRolesList() =>
         ExemptRoles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
