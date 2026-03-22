@@ -377,7 +377,7 @@ public class GoogleSheetsService
 
     /// <summary>
     /// Appends a row to the Recruit Log sheet.
-    /// Columns: Recruit Name | Date | Time (UTC) | Logged By
+    /// Columns: Recruit | Date | Time (UTC) | Logged By
     /// </summary>
     public async Task WriteRecruitLogAsync(string recruitName, string loggedBy, DateTime timestampUtc)
     {
@@ -412,10 +412,68 @@ public class GoogleSheetsService
         var appendBody = new ValueRange { Values = new List<IList<object>> { newRow } };
         var appendRequest = service.Spreadsheets.Values.Append(appendBody, spreadsheetId, range);
         appendRequest.ValueInputOption =
-            SpreadsheetsResource.ValuesResource.AppendRequest.ValueInputOptionEnum.USERENTERED;
+            SpreadsheetsResource.ValuesResource.AppendRequest.ValueInputOptionEnum.RAW;
         appendRequest.InsertDataOption =
             SpreadsheetsResource.ValuesResource.AppendRequest.InsertDataOptionEnum.INSERTROWS;
-        await appendRequest.ExecuteAsync();
+        var appendResponse = await appendRequest.ExecuteAsync();
+
+        // Clear formatting on the appended row so the header's teal doesn't bleed down
+        var updatedRange = appendResponse.Updates?.UpdatedRange;
+        if (updatedRange is not null)
+        {
+            var spreadsheet = await service.Spreadsheets.Get(spreadsheetId).ExecuteAsync();
+            var sheet = spreadsheet.Sheets.FirstOrDefault(s => s.Properties.Title == sheetName);
+            if (sheet is not null)
+            {
+                var sheetId = sheet.Properties.SheetId ?? 0;
+
+                // Parse the row number from the updated range (e.g. "'Recruit Log'!A2:D2")
+                var match = System.Text.RegularExpressions.Regex.Match(updatedRange, @"(\d+)$");
+                if (match.Success && int.TryParse(match.Value, out var rowNumber))
+                {
+                    var clearFormat = new BatchUpdateSpreadsheetRequest
+                    {
+                        Requests = new List<Request>
+                        {
+                            new Request
+                            {
+                                RepeatCell = new RepeatCellRequest
+                                {
+                                    Range = new GridRange
+                                    {
+                                        SheetId = sheetId,
+                                        StartRowIndex = rowNumber - 1, // 0-indexed
+                                        EndRowIndex = rowNumber,
+                                        StartColumnIndex = 0,
+                                        EndColumnIndex = 4
+                                    },
+                                    Cell = new CellData
+                                    {
+                                        UserEnteredFormat = new CellFormat
+                                        {
+                                            BackgroundColor = new Color
+                                            {
+                                                Red = 1f, Green = 1f, Blue = 1f, Alpha = 1f
+                                            },
+                                            TextFormat = new TextFormat
+                                            {
+                                                Bold = false,
+                                                ForegroundColor = new Color
+                                                {
+                                                    Red = 0f, Green = 0f, Blue = 0f, Alpha = 1f
+                                                }
+                                            }
+                                        }
+                                    },
+                                    Fields = "userEnteredFormat(backgroundColor,textFormat)"
+                                }
+                            }
+                        }
+                    };
+                    await service.Spreadsheets.BatchUpdate(clearFormat, spreadsheetId).ExecuteAsync();
+                }
+            }
+        }
 
         _logger.LogInformation("Appended recruit log: {RecruitName} by {LoggedBy}", recruitName, loggedBy);
     }
