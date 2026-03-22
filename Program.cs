@@ -60,6 +60,7 @@ try
     builder.Services.AddHostedService(sp => sp.GetRequiredService<OnboardingReminderHandler>());
 
     builder.Services.AddSingleton<GamertagCommandHandler>();
+    builder.Services.AddSingleton<RecruitCommandHandler>();
 
     // TicketReminderHandler: registered as singleton so DiscordBotService can inject it
     // for event registration, and also as a hosted service for startup recovery.
@@ -99,6 +100,7 @@ try
     // Ensure the Google Sheet has a header row
     var sheetsService = app.Services.GetRequiredService<GoogleSheetsService>();
     await sheetsService.EnsureHeaderRowAsync();
+    await sheetsService.EnsureRecruitHeaderRowAsync();
 
     await app.RunAsync();
 }

@@ -375,6 +375,98 @@ public class GoogleSheetsService
         _logger.LogInformation("Created sheet tab {SheetName}", sheetName);
     }
 
+    /// <summary>
+    /// Appends a row to the Recruit Log sheet.
+    /// Columns: Recruit Name | Date | Time (UTC) | Logged By
+    /// </summary>
+    public async Task WriteRecruitLogAsync(string recruitName, string loggedBy, DateTime timestampUtc)
+    {
+        var credential = GoogleCredential
+            .FromFile(_config.GoogleCredentialsPath)
+            .CreateScoped(SheetsService.Scope.Spreadsheets);
+
+        using var service = new SheetsService(new BaseClientService.Initializer
+        {
+            HttpClientInitializer = credential,
+            ApplicationName = "ClanGuardBot"
+        });
+
+        var spreadsheetId = string.IsNullOrWhiteSpace(_config.RecruitSpreadsheetId)
+            ? _config.GoogleSpreadsheetId
+            : _config.RecruitSpreadsheetId;
+        var sheetName = _config.RecruitSheetName;
+
+        // Ensure the tab exists
+        await EnsureSheetTabExistsAsync(service, spreadsheetId, sheetName);
+
+        var range = $"{sheetName}!A:D";
+
+        var newRow = new List<object>
+        {
+            recruitName,
+            timestampUtc.ToString("yyyy-MM-dd"),
+            timestampUtc.ToString("HH:mm:ss"),
+            loggedBy
+        };
+
+        var appendBody = new ValueRange { Values = new List<IList<object>> { newRow } };
+        var appendRequest = service.Spreadsheets.Values.Append(appendBody, spreadsheetId, range);
+        appendRequest.ValueInputOption =
+            SpreadsheetsResource.ValuesResource.AppendRequest.ValueInputOptionEnum.USERENTERED;
+        appendRequest.InsertDataOption =
+            SpreadsheetsResource.ValuesResource.AppendRequest.InsertDataOptionEnum.INSERTROWS;
+        await appendRequest.ExecuteAsync();
+
+        _logger.LogInformation("Appended recruit log: {RecruitName} by {LoggedBy}", recruitName, loggedBy);
+    }
+
+    /// <summary>
+    /// Ensures the header row exists in the Recruit Log sheet. Call once on startup.
+    /// </summary>
+    public async Task EnsureRecruitHeaderRowAsync()
+    {
+        try
+        {
+            var credential = GoogleCredential
+                .FromFile(_config.GoogleCredentialsPath)
+                .CreateScoped(SheetsService.Scope.Spreadsheets);
+
+            using var service = new SheetsService(new BaseClientService.Initializer
+            {
+                HttpClientInitializer = credential,
+                ApplicationName = "ClanGuardBot"
+            });
+
+            var spreadsheetId = string.IsNullOrWhiteSpace(_config.RecruitSpreadsheetId)
+                ? _config.GoogleSpreadsheetId
+                : _config.RecruitSpreadsheetId;
+            var sheetName = _config.RecruitSheetName;
+
+            // Ensure the tab exists
+            await EnsureSheetTabExistsAsync(service, spreadsheetId, sheetName);
+
+            var range = $"{sheetName}!A1:D1";
+            var getRequest = service.Spreadsheets.Values.Get(spreadsheetId, range);
+            var response = await getRequest.ExecuteAsync();
+
+            if (response.Values is null || response.Values.Count == 0)
+            {
+                var header = new List<object> { "Recruit Name", "Date", "Time (UTC)", "Logged By" };
+                var body = new ValueRange { Values = new List<IList<object>> { header } };
+                var updateRequest = service.Spreadsheets.Values.Update(body, spreadsheetId, range);
+                updateRequest.ValueInputOption =
+                    SpreadsheetsResource.ValuesResource.UpdateRequest.ValueInputOptionEnum.USERENTERED;
+                await updateRequest.ExecuteAsync();
+
+                _logger.LogInformation("Created header row in Recruit Log sheet");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not ensure header row in Recruit Log sheet (sheet may not be configured yet)");
+        }
+    }
+
     /// <summary>Formats a TimeSpan as a human-readable duration like "45d" or "3mo 12d".</summary>
     private static string FormatDuration(TimeSpan duration)
     {
