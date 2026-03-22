@@ -71,7 +71,7 @@ public class RecruitCommandHandler
             var embed = new EmbedBuilder()
                 .WithTitle("📋 Recruit Logged!")
                 .WithColor(Color.Green)
-                .AddField("Recruit Name", recruitName, true)
+                .AddField("Recruit", recruitName, true)
                 .AddField("Logged By", loggedBy, true)
                 .AddField("Date", nowUtc.ToString("yyyy-MM-dd"), true)
                 .AddField("Time (UTC)", nowUtc.ToString("HH:mm:ss"), true)

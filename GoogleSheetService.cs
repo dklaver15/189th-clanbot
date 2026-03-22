@@ -421,7 +421,7 @@ public class GoogleSheetsService
     }
 
     /// <summary>
-    /// Ensures the header row exists in the Recruit Log sheet. Call once on startup.
+    /// Ensures the header row exists in the Recruit Log sheet with formatting. Call once on startup.
     /// </summary>
     public async Task EnsureRecruitHeaderRowAsync()
     {
@@ -451,14 +451,70 @@ public class GoogleSheetsService
 
             if (response.Values is null || response.Values.Count == 0)
             {
-                var header = new List<object> { "Recruit Name", "Date", "Time (UTC)", "Logged By" };
+                // Write header values
+                var header = new List<object> { "Recruit", "Date", "Time (UTC)", "Logged By" };
                 var body = new ValueRange { Values = new List<IList<object>> { header } };
                 var updateRequest = service.Spreadsheets.Values.Update(body, spreadsheetId, range);
                 updateRequest.ValueInputOption =
                     SpreadsheetsResource.ValuesResource.UpdateRequest.ValueInputOptionEnum.USERENTERED;
                 await updateRequest.ExecuteAsync();
 
-                _logger.LogInformation("Created header row in Recruit Log sheet");
+                // Apply teal background + white bold text formatting
+                var spreadsheet = await service.Spreadsheets.Get(spreadsheetId).ExecuteAsync();
+                var sheet = spreadsheet.Sheets.FirstOrDefault(s => s.Properties.Title == sheetName);
+                if (sheet is not null)
+                {
+                    var sheetId = sheet.Properties.SheetId ?? 0;
+
+                    var formatRequest = new BatchUpdateSpreadsheetRequest
+                    {
+                        Requests = new List<Request>
+                        {
+                            new Request
+                            {
+                                RepeatCell = new RepeatCellRequest
+                                {
+                                    Range = new GridRange
+                                    {
+                                        SheetId = sheetId,
+                                        StartRowIndex = 0,
+                                        EndRowIndex = 1,
+                                        StartColumnIndex = 0,
+                                        EndColumnIndex = 4
+                                    },
+                                    Cell = new CellData
+                                    {
+                                        UserEnteredFormat = new CellFormat
+                                        {
+                                            BackgroundColor = new Color
+                                            {
+                                                Red = 0.0f,
+                                                Green = 0.502f,
+                                                Blue = 0.502f,
+                                                Alpha = 1f
+                                            },
+                                            TextFormat = new TextFormat
+                                            {
+                                                Bold = true,
+                                                ForegroundColor = new Color
+                                                {
+                                                    Red = 1f,
+                                                    Green = 1f,
+                                                    Blue = 1f,
+                                                    Alpha = 1f
+                                                }
+                                            }
+                                        }
+                                    },
+                                    Fields = "userEnteredFormat(backgroundColor,textFormat)"
+                                }
+                            }
+                        }
+                    };
+                    await service.Spreadsheets.BatchUpdate(formatRequest, spreadsheetId).ExecuteAsync();
+                }
+
+                _logger.LogInformation("Created and formatted header row in Recruit Log sheet");
             }
         }
         catch (Exception ex)
