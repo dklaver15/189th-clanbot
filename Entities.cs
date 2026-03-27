@@ -168,4 +168,6 @@ public class CalendarEvent
     public string Source { get; set; } = "Clan";
 
     public DateTime CreatedAt { get; set; }
+    
+    public string Description { get; set; } = "";
 }

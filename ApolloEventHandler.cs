@@ -14,14 +14,17 @@ namespace ClanGuardBot.Handlers;
 /// Monitors the configured events text channel for posts from the Apollo bot.
 ///
 /// For each Apollo event embed, this handler:
-///   1. Parses the event title, start/end time, and organizer via ApolloEmbedParser.
+///   1. Parses the event title, start/end time, description, and organizer via ApolloEmbedParser.
 ///   2. Checks Google Calendar for any overlapping events.
 ///   3. If there is an overlap, DMs the organizer with the conflict details.
 ///   4. Adds the event to Google Calendar (tagged "Clan", teal color).
 ///   5. Persists a CalendarEvent DB record so edits/deletes stay in sync.
 ///
-/// MessageUpdated — updates the calendar event if Apollo edits the post.
+/// MessageUpdated — updates the calendar event (title, times, AND description) if Apollo edits.
 /// MessageDeleted — removes the calendar event if the Apollo post is deleted.
+///
+/// Channel identification prefers EventsTextChannelId (numeric, rename-proof) and
+/// falls back to EventsTextChannelName for backwards compatibility.
 /// </summary>
 public class ApolloEventHandler
 {
@@ -114,12 +117,16 @@ public class ApolloEventHandler
             if (isUpdate && existing is not null)
             {
                 await _calendarService.UpdateEventAsync(
-                    existing.CalendarEventId, parsed.Title,
-                    parsed.StartUtc, parsed.EndUtc);
+                    existing.CalendarEventId,
+                    parsed.Title,
+                    parsed.StartUtc,
+                    parsed.EndUtc,
+                    description: parsed.Description ?? "");
 
-                existing.Title    = parsed.Title;
-                existing.StartUtc = parsed.StartUtc;
-                existing.EndUtc   = parsed.EndUtc;
+                existing.Title       = parsed.Title;
+                existing.StartUtc    = parsed.StartUtc;
+                existing.EndUtc      = parsed.EndUtc;
+                existing.Description = parsed.Description ?? "";
                 await db.SaveChangesAsync();
 
                 _logger.LogInformation(
@@ -164,6 +171,7 @@ public class ApolloEventHandler
                 Title            = parsed.Title,
                 StartUtc         = parsed.StartUtc,
                 EndUtc           = parsed.EndUtc,
+                Description      = parsed.Description ?? "",
                 Source           = "Clan",
                 CreatedAt        = DateTime.UtcNow
             });
@@ -260,7 +268,10 @@ public class ApolloEventHandler
             _config.ApolloBotName, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Checks by channel ID first (rename-proof), falls back to name comparison.
+    /// </summary>
     private bool IsEventsChannel(SocketTextChannel channel) =>
-        channel.Name.Equals(
-            _config.EventsTextChannelName, StringComparison.OrdinalIgnoreCase);
+        (_config.EventsTextChannelId != 0 && channel.Id == _config.EventsTextChannelId) ||
+        channel.Name.Equals(_config.EventsTextChannelName, StringComparison.OrdinalIgnoreCase);
 }
