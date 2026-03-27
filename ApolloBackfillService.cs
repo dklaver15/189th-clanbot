@@ -94,7 +94,7 @@ public class ApolloBackfillService : BackgroundService
         var skipped = 0;
         var errors  = 0;
 
-        var messages = channel.GetMessagesAsync(limit: int.MaxValue).Flatten();
+        var messages = ((ITextChannel)channel).GetMessagesAsync(limit: 100).Flatten();
 
         await foreach (var message in messages.WithCancellation(ct))
         {
