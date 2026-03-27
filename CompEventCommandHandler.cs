@@ -15,15 +15,21 @@ namespace ClanGuardBot.Handlers;
 /// Opens a 5-field modal for:
 ///   - Event Name
 ///   - Date (MM/DD/YYYY)
-///   - Start Time (HH:MM UTC, 24-hour)
-///   - End Time   (HH:MM UTC, 24-hour)
+///   - Start Time (HH:MM ET, 24-hour)
+///   - End Time   (HH:MM ET, 24-hour)
 ///   - Description (optional)
+///
+/// Times are entered in Eastern Time (America/New_York), which automatically
+/// accounts for EST/EDT depending on the date. They are converted to UTC for
+/// storage and the Google Calendar API. Google Calendar then displays the event
+/// in each viewer's own local timezone.
 ///
 /// On submit, the event is:
 ///   1. Validated (date/time format, duration sanity check).
-///   2. Checked for overlaps against all existing calendar events.
-///   3. Created on Google Calendar with the [COMP] prefix and red/Tomato color.
-///   4. Persisted to the CalendarEvents table.
+///   2. Converted from Eastern Time to UTC.
+///   3. Checked for overlaps against all existing calendar events.
+///   4. Created on Google Calendar with the [COMP] prefix and red/Tomato color.
+///   5. Persisted to the CalendarEvents table.
 ///
 /// Overlap conflicts are shown inline in the confirmation embed (not blocked) so
 /// the officer making the event can see the conflict and coordinate manually.
@@ -34,6 +40,10 @@ public class CompEventCommandHandler
     private readonly GoogleCalendarService _calendarService;
     private readonly ILogger<CompEventCommandHandler> _logger;
     private readonly BotConfig _config;
+
+    // Eastern Time — covers both EST (UTC-5) and EDT (UTC-4) automatically.
+    private static readonly TimeZoneInfo EasternTz =
+        TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
     public CompEventCommandHandler(
         IServiceProvider services,
@@ -80,11 +90,11 @@ public class CompEventCommandHandler
                 placeholder: "e.g. 04/15/2026",
                 required: true, maxLength: 10)
             .AddTextInput(
-                "Start Time (HH:MM UTC, 24-hour)", "event_start", TextInputStyle.Short,
+                "Start Time (HH:MM ET, 24-hour)", "event_start", TextInputStyle.Short,
                 placeholder: "e.g. 20:00",
                 required: true, maxLength: 5)
             .AddTextInput(
-                "End Time (HH:MM UTC, 24-hour)", "event_end", TextInputStyle.Short,
+                "End Time (HH:MM ET, 24-hour)", "event_end", TextInputStyle.Short,
                 placeholder: "e.g. 22:00",
                 required: true, maxLength: 5)
             .AddTextInput(
@@ -115,21 +125,21 @@ public class CompEventCommandHandler
             var endStr    = fields.GetValueOrDefault("event_end",   "");
             var desc      = fields.GetValueOrDefault("event_desc",  "");
 
-            // ── Validation ────────────────────────────────────────────
-            if (!TryParseEventDateTime(dateStr, startStr, out var startUtc))
+            // ── Validation & ET → UTC conversion ─────────────────────
+            if (!TryParseEasternDateTime(dateStr, startStr, out var startUtc))
             {
                 await modal.FollowupAsync(
                     "⚠️ **Invalid date or start time.**\n" +
-                    "Use `MM/DD/YYYY` for the date and `HH:MM` (24-hour UTC) for the time.\n" +
+                    "Use `MM/DD/YYYY` for the date and `HH:MM` (24-hour ET) for the time.\n" +
                     "_Example: date `04/15/2026`, start `20:00`_",
                     ephemeral: true);
                 return;
             }
 
-            if (!TryParseEventDateTime(dateStr, endStr, out var endUtc))
+            if (!TryParseEasternDateTime(dateStr, endStr, out var endUtc))
             {
                 await modal.FollowupAsync(
-                    "⚠️ **Invalid end time.** Use `HH:MM` (24-hour UTC) format.\n" +
+                    "⚠️ **Invalid end time.** Use `HH:MM` (24-hour ET) format.\n" +
                     "_Example: `22:00`_",
                     ephemeral: true);
                 return;
@@ -171,11 +181,12 @@ public class CompEventCommandHandler
                 db.CalendarEvents.Add(new CalendarEvent
                 {
                     GuildId          = modal.GuildId.Value,
-                    DiscordMessageId = 0,          // no Discord message — comp events are calendar-only
+                    DiscordMessageId = 0,   // no Discord message — comp events are calendar-only
                     CalendarEventId  = calEvent.Id,
                     Title            = calTitle,
                     StartUtc         = startUtc,
                     EndUtc           = endUtc,
+                    Description      = desc,
                     Source           = "CompDiv",
                     CreatedAt        = DateTime.UtcNow
                 });
@@ -183,18 +194,17 @@ public class CompEventCommandHandler
             }
 
             // ── Response Embed ────────────────────────────────────────
-            var unixStart = new DateTimeOffset(startUtc).ToUnixTimeSeconds();
-            var unixEnd   = new DateTimeOffset(endUtc).ToUnixTimeSeconds();
-
+            var unixStart  = new DateTimeOffset(startUtc).ToUnixTimeSeconds();
+            var unixEnd    = new DateTimeOffset(endUtc).ToUnixTimeSeconds();
             var embedColor = overlaps.Count > 0 ? Color.Orange : Color.Red;
 
             var embedBuilder = new EmbedBuilder()
                 .WithTitle("🏆 Comp Event Created!")
                 .WithColor(embedColor)
-                .AddField("Event",      eventName,                       true)
-                .AddField("Created By", creatorName,                     true)
-                .AddField("Start",      $"<t:{unixStart}:F>",           false)
-                .AddField("End",        $"<t:{unixEnd}:t>",             true)
+                .AddField("Event",      eventName,                        true)
+                .AddField("Created By", creatorName,                      true)
+                .AddField("Start",      $"<t:{unixStart}:F>",            false)
+                .AddField("End",        $"<t:{unixEnd}:t>",              true)
                 .AddField("Duration",   FormatDuration(startUtc, endUtc), true);
 
             if (!string.IsNullOrWhiteSpace(desc))
@@ -238,10 +248,6 @@ public class CompEventCommandHandler
 
     // ─── Permission Check ────────────────────────────────────────────
 
-    /// <summary>
-    /// Returns true if the user holds a rank at or above CompEventMinRank in the configured
-    /// rank hierarchy, or if they have Administrator / Manage Roles permissions.
-    /// </summary>
     private bool HasCompEventPermission(SocketGuildUser user)
     {
         if (user.GuildPermissions.Administrator || user.GuildPermissions.ManageRoles)
@@ -270,31 +276,30 @@ public class CompEventCommandHandler
     // ─── Helpers ─────────────────────────────────────────────────────
 
     /// <summary>
-    /// Parses a date string (MM/DD/YYYY or YYYY-MM-DD) and time string (HH:MM, 24-hour)
-    /// into a UTC DateTime. Returns false if either cannot be parsed.
+    /// Parses a date string (MM/DD/YYYY) and 24-hour time string (HH:MM) as Eastern Time,
+    /// then converts to UTC. Handles EST/EDT automatically based on the date.
+    /// Returns false if either value cannot be parsed.
     /// </summary>
-    private static bool TryParseEventDateTime(string dateStr, string timeStr, out DateTime result)
+    private static bool TryParseEasternDateTime(string dateStr, string timeStr, out DateTime resultUtc)
     {
-        result = DateTime.MinValue;
+        resultUtc = DateTime.MinValue;
 
-        // Normalise separators so both MM/DD/YYYY and MM-DD-YYYY work
         dateStr = dateStr.Replace('-', '/');
         timeStr = timeStr.Replace('.', ':');
 
         if (!DateOnly.TryParse(dateStr, out var date)) return false;
         if (!TimeOnly.TryParse(timeStr, out var time)) return false;
 
-        result = DateTime.SpecifyKind(date.ToDateTime(time), DateTimeKind.Utc);
+        var localDt = DateTime.SpecifyKind(date.ToDateTime(time), DateTimeKind.Unspecified);
+        resultUtc   = TimeZoneInfo.ConvertTimeToUtc(localDt, EasternTz);
         return true;
     }
 
     private static string FormatDuration(DateTime start, DateTime end)
     {
         var dur = end - start;
-        if (dur.TotalMinutes < 60)
-            return $"{(int)dur.TotalMinutes}m";
-        if (dur.Minutes == 0)
-            return $"{(int)dur.TotalHours}h";
+        if (dur.TotalMinutes < 60) return $"{(int)dur.TotalMinutes}m";
+        if (dur.Minutes == 0)      return $"{(int)dur.TotalHours}h";
         return $"{(int)dur.TotalHours}h {dur.Minutes}m";
     }
 }
