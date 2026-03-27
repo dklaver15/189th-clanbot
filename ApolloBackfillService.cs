@@ -1,4 +1,3 @@
-using System.Text.RegularExpressions;
 using ClanGuardBot.Data;
 using ClanGuardBot.Models;
 using ClanGuardBot.Services;
@@ -20,23 +19,15 @@ namespace ClanGuardBot.Services;
 /// are skipped so the service is safe to run on every restart — it will only ever
 /// process new-to-us messages.
 ///
-/// The service runs once after Discord is ready, then stops. It does NOT re-run on
-/// subsequent restarts unless there are new un-synced messages to process.
+/// Past events (ended more than 1 hour ago) are intentionally skipped.
 /// </summary>
-public partial class ApolloBackfillService : BackgroundService
+public class ApolloBackfillService : BackgroundService
 {
     private readonly IServiceProvider _services;
     private readonly DiscordSocketClient _client;
     private readonly GoogleCalendarService _calendarService;
     private readonly ILogger<ApolloBackfillService> _logger;
     private readonly BotConfig _config;
-
-    // Matches <t:UNIX> or <t:UNIX:F> etc.
-    [GeneratedRegex(@"<t:(\d+)(?::[a-zA-Z])?>", RegexOptions.Compiled)]
-    private static partial Regex TimestampRegex();
-
-    [GeneratedRegex(@"<@!?(\d+)>", RegexOptions.Compiled)]
-    private static partial Regex MentionRegex();
 
     public ApolloBackfillService(
         IServiceProvider services,
@@ -56,9 +47,8 @@ public partial class ApolloBackfillService : BackgroundService
     {
         // Wait for Discord to be fully ready
         while (_client.ConnectionState != ConnectionState.Connected || !_client.Guilds.Any())
-        {
             await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
-        }
+
         // Extra buffer so the forward-listening ApolloEventHandler is registered first
         await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
 
@@ -104,26 +94,23 @@ public partial class ApolloBackfillService : BackgroundService
         var skipped = 0;
         var errors  = 0;
 
-        // GetMessagesAsync returns newest-first; we process them all but only add future/recent ones
         var messages = channel.GetMessagesAsync(limit: int.MaxValue).Flatten();
 
         await foreach (var message in messages.WithCancellation(ct))
         {
-            // Only care about Apollo bot posts with embeds
             if (!message.Author.IsBot) continue;
             if (!message.Author.Username.Contains(
                     _config.ApolloBotName, StringComparison.OrdinalIgnoreCase)) continue;
             if (message.Embeds.Count == 0) continue;
 
-            // Skip already-synced messages
             if (alreadySynced.Contains(message.Id))
             {
                 skipped++;
                 continue;
             }
 
-            var embed = message.Embeds.First();
-            var parsed = ParseApolloEmbed(embed);
+            var embed  = message.Embeds.First();
+            var parsed = ApolloEmbedParser.Parse(embed);
 
             if (parsed is null)
             {
@@ -134,7 +121,7 @@ public partial class ApolloBackfillService : BackgroundService
                 continue;
             }
 
-            // Skip events that have already fully ended — no point adding stale events
+            // Skip events that have already fully ended
             if (parsed.EndUtc < DateTime.UtcNow.AddHours(-1))
             {
                 _logger.LogDebug(
@@ -146,7 +133,6 @@ public partial class ApolloBackfillService : BackgroundService
 
             try
             {
-                // Check for overlaps (informational only — we still add the event)
                 var overlaps = await _calendarService.GetOverlappingEventsAsync(
                     parsed.StartUtc, parsed.EndUtc);
 
@@ -181,7 +167,7 @@ public partial class ApolloBackfillService : BackgroundService
                 });
                 await db.SaveChangesAsync(ct);
 
-                alreadySynced.Add(message.Id); // prevent duplicate if iterator returns it again
+                alreadySynced.Add(message.Id);
 
                 _logger.LogInformation(
                     "Apollo backfill: added '{Title}' ({Start} UTC) from message {MessageId}",
@@ -189,7 +175,7 @@ public partial class ApolloBackfillService : BackgroundService
 
                 synced++;
 
-                // Small delay between Calendar API calls to stay well within quota
+                // Small delay between Calendar API calls to stay within quota
                 await Task.Delay(TimeSpan.FromMilliseconds(300), ct);
             }
             catch (Exception ex)
@@ -204,103 +190,5 @@ public partial class ApolloBackfillService : BackgroundService
         _logger.LogInformation(
             "Apollo backfill #{Channel}: {Synced} added, {Skipped} skipped, {Errors} error(s)",
             channel.Name, synced, skipped, errors);
-    }
-
-    // ─── Embed Parsing (mirrors ApolloEventHandler) ──────────────────
-
-    private ParsedApolloEvent? ParseApolloEmbed(IEmbed embed)
-    {
-        var title = !string.IsNullOrWhiteSpace(embed.Title)
-            ? embed.Title
-            : embed.Author?.Name;
-
-        if (string.IsNullOrWhiteSpace(title)) return null;
-
-        var allText = BuildEmbedText(embed);
-
-        var timestamps = TimestampRegex()
-            .Matches(allText)
-            .Select(m => DateTimeOffset.FromUnixTimeSeconds(long.Parse(m.Groups[1].Value)).UtcDateTime)
-            .OrderBy(t => t)
-            .ToList();
-
-        if (timestamps.Count == 0) return null;
-
-        var startUtc = timestamps[0];
-
-        DateTime endUtc;
-        if (timestamps.Count >= 2 && timestamps[1] > startUtc.AddMinutes(15))
-            endUtc = timestamps[1];
-        else
-            endUtc = startUtc.AddMinutes(ParseDurationMinutes(embed));
-
-        ulong? organizerId = null;
-        var organizerFieldValue = embed.Fields
-            .FirstOrDefault(f =>
-                f.Name.Contains("organizer",  StringComparison.OrdinalIgnoreCase) ||
-                f.Name.Contains("host",       StringComparison.OrdinalIgnoreCase) ||
-                f.Name.Contains("created by", StringComparison.OrdinalIgnoreCase))
-            .Value;
-
-        var mentionSource = !string.IsNullOrEmpty(organizerFieldValue)
-            ? organizerFieldValue
-            : embed.Description ?? "";
-
-        var mentionMatch = MentionRegex().Match(mentionSource);
-        if (mentionMatch.Success && ulong.TryParse(mentionMatch.Groups[1].Value, out var uid))
-            organizerId = uid;
-
-        return new ParsedApolloEvent
-        {
-            Title         = title.Trim(),
-            StartUtc      = startUtc,
-            EndUtc        = endUtc,
-            OrganizerId   = organizerId,
-            OrganizerName = embed.Author?.Name,
-            Description   = embed.Description
-        };
-    }
-
-    private static string BuildEmbedText(IEmbed embed)
-    {
-        var parts = new List<string>();
-        if (!string.IsNullOrEmpty(embed.Description)) parts.Add(embed.Description);
-        foreach (var field in embed.Fields)
-        {
-            parts.Add(field.Name);
-            parts.Add(field.Value);
-        }
-        if (!string.IsNullOrEmpty(embed.Footer?.Text)) parts.Add(embed.Footer.Value.Text);
-        return string.Join("\n", parts);
-    }
-
-    private static int ParseDurationMinutes(IEmbed embed)
-    {
-        var durationText = embed.Fields
-            .FirstOrDefault(f =>
-                f.Name.Contains("duration", StringComparison.OrdinalIgnoreCase) ||
-                f.Name.Contains("length",   StringComparison.OrdinalIgnoreCase))
-            .Value;
-
-        if (string.IsNullOrEmpty(durationText)) return 120;
-
-        var hoursMatch = Regex.Match(durationText, @"(\d+)\s*h(?:ours?)?", RegexOptions.IgnoreCase);
-        var minsMatch  = Regex.Match(durationText, @"(\d+)\s*m(?:in(?:utes?)?)?", RegexOptions.IgnoreCase);
-
-        var hours   = hoursMatch.Success ? int.Parse(hoursMatch.Groups[1].Value) : 0;
-        var minutes = minsMatch.Success  ? int.Parse(minsMatch.Groups[1].Value)  : 0;
-
-        var total = hours * 60 + minutes;
-        return total > 0 ? total : 120;
-    }
-
-    private sealed record ParsedApolloEvent
-    {
-        public string    Title         { get; init; } = "";
-        public DateTime  StartUtc      { get; init; }
-        public DateTime  EndUtc        { get; init; }
-        public ulong?    OrganizerId   { get; init; }
-        public string?   OrganizerName { get; init; }
-        public string?   Description   { get; init; }
     }
 }
