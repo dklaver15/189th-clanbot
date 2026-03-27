@@ -27,7 +27,7 @@ public class BotConfig
     /// e.g. "Guest,RCT"
     /// </summary>
     public string ShortWindowRoles { get; set; } = "Guest,RCT";
-    
+
     /// <summary>Minimum messages required within the window to stay active.</summary>
     public int MinMessages { get; set; } = 5;
 
@@ -45,7 +45,7 @@ public class BotConfig
     /// Officers, admins, bots, etc.
     /// </summary>
     public string ExemptRoles { get; set; } = "Admin,Moderator,Retired,Bot,Bot Whisperer";
-    
+
     /// <summary>Path to the Google service account credentials JSON file.</summary>
     public string GoogleCredentialsPath { get; set; } = "google-credentials.json";
 
@@ -98,16 +98,46 @@ public class BotConfig
 
     /// <summary>Hours to wait after a Guest completes an onboarding step before reminding them to create a ticket.</summary>
     public double OnboardingReminderDelayHours { get; set; } = 24.0;
-    
+
     /// <summary>The sheet/tab name for the recruit log.</summary>
     public string RecruitSheetName { get; set; } = "Recruit Log";
 
     /// <summary>The Google Spreadsheet ID for the recruit log. If empty, uses GoogleSpreadsheetId.</summary>
     public string RecruitSpreadsheetId { get; set; } = string.Empty;
 
+    // ─── Calendar Settings ───────────────────────────────────────────
+
+    /// <summary>
+    /// Google Calendar ID for the clan calendar.
+    /// For a personal Gmail calendar this is typically your Gmail address (e.g. "you@gmail.com").
+    /// Find it in Google Calendar → Settings → [Calendar name] → "Calendar ID".
+    /// The service account must have at least "Make changes to events" permission on this calendar.
+    /// </summary>
+    public string GoogleCalendarId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Name of the text channel where Apollo posts its event embeds.
+    /// The bot will listen here for new posts, edits, and deletes to keep the calendar in sync.
+    /// </summary>
+    public string EventsTextChannelName { get; set; } = "events";
+
+    /// <summary>
+    /// Username (or partial username) of the Apollo Discord bot.
+    /// Used to identify which messages in the events channel come from Apollo.
+    /// </summary>
+    public string ApolloBotName { get; set; } = "Apollo";
+
+    /// <summary>
+    /// The minimum rank required to use the /comp-event command.
+    /// Must exactly match one of the rank names in RankRoles (case-insensitive).
+    /// </summary>
+    public string CompEventMinRank { get; set; } = "CPT";
+
+    // ─── Helpers ─────────────────────────────────────────────────────
+
     public List<string> GetExemptRolesList() =>
         ExemptRoles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
-    
+
     public List<string> GetShortWindowRolesList() =>
         ShortWindowRoles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
 
@@ -116,7 +146,7 @@ public class BotConfig
 
     public List<string> GetPlatoonRolesList() =>
         PlatoonRoles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
-    
+
     /// <summary>
     /// Returns the appropriate window days for a guild member based on their roles.
     /// Members with any role in ShortWindowRoles get ShortWindowDays; others get WindowDays.

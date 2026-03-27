@@ -140,3 +140,32 @@ public class OnboardingReminder
     /// <summary>When the reminder should fire.</summary>
     public DateTime ReminderAt { get; set; }
 }
+
+/// <summary>
+/// Maps a calendar entry back to either a Discord message (Apollo clan events)
+/// or a bot-generated comp division event. Used to keep Google Calendar in sync
+/// when Apollo edits or deletes an event post, and to deduplicate on restart.
+/// </summary>
+public class CalendarEvent
+{
+    public int Id { get; set; }
+    public ulong GuildId { get; set; }
+
+    /// <summary>
+    /// Discord message ID from the Apollo bot post.
+    /// Set to 0 for comp division events which are not tied to a message.
+    /// </summary>
+    public ulong DiscordMessageId { get; set; }
+
+    /// <summary>The Google Calendar event ID returned by the API (used for update/delete).</summary>
+    public string CalendarEventId { get; set; } = string.Empty;
+
+    public string Title { get; set; } = string.Empty;
+    public DateTime StartUtc { get; set; }
+    public DateTime EndUtc { get; set; }
+
+    /// <summary>"Clan" for Apollo-sourced events, "CompDiv" for /comp-event entries.</summary>
+    public string Source { get; set; } = "Clan";
+
+    public DateTime CreatedAt { get; set; }
+}

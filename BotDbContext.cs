@@ -6,14 +6,15 @@ namespace ClanGuardBot.Data;
 
 public class BotDbContext : DbContext
 {
-    public DbSet<UserActivity> UserActivities => Set<UserActivity>();
-    public DbSet<AwolRecord> AwolRecords => Set<AwolRecord>();
-    public DbSet<MessageEvent> MessageEvents => Set<MessageEvent>();
-    public DbSet<VoiceSession> VoiceSessions => Set<VoiceSession>();
-    public DbSet<RankHistory> RankHistories => Set<RankHistory>();
-    public DbSet<TicketReminder> TicketReminders => Set<TicketReminder>();
-    public DbSet<GuestReminder> GuestReminders => Set<GuestReminder>();
+    public DbSet<UserActivity>      UserActivities     => Set<UserActivity>();
+    public DbSet<AwolRecord>        AwolRecords        => Set<AwolRecord>();
+    public DbSet<MessageEvent>      MessageEvents      => Set<MessageEvent>();
+    public DbSet<VoiceSession>      VoiceSessions      => Set<VoiceSession>();
+    public DbSet<RankHistory>       RankHistories      => Set<RankHistory>();
+    public DbSet<TicketReminder>    TicketReminders    => Set<TicketReminder>();
+    public DbSet<GuestReminder>     GuestReminders     => Set<GuestReminder>();
     public DbSet<OnboardingReminder> OnboardingReminders => Set<OnboardingReminder>();
+    public DbSet<CalendarEvent>     CalendarEvents     => Set<CalendarEvent>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -29,7 +30,7 @@ public class BotDbContext : DbContext
             entity.HasIndex(e => new { e.GuildId, e.UserId });
             entity.HasIndex(e => new { e.NotificationSent, e.AssignedAt });
         });
-        
+
         modelBuilder.Entity<MessageEvent>(e =>
         {
             e.HasIndex(m => new { m.GuildId, m.UserId, m.Timestamp });
@@ -59,6 +60,14 @@ public class BotDbContext : DbContext
         modelBuilder.Entity<OnboardingReminder>(e =>
         {
             e.HasIndex(o => new { o.GuildId, o.UserId }).IsUnique();
+        });
+
+        modelBuilder.Entity<CalendarEvent>(e =>
+        {
+            // Look up by Discord message ID to detect duplicates and handle edits/deletes
+            e.HasIndex(c => c.DiscordMessageId);
+            // Look up all events for a guild by source (Clan vs CompDiv)
+            e.HasIndex(c => new { c.GuildId, c.Source });
         });
     }
 }
