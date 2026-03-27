@@ -13,11 +13,13 @@ namespace ClanGuardBot.Services;
 
 /// <summary>
 /// One-shot startup service that scrolls back through the configured events text channel,
-/// parses any Apollo bot embeds it finds, and adds them to Google Calendar.
+/// parses any Apollo bot embeds it finds, and adds or updates them in Google Calendar.
 ///
-/// Already-synced messages (tracked in the CalendarEvents table by DiscordMessageId)
-/// are skipped so the service is safe to run on every restart — it will only ever
-/// process new-to-us messages.
+/// Three outcomes for each Apollo message found:
+///   • NEW   — not in DB yet → created in Calendar and DB.
+///   • DRIFT — already in DB but title, time, or description has changed while the bot was
+///             offline → calendar event updated and DB record refreshed.
+///   • SKIP  — already in DB and nothing has changed → no-op.
 ///
 /// Past events (ended more than 1 hour ago) are intentionally skipped.
 /// </summary>
@@ -55,7 +57,8 @@ public class ApolloBackfillService : BackgroundService
         foreach (var guild in _client.Guilds)
         {
             var eventsChannel = guild.TextChannels.FirstOrDefault(c =>
-                c.Id == _config.EventsTextChannelId);
+                (_config.EventsTextChannelId != 0 && c.Id == _config.EventsTextChannelId) ||
+                c.Name.Equals(_config.EventsTextChannelName, StringComparison.OrdinalIgnoreCase));
 
             if (eventsChannel is null)
             {
@@ -78,19 +81,19 @@ public class ApolloBackfillService : BackgroundService
     private async Task BackfillChannelAsync(
         SocketTextChannel channel, SocketGuild guild, CancellationToken ct)
     {
-        // Load all message IDs we've already synced so we can skip them cheaply
-        HashSet<ulong> alreadySynced;
+        // Load all events we've already synced with their full details so we can
+        // detect drift (title, time, or description changed while the bot was offline).
+        Dictionary<ulong, CalendarEvent> syncedByMessageId;
         using (var scope = _services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-            alreadySynced = (await db.CalendarEvents
+            syncedByMessageId = await db.CalendarEvents
                 .Where(c => c.GuildId == guild.Id && c.DiscordMessageId != 0)
-                .Select(c => c.DiscordMessageId)
-                .ToListAsync(ct))
-                .ToHashSet();
+                .ToDictionaryAsync(c => c.DiscordMessageId, ct);
         }
 
         var synced  = 0;
+        var updated = 0;
         var skipped = 0;
         var errors  = 0;
 
@@ -102,12 +105,6 @@ public class ApolloBackfillService : BackgroundService
             if (!message.Author.Username.Contains(
                     _config.ApolloBotName, StringComparison.OrdinalIgnoreCase)) continue;
             if (message.Embeds.Count == 0) continue;
-
-            if (alreadySynced.Contains(message.Id))
-            {
-                skipped++;
-                continue;
-            }
 
             var embed  = message.Embeds.First();
             var parsed = ApolloEmbedParser.Parse(embed);
@@ -131,6 +128,68 @@ public class ApolloBackfillService : BackgroundService
                 continue;
             }
 
+            // ── UPDATE path: event already in DB, check for drift ─────────
+            if (syncedByMessageId.TryGetValue(message.Id, out var existing))
+            {
+                var titleChanged = !string.Equals(existing.Title, parsed.Title, StringComparison.Ordinal);
+                var startChanged = Math.Abs((existing.StartUtc - parsed.StartUtc).TotalMinutes) >= 1;
+                var endChanged   = Math.Abs((existing.EndUtc   - parsed.EndUtc  ).TotalMinutes) >= 1;
+                var descChanged  = !string.Equals(
+                    existing.Description, parsed.Description ?? "", StringComparison.Ordinal);
+
+                if (!titleChanged && !startChanged && !endChanged && !descChanged)
+                {
+                    skipped++;
+                    continue;
+                }
+
+                _logger.LogInformation(
+                    "Apollo backfill: drift detected for '{Title}' (message {MessageId}) — " +
+                    "title={TitleChanged} start={StartChanged} end={EndChanged} desc={DescChanged}",
+                    parsed.Title, message.Id, titleChanged, startChanged, endChanged, descChanged);
+
+                try
+                {
+                    await _calendarService.UpdateEventAsync(
+                        existing.CalendarEventId,
+                        parsed.Title,
+                        parsed.StartUtc,
+                        parsed.EndUtc,
+                        parsed.Description ?? "");
+
+                    using var scope = _services.CreateScope();
+                    var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+                    var record = await db.CalendarEvents
+                        .FirstOrDefaultAsync(c => c.DiscordMessageId == message.Id, ct);
+
+                    if (record is not null)
+                    {
+                        record.Title       = parsed.Title;
+                        record.StartUtc    = parsed.StartUtc;
+                        record.EndUtc      = parsed.EndUtc;
+                        record.Description = parsed.Description ?? "";
+                        await db.SaveChangesAsync(ct);
+                    }
+
+                    _logger.LogInformation(
+                        "Apollo backfill: updated '{Title}' ({Start} UTC) from message {MessageId}",
+                        parsed.Title, parsed.StartUtc, message.Id);
+
+                    updated++;
+                    await Task.Delay(TimeSpan.FromMilliseconds(300), ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex,
+                        "Apollo backfill: error updating message {MessageId} ('{Title}')",
+                        message.Id, parsed.Title);
+                    errors++;
+                }
+
+                continue;
+            }
+
+            // ── CREATE path: new event ────────────────────────────────────
             try
             {
                 var overlaps = await _calendarService.GetOverlappingEventsAsync(
@@ -151,10 +210,10 @@ public class ApolloBackfillService : BackgroundService
                     creatorName: parsed.OrganizerName ?? "",
                     source:      "Clan");
 
-                using var scope = _services.CreateScope();
-                var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+                using var createScope = _services.CreateScope();
+                var createDb = createScope.ServiceProvider.GetRequiredService<BotDbContext>();
 
-                db.CalendarEvents.Add(new CalendarEvent
+                createDb.CalendarEvents.Add(new CalendarEvent
                 {
                     GuildId          = guild.Id,
                     DiscordMessageId = message.Id,
@@ -162,20 +221,17 @@ public class ApolloBackfillService : BackgroundService
                     Title            = parsed.Title,
                     StartUtc         = parsed.StartUtc,
                     EndUtc           = parsed.EndUtc,
+                    Description      = parsed.Description ?? "",
                     Source           = "Clan",
                     CreatedAt        = DateTime.UtcNow
                 });
-                await db.SaveChangesAsync(ct);
-
-                alreadySynced.Add(message.Id);
+                await createDb.SaveChangesAsync(ct);
 
                 _logger.LogInformation(
                     "Apollo backfill: added '{Title}' ({Start} UTC) from message {MessageId}",
                     parsed.Title, parsed.StartUtc, message.Id);
 
                 synced++;
-
-                // Small delay between Calendar API calls to stay within quota
                 await Task.Delay(TimeSpan.FromMilliseconds(300), ct);
             }
             catch (Exception ex)
@@ -188,7 +244,7 @@ public class ApolloBackfillService : BackgroundService
         }
 
         _logger.LogInformation(
-            "Apollo backfill #{Channel}: {Synced} added, {Skipped} skipped, {Errors} error(s)",
-            channel.Name, synced, skipped, errors);
+            "Apollo backfill #{Channel}: {Synced} added, {Updated} updated, {Skipped} skipped, {Errors} error(s)",
+            channel.Name, synced, updated, skipped, errors);
     }
 }

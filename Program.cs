@@ -34,7 +34,10 @@ try
                        | GatewayIntents.GuildVoiceStates
                        | GatewayIntents.MessageContent,
         AlwaysDownloadUsers = true,
-        LogLevel = LogSeverity.Info
+        LogLevel            = LogSeverity.Info,
+        // Cache the most recent 500 messages per channel so that MessageUpdated
+        // fires reliably for Apollo event edits even after a short bot restart.
+        MessageCacheSize    = 500
     };
 
     builder.Services.AddSingleton(discordConfig);
