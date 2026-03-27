@@ -48,10 +48,13 @@ try
     builder.Services.AddDbContext<BotDbContext>(options =>
         options.UseSqlite($"Data Source={dbPath}"));
 
-    // Handlers (singleton so event registrations persist)
+    // ── Google Services ──────────────────────────────────────────────
+    builder.Services.AddSingleton<GoogleSheetsService>();
+    builder.Services.AddSingleton<GoogleCalendarService>();
+
+    // ── Handlers (singleton so event registrations persist) ──────────
     builder.Services.AddSingleton<ActivityTrackingHandler>();
     builder.Services.AddSingleton<SlashCommandHandler>();
-    builder.Services.AddSingleton<GoogleSheetsService>();
     builder.Services.AddSingleton<RankTrackingHandler>();
 
     // OnboardingReminderHandler: registered before GamertagCommandHandler because
@@ -62,23 +65,27 @@ try
     builder.Services.AddSingleton<GamertagCommandHandler>();
     builder.Services.AddSingleton<RecruitCommandHandler>();
 
-    // TicketReminderHandler: registered as singleton so DiscordBotService can inject it
-    // for event registration, and also as a hosted service for startup recovery.
+    // TicketReminderHandler: singleton for event registration + hosted service for startup recovery.
     builder.Services.AddSingleton<TicketReminderHandler>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<TicketReminderHandler>());
 
-    // GuestReminderHandler: same pattern — singleton for event registration,
-    // hosted service for startup recovery of pending reminders.
+    // GuestReminderHandler: same pattern.
     builder.Services.AddSingleton<GuestReminderHandler>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<GuestReminderHandler>());
 
-    // Hosted services
+    // ApolloEventHandler: parses #events channel posts and syncs to Google Calendar.
+    builder.Services.AddSingleton<ApolloEventHandler>();
+
+    // CompEventCommandHandler: /comp-event slash command for CPT+ officers.
+    builder.Services.AddSingleton<CompEventCommandHandler>();
+
+    // ── Hosted Services ──────────────────────────────────────────────
     builder.Services.AddHostedService<DiscordBotService>();
     builder.Services.AddHostedService<HistoryBackfillService>();
     builder.Services.AddHostedService<AwolCheckService>();
 
-    // RosterExportService: registered as singleton so SlashCommandHandler can inject it,
-    // and also registered as a hosted service so its background loop runs automatically.
+    // RosterExportService: singleton so SlashCommandHandler can inject it,
+    // + hosted service so its background loop runs automatically.
     builder.Services.AddSingleton<RosterExportService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<RosterExportService>());
 
@@ -93,10 +100,10 @@ try
     }
 
     // Register the slash command handler (needs to happen before the bot connects)
-    var slashHandler = app.Services.GetRequiredService<SlashCommandHandler>();
-    var discordClient = app.Services.GetRequiredService<DiscordSocketClient>();
+    var slashHandler    = app.Services.GetRequiredService<SlashCommandHandler>();
+    var discordClient   = app.Services.GetRequiredService<DiscordSocketClient>();
     slashHandler.Register(discordClient);
-    
+
     // Ensure the Google Sheet has a header row
     var sheetsService = app.Services.GetRequiredService<GoogleSheetsService>();
     await sheetsService.EnsureHeaderRowAsync();

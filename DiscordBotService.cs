@@ -21,9 +21,11 @@ public class DiscordBotService : IHostedService
     private readonly TicketReminderHandler _ticketReminderHandler;
     private readonly GuestReminderHandler _guestReminderHandler;
     private readonly OnboardingReminderHandler _onboardingReminderHandler;
+    private readonly RecruitCommandHandler _recruitHandler;
+    private readonly ApolloEventHandler _apolloEventHandler;
+    private readonly CompEventCommandHandler _compEventHandler;
     private readonly ILogger<DiscordBotService> _logger;
     private readonly BotConfig _config;
-    private readonly RecruitCommandHandler _recruitHandler;
 
     public DiscordBotService(
         DiscordSocketClient client,
@@ -34,46 +36,39 @@ public class DiscordBotService : IHostedService
         GuestReminderHandler guestReminderHandler,
         OnboardingReminderHandler onboardingReminderHandler,
         RecruitCommandHandler recruitHandler,
+        ApolloEventHandler apolloEventHandler,
+        CompEventCommandHandler compEventHandler,
         ILogger<DiscordBotService> logger,
         IOptions<BotConfig> config)
     {
-        _client = client;
-        _activityHandler = activityHandler;
-        _gamertagHandler = gamertagHandler;
-        _rankHandler = rankHandler;
-        _ticketReminderHandler = ticketReminderHandler;
-        _guestReminderHandler = guestReminderHandler;
+        _client                    = client;
+        _activityHandler           = activityHandler;
+        _gamertagHandler           = gamertagHandler;
+        _rankHandler               = rankHandler;
+        _ticketReminderHandler     = ticketReminderHandler;
+        _guestReminderHandler      = guestReminderHandler;
         _onboardingReminderHandler = onboardingReminderHandler;
-        _logger = logger;
-        _config = config.Value;
-        _recruitHandler = recruitHandler;
+        _recruitHandler            = recruitHandler;
+        _apolloEventHandler        = apolloEventHandler;
+        _compEventHandler          = compEventHandler;
+        _logger                    = logger;
+        _config                    = config.Value;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        _client.Log += LogAsync;
-        _client.Ready += OnReadyAsync;
+        _client.Log    += LogAsync;
+        _client.Ready  += OnReadyAsync;
 
-        // Register the activity tracking event handlers
         _activityHandler.Register(_client);
-        
-        // Register the gamertag command handler
         _gamertagHandler.Register(_client);
-
-        // Register the rank tracking handler
         _rankHandler.Register(_client);
-
-        // Register the ticket reminder handler
         _ticketReminderHandler.Register(_client);
-
-        // Register the guest reminder handler
         _guestReminderHandler.Register(_client);
-
-        // Register the onboarding reminder handler
         _onboardingReminderHandler.Register(_client);
-        
-        // Register the recruit command handler
         _recruitHandler.Register(_client);
+        _apolloEventHandler.Register(_client);     // ← new: Apollo → Calendar sync
+        _compEventHandler.Register(_client);       // ← new: /comp-event modal handler
 
         await _client.LoginAsync(TokenType.Bot, _config.Token);
         await _client.StartAsync();
@@ -95,9 +90,9 @@ public class DiscordBotService : IHostedService
         try
         {
             // Clear any stale global commands
-            await _client.BulkOverwriteGlobalApplicationCommandsAsync(Array.Empty<ApplicationCommandProperties>());
-            
-            // Register guild slash commands (instant update, unlike global commands)
+            await _client.BulkOverwriteGlobalApplicationCommandsAsync(
+                Array.Empty<ApplicationCommandProperties>());
+
             var commands = new[]
             {
                 new SlashCommandBuilder()
@@ -118,7 +113,7 @@ public class DiscordBotService : IHostedService
                     .AddOption("user", ApplicationCommandOptionType.User,
                         "The user to exempt", isRequired: true)
                     .Build(),
-                
+
                 new SlashCommandBuilder()
                     .WithName("gamertags")
                     .WithDescription("Enter your gamertags for EA, Steam, PSN, Xbox, Embark, and Bungie")
@@ -128,14 +123,18 @@ public class DiscordBotService : IHostedService
                     .WithName("roster-export")
                     .WithDescription("Manually trigger a roster export to Google Sheets (Officer+ only)")
                     .Build(),
-                
+
                 new SlashCommandBuilder()
                     .WithName("recruit")
                     .WithDescription("Log a new recruit's name to the roster sheet")
-                    .Build()
+                    .Build(),
+
+                new SlashCommandBuilder()
+                    .WithName("comp-event")
+                    .WithDescription($"Create a competitive division event on the clan calendar ({_config.CompEventMinRank}+ only)")
+                    .Build(),
             };
 
-            // Register to each guild the bot is in (updates instantly)
             foreach (var guild in _client.Guilds)
             {
                 await guild.BulkOverwriteApplicationCommandAsync(commands);
@@ -155,12 +154,12 @@ public class DiscordBotService : IHostedService
         var severity = message.Severity switch
         {
             LogSeverity.Critical => LogLevel.Critical,
-            LogSeverity.Error => LogLevel.Error,
-            LogSeverity.Warning => LogLevel.Warning,
-            LogSeverity.Info => LogLevel.Information,
-            LogSeverity.Verbose => LogLevel.Debug,
-            LogSeverity.Debug => LogLevel.Trace,
-            _ => LogLevel.Information
+            LogSeverity.Error    => LogLevel.Error,
+            LogSeverity.Warning  => LogLevel.Warning,
+            LogSeverity.Info     => LogLevel.Information,
+            LogSeverity.Verbose  => LogLevel.Debug,
+            LogSeverity.Debug    => LogLevel.Trace,
+            _                    => LogLevel.Information
         };
 
         _logger.Log(severity, message.Exception, "[Discord] {Source}: {Message}",
