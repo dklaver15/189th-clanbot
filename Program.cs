@@ -82,6 +82,7 @@ try
     // ── Hosted Services ──────────────────────────────────────────────
     builder.Services.AddHostedService<DiscordBotService>();
     builder.Services.AddHostedService<HistoryBackfillService>();
+    builder.Services.AddHostedService<ApolloBackfillService>();
     builder.Services.AddHostedService<AwolCheckService>();
 
     // RosterExportService: singleton so SlashCommandHandler can inject it,
