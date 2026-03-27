@@ -55,7 +55,7 @@ public class ApolloBackfillService : BackgroundService
         foreach (var guild in _client.Guilds)
         {
             var eventsChannel = guild.TextChannels.FirstOrDefault(c =>
-                c.Name.Equals(_config.EventsTextChannelName, StringComparison.OrdinalIgnoreCase));
+                c.Id == _config.EventsTextChannelId);
 
             if (eventsChannel is null)
             {

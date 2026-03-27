@@ -1,3 +1,5 @@
+using System.Reactive;
+
 namespace ClanGuardBot.Models;
 
 /// <summary>
@@ -120,6 +122,8 @@ public class BotConfig
     /// The bot will listen here for new posts, edits, and deletes to keep the calendar in sync.
     /// </summary>
     public string EventsTextChannelName { get; set; } = "events";
+    
+    public ulong EventsTextChannelId { get; set; } = default;
 
     /// <summary>
     /// Username (or partial username) of the Apollo Discord bot.
