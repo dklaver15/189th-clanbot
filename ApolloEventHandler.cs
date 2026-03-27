@@ -116,6 +116,36 @@ public class ApolloEventHandler
             // ── UPDATE path ───────────────────────────────────────────
             if (isUpdate && existing is not null)
             {
+                var timeChanged =
+                    Math.Abs((existing.StartUtc - parsed.StartUtc).TotalMinutes) >= 1 ||
+                    Math.Abs((existing.EndUtc   - parsed.EndUtc  ).TotalMinutes) >= 1;
+
+                // Only run the overlap check when the time actually changed —
+                // title/description edits can't create a new conflict.
+                if (timeChanged)
+                {
+                    // Exclude the event itself; it still occupies its old slot in
+                    // the calendar until we update it, so it would always self-overlap.
+                    var overlaps = (await _calendarService.GetOverlappingEventsAsync(
+                            parsed.StartUtc, parsed.EndUtc))
+                        .Where(e => e.Id != existing.CalendarEventId)
+                        .ToList();
+
+                    if (overlaps.Count > 0)
+                    {
+                        _logger.LogWarning(
+                            "Apollo event update '{Title}' overlaps {Count} existing calendar event(s)",
+                            parsed.Title, overlaps.Count);
+
+                        if (parsed.OrganizerId.HasValue)
+                        {
+                            var organizer = guild.GetUser(parsed.OrganizerId.Value);
+                            if (organizer is not null)
+                                await SendOverlapDmAsync(organizer, parsed, overlaps, isReschedule: true);
+                        }
+                    }
+                }
+
                 await _calendarService.UpdateEventAsync(
                     existing.CalendarEventId,
                     parsed.Title,
@@ -138,20 +168,20 @@ public class ApolloEventHandler
             if (existing is not null) return;
 
             // ── CREATE path ───────────────────────────────────────────
-            var overlaps = await _calendarService.GetOverlappingEventsAsync(
+            var createOverlaps = await _calendarService.GetOverlappingEventsAsync(
                 parsed.StartUtc, parsed.EndUtc);
 
-            if (overlaps.Count > 0)
+            if (createOverlaps.Count > 0)
             {
                 _logger.LogWarning(
                     "Apollo event '{Title}' overlaps {Count} existing calendar event(s)",
-                    parsed.Title, overlaps.Count);
+                    parsed.Title, createOverlaps.Count);
 
                 if (parsed.OrganizerId.HasValue)
                 {
                     var organizer = guild.GetUser(parsed.OrganizerId.Value);
                     if (organizer is not null)
-                        await SendOverlapDmAsync(organizer, parsed, overlaps);
+                        await SendOverlapDmAsync(organizer, parsed, createOverlaps);
                 }
             }
 
@@ -216,7 +246,8 @@ public class ApolloEventHandler
     private async Task SendOverlapDmAsync(
         SocketGuildUser organizer,
         ApolloEmbedParser.ParsedApolloEvent newEvent,
-        List<Google.Apis.Calendar.v3.Data.Event> overlaps)
+        List<Google.Apis.Calendar.v3.Data.Event> overlaps,
+        bool isReschedule = false)
     {
         try
         {
@@ -231,15 +262,20 @@ public class ApolloEventHandler
                 return $"• **{e.Summary}** — {timeStr}";
             });
 
+            var action = isReschedule ? "rescheduled" : "posted";
+            var outcome = isReschedule
+                ? "The calendar has been updated to the new time."
+                : "The event has been added to the calendar.";
+
             var embed = new EmbedBuilder()
                 .WithTitle("⚠️ Schedule Conflict Detected")
                 .WithColor(Color.Orange)
                 .WithDescription(
-                    $"Hey {organizer.Mention}! The event you just posted — " +
+                    $"Hey {organizer.Mention}! The event you just {action} — " +
                     $"**{newEvent.Title}** (<t:{unixStart}:F>) — " +
                     $"overlaps with the following existing event(s):\n\n" +
                     string.Join("\n", overlapLines) +
-                    "\n\nThe event has been added to the calendar. " +
+                    $"\n\n{outcome} " +
                     "Please reach out to the other organizer(s) to coordinate or reschedule.")
                 .WithFooter("ClanGuard Bot • Calendar Conflict Alert")
                 .WithTimestamp(DateTimeOffset.UtcNow)
