@@ -287,7 +287,15 @@ public class CompEventCommandHandler
         dateStr = dateStr.Replace('-', '/');
         timeStr = timeStr.Replace('.', ':');
 
-        if (!DateOnly.TryParse(dateStr, out var date)) return false;
+        // Explicitly enforce MM/dd/yyyy — prevents locale-dependent DD/MM/YYYY misparse on Linux
+        if (!DateOnly.TryParseExact(
+                dateStr,
+                new[] { "MM/dd/yyyy", "M/d/yyyy", "MM/d/yyyy", "M/dd/yyyy" },
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None,
+                out var date))
+            return false;
+
         if (!TimeOnly.TryParse(timeStr, out var time)) return false;
 
         var localDt = DateTime.SpecifyKind(date.ToDateTime(time), DateTimeKind.Unspecified);
