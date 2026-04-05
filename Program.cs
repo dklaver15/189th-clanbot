@@ -67,6 +67,7 @@ try
 
     builder.Services.AddSingleton<GamertagCommandHandler>();
     builder.Services.AddSingleton<RecruitCommandHandler>();
+    builder.Services.AddSingleton<PromoteCommandHandler>();
 
     // TicketReminderHandler: singleton for event registration + hosted service for startup recovery.
     builder.Services.AddSingleton<TicketReminderHandler>();

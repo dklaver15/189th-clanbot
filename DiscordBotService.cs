@@ -24,6 +24,7 @@ public class DiscordBotService : IHostedService
     private readonly RecruitCommandHandler _recruitHandler;
     private readonly ApolloEventHandler _apolloEventHandler;
     private readonly CompEventCommandHandler _compEventHandler;
+    private readonly PromoteCommandHandler _promoteHandler;
     private readonly ILogger<DiscordBotService> _logger;
     private readonly BotConfig _config;
 
@@ -38,6 +39,7 @@ public class DiscordBotService : IHostedService
         RecruitCommandHandler recruitHandler,
         ApolloEventHandler apolloEventHandler,
         CompEventCommandHandler compEventHandler,
+        PromoteCommandHandler promoteHandler,
         ILogger<DiscordBotService> logger,
         IOptions<BotConfig> config)
     {
@@ -51,6 +53,7 @@ public class DiscordBotService : IHostedService
         _recruitHandler            = recruitHandler;
         _apolloEventHandler        = apolloEventHandler;
         _compEventHandler          = compEventHandler;
+        _promoteHandler            = promoteHandler;
         _logger                    = logger;
         _config                    = config.Value;
     }
@@ -67,8 +70,9 @@ public class DiscordBotService : IHostedService
         _guestReminderHandler.Register(_client);
         _onboardingReminderHandler.Register(_client);
         _recruitHandler.Register(_client);
-        _apolloEventHandler.Register(_client);     // ← new: Apollo → Calendar sync
-        _compEventHandler.Register(_client);       // ← new: /comp-event modal handler
+        _apolloEventHandler.Register(_client);
+        _compEventHandler.Register(_client);
+        _promoteHandler.Register(_client);
 
         await _client.LoginAsync(TokenType.Bot, _config.Token);
         await _client.StartAsync();
@@ -133,6 +137,15 @@ public class DiscordBotService : IHostedService
                     .WithName("comp-event")
                     .WithDescription($"Create a competitive division event on the clan calendar ({_config.CompEventMinRank}+ only)")
                     .Build(),
+
+                new SlashCommandBuilder()
+                    .WithName("promote")
+                    .WithDescription("Promote a member to the next rank")
+                    .AddOption("rank", ApplicationCommandOptionType.String,
+                        "The rank to promote to (e.g. pvt, pfc, sgt)", isRequired: true)
+                    .AddOption("member", ApplicationCommandOptionType.User,
+                        "The member to promote", isRequired: true)
+                    .Build()
             };
 
             foreach (var guild in _client.Guilds)
