@@ -153,7 +153,7 @@ public partial class GamertagCommandHandler
             var discordName = modal.User.GlobalName ?? modal.User.Username;
 
             await _sheetsService.WriteGamertagsAsync(
-                discordName, partial.EA, partial.Steam, partial.PSN,
+                modal.User.Id, discordName, partial.EA, partial.Steam, partial.PSN,
                 xbox, embark, bungie);
 
             var embed = new EmbedBuilder()
