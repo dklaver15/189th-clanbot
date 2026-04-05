@@ -137,6 +137,12 @@ public class BotConfig
     /// </summary>
     public string CompEventMinRank { get; set; } = "CPT";
 
+    /// <summary>
+    /// The minimum rank required to use the /promote and /demote commands.
+    /// Must exactly match one of the rank names in RankRoles (case-insensitive).
+    /// </summary>
+    public string PromoteDemoteMinRank { get; set; } = "2ndLT";
+
     // ─── Helpers ─────────────────────────────────────────────────────
 
     public List<string> GetExemptRolesList() =>
