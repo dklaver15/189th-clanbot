@@ -25,6 +25,7 @@ public class DiscordBotService : IHostedService
     private readonly ApolloEventHandler _apolloEventHandler;
     private readonly CompEventCommandHandler _compEventHandler;
     private readonly PromoteCommandHandler _promoteHandler;
+    private readonly SetNickCommandHandler _setNickHandler;
     private readonly ILogger<DiscordBotService> _logger;
     private readonly BotConfig _config;
 
@@ -40,6 +41,7 @@ public class DiscordBotService : IHostedService
         ApolloEventHandler apolloEventHandler,
         CompEventCommandHandler compEventHandler,
         PromoteCommandHandler promoteHandler,
+        SetNickCommandHandler setNickHandler,
         ILogger<DiscordBotService> logger,
         IOptions<BotConfig> config)
     {
@@ -54,6 +56,7 @@ public class DiscordBotService : IHostedService
         _apolloEventHandler        = apolloEventHandler;
         _compEventHandler          = compEventHandler;
         _promoteHandler            = promoteHandler;
+        _setNickHandler            = setNickHandler;
         _logger                    = logger;
         _config                    = config.Value;
     }
@@ -73,6 +76,7 @@ public class DiscordBotService : IHostedService
         _apolloEventHandler.Register(_client);
         _compEventHandler.Register(_client);
         _promoteHandler.Register(_client);
+        _setNickHandler.Register(_client);
 
         await _client.LoginAsync(TokenType.Bot, _config.Token);
         await _client.StartAsync();
@@ -145,6 +149,15 @@ public class DiscordBotService : IHostedService
                         "The rank to promote to (e.g. pvt, pfc, sgt)", isRequired: true)
                     .AddOption("member", ApplicationCommandOptionType.User,
                         "The member to promote", isRequired: true)
+                    .Build(),
+
+                new SlashCommandBuilder()
+                    .WithName("setnick")
+                    .WithDescription("Change a member's nickname (Officer+ only)")
+                    .AddOption("member", ApplicationCommandOptionType.User,
+                        "The member to rename", isRequired: true)
+                    .AddOption("nickname", ApplicationCommandOptionType.String,
+                        "The new nickname", isRequired: true)
                     .Build()
             };
 
