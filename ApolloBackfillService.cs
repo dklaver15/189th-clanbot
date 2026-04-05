@@ -83,13 +83,36 @@ public class ApolloBackfillService : BackgroundService
     {
         // Load all events we've already synced with their full details so we can
         // detect drift (title, time, or description changed while the bot was offline).
+        // Use GroupBy to handle duplicate DiscordMessageIds gracefully — keep the most recent record.
         Dictionary<ulong, CalendarEvent> syncedByMessageId;
         using (var scope = _services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-            syncedByMessageId = await db.CalendarEvents
+            var events = await db.CalendarEvents
                 .Where(c => c.GuildId == guild.Id && c.DiscordMessageId != 0)
-                .ToDictionaryAsync(c => c.DiscordMessageId, ct);
+                .ToListAsync(ct);
+
+            syncedByMessageId = events
+                .GroupBy(c => c.DiscordMessageId)
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.OrderByDescending(c => c.Id).First());
+
+            // Clean up any duplicates found
+            var duplicates = events
+                .GroupBy(c => c.DiscordMessageId)
+                .Where(g => g.Count() > 1)
+                .SelectMany(g => g.OrderByDescending(c => c.Id).Skip(1))
+                .ToList();
+
+            if (duplicates.Count > 0)
+            {
+                _logger.LogWarning(
+                    "Apollo backfill: removing {Count} duplicate CalendarEvent record(s)",
+                    duplicates.Count);
+                db.CalendarEvents.RemoveRange(duplicates);
+                await db.SaveChangesAsync(ct);
+            }
         }
 
         var synced  = 0;

@@ -173,7 +173,7 @@ public class PromoteCommandHandler
         // Preserve the member's display name by stripping any existing rank prefix.
         // Nickname format is "RANK.DisplayName", so we look for that pattern.
         // Also handles legacy "RANK . DisplayName" with spaces.
-        var currentName = member.Nickname ?? member.Username;
+        var currentName = member.DisplayName;
         var rankRoles = _config.GetRankRolesList();
 
         var baseName = currentName;
