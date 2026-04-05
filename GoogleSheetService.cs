@@ -56,12 +56,12 @@ public class GoogleSheetsService
 
         if (getResponse.Values is not null)
         {
+            // First pass: try to match by Discord ID in column A
             for (int i = 0; i < getResponse.Values.Count; i++)
             {
                 var row = getResponse.Values[i];
                 if (row.Count > 0 && string.Equals(row[0]?.ToString(), discordId.ToString(), StringComparison.Ordinal))
                 {
-                    // Update existing row (sheets are 1-indexed)
                     var updateRange = $"{sheetName}!A{i + 1}:H{i + 1}";
                     var updateBody = new ValueRange { Values = new List<IList<object>> { newRow } };
                     var updateRequest = service.Spreadsheets.Values.Update(updateBody, spreadsheetId, updateRange);
@@ -69,7 +69,34 @@ public class GoogleSheetsService
                         .ValueInputOptionEnum.USERENTERED;
                     await updateRequest.ExecuteAsync();
 
-                    _logger.LogInformation("Updated gamertags for {DiscordName} ({DiscordId}) in row {Row}",
+                    _logger.LogInformation("Updated gamertags for {DiscordName} ({DiscordId}) in row {Row} (matched by ID)",
+                        discordName, discordId, i + 1);
+                    await SortSheetBySecondColumnAsync(service, spreadsheetId, sheetName);
+                    return;
+                }
+            }
+
+            // Second pass: fall back to matching by Discord Name in column B (legacy rows without ID)
+            // Also check column A for legacy rows where name was in column A before the ID column was added
+            for (int i = 0; i < getResponse.Values.Count; i++)
+            {
+                var row = getResponse.Values[i];
+                var colA = row.Count > 0 ? row[0]?.ToString() ?? "" : "";
+                var colB = row.Count > 1 ? row[1]?.ToString() ?? "" : "";
+
+                if (string.Equals(colB, discordName, StringComparison.OrdinalIgnoreCase) ||
+                    (string.Equals(colA, discordName, StringComparison.OrdinalIgnoreCase) && !ulong.TryParse(colA, out _)))
+                {
+                    // Update the row and backfill the Discord ID
+                    var updateRange = $"{sheetName}!A{i + 1}:H{i + 1}";
+                    var updateBody = new ValueRange { Values = new List<IList<object>> { newRow } };
+                    var updateRequest = service.Spreadsheets.Values.Update(updateBody, spreadsheetId, updateRange);
+                    updateRequest.ValueInputOption = SpreadsheetsResource.ValuesResource.UpdateRequest
+                        .ValueInputOptionEnum.USERENTERED;
+                    await updateRequest.ExecuteAsync();
+
+                    _logger.LogInformation(
+                        "Updated gamertags for {DiscordName} ({DiscordId}) in row {Row} (matched by name, backfilled ID)",
                         discordName, discordId, i + 1);
                     await SortSheetBySecondColumnAsync(service, spreadsheetId, sheetName);
                     return;
