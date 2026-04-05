@@ -27,11 +27,11 @@ public class GoogleSheetsService
 
     /// <summary>
     /// Appends (or updates) a row in the configured Google Sheet.
-    /// Columns: Discord Name | EA | Steam | PSN | Xbox | Embark | Bungie
-    /// If the Discord user already has a row, it will be updated in place.
+    /// Columns: Discord ID | Discord Name | EA | Steam | PSN | Xbox | Embark | Bungie
+    /// Matches rows by Discord ID so name changes don't create duplicates.
     /// </summary>
     public async Task WriteGamertagsAsync(
-        string discordName, string ea, string steam, string psn,
+        ulong discordId, string discordName, string ea, string steam, string psn,
         string xbox, string embark, string bungie)
     {
         var credential = GoogleCredential
@@ -46,31 +46,32 @@ public class GoogleSheetsService
 
         var spreadsheetId = _config.GoogleSpreadsheetId;
         var sheetName = _config.GoogleSheetName;
-        var range = $"{sheetName}!A:G";
+        var range = $"{sheetName}!A:H";
 
-        // Try to find an existing row for this Discord user
+        // Try to find an existing row for this Discord user by ID
         var getRequest = service.Spreadsheets.Values.Get(spreadsheetId, range);
         var getResponse = await getRequest.ExecuteAsync();
 
-        var newRow = new List<object> { discordName, ea, steam, psn, xbox, embark, bungie };
+        var newRow = new List<object> { discordId.ToString(), discordName, ea, steam, psn, xbox, embark, bungie };
 
         if (getResponse.Values is not null)
         {
             for (int i = 0; i < getResponse.Values.Count; i++)
             {
                 var row = getResponse.Values[i];
-                if (row.Count > 0 && string.Equals(row[0]?.ToString(), discordName, StringComparison.OrdinalIgnoreCase))
+                if (row.Count > 0 && string.Equals(row[0]?.ToString(), discordId.ToString(), StringComparison.Ordinal))
                 {
-                    // Update existing row (sheets are 1-indexed, +1 for header awareness)
-                    var updateRange = $"{sheetName}!A{i + 1}:G{i + 1}";
+                    // Update existing row (sheets are 1-indexed)
+                    var updateRange = $"{sheetName}!A{i + 1}:H{i + 1}";
                     var updateBody = new ValueRange { Values = new List<IList<object>> { newRow } };
                     var updateRequest = service.Spreadsheets.Values.Update(updateBody, spreadsheetId, updateRange);
                     updateRequest.ValueInputOption = SpreadsheetsResource.ValuesResource.UpdateRequest
                         .ValueInputOptionEnum.USERENTERED;
                     await updateRequest.ExecuteAsync();
 
-                    _logger.LogInformation("Updated gamertags for {DiscordName} in row {Row}", discordName, i + 1);
-                    await SortSheetByFirstColumnAsync(service, spreadsheetId, sheetName);
+                    _logger.LogInformation("Updated gamertags for {DiscordName} ({DiscordId}) in row {Row}",
+                        discordName, discordId, i + 1);
+                    await SortSheetBySecondColumnAsync(service, spreadsheetId, sheetName);
                     return;
                 }
             }
@@ -85,15 +86,15 @@ public class GoogleSheetsService
             SpreadsheetsResource.ValuesResource.AppendRequest.InsertDataOptionEnum.INSERTROWS;
         await appendRequest.ExecuteAsync();
 
-        _logger.LogInformation("Appended gamertags for {DiscordName}", discordName);
+        _logger.LogInformation("Appended gamertags for {DiscordName} ({DiscordId})", discordName, discordId);
 
-        await SortSheetByFirstColumnAsync(service, spreadsheetId, sheetName);
+        await SortSheetBySecondColumnAsync(service, spreadsheetId, sheetName);
     }
 
     /// <summary>
-    /// Sorts all data rows (excluding the header) alphabetically by the first column.
+    /// Sorts all data rows (excluding the header) alphabetically by the second column (Discord Name).
     /// </summary>
-    private async Task SortSheetByFirstColumnAsync(SheetsService service, string spreadsheetId, string sheetName)
+    private async Task SortSheetBySecondColumnAsync(SheetsService service, string spreadsheetId, string sheetName)
     {
         // Get the sheet ID by name
         var spreadsheet = await service.Spreadsheets.Get(spreadsheetId).ExecuteAsync();
@@ -106,7 +107,7 @@ public class GoogleSheetsService
 
         var sheetId = sheet.Properties.SheetId ?? 0;
         var rowCount = sheet.Properties.GridProperties.RowCount ?? 1000;
-        var colCount = sheet.Properties.GridProperties.ColumnCount ?? 7;
+        var colCount = sheet.Properties.GridProperties.ColumnCount ?? 8;
 
         var sortRequest = new Request
         {
@@ -124,7 +125,7 @@ public class GoogleSheetsService
                 {
                     new SortSpec
                     {
-                        DimensionIndex = 0, // column A
+                        DimensionIndex = 1, // column B (Discord Name)
                         SortOrder = "ASCENDING"
                     }
                 }
@@ -158,13 +159,13 @@ public class GoogleSheetsService
                 ApplicationName = "ClanGuardBot"
             });
 
-            var range = $"{_config.GoogleSheetName}!A1:G1";
+            var range = $"{_config.GoogleSheetName}!A1:H1";
             var getRequest = service.Spreadsheets.Values.Get(_config.GoogleSpreadsheetId, range);
             var response = await getRequest.ExecuteAsync();
 
             if (response.Values is null || response.Values.Count == 0)
             {
-                var header = new List<object> { "Discord Name", "EA", "Steam", "PSN", "Xbox", "Embark", "Bungie" };
+                var header = new List<object> { "Discord ID", "Discord Name", "EA", "Steam", "PSN", "Xbox", "Embark", "Bungie" };
                 var body = new ValueRange { Values = new List<IList<object>> { header } };
                 var updateRequest = service.Spreadsheets.Values.Update(body, _config.GoogleSpreadsheetId, range);
                 updateRequest.ValueInputOption =
