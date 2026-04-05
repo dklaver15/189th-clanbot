@@ -170,8 +170,32 @@ public class PromoteCommandHandler
         await member.AddRoleAsync(newRole);
 
         // ── Update nickname ─────────────────────────────────────────
-        var baseName = member.Username;
-        var newNickname = $"{rankInfo.NewRole} . {baseName}";
+        // Preserve the member's display name by stripping any existing rank prefix.
+        // Nickname format is "RANK.DisplayName", so we look for that pattern.
+        // Also handles legacy "RANK . DisplayName" with spaces.
+        var currentName = member.Nickname ?? member.Username;
+        var rankRoles = _config.GetRankRolesList();
+
+        var baseName = currentName;
+        foreach (var rankRole in rankRoles)
+        {
+            // Match patterns like "SGT . Dogteem" or "SGT. Dogteem" or "SGT.Dogteem"
+            var prefix = $"{rankRole} . ";
+            if (currentName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                baseName = currentName[prefix.Length..];
+                break;
+            }
+
+            var prefixNoDotSpace = $"{rankRole}.";
+            if (currentName.StartsWith(prefixNoDotSpace, StringComparison.OrdinalIgnoreCase))
+            {
+                baseName = currentName[prefixNoDotSpace.Length..].TrimStart();
+                break;
+            }
+        }
+
+        var newNickname = $"{rankInfo.NewRole}.{baseName}";
 
         try
         {
@@ -199,7 +223,7 @@ public class PromoteCommandHandler
             member.Username, rankInfo.NewRole, caller.Username, removedInfo);
 
         await command.FollowupAsync(
-            $"✅ **Promotion Confirmed**: {rankInfo.NewRole} . {member.Username}\n" +
+            $"✅ **Promotion Confirmed**: {rankInfo.NewRole}.{baseName}\n" +
             $"{member.Mention} has been promoted to **{rankInfo.NewRole}**.");
     }
 
