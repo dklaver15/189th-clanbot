@@ -103,6 +103,40 @@ public class RankTrackingHandler
             }
 
             await db.SaveChangesAsync();
+
+            // ── Auto-prefix nickname when RCT role is gained ──────────
+            // This handles new members who accept rules via MEE6 and get the RCT role.
+            // Checks if RCT was added in this update (not present before, present after).
+            var rctGained = after.Roles.Any(r => r.Name.Equals("RCT", StringComparison.OrdinalIgnoreCase)) &&
+                           !before.Roles.Any(r => r.Name.Equals("RCT", StringComparison.OrdinalIgnoreCase));
+
+            if (rctGained)
+            {
+                try
+                {
+                    var displayName = after.DisplayName;
+
+                    // Don't prefix if they already have a rank prefix
+                    var hasPrefix = rankRoles.Any(r =>
+                        displayName.StartsWith($"{r}.", StringComparison.OrdinalIgnoreCase) ||
+                        displayName.StartsWith($"{r} . ", StringComparison.OrdinalIgnoreCase));
+
+                    if (!hasPrefix)
+                    {
+                        var newNickname = $"RCT.{displayName}";
+                        await after.ModifyAsync(p => p.Nickname = newNickname);
+                        _logger.LogInformation(
+                            "Auto-nickname: {Username} → {NewNick} in {Guild}",
+                            after.Username, newNickname, after.Guild.Name);
+                    }
+                }
+                catch (Discord.Net.HttpException ex) when (ex.HttpCode == System.Net.HttpStatusCode.Forbidden)
+                {
+                    _logger.LogWarning(
+                        "Could not set RCT nickname for {Username}: insufficient permissions",
+                        after.Username);
+                }
+            }
         }
         catch (Exception ex)
         {
