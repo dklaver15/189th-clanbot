@@ -215,8 +215,44 @@ public class ApolloBackfillService : BackgroundService
             // ── CREATE path: new event ────────────────────────────────────
             try
             {
+                // Check for an existing calendar event with the same title and time
+                // to prevent duplicates from crash-loop restarts
                 var overlaps = await _calendarService.GetOverlappingEventsAsync(
                     parsed.StartUtc, parsed.EndUtc);
+
+                var isDuplicate = overlaps.Any(e =>
+                    string.Equals(e.Summary, parsed.Title, StringComparison.OrdinalIgnoreCase));
+
+                if (isDuplicate)
+                {
+                    _logger.LogInformation(
+                        "Apollo backfill: skipping '{Title}' — duplicate already exists on calendar",
+                        parsed.Title);
+
+                    // Still record it in DB so we don't check again next restart
+                    using var dupScope = _services.CreateScope();
+                    var dupDb = dupScope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+                    var existingOverlap = overlaps.First(e =>
+                        string.Equals(e.Summary, parsed.Title, StringComparison.OrdinalIgnoreCase));
+
+                    dupDb.CalendarEvents.Add(new CalendarEvent
+                    {
+                        GuildId          = guild.Id,
+                        DiscordMessageId = message.Id,
+                        CalendarEventId  = existingOverlap.Id,
+                        Title            = parsed.Title,
+                        StartUtc         = parsed.StartUtc,
+                        EndUtc           = parsed.EndUtc,
+                        Description      = parsed.Description ?? "",
+                        Source           = "Clan",
+                        CreatedAt        = DateTime.UtcNow
+                    });
+                    await dupDb.SaveChangesAsync(ct);
+
+                    skipped++;
+                    continue;
+                }
 
                 if (overlaps.Count > 0)
                 {
