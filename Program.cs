@@ -67,6 +67,11 @@ try
 
     builder.Services.AddSingleton<GamertagCommandHandler>();
     builder.Services.AddSingleton<RecruitCommandHandler>();
+
+    // PromotionService: shared core used by both /promote and AutoPromotionService.
+    // Registered before the consumers that inject it.
+    builder.Services.AddSingleton<PromotionService>();
+
     builder.Services.AddSingleton<PromoteCommandHandler>();
     builder.Services.AddSingleton<DemoteCommandHandler>();
     builder.Services.AddSingleton<SetNickCommandHandler>();
@@ -90,6 +95,11 @@ try
     builder.Services.AddHostedService<HistoryBackfillService>();
     builder.Services.AddHostedService<ApolloBackfillService>();
     builder.Services.AddHostedService<AwolCheckService>();
+
+    // AutoPromotionService: nightly check that auto-promotes RCT → CPL based on
+    // time-in-rank + activity thresholds. Respects the AutoPromotionEnabled and
+    // AutoPromotionDryRun config flags.
+    builder.Services.AddHostedService<AutoPromotionService>();
 
     // RosterExportService: singleton so SlashCommandHandler can inject it,
     // + hosted service so its background loop runs automatically.
