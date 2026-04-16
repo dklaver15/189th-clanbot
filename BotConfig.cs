@@ -143,6 +143,30 @@ public class BotConfig
     /// </summary>
     public string PromoteDemoteMinRank { get; set; } = "2ndLT";
 
+    // ─── Auto-Promotion Settings ─────────────────────────────────────
+
+    /// <summary>
+    /// Master switch for the nightly AutoPromotionService.
+    /// When false, the service exits immediately on startup.
+    /// </summary>
+    public bool AutoPromotionEnabled { get; set; } = true;
+
+    /// <summary>
+    /// When true, AutoPromotionService logs what it WOULD do but does not apply
+    /// any role changes or post announcements. Recommended for first-run verification.
+    /// </summary>
+    public bool AutoPromotionDryRun { get; set; } = false;
+
+    /// <summary>
+    /// Hour of day (UTC, 0-23) to run the nightly auto-promotion check.
+    /// </summary>
+    public int AutoPromotionRunHourUtc { get; set; } = 3;
+
+    /// <summary>
+    /// Name of the text channel where auto-promotion announcements are posted.
+    /// </summary>
+    public string AutoPromotionAnnouncementChannel { get; set; } = "general-chat";
+
     // ─── Helpers ─────────────────────────────────────────────────────
 
     public List<string> GetExemptRolesList() =>
