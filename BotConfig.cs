@@ -122,7 +122,7 @@ public class BotConfig
     /// The bot will listen here for new posts, edits, and deletes to keep the calendar in sync.
     /// </summary>
     public string EventsTextChannelName { get; set; } = "events";
-    
+
     public ulong EventsTextChannelId { get; set; } = default;
 
     /// <summary>
@@ -166,6 +166,18 @@ public class BotConfig
     /// Name of the text channel where auto-promotion announcements are posted.
     /// </summary>
     public string AutoPromotionAnnouncementChannel { get; set; } = "general-chat";
+
+    // ─── Voice Activity Safeguards ───────────────────────────────────
+
+    /// <summary>
+    /// Cap on how many hours a single voice session can contribute to activity
+    /// counts (AWOL checks + auto-promotion). Protects against stuck sessions
+    /// that were never properly closed (e.g. because the bot crashed while users
+    /// were in voice). 12 hours is generous enough for legitimate gaming
+    /// marathons while preventing impossibly-long orphaned sessions from inflating
+    /// totals. Set to 0 or negative to disable the cap (not recommended).
+    /// </summary>
+    public double MaxSingleSessionHours { get; set; } = 12.0;
 
     // ─── Helpers ─────────────────────────────────────────────────────
 

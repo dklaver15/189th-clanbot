@@ -15,6 +15,9 @@ namespace ClanGuardBot.Services;
 ///   1. Resets expired activity windows (rolling 28 days)
 ///   2. Checks for users below activity thresholds and assigns the AWOL role
 ///   3. Posts HQ notifications for users who've been AWOL for 2+ days
+///
+/// Voice time is capped per-session via MaxSingleSessionHours so stuck or orphaned
+/// voice sessions cannot inflate a user's "active" status.
 /// </summary>
 public class AwolCheckService : BackgroundService
 {
@@ -186,7 +189,9 @@ public class AwolCheckService : BackgroundService
                               && m.UserId == member.Id
                               && m.Timestamp >= windowStart, ct);
 
-            var voiceSeconds = await GetVoiceSecondsAsync(db, guild.Id, member.Id, windowStart, ct);
+            var voiceSeconds = await VoiceActivityHelper.GetVoiceSecondsAsync(
+                db, guild.Id, member.Id, windowStart,
+                _config.MaxSingleSessionHours, ct);
 
             var meetsMessages = messageCount >= _config.MinMessages;
             var meetsVoice = voiceSeconds >= minVoiceSeconds;
@@ -291,7 +296,9 @@ public class AwolCheckService : BackgroundService
                               && m.UserId == record.UserId
                               && m.Timestamp >= windowStart, ct);
 
-            var voiceSeconds = await GetVoiceSecondsAsync(db, guild.Id, record.UserId, windowStart, ct);
+            var voiceSeconds = await VoiceActivityHelper.GetVoiceSecondsAsync(
+                db, guild.Id, record.UserId, windowStart,
+                _config.MaxSingleSessionHours, ct);
 
             var embed = new EmbedBuilder()
                 .WithTitle("⚠️ AWOL Member — Ready for Review")
@@ -336,43 +343,6 @@ public class AwolCheckService : BackgroundService
         }
 
         await db.SaveChangesAsync(ct);
-    }
-
-    /// <summary>
-    /// Calculates total voice seconds within the window, including any currently-open session.
-    /// </summary>
-    private static async Task<long> GetVoiceSecondsAsync(
-        BotDbContext db, ulong guildId, ulong userId, DateTime windowStart, CancellationToken ct)
-    {
-        var sessions = await db.VoiceSessions
-            .Where(v => v.GuildId == guildId
-                        && v.UserId == userId
-                        && v.JoinedAt >= windowStart)
-            .ToListAsync(ct);
-
-        long totalSeconds = 0;
-        foreach (var session in sessions)
-        {
-            var end = session.LeftAt ?? DateTime.UtcNow;
-            var start = session.JoinedAt < windowStart ? windowStart : session.JoinedAt;
-            totalSeconds += (long)(end - start).TotalSeconds;
-        }
-
-        // Also check for sessions that started before the window but are still open or ended within it
-        var overlapping = await db.VoiceSessions
-            .Where(v => v.GuildId == guildId
-                        && v.UserId == userId
-                        && v.JoinedAt < windowStart
-                        && (v.LeftAt == null || v.LeftAt > windowStart))
-            .ToListAsync(ct);
-
-        foreach (var session in overlapping)
-        {
-            var end = session.LeftAt ?? DateTime.UtcNow;
-            totalSeconds += (long)(end - windowStart).TotalSeconds;
-        }
-
-        return totalSeconds;
     }
 
     private static bool IsExempt(SocketGuildUser member, List<string> exemptRoles)
