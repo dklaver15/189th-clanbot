@@ -21,7 +21,6 @@ public class DiscordBotService : IHostedService
     private readonly TicketReminderHandler _ticketReminderHandler;
     private readonly GuestReminderHandler _guestReminderHandler;
     private readonly OnboardingReminderHandler _onboardingReminderHandler;
-    private readonly RecruitCommandHandler _recruitHandler;
     private readonly ApolloEventHandler _apolloEventHandler;
     private readonly CompEventCommandHandler _compEventHandler;
     private readonly PromoteCommandHandler _promoteHandler;
@@ -38,7 +37,6 @@ public class DiscordBotService : IHostedService
         TicketReminderHandler ticketReminderHandler,
         GuestReminderHandler guestReminderHandler,
         OnboardingReminderHandler onboardingReminderHandler,
-        RecruitCommandHandler recruitHandler,
         ApolloEventHandler apolloEventHandler,
         CompEventCommandHandler compEventHandler,
         PromoteCommandHandler promoteHandler,
@@ -54,7 +52,6 @@ public class DiscordBotService : IHostedService
         _ticketReminderHandler     = ticketReminderHandler;
         _guestReminderHandler      = guestReminderHandler;
         _onboardingReminderHandler = onboardingReminderHandler;
-        _recruitHandler            = recruitHandler;
         _apolloEventHandler        = apolloEventHandler;
         _compEventHandler          = compEventHandler;
         _promoteHandler            = promoteHandler;
@@ -75,7 +72,6 @@ public class DiscordBotService : IHostedService
         _ticketReminderHandler.Register(_client);
         _guestReminderHandler.Register(_client);
         _onboardingReminderHandler.Register(_client);
-        _recruitHandler.Register(_client);
         _apolloEventHandler.Register(_client);
         _compEventHandler.Register(_client);
         _promoteHandler.Register(_client);
@@ -136,10 +132,8 @@ public class DiscordBotService : IHostedService
                     .WithDescription("Manually trigger a roster export to Google Sheets (Officer+ only)")
                     .Build(),
 
-                new SlashCommandBuilder()
-                    .WithName("recruit")
-                    .WithDescription("Log a new recruit's name to the roster sheet")
-                    .Build(),
+                // NOTE: /recruit was removed — new recruits are auto-logged by
+                // RankTrackingHandler when they gain the RCT role.
 
                 new SlashCommandBuilder()
                     .WithName("comp-event")
