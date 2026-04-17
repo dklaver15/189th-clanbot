@@ -66,7 +66,9 @@ try
     builder.Services.AddHostedService(sp => sp.GetRequiredService<OnboardingReminderHandler>());
 
     builder.Services.AddSingleton<GamertagCommandHandler>();
-    builder.Services.AddSingleton<RecruitCommandHandler>();
+
+    // NOTE: RecruitCommandHandler was removed — recruits are now auto-logged by
+    // RankTrackingHandler when a member gains the RCT role. See TryLogRecruitAsync.
 
     // PromotionService: shared core used by both /promote and AutoPromotionService.
     // Registered before the consumers that inject it.

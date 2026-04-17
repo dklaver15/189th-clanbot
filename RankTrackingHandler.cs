@@ -1,5 +1,6 @@
 using ClanGuardBot.Data;
 using ClanGuardBot.Models;
+using ClanGuardBot.Services;
 using Discord;
 using Discord.WebSocket;
 using Microsoft.EntityFrameworkCore;
@@ -12,21 +13,32 @@ namespace ClanGuardBot.Handlers;
 /// <summary>
 /// Handles the GuildMemberUpdated event to detect rank role changes in real-time.
 /// When a member's rank changes, updates the RankHistory record with the exact timestamp.
+/// Also auto-prefixes nicknames on RCT gain and auto-logs new recruits to the Google Sheet.
 /// </summary>
 public class RankTrackingHandler
 {
     private readonly IServiceProvider _services;
     private readonly ILogger<RankTrackingHandler> _logger;
     private readonly BotConfig _config;
+    private readonly GoogleSheetsService _sheetsService;
+
+    /// <summary>
+    /// Value written to the "Logged By" column when a recruit is auto-logged.
+    /// Left blank so officers can fill in the recruiter manually later without
+    /// having to clear a placeholder first.
+    /// </summary>
+    private const string AutoLogPendingMarker = "";
 
     public RankTrackingHandler(
         IServiceProvider services,
         ILogger<RankTrackingHandler> logger,
-        IOptions<BotConfig> config)
+        IOptions<BotConfig> config,
+        GoogleSheetsService sheetsService)
     {
         _services = services;
         _logger = logger;
         _config = config.Value;
+        _sheetsService = sheetsService;
     }
 
     /// <summary>Register the GuildMemberUpdated event handler on the Discord client.</summary>
@@ -104,44 +116,87 @@ public class RankTrackingHandler
 
             await db.SaveChangesAsync();
 
-            // ── Auto-prefix nickname when RCT role is gained ──────────
-            // This handles new members who accept rules via MEE6 and get the RCT role.
-            // Checks if RCT was added in this update (not present before, present after).
-            var rctGained = after.Roles.Any(r => r.Name.Equals("RCT", StringComparison.OrdinalIgnoreCase)) &&
-                           !before.Roles.Any(r => r.Name.Equals("RCT", StringComparison.OrdinalIgnoreCase));
+            // ── Detect "RCT gained" transition (used by two side effects below) ──
+            // Fires when the RCT role is present after but was not present before.
+            var rctGained =
+                after.Roles.Any(r => r.Name.Equals("RCT", StringComparison.OrdinalIgnoreCase)) &&
+                !before.Roles.Any(r => r.Name.Equals("RCT", StringComparison.OrdinalIgnoreCase));
 
             if (rctGained)
             {
-                try
-                {
-                    var displayName = after.DisplayName;
+                // Side effect 1: auto-prefix the nickname to "RCT.{DisplayName}".
+                var newNickname = await TryApplyRctNicknameAsync(after, rankRoles);
 
-                    // Don't prefix if they already have a rank prefix
-                    var hasPrefix = rankRoles.Any(r =>
-                        displayName.StartsWith($"{r}.", StringComparison.OrdinalIgnoreCase) ||
-                        displayName.StartsWith($"{r} . ", StringComparison.OrdinalIgnoreCase));
-
-                    if (!hasPrefix)
-                    {
-                        var newNickname = $"RCT.{displayName}";
-                        await after.ModifyAsync(p => p.Nickname = newNickname);
-                        _logger.LogInformation(
-                            "Auto-nickname: {Username} → {NewNick} in {Guild}",
-                            after.Username, newNickname, after.Guild.Name);
-                    }
-                }
-                catch (Discord.Net.HttpException ex) when (ex.HttpCode == System.Net.HttpStatusCode.Forbidden)
-                {
-                    _logger.LogWarning(
-                        "Could not set RCT nickname for {Username}: insufficient permissions",
-                        after.Username);
-                }
+                // Side effect 2: auto-log the recruit to the Google Sheet.
+                // Uses the post-prefix nickname when available so the logged name
+                // matches what appears in Discord. Falls back to display name if
+                // the nickname update was skipped or failed.
+                var recruitName = !string.IsNullOrWhiteSpace(newNickname)
+                    ? newNickname!
+                    : after.DisplayName;
+                _ = TryLogRecruitAsync(recruitName, after);
             }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error tracking rank change for {Username} in {Guild}",
                 after.Username, after.Guild.Name);
+        }
+    }
+
+    /// <summary>
+    /// Applies the "RCT." prefix to a member's nickname if they don't already have a rank prefix.
+    /// Returns the new nickname on success, or null if no change was made or the update failed.
+    /// </summary>
+    private async Task<string?> TryApplyRctNicknameAsync(SocketGuildUser after, List<string> rankRoles)
+    {
+        try
+        {
+            var displayName = after.DisplayName;
+
+            // Don't prefix if they already have a rank prefix
+            var hasPrefix = rankRoles.Any(r =>
+                displayName.StartsWith($"{r}.", StringComparison.OrdinalIgnoreCase) ||
+                displayName.StartsWith($"{r} . ", StringComparison.OrdinalIgnoreCase));
+
+            if (hasPrefix) return null;
+
+            var newNickname = $"RCT.{displayName}";
+            await after.ModifyAsync(p => p.Nickname = newNickname);
+            _logger.LogInformation(
+                "Auto-nickname: {Username} → {NewNick} in {Guild}",
+                after.Username, newNickname, after.Guild.Name);
+
+            return newNickname;
+        }
+        catch (Discord.Net.HttpException ex) when (ex.HttpCode == System.Net.HttpStatusCode.Forbidden)
+        {
+            _logger.LogWarning(
+                "Could not set RCT nickname for {Username}: insufficient permissions",
+                after.Username);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Writes a row to the Recruit Log sheet with "Pending" as the recruiter.
+    /// Runs fire-and-forget so a sheets outage cannot block the rest of the rank-tracking flow.
+    /// Errors are caught and logged — the member's role/nickname state is already correct.
+    /// </summary>
+    private async Task TryLogRecruitAsync(string recruitName, SocketGuildUser member)
+    {
+        try
+        {
+            await _sheetsService.WriteRecruitLogAsync(recruitName, AutoLogPendingMarker, DateTime.UtcNow);
+            _logger.LogInformation(
+                "Auto-logged recruit {RecruitName} ({UserId}) to sheet with blank recruiter",
+                recruitName, member.Id);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to auto-log recruit {RecruitName} ({UserId}) to sheet",
+                recruitName, member.Id);
         }
     }
 
