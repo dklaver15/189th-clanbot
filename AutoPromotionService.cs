@@ -205,7 +205,9 @@ public class AutoPromotionService : BackgroundService
                               && m.UserId == member.Id
                               && m.Timestamp >= assignedAt.Value, ct);
 
-            var voiceSeconds = await GetVoiceSecondsSinceAsync(db, guild.Id, member.Id, assignedAt.Value, ct);
+            var voiceSeconds = await VoiceActivityHelper.GetVoiceSecondsAsync(
+                db, guild.Id, member.Id, assignedAt.Value,
+                _config.MaxSingleSessionHours, ct);
             var voiceHours = voiceSeconds / 3600.0;
 
             var meetsMessages = messageCount >= tier.MinMessages;
@@ -273,45 +275,6 @@ public class AutoPromotionService : BackgroundService
                 return rankRoles[i];
         }
         return null;
-    }
-
-    /// <summary>
-    /// Calculates voice seconds logged since the given cutoff timestamp.
-    /// Mirrors the logic in AwolCheckService.GetVoiceSecondsAsync to stay consistent,
-    /// including overlapping sessions and currently-open sessions.
-    /// </summary>
-    private static async Task<long> GetVoiceSecondsSinceAsync(
-        BotDbContext db, ulong guildId, ulong userId, DateTime cutoff, CancellationToken ct)
-    {
-        // Sessions that started after the cutoff
-        var sessions = await db.VoiceSessions
-            .Where(v => v.GuildId == guildId
-                     && v.UserId == userId
-                     && v.JoinedAt >= cutoff)
-            .ToListAsync(ct);
-
-        long totalSeconds = 0;
-        foreach (var session in sessions)
-        {
-            var end = session.LeftAt ?? DateTime.UtcNow;
-            totalSeconds += (long)(end - session.JoinedAt).TotalSeconds;
-        }
-
-        // Sessions that started before the cutoff but are still open or ended after
-        var overlapping = await db.VoiceSessions
-            .Where(v => v.GuildId == guildId
-                     && v.UserId == userId
-                     && v.JoinedAt < cutoff
-                     && (v.LeftAt == null || v.LeftAt > cutoff))
-            .ToListAsync(ct);
-
-        foreach (var session in overlapping)
-        {
-            var end = session.LeftAt ?? DateTime.UtcNow;
-            totalSeconds += (long)(end - cutoff).TotalSeconds;
-        }
-
-        return totalSeconds;
     }
 
     /// <summary>

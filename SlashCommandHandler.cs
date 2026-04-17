@@ -44,7 +44,7 @@ public class SlashCommandHandler
     {
         if (command.Data.Name is not ("awol-status" or "awol-check" or "awol-exempt" or "roster-export"))
             return;
-        
+
         try
         {
             switch (command.Data.Name)
@@ -99,7 +99,9 @@ public class SlashCommandHandler
                           && m.UserId == command.User.Id
                           && m.Timestamp >= windowStart);
 
-        var voiceSeconds = await GetVoiceSecondsAsync(db, command.GuildId.Value, command.User.Id, windowStart);
+        var voiceSeconds = await VoiceActivityHelper.GetVoiceSecondsAsync(
+            db, command.GuildId.Value, command.User.Id, windowStart,
+            _config.MaxSingleSessionHours);
         var voiceHours = voiceSeconds / 3600.0;
 
         var msgStatus = messageCount >= _config.MinMessages ? "✅" : "⚠️";
@@ -149,7 +151,9 @@ public class SlashCommandHandler
                           && m.UserId == targetUser.Id
                           && m.Timestamp >= windowStart);
 
-        var voiceSeconds = await GetVoiceSecondsAsync(db, command.GuildId.Value, targetUser.Id, windowStart);
+        var voiceSeconds = await VoiceActivityHelper.GetVoiceSecondsAsync(
+            db, command.GuildId.Value, targetUser.Id, windowStart,
+            _config.MaxSingleSessionHours);
         var voiceHours = voiceSeconds / 3600.0;
 
         var activity = await db.UserActivities
@@ -260,39 +264,6 @@ public class SlashCommandHandler
             _logger.LogError(ex, "Manual roster export failed");
             await command.FollowupAsync($"❌ Export failed: {ex.Message}", ephemeral: true);
         }
-    }
-
-    private static async Task<long> GetVoiceSecondsAsync(
-        BotDbContext db, ulong guildId, ulong userId, DateTime windowStart, CancellationToken ct = default)
-    {
-        var sessions = await db.VoiceSessions
-            .Where(v => v.GuildId == guildId
-                        && v.UserId == userId
-                        && v.JoinedAt >= windowStart)
-            .ToListAsync(ct);
-
-        long totalSeconds = 0;
-        foreach (var session in sessions)
-        {
-            var end = session.LeftAt ?? DateTime.UtcNow;
-            var start = session.JoinedAt < windowStart ? windowStart : session.JoinedAt;
-            totalSeconds += (long)(end - start).TotalSeconds;
-        }
-
-        var overlapping = await db.VoiceSessions
-            .Where(v => v.GuildId == guildId
-                        && v.UserId == userId
-                        && v.JoinedAt < windowStart
-                        && (v.LeftAt == null || v.LeftAt > windowStart))
-            .ToListAsync(ct);
-
-        foreach (var session in overlapping)
-        {
-            var end = session.LeftAt ?? DateTime.UtcNow;
-            totalSeconds += (long)(end - windowStart).TotalSeconds;
-        }
-
-        return totalSeconds;
     }
 
     private bool HasElevatedPermissions(SocketGuildUser user)

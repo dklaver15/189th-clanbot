@@ -68,7 +68,8 @@ try
     builder.Services.AddSingleton<GamertagCommandHandler>();
 
     // NOTE: RecruitCommandHandler was removed — recruits are now auto-logged by
-    // RankTrackingHandler when a member gains the RCT role. See TryLogRecruitAsync.
+    // RankTrackingHandler when a member gains the RCT role. See TryLogRecruitAsync
+    // in RankTrackingHandler.cs.
 
     // PromotionService: shared core used by both /promote and AutoPromotionService.
     // Registered before the consumers that inject it.
@@ -97,6 +98,11 @@ try
     builder.Services.AddHostedService<HistoryBackfillService>();
     builder.Services.AddHostedService<ApolloBackfillService>();
     builder.Services.AddHostedService<AwolCheckService>();
+
+    // VoiceSessionCleanupService: one-shot service that runs at startup to close
+    // stuck voice sessions (LeftAt IS NULL rows that don't match current Discord
+    // voice state). Prevents orphaned sessions from inflating activity totals.
+    builder.Services.AddHostedService<VoiceSessionCleanupService>();
 
     // AutoPromotionService: nightly check that auto-promotes RCT → CPL based on
     // time-in-rank + activity thresholds. Respects the AutoPromotionEnabled and
