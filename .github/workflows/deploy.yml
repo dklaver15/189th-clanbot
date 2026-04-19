@@ -19,6 +19,7 @@ jobs:
             git fetch origin main
             git reset --hard origin/main
             echo "$GOOGLE_CREDENTIALS_BASE64" | base64 --decode > google-credentials.json
-            docker compose up -d --build
+            docker compose build --no-cache
+            docker compose up -d --force-recreate
         env:
           GOOGLE_CREDENTIALS_BASE64: ${{ secrets.GOOGLE_CREDENTIALS_BASE64 }}
