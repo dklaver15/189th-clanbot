@@ -20,6 +20,10 @@ namespace ClanGuardBot.Services;
 /// Members with the AWOL role are skipped. Each run promotes eligible members
 /// by at most one rank — backlogged users will catch up over subsequent nights.
 ///
+/// Announcement posts are throttled via AutoPromotionAnnouncementDelaySeconds so
+/// a cycle that promotes many members doesn't burst-post and trip Discord rate
+/// limits or spam filters.
+///
 /// Promotions can be disabled globally or put in DryRun mode via appsettings.
 /// </summary>
 public class AutoPromotionService : BackgroundService
@@ -75,8 +79,10 @@ public class AutoPromotionService : BackgroundService
         await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
 
         _logger.LogInformation(
-            "Auto-promotion service started. Running daily at {Hour:D2}:00 UTC. DryRun={DryRun}",
-            _config.AutoPromotionRunHourUtc, _config.AutoPromotionDryRun);
+            "Auto-promotion service started. Running daily at {Hour:D2}:00 UTC. DryRun={DryRun}, AnnouncementDelay={Delay}s",
+            _config.AutoPromotionRunHourUtc,
+            _config.AutoPromotionDryRun,
+            _config.AutoPromotionAnnouncementDelaySeconds);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -154,6 +160,11 @@ public class AutoPromotionService : BackgroundService
         var evaluated = 0;
         var promoted = 0;
         var skipped = 0;
+
+        // Queue of promotions to announce after all role changes are applied.
+        // Announcements are throttled separately so they don't burst-post
+        // and trip Discord's channel rate limits.
+        var pendingAnnouncements = new List<PendingAnnouncement>();
 
         foreach (var member in guild.Users)
         {
@@ -246,18 +257,65 @@ public class AutoPromotionService : BackgroundService
 
             promoted++;
 
-            // Announce in the configured channel
-            await _promotion.AnnouncePromotionAsync(
-                guild,
-                member,
-                fromRankShort: tier.FromRank,
-                toRankShort: result.NewRankName,
-                channelName: _config.AutoPromotionAnnouncementChannel);
+            // Defer the announcement — we'll post them in a throttled pass after
+            // all role changes are done, so the rate-limit window doesn't overlap
+            // with Discord role-change API calls.
+            pendingAnnouncements.Add(new PendingAnnouncement(
+                Member: member,
+                FromRankShort: tier.FromRank,
+                ToRankShort: result.NewRankName));
         }
 
         _logger.LogInformation(
             "Auto-promotion for guild {Guild}: evaluated={Evaluated}, promoted={Promoted}, skipped={Skipped}",
             guild.Name, evaluated, promoted, skipped);
+
+        // ── Throttled announcement pass ─────────────────────────────
+        if (pendingAnnouncements.Count > 0)
+        {
+            await AnnounceAllAsync(guild, pendingAnnouncements, ct);
+        }
+    }
+
+    /// <summary>
+    /// Posts all queued promotion announcements with a configurable delay between
+    /// each one. This avoids bursting the announcement channel when a large batch
+    /// (e.g. the first live run after a backlog) would otherwise post dozens of
+    /// messages within the same second.
+    /// </summary>
+    private async Task AnnounceAllAsync(
+        SocketGuild guild,
+        IReadOnlyList<PendingAnnouncement> announcements,
+        CancellationToken ct)
+    {
+        var delayMs = Math.Max(0, _config.AutoPromotionAnnouncementDelaySeconds * 1000);
+
+        _logger.LogInformation(
+            "Posting {Count} promotion announcement(s) with {Delay}s spacing",
+            announcements.Count, _config.AutoPromotionAnnouncementDelaySeconds);
+
+        for (int i = 0; i < announcements.Count; i++)
+        {
+            if (ct.IsCancellationRequested) break;
+
+            var a = announcements[i];
+            await _promotion.AnnouncePromotionAsync(
+                guild,
+                a.Member,
+                fromRankShort: a.FromRankShort,
+                toRankShort: a.ToRankShort,
+                channelName: _config.AutoPromotionAnnouncementChannel);
+
+            // Delay between announcements (but not after the last one)
+            if (i < announcements.Count - 1 && delayMs > 0)
+            {
+                try
+                {
+                    await Task.Delay(delayMs, ct);
+                }
+                catch (OperationCanceledException) { break; }
+            }
+        }
     }
 
     /// <summary>
@@ -286,4 +344,12 @@ public class AutoPromotionService : BackgroundService
         int DaysInRank,
         int MinMessages,
         double MinVoiceHours);
+
+    /// <summary>
+    /// A queued announcement to post during the throttled announcement pass.
+    /// </summary>
+    private record PendingAnnouncement(
+        SocketGuildUser Member,
+        string FromRankShort,
+        string ToRankShort);
 }

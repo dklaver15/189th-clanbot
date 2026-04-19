@@ -167,6 +167,15 @@ public class BotConfig
     /// </summary>
     public string AutoPromotionAnnouncementChannel { get; set; } = "general-chat";
 
+    /// <summary>
+    /// Seconds to wait between successive promotion announcement posts. Prevents
+    /// burst-posting when many members are promoted in a single run (especially
+    /// the first live run after a backlog). Discord's channel rate limit is
+    /// roughly 5 messages per 5 seconds, so 5 seconds is a safe floor. Set to 0
+    /// to disable throttling entirely.
+    /// </summary>
+    public int AutoPromotionAnnouncementDelaySeconds { get; set; } = 5;
+
     // ─── Voice Activity Safeguards ───────────────────────────────────
 
     /// <summary>
