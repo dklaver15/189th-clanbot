@@ -282,17 +282,41 @@ public class AutoPromotionService : BackgroundService
     /// each one. This avoids bursting the announcement channel when a large batch
     /// (e.g. the first live run after a backlog) would otherwise post dozens of
     /// messages within the same second.
+    ///
+    /// The channel is resolved by ID (AutoPromotionAnnouncementChannelId) when set,
+    /// which is immune to emoji prefixes, renames, or other name-matching quirks.
+    /// The ID path resolves the channel's actual stored Name and passes that to
+    /// PromotionService so its existing name-based lookup will match exactly.
+    /// Falls back to AutoPromotionAnnouncementChannel (name) if the ID is unset
+    /// or can't be resolved.
     /// </summary>
     private async Task AnnounceAllAsync(
         SocketGuild guild,
         IReadOnlyList<PendingAnnouncement> announcements,
         CancellationToken ct)
     {
+        // Prefer channel ID (immune to emoji/rename), fall back to configured name.
+        string? channelName = _config.AutoPromotionAnnouncementChannel;
+        if (_config.AutoPromotionAnnouncementChannelId != 0)
+        {
+            var channel = guild.GetTextChannel(_config.AutoPromotionAnnouncementChannelId);
+            if (channel is null)
+            {
+                _logger.LogWarning(
+                    "Auto-promotion announcement channel ID {ChannelId} not found in guild {GuildName}. Falling back to name '{ChannelName}'.",
+                    _config.AutoPromotionAnnouncementChannelId, guild.Name, channelName);
+            }
+            else
+            {
+                channelName = channel.Name;
+            }
+        }
+
         var delayMs = Math.Max(0, _config.AutoPromotionAnnouncementDelaySeconds * 1000);
 
         _logger.LogInformation(
-            "Posting {Count} promotion announcement(s) with {Delay}s spacing",
-            announcements.Count, _config.AutoPromotionAnnouncementDelaySeconds);
+            "Posting {Count} promotion announcement(s) to #{ChannelName} with {Delay}s spacing",
+            announcements.Count, channelName, _config.AutoPromotionAnnouncementDelaySeconds);
 
         for (int i = 0; i < announcements.Count; i++)
         {
@@ -304,7 +328,7 @@ public class AutoPromotionService : BackgroundService
                 a.Member,
                 fromRankShort: a.FromRankShort,
                 toRankShort: a.ToRankShort,
-                channelName: _config.AutoPromotionAnnouncementChannel);
+                channelName: channelName);
 
             // Delay between announcements (but not after the last one)
             if (i < announcements.Count - 1 && delayMs > 0)

@@ -166,6 +166,8 @@ public class BotConfig
     /// Name of the text channel where auto-promotion announcements are posted.
     /// </summary>
     public string AutoPromotionAnnouncementChannel { get; set; } = "general-chat";
+    
+    public ulong AutoPromotionAnnouncementChannelId { get; set; }
 
     /// <summary>
     /// Seconds to wait between successive promotion announcement posts. Prevents
