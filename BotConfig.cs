@@ -66,6 +66,12 @@ public class BotConfig
     /// <summary>Name of the voice channel to track for "Last Events" column.</summary>
     public string EventsVoiceChannelName { get; set; } = "Events";
 
+    /// <summary>
+    /// Discord channel ID of the events voice channel. Used for attendance
+    /// credit in auto-promotion (SGT+) — immune to renames.
+    /// </summary>
+    public ulong EventsVoiceChannelId { get; set; } = default;
+
     /// <summary>Hour of day (UTC, 0-23) to run the nightly roster export.</summary>
     public int RosterExportHourUtc { get; set; } = 6;
 
@@ -158,6 +164,15 @@ public class BotConfig
     public bool AutoPromotionDryRun { get; set; } = false;
 
     /// <summary>
+    /// Comma-separated list of "from" rank names whose tier should be dry-run
+    /// even when AutoPromotionDryRun is false. Useful for rolling out a newly
+    /// added tier with the rest of the ladder still running live.
+    /// Example: "CPL" = the CPL→SGT tier dry-runs; RCT→CPL still promote live.
+    /// Empty = no per-tier overrides.
+    /// </summary>
+    public string AutoPromotionDryRunRanks { get; set; } = "CPL";
+
+    /// <summary>
     /// Hour of day (UTC, 0-23) to run the nightly auto-promotion check.
     /// </summary>
     public int AutoPromotionRunHourUtc { get; set; } = 3;
@@ -166,7 +181,7 @@ public class BotConfig
     /// Name of the text channel where auto-promotion announcements are posted.
     /// </summary>
     public string AutoPromotionAnnouncementChannel { get; set; } = "general-chat";
-    
+
     public ulong AutoPromotionAnnouncementChannelId { get; set; }
 
     /// <summary>
@@ -177,6 +192,19 @@ public class BotConfig
     /// to disable throttling entirely.
     /// </summary>
     public int AutoPromotionAnnouncementDelaySeconds { get; set; } = 5;
+
+    /// <summary>
+    /// Grace period (minutes) on each side of a scheduled event when counting
+    /// voice attendance. 30 = user can show up 30 min early or leave 30 min
+    /// late and still get attendance credit.
+    /// </summary>
+    public int AutoPromotionEventBufferMinutes { get; set; } = 30;
+
+    /// <summary>
+    /// Minimum cumulative minutes a user must be in the events VC (during the
+    /// buffered event window) to count as having attended that event.
+    /// </summary>
+    public int AutoPromotionMinEventAttendanceMinutes { get; set; } = 30;
 
     // ─── Voice Activity Safeguards ───────────────────────────────────
 
@@ -203,6 +231,9 @@ public class BotConfig
 
     public List<string> GetPlatoonRolesList() =>
         PlatoonRoles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+
+    public List<string> GetAutoPromotionDryRunRanksList() =>
+        AutoPromotionDryRunRanks.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
 
     /// <summary>
     /// Returns the appropriate window days for a guild member based on their roles.

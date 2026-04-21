@@ -12,7 +12,14 @@ namespace ClanGuardBot.Services;
 
 /// <summary>
 /// Nightly background service that automatically promotes members who have
-/// met both the time-in-rank and activity thresholds for the RCT → CPL chain.
+/// met both the time-in-rank and activity thresholds for the RCT → SGT chain.
+///
+/// Two activity models:
+///   • RCT → CPL: message count OR voice hours since current rank assignment.
+///   • CPL → SGT (and future ranks above): event attendance. A member attends
+///     an event if they have ≥ AutoPromotionMinEventAttendanceMinutes in the
+///     events VC during the event's buffered window
+///     (event.Start - buffer .. event.End + buffer).
 ///
 /// Activity is counted from the member's current rank assignment date (stored
 /// in RankHistory.AssignedAt), falling back to guild-join date if no record exists.
@@ -24,7 +31,9 @@ namespace ClanGuardBot.Services;
 /// a cycle that promotes many members doesn't burst-post and trip Discord rate
 /// limits or spam filters.
 ///
-/// Promotions can be disabled globally or put in DryRun mode via appsettings.
+/// Promotions can be disabled globally (AutoPromotionDryRun) or per-tier via
+/// AutoPromotionDryRunRanks — useful for rolling out a new tier alongside
+/// existing live ones.
 /// </summary>
 public class AutoPromotionService : BackgroundService
 {
@@ -35,15 +44,20 @@ public class AutoPromotionService : BackgroundService
     private readonly PromotionService _promotion;
 
     /// <summary>
-    /// The promotion tiers for auto-promotion (RCT → CPL).
+    /// The promotion tiers for auto-promotion (RCT → SGT).
     /// Matches the requirements from the clan's promotion doc.
+    ///
+    /// Tiers with MinEvents > 0 use event-attendance activity checks and
+    /// ignore MinMessages / MinVoiceHours. RCT → CPL use msgs/voice; CPL → SGT
+    /// uses events.
     /// </summary>
     private static readonly AutoPromotionTier[] DefaultTiers =
     {
-        new("RCT", "pvt", 7,  5,  1.0),
-        new("PVT", "pfc", 7,  10, 2.0),
-        new("PFC", "spc", 7,  10, 2.0),
-        new("SPC", "cpl", 14, 25, 5.0),
+        new("RCT", "pvt", DaysInRank: 7,  MinMessages: 5,  MinVoiceHours: 1.0),
+        new("PVT", "pfc", DaysInRank: 7,  MinMessages: 10, MinVoiceHours: 2.0),
+        new("PFC", "spc", DaysInRank: 7,  MinMessages: 10, MinVoiceHours: 2.0),
+        new("SPC", "cpl", DaysInRank: 14, MinMessages: 25, MinVoiceHours: 5.0),
+        new("CPL", "sgt", DaysInRank: 14, MinMessages: 0,  MinVoiceHours: 0,   MinEvents: 2),
     };
 
     public AutoPromotionService(
@@ -78,10 +92,12 @@ public class AutoPromotionService : BackgroundService
         // Give guilds a moment to finish downloading members
         await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
 
+        var dryRunRanks = _config.GetAutoPromotionDryRunRanksList();
         _logger.LogInformation(
-            "Auto-promotion service started. Running daily at {Hour:D2}:00 UTC. DryRun={DryRun}, AnnouncementDelay={Delay}s",
+            "Auto-promotion service started. Running daily at {Hour:D2}:00 UTC. DryRun={DryRun}, DryRunRanks=[{DryRunRanks}], AnnouncementDelay={Delay}s",
             _config.AutoPromotionRunHourUtc,
             _config.AutoPromotionDryRun,
+            string.Join(",", dryRunRanks),
             _config.AutoPromotionAnnouncementDelaySeconds);
 
         while (!stoppingToken.IsCancellationRequested)
@@ -153,6 +169,7 @@ public class AutoPromotionService : BackgroundService
             r.Name.Equals(_config.AwolRoleName, StringComparison.OrdinalIgnoreCase));
 
         var tiers = DefaultTiers;
+        var dryRunRanks = _config.GetAutoPromotionDryRunRanksList();
 
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
@@ -177,7 +194,7 @@ public class AutoPromotionService : BackgroundService
             var tier = tiers.FirstOrDefault(t =>
                 t.FromRank.Equals(currentRank, StringComparison.OrdinalIgnoreCase));
 
-            if (tier is null) continue; // Above CPL or unknown rank — skip
+            if (tier is null) continue; // Above top auto-tier or unknown rank — skip
 
             evaluated++;
 
@@ -210,39 +227,76 @@ public class AutoPromotionService : BackgroundService
                 continue;
             }
 
-            // ── Activity check (within current rank only) ───────────
-            var messageCount = await db.MessageEvents
-                .CountAsync(m => m.GuildId == guild.Id
-                              && m.UserId == member.Id
-                              && m.Timestamp >= assignedAt.Value, ct);
+            // ── Activity check ──────────────────────────────────────
+            // Event-based tiers (MinEvents > 0) use attendance; the rest use
+            // messages OR voice hours.
+            bool meetsActivity;
+            string activityDetails;
 
-            var voiceSeconds = await VoiceActivityHelper.GetVoiceSecondsAsync(
-                db, guild.Id, member.Id, assignedAt.Value,
-                _config.MaxSingleSessionHours, ct);
-            var voiceHours = voiceSeconds / 3600.0;
+            if (tier.MinEvents > 0)
+            {
+                var eventsAttended = await EventAttendanceHelper.CountEventsAttendedAsync(
+                    db,
+                    guild.Id,
+                    member.Id,
+                    _config.EventsVoiceChannelId,
+                    assignedAt.Value,
+                    _config.AutoPromotionEventBufferMinutes,
+                    _config.AutoPromotionMinEventAttendanceMinutes,
+                    _config.MaxSingleSessionHours,
+                    ct);
 
-            var meetsMessages = messageCount >= tier.MinMessages;
-            var meetsVoice = voiceHours >= tier.MinVoiceHours;
+                meetsActivity = eventsAttended >= tier.MinEvents;
+                activityDetails = $"events={eventsAttended}/{tier.MinEvents}";
+            }
+            else
+            {
+                var messageCount = await db.MessageEvents
+                    .CountAsync(m => m.GuildId == guild.Id
+                                  && m.UserId == member.Id
+                                  && m.Timestamp >= assignedAt.Value, ct);
 
-            if (!meetsMessages && !meetsVoice)
+                var voiceSeconds = await VoiceActivityHelper.GetVoiceSecondsAsync(
+                    db, guild.Id, member.Id, assignedAt.Value,
+                    _config.MaxSingleSessionHours, ct);
+                var voiceHours = voiceSeconds / 3600.0;
+
+                var meetsMessages = messageCount >= tier.MinMessages;
+                var meetsVoice    = voiceHours   >= tier.MinVoiceHours;
+
+                meetsActivity = meetsMessages || meetsVoice;
+                activityDetails =
+                    $"msgs={messageCount}/{tier.MinMessages}, voice={voiceHours:F1}h/{tier.MinVoiceHours}h";
+            }
+
+            if (!meetsActivity)
             {
                 _logger.LogDebug(
-                    "Auto-promo skip: {User} activity below threshold — msgs={Msgs}/{MinMsgs}, voice={Voice:F1}h/{MinVoice}h",
-                    member.Username, messageCount, tier.MinMessages, voiceHours, tier.MinVoiceHours);
+                    "Auto-promo skip: {User} activity below threshold — {Details}",
+                    member.Username, activityDetails);
                 skipped++;
                 continue;
             }
 
             // ── Eligible — promote ──────────────────────────────────
             _logger.LogInformation(
-                "Auto-promo ELIGIBLE: {User} {From} → {To} (time={Days:F1}d, msgs={Msgs}, voice={Voice:F1}h)",
+                "Auto-promo ELIGIBLE: {User} {From} → {To} (time={Days:F1}d, {ActivityDetails})",
                 member.Username, tier.FromRank, tier.ToRank.ToUpperInvariant(),
-                timeInRank.TotalDays, messageCount, voiceHours);
+                timeInRank.TotalDays, activityDetails);
 
-            if (_config.AutoPromotionDryRun)
+            // Global OR per-tier dry-run. Per-tier lets us stage a new tier
+            // while RCT→CPL keeps running live.
+            var tierDryRun =
+                dryRunRanks.Any(r => r.Equals(tier.FromRank, StringComparison.OrdinalIgnoreCase));
+
+            if (_config.AutoPromotionDryRun || tierDryRun)
             {
-                _logger.LogInformation("Auto-promo DRY RUN: would promote {User} to {NewRank}",
-                    member.Username, tier.ToRank.ToUpperInvariant());
+                var reason = _config.AutoPromotionDryRun
+                    ? "global DryRun"
+                    : $"per-tier DryRun ({tier.FromRank})";
+                _logger.LogInformation(
+                    "Auto-promo DRY RUN ({Reason}): would promote {User} to {NewRank}",
+                    reason, member.Username, tier.ToRank.ToUpperInvariant());
                 continue;
             }
 
@@ -361,13 +415,16 @@ public class AutoPromotionService : BackgroundService
 
     /// <summary>
     /// Represents a single auto-promotion tier.
+    /// When MinEvents > 0, activity is measured by event attendance (events VC
+    /// presence during buffered calendar-event windows) instead of msgs/voice.
     /// </summary>
     private record AutoPromotionTier(
         string FromRank,
         string ToRank,           // shorthand (lowercase) matching PromotionService.RankMap keys
         int DaysInRank,
         int MinMessages,
-        double MinVoiceHours);
+        double MinVoiceHours,
+        int MinEvents = 0);
 
     /// <summary>
     /// A queued announcement to post during the throttled announcement pass.
