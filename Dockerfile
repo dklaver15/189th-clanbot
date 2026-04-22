@@ -12,6 +12,9 @@ RUN dotnet publish -c Release -o /app
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
 WORKDIR /app
 
+# Install sqlite3 CLI for DB inspection
+RUN apt-get update && apt-get install -y sqlite3 && rm -rf /var/lib/apt/lists/*
+
 # Create directories for persistent data
 RUN mkdir -p /app/data /app/logs
 
