@@ -104,9 +104,17 @@ try
     // voice state). Prevents orphaned sessions from inflating activity totals.
     builder.Services.AddHostedService<VoiceSessionCleanupService>();
 
-    // AutoPromotionService: nightly check that auto-promotes RCT → CPL based on
-    // time-in-rank + activity thresholds. Respects the AutoPromotionEnabled and
-    // AutoPromotionDryRun config flags.
+    // EventAttendanceSnapshotService: timer-driven (default 5 min) + startup
+    // catch-up pass. Writes EventAttendance rows shortly after each clan event
+    // ends, so attendance history survives CalendarEvent row deletion (which
+    // happens when Apollo messages are cleaned up). Consumed by AutoPromotionService
+    // for SGT+ eligibility checks.
+    builder.Services.AddHostedService<EventAttendanceSnapshotService>();
+
+    // AutoPromotionService: nightly check that auto-promotes RCT → SGT based on
+    // time-in-rank + activity thresholds (msgs/voice for RCT→CPL; event attendance
+    // for CPL→SGT). Respects the AutoPromotionEnabled, AutoPromotionDryRun, and
+    // AutoPromotionDryRunRanks config flags.
     builder.Services.AddHostedService<AutoPromotionService>();
 
     // RosterExportService: singleton so SlashCommandHandler can inject it,

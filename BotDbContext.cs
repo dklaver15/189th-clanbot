@@ -6,15 +6,16 @@ namespace ClanGuardBot.Data;
 
 public class BotDbContext : DbContext
 {
-    public DbSet<UserActivity>      UserActivities     => Set<UserActivity>();
-    public DbSet<AwolRecord>        AwolRecords        => Set<AwolRecord>();
-    public DbSet<MessageEvent>      MessageEvents      => Set<MessageEvent>();
-    public DbSet<VoiceSession>      VoiceSessions      => Set<VoiceSession>();
-    public DbSet<RankHistory>       RankHistories      => Set<RankHistory>();
-    public DbSet<TicketReminder>    TicketReminders    => Set<TicketReminder>();
-    public DbSet<GuestReminder>     GuestReminders     => Set<GuestReminder>();
+    public DbSet<UserActivity>       UserActivities      => Set<UserActivity>();
+    public DbSet<AwolRecord>         AwolRecords         => Set<AwolRecord>();
+    public DbSet<MessageEvent>       MessageEvents       => Set<MessageEvent>();
+    public DbSet<VoiceSession>       VoiceSessions       => Set<VoiceSession>();
+    public DbSet<RankHistory>        RankHistories       => Set<RankHistory>();
+    public DbSet<TicketReminder>     TicketReminders     => Set<TicketReminder>();
+    public DbSet<GuestReminder>      GuestReminders      => Set<GuestReminder>();
     public DbSet<OnboardingReminder> OnboardingReminders => Set<OnboardingReminder>();
-    public DbSet<CalendarEvent>     CalendarEvents     => Set<CalendarEvent>();
+    public DbSet<CalendarEvent>      CalendarEvents      => Set<CalendarEvent>();
+    public DbSet<EventAttendance>    EventAttendances    => Set<EventAttendance>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -68,6 +69,21 @@ public class BotDbContext : DbContext
             e.HasIndex(c => c.DiscordMessageId);
             // Look up all events for a guild by source (Clan vs CompDiv)
             e.HasIndex(c => new { c.GuildId, c.Source });
+        });
+
+        modelBuilder.Entity<EventAttendance>(e =>
+        {
+            // One attendance row per user per event. The snapshot service uses
+            // this to avoid double-counting if a sweep runs twice for the same
+            // event (e.g. due to restart + catch-up overlap).
+            e.HasIndex(a => new { a.GuildId, a.UserId, a.CalendarEventId }).IsUnique();
+
+            // Primary query pattern from EventAttendanceHelper: "how many events
+            // has this user attended in a time window?"
+            e.HasIndex(a => new { a.GuildId, a.UserId, a.EventEndUtc });
+
+            // Sweep query: "events that ended recently but haven't been snapshotted"
+            e.HasIndex(a => a.CalendarEventId);
         });
     }
 }

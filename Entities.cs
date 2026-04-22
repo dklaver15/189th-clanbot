@@ -168,6 +168,56 @@ public class CalendarEvent
     public string Source { get; set; } = "Clan";
 
     public DateTime CreatedAt { get; set; }
-    
+
     public string Description { get; set; } = "";
+}
+
+/// <summary>
+/// Durable record of a member's attendance at a single clan event. One row per
+/// (guild, user, event) tuple with AttendedMinutes above the configured threshold.
+///
+/// ── Why this table exists ──
+/// CalendarEvents rows get deleted when their source Apollo Discord message is
+/// removed from #events (either manually or by Apollo's own auto-cleanup). That
+/// made CalendarEvents unsuitable as the source of truth for past attendance:
+/// past events vanish, and with them the data any attendance query would need.
+/// This table snapshots attendance per event shortly after the event ends, so
+/// the historical record persists even after the originating CalendarEvent is
+/// gone.
+///
+/// ── Denormalized event times ──
+/// We copy EventStartUtc/EventEndUtc onto each row rather than keeping them as
+/// a foreign-key relationship. That's the whole point — if CalendarEvent.Id=42
+/// gets deleted tomorrow, attendance rows that referenced it would still need
+/// to survive. The CalendarEventId is kept for traceability but is not a FK.
+/// </summary>
+public class EventAttendance
+{
+    public int Id { get; set; }
+    public ulong GuildId { get; set; }
+    public ulong UserId { get; set; }
+
+    /// <summary>
+    /// Internal CalendarEvents.Id this attendance was computed from. Not a FK —
+    /// the CalendarEvent row may be gone by the time you query this. Kept for
+    /// traceability / debugging only.
+    /// </summary>
+    public int CalendarEventId { get; set; }
+
+    /// <summary>Denormalized copy of CalendarEvent.StartUtc at snapshot time.</summary>
+    public DateTime EventStartUtc { get; set; }
+
+    /// <summary>Denormalized copy of CalendarEvent.EndUtc at snapshot time.</summary>
+    public DateTime EventEndUtc { get; set; }
+
+    /// <summary>
+    /// Cumulative minutes the user spent in the events VC during the buffered
+    /// event window (event.Start - buffer .. event.End + buffer). Only rows
+    /// meeting the configured minimum are written; this value is stored mainly
+    /// for auditing / "why did they qualify" questions.
+    /// </summary>
+    public int AttendedMinutes { get; set; }
+
+    /// <summary>When this attendance row was snapshotted by the background service.</summary>
+    public DateTime RecordedAt { get; set; }
 }
