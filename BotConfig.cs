@@ -196,7 +196,8 @@ public class BotConfig
     /// <summary>
     /// Grace period (minutes) on each side of a scheduled event when counting
     /// voice attendance. 30 = user can show up 30 min early or leave 30 min
-    /// late and still get attendance credit.
+    /// late and still get attendance credit. Used by
+    /// EventAttendanceSnapshotService when computing per-event attendance.
     /// </summary>
     public int AutoPromotionEventBufferMinutes { get; set; } = 30;
 
@@ -205,6 +206,15 @@ public class BotConfig
     /// buffered event window) to count as having attended that event.
     /// </summary>
     public int AutoPromotionMinEventAttendanceMinutes { get; set; } = 30;
+
+    /// <summary>
+    /// How often (minutes) the EventAttendanceSnapshotService wakes up to check
+    /// for newly-ended events that need attendance rows written. Shorter intervals
+    /// reduce the window of attendance loss if a CalendarEvent is deleted before
+    /// we snapshot it; longer intervals reduce DB load. 5 minutes is a good
+    /// default for a clan with a few events per week. Minimum 1.
+    /// </summary>
+    public int EventAttendanceSnapshotIntervalMinutes { get; set; } = 5;
 
     // ─── Voice Activity Safeguards ───────────────────────────────────
 

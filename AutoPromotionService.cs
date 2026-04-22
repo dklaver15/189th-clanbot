@@ -16,10 +16,8 @@ namespace ClanGuardBot.Services;
 ///
 /// Two activity models:
 ///   • RCT → CPL: message count OR voice hours since current rank assignment.
-///   • CPL → SGT (and future ranks above): event attendance. A member attends
-///     an event if they have ≥ AutoPromotionMinEventAttendanceMinutes in the
-///     events VC during the event's buffered window
-///     (event.Start - buffer .. event.End + buffer).
+///   • CPL → SGT (and future ranks above): event attendance, sourced from the
+///     EventAttendance table populated by EventAttendanceSnapshotService.
 ///
 /// Activity is counted from the member's current rank assignment date (stored
 /// in RankHistory.AssignedAt), falling back to guild-join date if no record exists.
@@ -47,9 +45,8 @@ public class AutoPromotionService : BackgroundService
     /// The promotion tiers for auto-promotion (RCT → SGT).
     /// Matches the requirements from the clan's promotion doc.
     ///
-    /// Tiers with MinEvents > 0 use event-attendance activity checks and
-    /// ignore MinMessages / MinVoiceHours. RCT → CPL use msgs/voice; CPL → SGT
-    /// uses events.
+    /// Tiers with MinEvents > 0 use event-attendance activity checks (via the
+    /// EventAttendance table) and ignore MinMessages / MinVoiceHours.
     /// </summary>
     private static readonly AutoPromotionTier[] DefaultTiers =
     {
@@ -178,27 +175,22 @@ public class AutoPromotionService : BackgroundService
         var promoted = 0;
         var skipped = 0;
 
-        // Queue of promotions to announce after all role changes are applied.
-        // Announcements are throttled separately so they don't burst-post
-        // and trip Discord's channel rate limits.
         var pendingAnnouncements = new List<PendingAnnouncement>();
 
         foreach (var member in guild.Users)
         {
             if (member.IsBot) continue;
 
-            // Find the tier matching the member's current rank, if any
             var currentRank = GetCurrentRank(member);
-            if (currentRank is null) continue; // No rank role — nothing to auto-promote
+            if (currentRank is null) continue;
 
             var tier = tiers.FirstOrDefault(t =>
                 t.FromRank.Equals(currentRank, StringComparison.OrdinalIgnoreCase));
 
-            if (tier is null) continue; // Above top auto-tier or unknown rank — skip
+            if (tier is null) continue;
 
             evaluated++;
 
-            // ── AWOL check ──────────────────────────────────────────
             if (awolRole is not null && member.Roles.Any(r => r.Id == awolRole.Id))
             {
                 _logger.LogDebug("Auto-promo skip: {User} is AWOL", member.Username);
@@ -206,7 +198,6 @@ public class AutoPromotionService : BackgroundService
                 continue;
             }
 
-            // ── Time-in-rank check ──────────────────────────────────
             var assignedAt = await _promotion.GetRankAssignedAtAsync(guild.Id, member, ct);
             if (assignedAt is null)
             {
@@ -228,23 +219,13 @@ public class AutoPromotionService : BackgroundService
             }
 
             // ── Activity check ──────────────────────────────────────
-            // Event-based tiers (MinEvents > 0) use attendance; the rest use
-            // messages OR voice hours.
             bool meetsActivity;
             string activityDetails;
 
             if (tier.MinEvents > 0)
             {
                 var eventsAttended = await EventAttendanceHelper.CountEventsAttendedAsync(
-                    db,
-                    guild.Id,
-                    member.Id,
-                    _config.EventsVoiceChannelId,
-                    assignedAt.Value,
-                    _config.AutoPromotionEventBufferMinutes,
-                    _config.AutoPromotionMinEventAttendanceMinutes,
-                    _config.MaxSingleSessionHours,
-                    ct);
+                    db, guild.Id, member.Id, assignedAt.Value, ct);
 
                 meetsActivity = eventsAttended >= tier.MinEvents;
                 activityDetails = $"events={eventsAttended}/{tier.MinEvents}";
@@ -278,14 +259,11 @@ public class AutoPromotionService : BackgroundService
                 continue;
             }
 
-            // ── Eligible — promote ──────────────────────────────────
             _logger.LogInformation(
                 "Auto-promo ELIGIBLE: {User} {From} → {To} (time={Days:F1}d, {ActivityDetails})",
                 member.Username, tier.FromRank, tier.ToRank.ToUpperInvariant(),
                 timeInRank.TotalDays, activityDetails);
 
-            // Global OR per-tier dry-run. Per-tier lets us stage a new tier
-            // while RCT→CPL keeps running live.
             var tierDryRun =
                 dryRunRanks.Any(r => r.Equals(tier.FromRank, StringComparison.OrdinalIgnoreCase));
 
@@ -311,9 +289,6 @@ public class AutoPromotionService : BackgroundService
 
             promoted++;
 
-            // Defer the announcement — we'll post them in a throttled pass after
-            // all role changes are done, so the rate-limit window doesn't overlap
-            // with Discord role-change API calls.
             pendingAnnouncements.Add(new PendingAnnouncement(
                 Member: member,
                 FromRankShort: tier.FromRank,
@@ -324,32 +299,17 @@ public class AutoPromotionService : BackgroundService
             "Auto-promotion for guild {Guild}: evaluated={Evaluated}, promoted={Promoted}, skipped={Skipped}",
             guild.Name, evaluated, promoted, skipped);
 
-        // ── Throttled announcement pass ─────────────────────────────
         if (pendingAnnouncements.Count > 0)
         {
             await AnnounceAllAsync(guild, pendingAnnouncements, ct);
         }
     }
 
-    /// <summary>
-    /// Posts all queued promotion announcements with a configurable delay between
-    /// each one. This avoids bursting the announcement channel when a large batch
-    /// (e.g. the first live run after a backlog) would otherwise post dozens of
-    /// messages within the same second.
-    ///
-    /// The channel is resolved by ID (AutoPromotionAnnouncementChannelId) when set,
-    /// which is immune to emoji prefixes, renames, or other name-matching quirks.
-    /// The ID path resolves the channel's actual stored Name and passes that to
-    /// PromotionService so its existing name-based lookup will match exactly.
-    /// Falls back to AutoPromotionAnnouncementChannel (name) if the ID is unset
-    /// or can't be resolved.
-    /// </summary>
     private async Task AnnounceAllAsync(
         SocketGuild guild,
         IReadOnlyList<PendingAnnouncement> announcements,
         CancellationToken ct)
     {
-        // Prefer channel ID (immune to emoji/rename), fall back to configured name.
         string? channelName = _config.AutoPromotionAnnouncementChannel;
         if (_config.AutoPromotionAnnouncementChannelId != 0)
         {
@@ -384,7 +344,6 @@ public class AutoPromotionService : BackgroundService
                 toRankShort: a.ToRankShort,
                 channelName: channelName);
 
-            // Delay between announcements (but not after the last one)
             if (i < announcements.Count - 1 && delayMs > 0)
             {
                 try
@@ -396,10 +355,6 @@ public class AutoPromotionService : BackgroundService
         }
     }
 
-    /// <summary>
-    /// Returns the member's highest-ranking rank role name, or null if they have none.
-    /// Uses the RankRoles config list (ordered low → high) to determine ordering.
-    /// </summary>
     private string? GetCurrentRank(SocketGuildUser member)
     {
         var rankRoles = _config.GetRankRolesList();
@@ -413,22 +368,14 @@ public class AutoPromotionService : BackgroundService
         return null;
     }
 
-    /// <summary>
-    /// Represents a single auto-promotion tier.
-    /// When MinEvents > 0, activity is measured by event attendance (events VC
-    /// presence during buffered calendar-event windows) instead of msgs/voice.
-    /// </summary>
     private record AutoPromotionTier(
         string FromRank,
-        string ToRank,           // shorthand (lowercase) matching PromotionService.RankMap keys
+        string ToRank,
         int DaysInRank,
         int MinMessages,
         double MinVoiceHours,
         int MinEvents = 0);
 
-    /// <summary>
-    /// A queued announcement to post during the throttled announcement pass.
-    /// </summary>
     private record PendingAnnouncement(
         SocketGuildUser Member,
         string FromRankShort,
