@@ -216,6 +216,15 @@ public class BotConfig
     /// </summary>
     public int EventAttendanceSnapshotIntervalMinutes { get; set; } = 5;
 
+    /// <summary>
+    /// Comma-separated list of CalendarEvent.Source values that count toward
+    /// auto-promotion attendance. CompDiv events (comp team scrims) don't count
+    /// toward clan-wide promotion points and are excluded by default. If new
+    /// source types are added in the future, add them here explicitly to opt
+    /// them in. Case-insensitive.
+    /// </summary>
+    public string AttendanceCountingSources { get; set; } = "Clan";
+
     // ─── Voice Activity Safeguards ───────────────────────────────────
 
     /// <summary>
@@ -244,6 +253,9 @@ public class BotConfig
 
     public List<string> GetAutoPromotionDryRunRanksList() =>
         AutoPromotionDryRunRanks.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+
+    public List<string> GetAttendanceCountingSourcesList() =>
+        AttendanceCountingSources.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
 
     /// <summary>
     /// Returns the appropriate window days for a guild member based on their roles.
