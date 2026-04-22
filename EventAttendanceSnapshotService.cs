@@ -31,6 +31,12 @@ namespace ClanGuardBot.Services;
 /// capped by MaxSingleSessionHours to prevent orphaned sessions from granting
 /// unlimited credit.
 ///
+/// ── Which events count toward promotion ──
+/// Only events whose Source is in AttendanceCountingSources (default: "Clan")
+/// are processed. CompDiv events — internal comp-team scrims — don't count
+/// toward clan-wide promotion points and are skipped, even though they're
+/// visible in the calendar and #events channel.
+///
 /// ── Idempotency ──
 /// The unique index on (GuildId, UserId, CalendarEventId) means we can
 /// re-snapshot the same event safely. We skip events that already have at least
@@ -76,11 +82,13 @@ public class EventAttendanceSnapshotService : BackgroundService
         // CalendarEvent rows we'd want to snapshot.
         await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
 
+        var countingSources = _config.GetAttendanceCountingSourcesList();
         _logger.LogInformation(
-            "EventAttendanceSnapshotService started. Interval={Interval}min, Buffer={Buffer}min, MinMinutes={Min}",
+            "EventAttendanceSnapshotService started. Interval={Interval}min, Buffer={Buffer}min, MinMinutes={Min}, CountingSources=[{Sources}]",
             _config.EventAttendanceSnapshotIntervalMinutes,
             _config.AutoPromotionEventBufferMinutes,
-            _config.AutoPromotionMinEventAttendanceMinutes);
+            _config.AutoPromotionMinEventAttendanceMinutes,
+            string.Join(",", countingSources));
 
         // Startup catch-up — snapshot every past event that doesn't already
         // have attendance records. This handles two cases:
@@ -119,13 +127,19 @@ public class EventAttendanceSnapshotService : BackgroundService
 
     /// <summary>
     /// Finds past CalendarEvents that don't yet have attendance snapshots and
-    /// computes one row per attending member for each. Idempotent — safe to
-    /// call repeatedly; events that already have any EventAttendance row are
-    /// skipped.
+    /// computes one row per attending member for each. Events whose Source is
+    /// not in the configured counting list (e.g. CompDiv) are skipped entirely
+    /// — they don't count toward promotion points and thus don't need snapshots.
+    ///
+    /// Idempotent — safe to call repeatedly; events that already have any
+    /// EventAttendance row are skipped.
     /// </summary>
     private async Task RunSweepAsync(bool isCatchUp, CancellationToken ct)
     {
         var now = DateTime.UtcNow;
+        var countingSources = _config.GetAttendanceCountingSourcesList()
+            .Select(s => s.ToLowerInvariant())
+            .ToHashSet();
 
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
@@ -148,24 +162,43 @@ public class EventAttendanceSnapshotService : BackgroundService
             .OrderBy(c => c.EndUtc)
             .ToListAsync(ct);
 
-        var toProcess = pastEvents
+        var unsnapshotted = pastEvents
             .Where(e => !snapshottedSet.Contains(e.Id))
             .ToList();
 
-        if (toProcess.Count == 0)
+        // Split unsnapshotted events by whether they count toward attendance.
+        // Non-counting events (CompDiv, etc.) are not worth snapshotting — they'll
+        // just produce empty results — but we log them so you can see they were
+        // considered and skipped.
+        var counting = unsnapshotted
+            .Where(e => countingSources.Contains((e.Source ?? "").ToLowerInvariant()))
+            .ToList();
+        var skippedBySource = unsnapshotted.Count - counting.Count;
+
+        if (counting.Count == 0)
         {
             if (isCatchUp)
-                _logger.LogInformation("Attendance catch-up: no past events needing snapshots");
+            {
+                _logger.LogInformation(
+                    "Attendance catch-up: no counting events needing snapshots ({Skipped} non-counting event(s) skipped)",
+                    skippedBySource);
+            }
+            else if (skippedBySource > 0)
+            {
+                _logger.LogDebug(
+                    "Attendance sweep: {Skipped} non-counting event(s) skipped, nothing else to process",
+                    skippedBySource);
+            }
             return;
         }
 
         _logger.LogInformation(
-            "Attendance sweep ({Mode}): processing {Count} event(s)",
-            isCatchUp ? "catch-up" : "interval", toProcess.Count);
+            "Attendance sweep ({Mode}): processing {Counting} counting event(s), skipping {Skipped} non-counting",
+            isCatchUp ? "catch-up" : "interval", counting.Count, skippedBySource);
 
         var totalAttendances = 0;
 
-        foreach (var evt in toProcess)
+        foreach (var evt in counting)
         {
             if (ct.IsCancellationRequested) break;
 
@@ -175,8 +208,8 @@ public class EventAttendanceSnapshotService : BackgroundService
                 totalAttendances += rowsWritten;
 
                 _logger.LogInformation(
-                    "Attendance snapshot: event '{Title}' (Id={EventId}, ended {End:yyyy-MM-dd HH:mm} UTC) → {Attendees} attendee(s)",
-                    evt.Title, evt.Id, evt.EndUtc, rowsWritten);
+                    "Attendance snapshot: event '{Title}' [{Source}] (Id={EventId}, ended {End:yyyy-MM-dd HH:mm} UTC) → {Attendees} attendee(s)",
+                    evt.Title, evt.Source, evt.Id, evt.EndUtc, rowsWritten);
             }
             catch (Exception ex)
             {
@@ -187,8 +220,8 @@ public class EventAttendanceSnapshotService : BackgroundService
         }
 
         _logger.LogInformation(
-            "Attendance sweep complete: {Events} event(s), {Rows} attendance row(s) written",
-            toProcess.Count, totalAttendances);
+            "Attendance sweep complete: {Events} event(s) processed, {Rows} attendance row(s) written",
+            counting.Count, totalAttendances);
     }
 
     /// <summary>
