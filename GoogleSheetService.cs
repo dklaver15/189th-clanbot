@@ -223,6 +223,13 @@ public class GoogleSheetsService
             ApplicationName = "ClanGuardBot"
         });
 
+        // The default HttpClient timeout (100s) is not enough when we hit the
+        // first post-fix run, because we may be cleaning up thousands of
+        // accumulated conditional-format rules on the roster sheet. Bump to
+        // 5 minutes which comfortably handles very large backlogs. Steady
+        // state runs finish in a few seconds regardless.
+        service.HttpClient.Timeout = TimeSpan.FromMinutes(5);
+
         var spreadsheetId = string.IsNullOrWhiteSpace(_config.RosterSpreadsheetId)
             ? _config.GoogleSpreadsheetId
             : _config.RosterSpreadsheetId;
@@ -339,6 +346,7 @@ public class GoogleSheetsService
             // our HttpClient timeout. 500 per batch is comfortably under
             // both the API's request limit and the timeout budget.
             const int deleteChunkSize = 500;
+            var chunkStartTime = DateTime.UtcNow;
             for (int offset = 0; offset < deleteRequests.Count; offset += deleteChunkSize)
             {
                 var chunk = deleteRequests
@@ -346,15 +354,24 @@ public class GoogleSheetsService
                     .Take(deleteChunkSize)
                     .ToList();
 
+                var chunkBegin = DateTime.UtcNow;
                 await service.Spreadsheets.BatchUpdate(
                     new BatchUpdateSpreadsheetRequest { Requests = chunk },
                     spreadsheetId).ExecuteAsync();
 
-                _logger.LogDebug(
-                    "Deleted conditional-format rules {From}-{To} of {Total}",
-                    offset + 1, Math.Min(offset + chunk.Count, deleteRequests.Count),
-                    deleteRequests.Count);
+                var chunkDuration = DateTime.UtcNow - chunkBegin;
+                _logger.LogInformation(
+                    "Deleted conditional-format rules {From}-{To} of {Total} in {Duration:F1}s",
+                    offset + 1,
+                    Math.Min(offset + chunk.Count, deleteRequests.Count),
+                    deleteRequests.Count,
+                    chunkDuration.TotalSeconds);
             }
+
+            var totalDuration = DateTime.UtcNow - chunkStartTime;
+            _logger.LogInformation(
+                "Conditional-format cleanup complete: removed {Count} rule(s) in {Duration:F1}s total",
+                existingRuleCount, totalDuration.TotalSeconds);
         }
 
         // Single rule for alternating shading + header formatting.
