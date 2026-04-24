@@ -287,23 +287,80 @@ public class GoogleSheetsService
             SpreadsheetsResource.ValuesResource.UpdateRequest.ValueInputOptionEnum.USERENTERED;
         await updateRequest.ExecuteAsync();
 
-        // Apply alternate row shading
+        // ── Apply formatting ────────────────────────────────────────────
+        //
+        // Historical note: an earlier version of this method added one
+        // conditional-format rule per data row on every export without ever
+        // cleaning up the previous run's rules. All N rules were identical
+        // (same formula, same range, same color), so they were redundant —
+        // one rule covers all alternating rows via the MOD(ROW(),2)=0
+        // formula. After months of nightly runs, thousands of duplicate
+        // rules accumulated on the sheet and the format batch started
+        // timing out the 100s HttpClient limit.
+        //
+        // This version:
+        //   1. Deletes ALL existing conditional-format rules (in chunks so
+        //      the cleanup itself doesn't time out on the first run post-
+        //      fix, when the backlog may be very large).
+        //   2. Adds exactly ONE alternating-row-shading rule.
+        //   3. Applies the dark header-row styling.
+        //
+        // Steady state after the first run: at most 1 existing rule to
+        // delete + 1 rule to add + 1 header format = 3 requests per export.
+
         var spreadsheet = await service.Spreadsheets.Get(spreadsheetId).ExecuteAsync();
-        var sheetId = spreadsheet.Sheets
-            .First(s => s.Properties.Title == sheetName)
-            .Properties.SheetId;
+        var rosterSheet = spreadsheet.Sheets.First(s => s.Properties.Title == sheetName);
+        var sheetId = rosterSheet.Properties.SheetId ?? 0;
+        var existingRuleCount = rosterSheet.ConditionalFormats?.Count ?? 0;
 
-        var formatRequests = new List<Request>();
-
-        // Light gray for even data rows (0-indexed: row 0 = header, row 1 = first data row)
-        var shadedColor = new Color { Red = 0.95f, Green = 0.95f, Blue = 0.95f, Alpha = 1f };
-        var whiteColor = new Color { Red = 1f, Green = 1f, Blue = 1f, Alpha = 1f };
-
-        for (int i = 1; i <= rows.Count; i++)
+        if (existingRuleCount > 0)
         {
-            var bgColor = (i % 2 == 0) ? shadedColor : whiteColor;
+            _logger.LogInformation(
+                "Roster sheet has {Count} existing conditional-format rule(s) — deleting before re-applying fresh formatting",
+                existingRuleCount);
 
-            formatRequests.Add(new Request
+            // Build all deletes from highest index to lowest so that the
+            // indices remain valid as the sheet processes the batch.
+            var deleteRequests = new List<Request>();
+            for (int idx = existingRuleCount - 1; idx >= 0; idx--)
+            {
+                deleteRequests.Add(new Request
+                {
+                    DeleteConditionalFormatRule = new DeleteConditionalFormatRuleRequest
+                    {
+                        SheetId = sheetId,
+                        Index = idx
+                    }
+                });
+            }
+
+            // Chunk in case the backlog is large. A single batch of many
+            // thousands of deletes can push Google's processing time past
+            // our HttpClient timeout. 500 per batch is comfortably under
+            // both the API's request limit and the timeout budget.
+            const int deleteChunkSize = 500;
+            for (int offset = 0; offset < deleteRequests.Count; offset += deleteChunkSize)
+            {
+                var chunk = deleteRequests
+                    .Skip(offset)
+                    .Take(deleteChunkSize)
+                    .ToList();
+
+                await service.Spreadsheets.BatchUpdate(
+                    new BatchUpdateSpreadsheetRequest { Requests = chunk },
+                    spreadsheetId).ExecuteAsync();
+
+                _logger.LogDebug(
+                    "Deleted conditional-format rules {From}-{To} of {Total}",
+                    offset + 1, Math.Min(offset + chunk.Count, deleteRequests.Count),
+                    deleteRequests.Count);
+            }
+        }
+
+        // Single rule for alternating shading + header formatting.
+        var formatRequests = new List<Request>
+        {
+            new Request
             {
                 AddConditionalFormatRule = new AddConditionalFormatRuleRequest
                 {
@@ -338,43 +395,41 @@ public class GoogleSheetsService
                     },
                     Index = 0
                 }
-            });
-        }
+            },
 
-        // Also style the header row
-        formatRequests.Add(new Request
-        {
-            RepeatCell = new RepeatCellRequest
+            // Dark header styling
+            new Request
             {
-                Range = new GridRange
+                RepeatCell = new RepeatCellRequest
                 {
-                    SheetId = sheetId,
-                    StartRowIndex = 0,
-                    EndRowIndex = 1,
-                    StartColumnIndex = 0,
-                    EndColumnIndex = 13
-                },
-                Cell = new CellData
-                {
-                    UserEnteredFormat = new CellFormat
+                    Range = new GridRange
                     {
-                        BackgroundColor = new Color { Red = 0.2f, Green = 0.2f, Blue = 0.2f, Alpha = 1f },
-                        TextFormat = new TextFormat
+                        SheetId = sheetId,
+                        StartRowIndex = 0,
+                        EndRowIndex = 1,
+                        StartColumnIndex = 0,
+                        EndColumnIndex = 13
+                    },
+                    Cell = new CellData
+                    {
+                        UserEnteredFormat = new CellFormat
                         {
-                            Bold = true,
-                            ForegroundColor = new Color { Red = 1f, Green = 1f, Blue = 1f, Alpha = 1f }
+                            BackgroundColor = new Color { Red = 0.2f, Green = 0.2f, Blue = 0.2f, Alpha = 1f },
+                            TextFormat = new TextFormat
+                            {
+                                Bold = true,
+                                ForegroundColor = new Color { Red = 1f, Green = 1f, Blue = 1f, Alpha = 1f }
+                            }
                         }
-                    }
-                },
-                Fields = "userEnteredFormat(backgroundColor,textFormat)"
+                    },
+                    Fields = "userEnteredFormat(backgroundColor,textFormat)"
+                }
             }
-        });
-
-        var batchFormatRequest = new BatchUpdateSpreadsheetRequest
-        {
-            Requests = formatRequests
         };
-        await service.Spreadsheets.BatchUpdate(batchFormatRequest, spreadsheetId).ExecuteAsync();
+
+        await service.Spreadsheets.BatchUpdate(
+            new BatchUpdateSpreadsheetRequest { Requests = formatRequests },
+            spreadsheetId).ExecuteAsync();
 
         _logger.LogInformation("Wrote {Count} roster rows to sheet {SheetName}", rows.Count, sheetName);
     }
