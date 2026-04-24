@@ -15,6 +15,14 @@ namespace ClanGuardBot.Services;
 /// Columns: Discord Name | Rank | All Roles | Join Date | Messages (window) |
 ///          Voice Hours (window) | AWOL Status | Time in Rank | Last Events VC
 /// Also detects and persists rank changes for time-in-rank tracking.
+///
+/// ── How "Events VC" is matched ──
+/// Both the "Last Events VC" column and the distinct-event attendance count
+/// at current rank match against the EVENTS category (BotConfig.EventsCategoryId)
+/// rather than a single channel. Any VC under that category — including temp
+/// event VCs spun up for overflow or squad splits — counts. Sessions recorded
+/// before CategoryId existed on VoiceSession (null CategoryId) fall back to
+/// matching on EventsVoiceChannelId so historical rows still register.
 /// </summary>
 public class RosterExportService : BackgroundService
 {
@@ -164,19 +172,25 @@ public class RosterExportService : BackgroundService
                 bool hasAwolRole = member.Roles.Any(r =>
                     r.Name.Equals(_config.AwolRoleName, StringComparison.OrdinalIgnoreCase));
 
-                // Last time in Events voice channel
+                // Last time in any EVENTS-category voice channel (main Events VC
+                // or any temp event VC under the category). Falls back to the
+                // legacy channel-ID match for rows with null CategoryId.
+                var categoryId = _config.EventsCategoryId;
+                var legacyEventsChannelId = _config.EventsVoiceChannelId;
+
                 var lastEventsSession = await db.VoiceSessions
                     .Where(v => v.GuildId == guild.Id
                              && v.UserId == member.Id
-                             && v.ChannelName != null
-                             && v.ChannelName.Equals(_config.EventsVoiceChannelName))
+                             && (v.CategoryId == categoryId
+                                 || (v.CategoryId == null && v.ChannelId == legacyEventsChannelId)))
                     .OrderByDescending(v => v.JoinedAt)
                     .FirstOrDefaultAsync(ct);
 
                 // Events attendance count at current rank (with 30-min debounce)
                 var eventsAtRank = await GetEventsAttendanceCountAsync(
                     db, guild.Id, member.Id,
-                    _config.EventsVoiceChannelName,
+                    categoryId,
+                    legacyEventsChannelId,
                     rankSince ?? member.JoinedAt?.UtcDateTime ?? now,
                     ct);
 
@@ -230,18 +244,22 @@ public class RosterExportService : BackgroundService
     }
 
     /// <summary>
-    /// Counts distinct Events VC entries for a user since a given date,
-    /// ignoring re-entries within 30 minutes of the previous session ending.
+    /// Counts distinct EVENTS-category voice entries for a user since a given
+    /// date, ignoring re-entries within 30 minutes of the previous session
+    /// ending. Matches any VC under <paramref name="eventsCategoryId"/>, and
+    /// falls back to <paramref name="legacyEventsChannelId"/> for sessions
+    /// recorded before VoiceSession.CategoryId existed.
     /// </summary>
     private static async Task<int> GetEventsAttendanceCountAsync(
-        BotDbContext db, ulong guildId, ulong userId, string eventsChannelName,
+        BotDbContext db, ulong guildId, ulong userId,
+        ulong eventsCategoryId, ulong legacyEventsChannelId,
         DateTime since, CancellationToken ct = default)
     {
         var sessions = await db.VoiceSessions
             .Where(v => v.GuildId == guildId
                         && v.UserId == userId
-                        && v.ChannelName != null
-                        && v.ChannelName == eventsChannelName
+                        && (v.CategoryId == eventsCategoryId
+                            || (v.CategoryId == null && v.ChannelId == legacyEventsChannelId))
                         && v.JoinedAt >= since)
             .OrderBy(v => v.JoinedAt)
             .Select(v => new { v.JoinedAt, v.LeftAt })

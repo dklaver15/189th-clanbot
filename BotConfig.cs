@@ -67,10 +67,23 @@ public class BotConfig
     public string EventsVoiceChannelName { get; set; } = "Events";
 
     /// <summary>
-    /// Discord channel ID of the events voice channel. Used for attendance
-    /// credit in auto-promotion (SGT+) — immune to renames.
+    /// Discord channel ID of the primary events voice channel. Used as the
+    /// legacy fallback for sessions recorded before CategoryId existed on
+    /// VoiceSession — immune to renames. New sessions are matched by
+    /// EventsCategoryId instead so any VC under the EVENTS category counts.
     /// </summary>
     public ulong EventsVoiceChannelId { get; set; } = default;
+
+    /// <summary>
+    /// Discord category ID that contains event voice channels. Voice time in
+    /// ANY channel under this category (including temporary event VCs spun
+    /// up for overflow, squad splits, etc.) counts toward event attendance
+    /// for auto-promotion and the roster export. Used alongside
+    /// EventsVoiceChannelId — sessions with a null CategoryId (recorded
+    /// before this column existed) fall back to the legacy channel-ID check.
+    /// Immune to category renames and to emoji changes in the category name.
+    /// </summary>
+    public ulong EventsCategoryId { get; set; } = default;
 
     /// <summary>Hour of day (UTC, 0-23) to run the nightly roster export.</summary>
     public int RosterExportHourUtc { get; set; } = 6;

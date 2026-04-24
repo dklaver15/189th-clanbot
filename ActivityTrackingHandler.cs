@@ -140,7 +140,8 @@ public class ActivityTrackingHandler
                     JoinedAt = DateTime.UtcNow,
                     LeftAt = null,
                     ChannelId = afterState.VoiceChannel?.Id,
-                    ChannelName = afterState.VoiceChannel?.Name
+                    ChannelName = afterState.VoiceChannel?.Name,
+                    CategoryId = afterState.VoiceChannel?.CategoryId
                 });
                 _logger.LogDebug("User {Username} joined voice in guild {GuildId}", username, guildId);
             }
@@ -182,7 +183,8 @@ public class ActivityTrackingHandler
                     JoinedAt = DateTime.UtcNow,
                     LeftAt = null,
                     ChannelId = afterState.VoiceChannel?.Id,
-                    ChannelName = afterState.VoiceChannel?.Name
+                    ChannelName = afterState.VoiceChannel?.Name,
+                    CategoryId = afterState.VoiceChannel?.CategoryId
                 });
                 _logger.LogDebug("User {Username} switched voice channels in guild {GuildId}", username, guildId);
             }
