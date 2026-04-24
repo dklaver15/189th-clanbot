@@ -42,6 +42,15 @@ public class VoiceSession
 
     /// <summary>The voice channel name at time of join.</summary>
     public string? ChannelName { get; set; }
+
+    /// <summary>
+    /// Parent category ID at time of join. Captured so event-attendance queries
+    /// can count time spent in any VC under the EVENTS category — including
+    /// temporary event VCs that may be deleted before the attendance snapshot
+    /// runs. Null for sessions recorded before this column existed; those rows
+    /// fall back to the legacy single-channel check via EventsVoiceChannelId.
+    /// </summary>
+    public ulong? CategoryId { get; set; }
 }
 
 /// <summary>

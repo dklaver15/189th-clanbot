@@ -25,11 +25,18 @@ namespace ClanGuardBot.Services;
 /// deletion.
 ///
 /// ── What counts as "attended" ──
-/// A member attended an event if their cumulative time in the events VC during
+/// A member attended an event if their cumulative time in ANY voice channel
+/// under the EVENTS category (matched by EventsCategoryId) during
 /// [event.StartUtc - bufferMinutes, event.EndUtc + bufferMinutes] meets or
-/// exceeds AutoPromotionMinEventAttendanceMinutes. Per-session duration is
+/// exceeds AutoPromotionMinEventAttendanceMinutes. Temp event VCs created
+/// under that category — e.g. when a squad splits off from the main Events VC
+/// mid-event — count just like the main Events VC. Per-session duration is
 /// capped by MaxSingleSessionHours to prevent orphaned sessions from granting
 /// unlimited credit.
+///
+/// Sessions recorded before the CategoryId column existed (null CategoryId)
+/// fall back to matching on EventsVoiceChannelId so historical snapshots
+/// keep producing the same results they always did.
 ///
 /// ── Which events count toward promotion ──
 /// Only events whose Source is in AttendanceCountingSources (default: "Clan")
@@ -84,11 +91,12 @@ public class EventAttendanceSnapshotService : BackgroundService
 
         var countingSources = _config.GetAttendanceCountingSourcesList();
         _logger.LogInformation(
-            "EventAttendanceSnapshotService started. Interval={Interval}min, Buffer={Buffer}min, MinMinutes={Min}, CountingSources=[{Sources}]",
+            "EventAttendanceSnapshotService started. Interval={Interval}min, Buffer={Buffer}min, MinMinutes={Min}, CountingSources=[{Sources}], EventsCategoryId={CategoryId}",
             _config.EventAttendanceSnapshotIntervalMinutes,
             _config.AutoPromotionEventBufferMinutes,
             _config.AutoPromotionMinEventAttendanceMinutes,
-            string.Join(",", countingSources));
+            string.Join(",", countingSources),
+            _config.EventsCategoryId);
 
         // Startup catch-up — snapshot every past event that doesn't already
         // have attendance records. This handles two cases:
@@ -241,14 +249,24 @@ public class EventAttendanceSnapshotService : BackgroundService
         var winStart = evt.StartUtc - buffer;
         var winEnd   = evt.EndUtc   + buffer;
 
-        // Pull every session in the events VC that overlaps the buffered window.
-        // Group-by happens client-side after clipping, since we need to apply the
-        // per-session cap to each session's clipped duration individually.
+        // Pull every session that overlaps the buffered window AND is in the
+        // EVENTS category (or — for pre-migration rows where CategoryId is
+        // null — matches the legacy EventsVoiceChannelId). This means time in
+        // temp event VCs created under the EVENTS category counts just like
+        // time in the main Events VC, while historical data behaves exactly
+        // as it did before the column existed.
+        //
+        // Group-by happens client-side after clipping, since we need to apply
+        // the per-session cap to each session's clipped duration individually.
+        var categoryId = _config.EventsCategoryId;
+        var legacyChannelId = _config.EventsVoiceChannelId;
+
         var sessions = await db.VoiceSessions
-            .Where(v => v.GuildId   == evt.GuildId
-                     && v.ChannelId == _config.EventsVoiceChannelId
-                     && v.JoinedAt  <  winEnd
-                     && (v.LeftAt   == null || v.LeftAt > winStart))
+            .Where(v => v.GuildId == evt.GuildId
+                     && (v.CategoryId == categoryId
+                         || (v.CategoryId == null && v.ChannelId == legacyChannelId))
+                     && v.JoinedAt <  winEnd
+                     && (v.LeftAt  == null || v.LeftAt > winStart))
             .ToListAsync(ct);
 
         // userId → total seconds attended
