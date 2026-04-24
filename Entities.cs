@@ -56,6 +56,22 @@ public class VoiceSession
 /// <summary>
 /// Tracks when a user was assigned their current rank role.
 /// Only the latest record per user/guild matters for "time in rank".
+///
+/// ── Seed fields (one-time spreadsheet backfill) ──
+/// EventsAttendedAtRankBeforeBot + SeedAppliedAt exist for the transition
+/// from the manual promotion spreadsheet to bot-tracked event attendance.
+///
+/// EventsAttendedAtRankBeforeBot is the count of qualifying events the user
+/// had already accumulated at their current rank when the seed was applied.
+/// SeedAppliedAt marks the moment the seed was applied; bot-tracked events
+/// are only counted *after* SeedAppliedAt to avoid double-counting events
+/// already reflected in the seed number.
+///
+/// Both fields MUST be reset (to 0 and null) whenever RankName changes — a
+/// new rank means a fresh count, not an inheritance of the previous rank's
+/// seed. Any code path that mutates RankHistory on rank change is responsible
+/// for zeroing these fields at the same time (RosterExportService detection,
+/// RankTrackingHandler realtime updates, promote/demote command flows).
 /// </summary>
 public class RankHistory
 {
@@ -68,6 +84,23 @@ public class RankHistory
 
     /// <summary>When this rank was first detected on the user.</summary>
     public DateTime AssignedAt { get; set; }
+
+    /// <summary>
+    /// One-time backfill of qualifying events already attended at this rank
+    /// before the bot became authoritative. Applied via /seed-promotion-credit
+    /// from the "Seed Events" column on the roster sheet. Reset to 0 on rank
+    /// change. Default 0 means "no seed has been applied."
+    /// </summary>
+    public int EventsAttendedAtRankBeforeBot { get; set; }
+
+    /// <summary>
+    /// When the seed above was applied. Bot-tracked events (EventAttendance
+    /// rows) with EventEndUtc < SeedAppliedAt are NOT counted again, since
+    /// they are assumed to already be included in the seed number from the
+    /// spreadsheet. Null = no seed has ever been applied at this rank, so
+    /// bot-tracked counting falls back to counting from AssignedAt forward.
+    /// </summary>
+    public DateTime? SeedAppliedAt { get; set; }
 }
 
 /// <summary>

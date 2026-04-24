@@ -272,7 +272,9 @@ public class GoogleSheetsService
             });
         }
 
-        // Clear existing data and write fresh
+        // Clear existing data and write fresh. NOTE: We clear A:N only — any
+        // user-added columns to the right (e.g. "Seed Events" and "Seed Applied"
+        // for the /seed-promotion-credit one-time backfill) are preserved.
         var fullRange = $"{sheetName}!A1:N{allRows.Count + 10}";
         var clearRequest = service.Spreadsheets.Values.Clear(
             new ClearValuesRequest(), spreadsheetId, fullRange);
@@ -375,6 +377,218 @@ public class GoogleSheetsService
         await service.Spreadsheets.BatchUpdate(batchFormatRequest, spreadsheetId).ExecuteAsync();
 
         _logger.LogInformation("Wrote {Count} roster rows to sheet {SheetName}", rows.Count, sheetName);
+    }
+
+    // ─── Seed promotion credit support ──────────────────────────────────
+    //
+    // The roster sheet may optionally have two human-edited columns to the
+    // right of the bot-managed columns A-N:
+    //   "Seed Events"  — an officer enters the event count from the manual
+    //                    tracking spreadsheet for each person at their
+    //                    current rank.
+    //   "Seed Applied" — the bot writes "YES | timestamp" after the seed has
+    //                    been applied to the DB, so re-runs don't re-apply.
+    //
+    // These columns are temporary (for the one-time transition from the
+    // spreadsheet to bot-tracked events). Once the transition is complete,
+    // the columns can be deleted from the sheet and will not be rewritten by
+    // WriteRosterAsync (which only clears A:N).
+
+    /// <summary>
+    /// Per-row data read from the roster sheet for seed-credit processing.
+    /// </summary>
+    public record RosterSeedRow(
+        int RowNumber,         // 1-indexed sheet row (header is row 1)
+        string DiscordName,    // column A value
+        string Username,       // column B value
+        string Rank,           // column C value
+        int? SeedEvents,       // parsed from the "Seed Events" column (null if empty or non-integer)
+        string SeedApplied);   // raw string from the "Seed Applied" column ("" if empty)
+
+    /// <summary>
+    /// Result of a ReadRosterSeedRowsAsync call.
+    /// </summary>
+    public record RosterSeedReadResult(
+        bool Success,
+        string? Error,
+        int SeedEventsColumnIndex,   // 0-indexed; -1 if not found
+        int SeedAppliedColumnIndex,  // 0-indexed; -1 if not found
+        List<RosterSeedRow> Rows);
+
+    /// <summary>
+    /// Reads the roster sheet, locating the "Seed Events" and "Seed Applied"
+    /// columns by header text (anywhere in the header row). Returns one
+    /// RosterSeedRow per data row. Rows are returned in sheet order — callers
+    /// filter down to rows with a seed value and an empty "Seed Applied" cell.
+    ///
+    /// Returns Success=false with an Error explanation if the headers are not
+    /// present; the /seed-promotion-credit handler reports this to the user.
+    /// </summary>
+    public async Task<RosterSeedReadResult> ReadRosterSeedRowsAsync()
+    {
+        var emptyRows = new List<RosterSeedRow>();
+
+        try
+        {
+            var credential = GoogleCredential
+                .FromFile(_config.GoogleCredentialsPath)
+                .CreateScoped(SheetsService.Scope.Spreadsheets);
+
+            using var service = new SheetsService(new BaseClientService.Initializer
+            {
+                HttpClientInitializer = credential,
+                ApplicationName = "ClanGuardBot"
+            });
+
+            var spreadsheetId = string.IsNullOrWhiteSpace(_config.RosterSpreadsheetId)
+                ? _config.GoogleSpreadsheetId
+                : _config.RosterSpreadsheetId;
+            var sheetName = _config.RosterSheetName;
+
+            // Read out to column Z — gives plenty of headroom past N for
+            // manually-added seed columns regardless of where the officer
+            // placed them.
+            var range = $"{sheetName}!A1:Z";
+            var getRequest = service.Spreadsheets.Values.Get(spreadsheetId, range);
+            var response = await getRequest.ExecuteAsync();
+
+            if (response.Values is null || response.Values.Count == 0)
+            {
+                return new RosterSeedReadResult(false,
+                    $"Roster sheet '{sheetName}' is empty. Run /roster-export first.",
+                    -1, -1, emptyRows);
+            }
+
+            var header = response.Values[0];
+            int seedEventsIdx = -1;
+            int seedAppliedIdx = -1;
+
+            for (int i = 0; i < header.Count; i++)
+            {
+                var cell = (header[i]?.ToString() ?? "").Trim();
+                if (seedEventsIdx < 0 && string.Equals(cell, "Seed Events", StringComparison.OrdinalIgnoreCase))
+                    seedEventsIdx = i;
+                else if (seedAppliedIdx < 0 && string.Equals(cell, "Seed Applied", StringComparison.OrdinalIgnoreCase))
+                    seedAppliedIdx = i;
+            }
+
+            if (seedEventsIdx < 0 || seedAppliedIdx < 0)
+            {
+                return new RosterSeedReadResult(false,
+                    "Could not find 'Seed Events' and/or 'Seed Applied' columns in the roster header. Add those two column headers to the right of the bot-managed columns (e.g. columns O and P) and try again.",
+                    seedEventsIdx, seedAppliedIdx, emptyRows);
+            }
+
+            var rows = new List<RosterSeedRow>();
+
+            for (int i = 1; i < response.Values.Count; i++)
+            {
+                var row = response.Values[i];
+
+                string discordName = row.Count > 0 ? (row[0]?.ToString() ?? "") : "";
+                string username    = row.Count > 1 ? (row[1]?.ToString() ?? "") : "";
+                string rank        = row.Count > 2 ? (row[2]?.ToString() ?? "") : "";
+
+                // Guard the column accesses — a row may have fewer cells than
+                // the header if trailing cells are blank.
+                string seedRaw     = row.Count > seedEventsIdx  ? (row[seedEventsIdx]?.ToString()  ?? "") : "";
+                string appliedRaw  = row.Count > seedAppliedIdx ? (row[seedAppliedIdx]?.ToString() ?? "") : "";
+
+                int? seedEvents = null;
+                if (!string.IsNullOrWhiteSpace(seedRaw)
+                    && int.TryParse(seedRaw.Trim(), out var parsed)
+                    && parsed >= 0)
+                {
+                    seedEvents = parsed;
+                }
+
+                rows.Add(new RosterSeedRow(
+                    RowNumber: i + 1, // 1-indexed (row 1 is header, so data starts at row 2)
+                    DiscordName: discordName,
+                    Username: username,
+                    Rank: rank,
+                    SeedEvents: seedEvents,
+                    SeedApplied: appliedRaw.Trim()));
+            }
+
+            return new RosterSeedReadResult(true, null, seedEventsIdx, seedAppliedIdx, rows);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to read roster seed rows");
+            return new RosterSeedReadResult(false, $"Error reading roster sheet: {ex.Message}", -1, -1, emptyRows);
+        }
+    }
+
+    /// <summary>
+    /// Batch-writes values into the "Seed Applied" column for the given rows.
+    /// Uses BatchUpdate so all cells are written in a single API round trip.
+    /// </summary>
+    /// <param name="seedAppliedColumnIndex">0-indexed column number as returned
+    /// from ReadRosterSeedRowsAsync.</param>
+    /// <param name="rowValues">1-indexed sheet row → cell value.</param>
+    public async Task WriteSeedAppliedCellsAsync(
+        int seedAppliedColumnIndex,
+        IReadOnlyDictionary<int, string> rowValues)
+    {
+        if (rowValues.Count == 0) return;
+
+        var credential = GoogleCredential
+            .FromFile(_config.GoogleCredentialsPath)
+            .CreateScoped(SheetsService.Scope.Spreadsheets);
+
+        using var service = new SheetsService(new BaseClientService.Initializer
+        {
+            HttpClientInitializer = credential,
+            ApplicationName = "ClanGuardBot"
+        });
+
+        var spreadsheetId = string.IsNullOrWhiteSpace(_config.RosterSpreadsheetId)
+            ? _config.GoogleSpreadsheetId
+            : _config.RosterSpreadsheetId;
+        var sheetName = _config.RosterSheetName;
+
+        var columnLetter = ColumnIndexToLetter(seedAppliedColumnIndex);
+
+        var data = new List<ValueRange>();
+        foreach (var kv in rowValues)
+        {
+            data.Add(new ValueRange
+            {
+                Range = $"{sheetName}!{columnLetter}{kv.Key}",
+                Values = new List<IList<object>> { new List<object> { kv.Value } }
+            });
+        }
+
+        var batchBody = new BatchUpdateValuesRequest
+        {
+            ValueInputOption = "USER_ENTERED",
+            Data = data
+        };
+
+        await service.Spreadsheets.Values.BatchUpdate(batchBody, spreadsheetId).ExecuteAsync();
+
+        _logger.LogInformation("Wrote {Count} Seed Applied cells to {Sheet} (column {Column})",
+            rowValues.Count, sheetName, columnLetter);
+    }
+
+    /// <summary>
+    /// Converts a 0-indexed column number to A1-notation letter(s).
+    /// 0 → A, 1 → B, ..., 25 → Z, 26 → AA, 27 → AB, etc.
+    /// </summary>
+    private static string ColumnIndexToLetter(int index)
+    {
+        if (index < 0) throw new ArgumentOutOfRangeException(nameof(index));
+
+        var sb = new System.Text.StringBuilder();
+        index++; // switch to 1-indexed for the math
+        while (index > 0)
+        {
+            var rem = (index - 1) % 26;
+            sb.Insert(0, (char)('A' + rem));
+            index = (index - 1) / 26;
+        }
+        return sb.ToString();
     }
 
     /// <summary>

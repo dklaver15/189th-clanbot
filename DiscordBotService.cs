@@ -26,6 +26,7 @@ public class DiscordBotService : IHostedService
     private readonly PromoteCommandHandler _promoteHandler;
     private readonly DemoteCommandHandler _demoteHandler;
     private readonly SetNickCommandHandler _setNickHandler;
+    private readonly SeedPromotionCreditCommandHandler _seedHandler;
     private readonly ILogger<DiscordBotService> _logger;
     private readonly BotConfig _config;
 
@@ -42,6 +43,7 @@ public class DiscordBotService : IHostedService
         PromoteCommandHandler promoteHandler,
         DemoteCommandHandler demoteHandler,
         SetNickCommandHandler setNickHandler,
+        SeedPromotionCreditCommandHandler seedHandler,
         ILogger<DiscordBotService> logger,
         IOptions<BotConfig> config)
     {
@@ -57,6 +59,7 @@ public class DiscordBotService : IHostedService
         _promoteHandler            = promoteHandler;
         _demoteHandler             = demoteHandler;
         _setNickHandler            = setNickHandler;
+        _seedHandler               = seedHandler;
         _logger                    = logger;
         _config                    = config.Value;
     }
@@ -77,6 +80,7 @@ public class DiscordBotService : IHostedService
         _promoteHandler.Register(_client);
         _demoteHandler.Register(_client);
         _setNickHandler.Register(_client);
+        _seedHandler.Register(_client);
 
         await _client.LoginAsync(TokenType.Bot, _config.Token);
         await _client.StartAsync();
@@ -165,7 +169,18 @@ public class DiscordBotService : IHostedService
                         "The member to rename", isRequired: true)
                     .AddOption("nickname", ApplicationCommandOptionType.String,
                         "The new nickname", isRequired: true)
-                    .Build()
+                    .Build(),
+
+                // One-time operational command: reads the "Seed Events" column
+                // from the roster sheet and writes those counts into
+                // RankHistory.EventsAttendedAtRankBeforeBot so the bot's promotion
+                // math includes events that were tracked on the manual
+                // spreadsheet before the bot became authoritative. Takes no
+                // options — operates on whatever is in the roster sheet.
+                new SlashCommandBuilder()
+                    .WithName("seed-promotion-credit")
+                    .WithDescription($"Apply Seed Events from the roster sheet to the DB ({_config.PromoteDemoteMinRank}+ only)")
+                    .Build(),
             };
 
             foreach (var guild in _client.Guilds)

@@ -103,6 +103,17 @@ public class PromotionService
         string? NewNickname = null);
 
     /// <summary>
+    /// Snapshot of a member's rank record for promotion math. AssignedAt falls
+    /// back to the member's guild-join date when no RankHistory row exists;
+    /// the seed fields default to (0, null) in that case, which is the normal
+    /// "no seed applied" state.
+    /// </summary>
+    public record RankInfo(
+        DateTime? AssignedAt,
+        DateTime? SeedAppliedAt,
+        int SeedEvents);
+
+    /// <summary>
     /// Performs the role swap and nickname update for a promotion.
     /// Does NOT post any announcement — callers control whether and how to announce.
     /// Does NOT perform permission checks — callers are responsible for those.
@@ -283,8 +294,24 @@ public class PromotionService
     /// Looks up when the member's current rank was assigned.
     /// Falls back to guild-join date if no RankHistory record exists.
     /// Returns null if neither is available.
+    ///
+    /// Thin wrapper around <see cref="GetRankInfoAsync"/> for callers that
+    /// don't need the seed fields.
     /// </summary>
     public async Task<DateTime?> GetRankAssignedAtAsync(
+        ulong guildId, SocketGuildUser member, CancellationToken ct = default)
+    {
+        var info = await GetRankInfoAsync(guildId, member, ct);
+        return info.AssignedAt;
+    }
+
+    /// <summary>
+    /// Looks up the full rank info (AssignedAt + seed fields) for a member.
+    /// Falls back to guild-join date with an empty seed when no RankHistory
+    /// row exists. Use this from callers that need to compute events-at-rank
+    /// (AutoPromotionService, RosterExportService).
+    /// </summary>
+    public async Task<RankInfo> GetRankInfoAsync(
         ulong guildId, SocketGuildUser member, CancellationToken ct = default)
     {
         using var scope = _services.CreateScope();
@@ -294,10 +321,18 @@ public class PromotionService
             .FirstOrDefaultAsync(r => r.GuildId == guildId && r.UserId == member.Id, ct);
 
         if (record is not null)
-            return record.AssignedAt;
+        {
+            return new RankInfo(
+                AssignedAt: record.AssignedAt,
+                SeedAppliedAt: record.SeedAppliedAt,
+                SeedEvents: record.EventsAttendedAtRankBeforeBot);
+        }
 
-        // Fallback: use guild join date. This matters for users who predate
-        // the RankTrackingHandler but still have a rank role.
-        return member.JoinedAt?.UtcDateTime;
+        // No record yet — fall back to guild-join date with no seed. Matters
+        // for users who predate RankTrackingHandler but still have a rank role.
+        return new RankInfo(
+            AssignedAt: member.JoinedAt?.UtcDateTime,
+            SeedAppliedAt: null,
+            SeedEvents: 0);
     }
 }
