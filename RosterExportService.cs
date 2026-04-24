@@ -23,6 +23,20 @@ namespace ClanGuardBot.Services;
 /// event VCs spun up for overflow or squad splits — counts. Sessions recorded
 /// before CategoryId existed on VoiceSession (null CategoryId) fall back to
 /// matching on EventsVoiceChannelId so historical rows still register.
+///
+/// ── Seeded events ──
+/// "Events At Rank" includes both bot-tracked voice-session events since the
+/// effective "since" date and any one-time seed applied via
+/// /seed-promotion-credit. The effective "since" date is the later of the
+/// rank-assigned date and the seed-applied date, so events before the seed
+/// aren't double-counted.
+///
+/// ── Rank change detection ──
+/// When a user's rank changes between exports, the RankHistory row is updated
+/// with the new rank and timestamp. The seed fields
+/// (EventsAttendedAtRankBeforeBot + SeedAppliedAt) are reset to (0, null) at
+/// the same time — a new rank means a fresh event count, not an inherited
+/// seed from the previous rank.
 /// </summary>
 public class RosterExportService : BackgroundService
 {
@@ -128,6 +142,9 @@ public class RosterExportService : BackgroundService
 
                 // Track / detect rank changes
                 DateTime? rankSince = null;
+                DateTime? seedAppliedAt = null;
+                int seedEvents = 0;
+
                 if (currentRank is not null)
                 {
                     var rankRecord = await db.RankHistories
@@ -141,20 +158,30 @@ public class RosterExportService : BackgroundService
                             GuildId = guild.Id,
                             UserId = member.Id,
                             RankName = currentRank,
-                            AssignedAt = member.JoinedAt?.UtcDateTime ?? now
+                            AssignedAt = member.JoinedAt?.UtcDateTime ?? now,
+                            EventsAttendedAtRankBeforeBot = 0,
+                            SeedAppliedAt = null,
                         };
                         db.RankHistories.Add(rankRecord);
                     }
                     else if (!rankRecord.RankName.Equals(currentRank, StringComparison.OrdinalIgnoreCase))
                     {
-                        // Rank changed — update the record
-                        _logger.LogInformation("Rank change detected: {User} {OldRank} → {NewRank}",
+                        // Rank changed — update the record and reset seed fields. The
+                        // previous rank's seed is not inherited; promotion math at the
+                        // new rank starts fresh.
+                        _logger.LogInformation(
+                            "Rank change detected: {User} {OldRank} → {NewRank} (clearing seed)",
                             member.Username, rankRecord.RankName, currentRank);
+
                         rankRecord.RankName = currentRank;
                         rankRecord.AssignedAt = now;
+                        rankRecord.EventsAttendedAtRankBeforeBot = 0;
+                        rankRecord.SeedAppliedAt = null;
                     }
 
                     rankSince = rankRecord.AssignedAt;
+                    seedAppliedAt = rankRecord.SeedAppliedAt;
+                    seedEvents = rankRecord.EventsAttendedAtRankBeforeBot;
                 }
 
                 // Activity stats within roster window
@@ -186,13 +213,23 @@ public class RosterExportService : BackgroundService
                     .OrderByDescending(v => v.JoinedAt)
                     .FirstOrDefaultAsync(ct);
 
-                // Events attendance count at current rank (with 30-min debounce)
-                var eventsAtRank = await GetEventsAttendanceCountAsync(
+                // Events attendance count at current rank.
+                // "Since" date is the later of AssignedAt and SeedAppliedAt so bot-tracked
+                // events that happened before the seed are not double-counted (they're
+                // assumed to already be reflected in the seed number). Final displayed
+                // value = bot-tracked count + seed events.
+                var eventsSince = rankSince ?? member.JoinedAt?.UtcDateTime ?? now;
+                if (seedAppliedAt.HasValue && seedAppliedAt.Value > eventsSince)
+                    eventsSince = seedAppliedAt.Value;
+
+                var botTrackedEventsAtRank = await GetEventsAttendanceCountAsync(
                     db, guild.Id, member.Id,
                     categoryId,
                     legacyEventsChannelId,
-                    rankSince ?? member.JoinedAt?.UtcDateTime ?? now,
+                    eventsSince,
                     ct);
+
+                var eventsAtRank = botTrackedEventsAtRank + seedEvents;
 
                 // All roles (sorted, excluding @everyone)
                 var rolesDisplay = string.Join(", ", member.Roles

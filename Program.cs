@@ -79,6 +79,13 @@ try
     builder.Services.AddSingleton<DemoteCommandHandler>();
     builder.Services.AddSingleton<SetNickCommandHandler>();
 
+    // SeedPromotionCreditCommandHandler: one-time /seed-promotion-credit command
+    // that reads the "Seed Events" column from the roster sheet and writes those
+    // values into RankHistory.EventsAttendedAtRankBeforeBot (plus SeedAppliedAt)
+    // so pre-existing spreadsheet-tracked event counts carry over to the bot.
+    // Register() is called from DiscordBotService alongside the other command handlers.
+    builder.Services.AddSingleton<SeedPromotionCreditCommandHandler>();
+
     // TicketReminderHandler: singleton for event registration + hosted service for startup recovery.
     builder.Services.AddSingleton<TicketReminderHandler>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<TicketReminderHandler>());

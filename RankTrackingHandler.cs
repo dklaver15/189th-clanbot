@@ -14,6 +14,17 @@ namespace ClanGuardBot.Handlers;
 /// Handles the GuildMemberUpdated event to detect rank role changes in real-time.
 /// When a member's rank changes, updates the RankHistory record with the exact timestamp.
 /// Also auto-prefixes nicknames on RCT gain and auto-logs new recruits to the Google Sheet.
+///
+/// ── Seed field handling ──
+/// Whenever this handler updates RankHistory.RankName, it also resets the seed
+/// fields (EventsAttendedAtRankBeforeBot + SeedAppliedAt) to their empty state.
+/// The seed is rank-specific — it represents events already counted at the
+/// person's previous rank when they were backfilled from the manual spreadsheet
+/// via /seed-promotion-credit. When rank changes (promotion or demotion), that
+/// credit has done its job and must NOT carry over to the new rank, or the
+/// person would start their new rank with a head start of inherited events.
+/// This rule is mirrored in RosterExportService's nightly rank-change detection
+/// path; the two should stay in sync.
 /// </summary>
 public class RankTrackingHandler
 {
@@ -92,13 +103,17 @@ public class RankTrackingHandler
             }
             else if (rankRecord is null)
             {
-                // First time seeing a rank for this user
+                // First time seeing a rank for this user. Explicitly zero out
+                // the seed fields so it's obvious at a glance that a fresh rank
+                // record starts without any one-time spreadsheet credit applied.
                 db.RankHistories.Add(new RankHistory
                 {
                     GuildId = guildId,
                     UserId = userId,
                     RankName = afterRank,
-                    AssignedAt = DateTime.UtcNow
+                    AssignedAt = DateTime.UtcNow,
+                    EventsAttendedAtRankBeforeBot = 0,
+                    SeedAppliedAt = null,
                 });
                 _logger.LogInformation(
                     "Rank assigned: {Username} → {NewRank} in {Guild}",
@@ -106,12 +121,20 @@ public class RankTrackingHandler
             }
             else
             {
-                // Rank changed — update with exact timestamp
+                // Rank changed — update with exact timestamp and clear the
+                // seed fields. The previous rank's seed represented events
+                // already credited AT THAT rank; it must not carry into the
+                // new rank. If the person needs credit at their new rank
+                // from the spreadsheet, that's a fresh /seed-promotion-credit
+                // run (which would clear here again and re-apply).
                 _logger.LogInformation(
-                    "Rank change: {Username} {OldRank} → {NewRank} in {Guild}",
+                    "Rank change: {Username} {OldRank} → {NewRank} in {Guild} (clearing seed)",
                     after.Username, rankRecord.RankName, afterRank, after.Guild.Name);
+
                 rankRecord.RankName = afterRank;
                 rankRecord.AssignedAt = DateTime.UtcNow;
+                rankRecord.EventsAttendedAtRankBeforeBot = 0;
+                rankRecord.SeedAppliedAt = null;
             }
 
             await db.SaveChangesAsync();

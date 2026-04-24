@@ -17,10 +17,14 @@ namespace ClanGuardBot.Services;
 /// Two activity models:
 ///   • RCT → CPL: message count OR voice hours since current rank assignment.
 ///   • CPL → SGT (and future ranks above): event attendance, sourced from the
-///     EventAttendance table populated by EventAttendanceSnapshotService.
+///     EventAttendance table populated by EventAttendanceSnapshotService,
+///     plus any one-time spreadsheet seed applied via /seed-promotion-credit.
 ///
 /// Activity is counted from the member's current rank assignment date (stored
-/// in RankHistory.AssignedAt), falling back to guild-join date if no record exists.
+/// in RankHistory.AssignedAt), falling back to guild-join date if no record
+/// exists. For event-based tiers, seeded events from the transition
+/// spreadsheet are added on top, and bot-tracked events are only counted
+/// from the seed-applied moment forward to avoid double-counting.
 ///
 /// Members with the AWOL role are skipped. Each run promotes eligible members
 /// by at most one rank — backlogged users will catch up over subsequent nights.
@@ -46,7 +50,8 @@ public class AutoPromotionService : BackgroundService
     /// Matches the requirements from the clan's promotion doc.
     ///
     /// Tiers with MinEvents > 0 use event-attendance activity checks (via the
-    /// EventAttendance table) and ignore MinMessages / MinVoiceHours.
+    /// EventAttendance table plus any applied seed) and ignore MinMessages /
+    /// MinVoiceHours.
     /// </summary>
     private static readonly AutoPromotionTier[] DefaultTiers =
     {
@@ -198,8 +203,10 @@ public class AutoPromotionService : BackgroundService
                 continue;
             }
 
-            var assignedAt = await _promotion.GetRankAssignedAtAsync(guild.Id, member, ct);
-            if (assignedAt is null)
+            // Pull full rank info (assigned-at + seed fields) in one call so
+            // event tiers can do seed-aware counting.
+            var rankInfo = await _promotion.GetRankInfoAsync(guild.Id, member, ct);
+            if (rankInfo.AssignedAt is null)
             {
                 _logger.LogDebug("Auto-promo skip: {User} has no rank-assigned timestamp or join date",
                     member.Username);
@@ -207,7 +214,7 @@ public class AutoPromotionService : BackgroundService
                 continue;
             }
 
-            var timeInRank = DateTime.UtcNow - assignedAt.Value;
+            var timeInRank = DateTime.UtcNow - rankInfo.AssignedAt.Value;
             var requiredTime = TimeSpan.FromDays(tier.DaysInRank);
             if (timeInRank < requiredTime)
             {
@@ -225,20 +232,29 @@ public class AutoPromotionService : BackgroundService
             if (tier.MinEvents > 0)
             {
                 var eventsAttended = await EventAttendanceHelper.CountEventsAttendedAsync(
-                    db, guild.Id, member.Id, assignedAt.Value, ct);
+                    db, guild.Id, member.Id,
+                    rankInfo.AssignedAt.Value,
+                    rankInfo.SeedAppliedAt,
+                    rankInfo.SeedEvents,
+                    ct);
 
                 meetsActivity = eventsAttended >= tier.MinEvents;
-                activityDetails = $"events={eventsAttended}/{tier.MinEvents}";
+
+                // Surface seed contribution in the log so it's obvious when a
+                // promotion decision leans on the one-time spreadsheet backfill.
+                activityDetails = rankInfo.SeedEvents > 0
+                    ? $"events={eventsAttended}/{tier.MinEvents} (seed={rankInfo.SeedEvents})"
+                    : $"events={eventsAttended}/{tier.MinEvents}";
             }
             else
             {
                 var messageCount = await db.MessageEvents
                     .CountAsync(m => m.GuildId == guild.Id
                                   && m.UserId == member.Id
-                                  && m.Timestamp >= assignedAt.Value, ct);
+                                  && m.Timestamp >= rankInfo.AssignedAt.Value, ct);
 
                 var voiceSeconds = await VoiceActivityHelper.GetVoiceSecondsAsync(
-                    db, guild.Id, member.Id, assignedAt.Value,
+                    db, guild.Id, member.Id, rankInfo.AssignedAt.Value,
                     _config.MaxSingleSessionHours, ct);
                 var voiceHours = voiceSeconds / 3600.0;
 
