@@ -341,11 +341,13 @@ public class GoogleSheetsService
                 });
             }
 
-            // Chunk in case the backlog is large. A single batch of many
-            // thousands of deletes can push Google's processing time past
-            // our HttpClient timeout. 500 per batch is comfortably under
-            // both the API's request limit and the timeout budget.
-            const int deleteChunkSize = 500;
+            // Chunk deletes so no single batch stresses Google's servers.
+            // An earlier version used 500 per chunk and hit 500 InternalServerError
+            // responses from Sheets on the larger accumulated backlogs. 200 per
+            // chunk keeps each batch well within comfortable processing time.
+            // The per-chunk retry wrapper below handles any remaining transient
+            // 5xx errors.
+            const int deleteChunkSize = 200;
             var chunkStartTime = DateTime.UtcNow;
             for (int offset = 0; offset < deleteRequests.Count; offset += deleteChunkSize)
             {
@@ -355,9 +357,11 @@ public class GoogleSheetsService
                     .ToList();
 
                 var chunkBegin = DateTime.UtcNow;
-                await service.Spreadsheets.BatchUpdate(
-                    new BatchUpdateSpreadsheetRequest { Requests = chunk },
-                    spreadsheetId).ExecuteAsync();
+                await ExecuteWithRetryAsync(
+                    () => service.Spreadsheets.BatchUpdate(
+                        new BatchUpdateSpreadsheetRequest { Requests = chunk },
+                        spreadsheetId).ExecuteAsync(),
+                    $"delete chunk {offset / deleteChunkSize + 1}");
 
                 var chunkDuration = DateTime.UtcNow - chunkBegin;
                 _logger.LogInformation(
@@ -444,12 +448,72 @@ public class GoogleSheetsService
             }
         };
 
-        await service.Spreadsheets.BatchUpdate(
-            new BatchUpdateSpreadsheetRequest { Requests = formatRequests },
-            spreadsheetId).ExecuteAsync();
+        await ExecuteWithRetryAsync(
+            () => service.Spreadsheets.BatchUpdate(
+                new BatchUpdateSpreadsheetRequest { Requests = formatRequests },
+                spreadsheetId).ExecuteAsync(),
+            "apply format rules");
 
         _logger.LogInformation("Wrote {Count} roster rows to sheet {SheetName}", rows.Count, sheetName);
     }
+
+    /// <summary>
+    /// Retries a Google Sheets API call with exponential backoff on transient
+    /// 5xx server errors. Google's own documentation recommends retrying 500,
+    /// 502, 503, and 504 responses, which tend to appear when their servers
+    /// are temporarily overloaded or processing stressful operations (such as
+    /// mass deletes on a sheet with thousands of accumulated conditional-format
+    /// rules — the exact scenario that motivated this helper).
+    ///
+    /// Non-transient errors (4xx, auth failures, validation errors) are NOT
+    /// retried — retrying those would just repeat the same failure, and they
+    /// indicate a bug or misconfiguration that needs attention rather than
+    /// patience.
+    /// </summary>
+    private async Task<T> ExecuteWithRetryAsync<T>(
+        Func<Task<T>> operation,
+        string operationDescription,
+        int maxAttempts = 5)
+    {
+        Exception? lastException = null;
+
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                return await operation();
+            }
+            catch (Google.GoogleApiException ex) when (IsTransientServerError(ex.HttpStatusCode))
+            {
+                lastException = ex;
+
+                if (attempt == maxAttempts)
+                {
+                    _logger.LogError(
+                        "Google Sheets API returned {Status} during '{Op}' on final attempt {Attempt}/{Max}. Giving up.",
+                        ex.HttpStatusCode, operationDescription, attempt, maxAttempts);
+                    break;
+                }
+
+                // Exponential backoff: 1s, 2s, 4s, 8s between attempts 1→2, 2→3, 3→4, 4→5.
+                var delayMs = (int)(Math.Pow(2, attempt - 1) * 1000);
+                _logger.LogWarning(
+                    "Google Sheets API returned {Status} during '{Op}' on attempt {Attempt}/{Max}. Retrying in {Delay}ms...",
+                    ex.HttpStatusCode, operationDescription, attempt, maxAttempts, delayMs);
+                await Task.Delay(delayMs);
+            }
+        }
+
+        // Exhausted retries — rethrow the last transient error so the caller
+        // sees a meaningful failure rather than a null-reference crash.
+        throw lastException!;
+    }
+
+    private static bool IsTransientServerError(System.Net.HttpStatusCode status) =>
+        status == System.Net.HttpStatusCode.InternalServerError   // 500
+        || status == System.Net.HttpStatusCode.BadGateway          // 502
+        || status == System.Net.HttpStatusCode.ServiceUnavailable  // 503
+        || status == System.Net.HttpStatusCode.GatewayTimeout;     // 504
 
     // ─── Seed promotion credit support ──────────────────────────────────
     //
