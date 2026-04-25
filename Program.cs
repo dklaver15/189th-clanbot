@@ -86,6 +86,13 @@ try
     // Register() is called from DiscordBotService alongside the other command handlers.
     builder.Services.AddSingleton<SeedPromotionCreditCommandHandler>();
 
+    // EventCreditCommandHandler: ad-hoc /add-event-credit and /remove-event-credit
+    // commands for officers (CPT+) to nudge a member's bot-tracked event count up
+    // or down at their current rank. Inserts/deletes rows in EventAttendance with
+    // CalendarEventId = 0 as the "manual adjustment" marker; never touches real
+    // attendance history.
+    builder.Services.AddSingleton<EventCreditCommandHandler>();
+
     // TicketReminderHandler: singleton for event registration + hosted service for startup recovery.
     builder.Services.AddSingleton<TicketReminderHandler>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<TicketReminderHandler>());

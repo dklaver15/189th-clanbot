@@ -27,6 +27,7 @@ public class DiscordBotService : IHostedService
     private readonly DemoteCommandHandler _demoteHandler;
     private readonly SetNickCommandHandler _setNickHandler;
     private readonly SeedPromotionCreditCommandHandler _seedHandler;
+    private readonly EventCreditCommandHandler _eventCreditHandler;
     private readonly ILogger<DiscordBotService> _logger;
     private readonly BotConfig _config;
 
@@ -44,6 +45,7 @@ public class DiscordBotService : IHostedService
         DemoteCommandHandler demoteHandler,
         SetNickCommandHandler setNickHandler,
         SeedPromotionCreditCommandHandler seedHandler,
+        EventCreditCommandHandler eventCreditHandler,
         ILogger<DiscordBotService> logger,
         IOptions<BotConfig> config)
     {
@@ -60,6 +62,7 @@ public class DiscordBotService : IHostedService
         _demoteHandler             = demoteHandler;
         _setNickHandler            = setNickHandler;
         _seedHandler               = seedHandler;
+        _eventCreditHandler        = eventCreditHandler;
         _logger                    = logger;
         _config                    = config.Value;
     }
@@ -81,6 +84,7 @@ public class DiscordBotService : IHostedService
         _demoteHandler.Register(_client);
         _setNickHandler.Register(_client);
         _seedHandler.Register(_client);
+        _eventCreditHandler.Register(_client);
 
         await _client.LoginAsync(TokenType.Bot, _config.Token);
         await _client.StartAsync();
@@ -180,6 +184,24 @@ public class DiscordBotService : IHostedService
                 new SlashCommandBuilder()
                     .WithName("seed-promotion-credit")
                     .WithDescription($"Apply Seed Events from the roster sheet to the DB ({_config.PromoteDemoteMinRank}+ only)")
+                    .Build(),
+
+                // Manual event-credit adjustment commands (CPT+). Add inserts a
+                // sentinel EventAttendance row; remove deletes the most recent
+                // sentinel row at the user's current rank. Real attendance
+                // history is never modified by these commands.
+                new SlashCommandBuilder()
+                    .WithName("add-event-credit")
+                    .WithDescription("Manually add 1 event credit to a member at their current rank (CPT+ only)")
+                    .AddOption("member", ApplicationCommandOptionType.User,
+                        "The member to credit", isRequired: true)
+                    .Build(),
+
+                new SlashCommandBuilder()
+                    .WithName("remove-event-credit")
+                    .WithDescription("Remove 1 manual event credit from a member at their current rank (CPT+ only)")
+                    .AddOption("member", ApplicationCommandOptionType.User,
+                        "The member to debit", isRequired: true)
                     .Build(),
             };
 
