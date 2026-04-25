@@ -12,12 +12,12 @@ namespace ClanGuardBot.Services;
 
 /// <summary>
 /// Nightly background service that automatically promotes members who have
-/// met both the time-in-rank and activity thresholds for the RCT → SGT chain.
+/// met both the time-in-rank and activity thresholds for the RCT → CSM chain.
 ///
 /// Two activity models:
 ///   • RCT → CPL: message count OR voice hours since current rank assignment.
-///   • CPL → SGT (and future ranks above): event attendance, sourced from the
-///     EventAttendance table populated by EventAttendanceSnapshotService,
+///   • CPL → CSM (and any future ranks above): event attendance, sourced from
+///     the EventAttendance table populated by EventAttendanceSnapshotService,
 ///     plus any one-time spreadsheet seed applied via /seed-promotion-credit.
 ///
 /// Activity is counted from the member's current rank assignment date (stored
@@ -28,13 +28,15 @@ namespace ClanGuardBot.Services;
 ///
 /// Members with the AWOL role are skipped. Each run promotes eligible members
 /// by at most one rank — backlogged users will catch up over subsequent nights.
+/// CSM → SMA is intentionally NOT in the ladder; SMA is a singular position
+/// and should be assigned manually via /promote sma.
 ///
 /// Announcement posts are throttled via AutoPromotionAnnouncementDelaySeconds so
 /// a cycle that promotes many members doesn't burst-post and trip Discord rate
 /// limits or spam filters.
 ///
 /// Promotions can be disabled globally (AutoPromotionDryRun) or per-tier via
-/// AutoPromotionDryRunRanks — useful for rolling out a new tier alongside
+/// AutoPromotionDryRunRanks — useful for rolling out new tiers alongside
 /// existing live ones.
 /// </summary>
 public class AutoPromotionService : BackgroundService
@@ -46,20 +48,42 @@ public class AutoPromotionService : BackgroundService
     private readonly PromotionService _promotion;
 
     /// <summary>
-    /// The promotion tiers for auto-promotion (RCT → SGT).
-    /// Matches the requirements from the clan's promotion doc.
+    /// The promotion tiers for auto-promotion (RCT → CSM).
     ///
-    /// Tiers with MinEvents > 0 use event-attendance activity checks (via the
-    /// EventAttendance table plus any applied seed) and ignore MinMessages /
-    /// MinVoiceHours.
+    /// ── RCT → CPL: message/voice activity ──
+    /// Tiers with MinEvents == 0 use the legacy msg-OR-voice activity check.
+    /// MinMessages and MinVoiceHours are checked with OR semantics: meeting
+    /// either threshold qualifies the user.
+    ///
+    /// ── CPL → CSM: event-attendance activity ──
+    /// Tiers with MinEvents > 0 use the EventAttendance table (plus any
+    /// applied seed) and ignore MinMessages / MinVoiceHours entirely. The
+    /// 2/3/4-point structure mirrors the clan's promotion doc.
+    ///
+    /// ── Linear progression notes ──
+    /// MSG → 1SG → SGM is intentionally a linear chain. There is no
+    /// MSG → SGM shortcut in PromotionService.RankMap, so the bot routes
+    /// MSG holders through 1SG first; the next cycle that meets 1SG → SGM
+    /// criteria carries them up. SMA is intentionally absent here — it's
+    /// a singular position assigned manually.
     /// </summary>
     private static readonly AutoPromotionTier[] DefaultTiers =
     {
+        // RCT → CPL: msg/voice activity
         new("RCT", "pvt", DaysInRank: 7,  MinMessages: 5,  MinVoiceHours: 1.0),
         new("PVT", "pfc", DaysInRank: 7,  MinMessages: 10, MinVoiceHours: 2.0),
         new("PFC", "spc", DaysInRank: 7,  MinMessages: 10, MinVoiceHours: 2.0),
         new("SPC", "cpl", DaysInRank: 14, MinMessages: 25, MinVoiceHours: 5.0),
+
+        // CPL → CSM: event-attendance activity (DaysInRank converted from
+        // weeks per the clan promotion doc; MinEvents = required points).
         new("CPL", "sgt", DaysInRank: 14, MinMessages: 0,  MinVoiceHours: 0,   MinEvents: 2),
+        new("SGT", "ssg", DaysInRank: 21, MinMessages: 0,  MinVoiceHours: 0,   MinEvents: 2),
+        new("SSG", "sfc", DaysInRank: 28, MinMessages: 0,  MinVoiceHours: 0,   MinEvents: 2),
+        new("SFC", "msg", DaysInRank: 35, MinMessages: 0,  MinVoiceHours: 0,   MinEvents: 3),
+        new("MSG", "1sg", DaysInRank: 35, MinMessages: 0,  MinVoiceHours: 0,   MinEvents: 3),
+        new("1SG", "sgm", DaysInRank: 42, MinMessages: 0,  MinVoiceHours: 0,   MinEvents: 3),
+        new("SGM", "csm", DaysInRank: 49, MinMessages: 0,  MinVoiceHours: 0,   MinEvents: 4),
     };
 
     public AutoPromotionService(
