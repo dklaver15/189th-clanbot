@@ -106,6 +106,14 @@ public class RankHistory
 /// <summary>
 /// Tracks when a user was assigned the AWOL role so we know
 /// when the 2-day grace period expires.
+///
+/// ── Notification retry policy ──
+/// LastNotificationAttemptUtc is stamped on every notification attempt
+/// (whether it succeeds or fails). Combined with the "give up after 7
+/// days" rule in AwolCheckService, this prevents records from looping
+/// in the pending-notification queue indefinitely when the bot can't
+/// successfully post (channel deleted, permissions revoked, etc.). See
+/// AwolCheckService for the full retry policy.
 /// </summary>
 public class AwolRecord
 {
@@ -122,6 +130,21 @@ public class AwolRecord
 
     /// <summary>When the HQ notification was posted (null if not yet).</summary>
     public DateTime? NotificationSentAt { get; set; }
+
+    /// <summary>
+    /// Most recent attempt to post the HQ notification, regardless of outcome.
+    /// Null = no attempt has ever been made (typical for fresh records before
+    /// the grace period elapses). Stamped on every attempt so the give-up
+    /// policy in AwolCheckService can identify records that have been tried
+    /// repeatedly without success.
+    ///
+    /// Records with NotificationSent=false AND LastNotificationAttemptUtc
+    /// non-null AND AssignedAt older than the give-up window (7 days) get
+    /// auto-resolved as "given up" so they stop occupying the pending queue.
+    /// If the underlying problem is later fixed and the user is still AWOL,
+    /// a fresh AwolRecord will be created on the next AWOL check cycle.
+    /// </summary>
+    public DateTime? LastNotificationAttemptUtc { get; set; }
 }
 
 /// <summary>
