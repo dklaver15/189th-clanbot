@@ -93,6 +93,45 @@ public class ApolloEventHandler
         var embed = message.Embeds.FirstOrDefault();
         if (embed is null) return;
 
+        // ── Diagnostic embed dump ─────────────────────────────────────
+        // Logs a sanitized snapshot of the Apollo embed before parsing, so
+        // we can see exactly what format Apollo posts when investigating
+        // parser bugs (e.g. the 2026-04-25 Helldivers end-time bug where
+        // Apollo's dashboard showed 7 AM – 9 PM but the parser produced
+        // 12:00–14:00 UTC, suggesting only the start time was captured and
+        // a 2-hour duration default was applied).
+        //
+        // We project the embed to a dictionary first because IEmbed isn't
+        // directly serializable. The fields list preserves order so we can
+        // see which field positions Apollo uses for time/organizer/etc.
+        try
+        {
+            var diag = new
+            {
+                Title       = embed.Title,
+                Description = embed.Description,
+                AuthorName  = embed.Author?.Name,
+                FooterText  = embed.Footer?.Text,
+                Fields      = embed.Fields.Select(f => new
+                {
+                    f.Name,
+                    f.Value,
+                    f.Inline
+                }).ToList(),
+            };
+
+            _logger.LogInformation(
+                "Apollo embed (messageId={MessageId}, isUpdate={IsUpdate}): {EmbedJson}",
+                message.Id,
+                isUpdate,
+                Newtonsoft.Json.JsonConvert.SerializeObject(diag));
+        }
+        catch (Exception ex)
+        {
+            // Don't let logging blow up the actual processing path.
+            _logger.LogWarning(ex, "Failed to serialize Apollo embed for diagnostics");
+        }
+
         var parsed = ApolloEmbedParser.Parse(embed);
         if (parsed is null)
         {
