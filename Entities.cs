@@ -212,6 +212,29 @@ public class CalendarEvent
     public DateTime CreatedAt { get; set; }
 
     public string Description { get; set; } = "";
+
+    /// <summary>
+    /// When EventAttendanceSnapshotService last attempted to snapshot this
+    /// event. Stamped on every attempt regardless of whether anyone qualified.
+    /// Null means the event has never been processed yet.
+    ///
+    /// ── Why this column exists ──
+    /// Before this column, the snapshot service determined "already processed"
+    /// by checking whether *any* EventAttendance row referenced the event.
+    /// That check fails open in the case where an event finishes and zero
+    /// users qualify — no rows get written, and the "already processed" check
+    /// keeps returning false, so the event gets re-processed on every 5-minute
+    /// sweep forever. The Helldivers event on 2026-04-25 demonstrated this:
+    /// hours of identical "0 attendee(s)" log lines because the event was
+    /// stuck in a perpetual no-qualifiers state until its EndUtc was extended.
+    ///
+    /// With this column, the service stamps LastSnapshotAttemptUtc on each
+    /// pass, then a "stale enough to stop retrying" check kicks in once the
+    /// event is far enough in the past that further retries are unlikely to
+    /// produce different results. See EventAttendanceSnapshotService for the
+    /// retry policy.
+    /// </summary>
+    public DateTime? LastSnapshotAttemptUtc { get; set; }
 }
 
 /// <summary>
