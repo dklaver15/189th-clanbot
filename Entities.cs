@@ -286,3 +286,45 @@ public class EventAttendance
     /// <summary>When this attendance row was snapshotted by the background service.</summary>
     public DateTime RecordedAt { get; set; }
 }
+
+/// <summary>
+/// Singleton row holding cross-cutting bot state that needs to survive
+/// restarts. Logically a key/value blob, but typed for clarity and for EF
+/// Core's benefit.
+///
+/// ── Why this exists ──
+/// Some operations need a "did this happen since the last redeploy" answer
+/// that can't be derived from other tables. The motivating example:
+/// AutoPromotionService runs once per day at a configured UTC hour. If the
+/// container redeploys 5 minutes after that hour, the service starts up,
+/// computes "next run" = today's run hour (which is in the past), pushes it
+/// to tomorrow, and silently skips today's cycle. Without state tracking,
+/// there's no way to know on startup whether today's run already completed
+/// in a previous container instance.
+///
+/// ── How it's used ──
+/// Single row, Id = 1 by convention. AutoPromotionService stamps
+/// LastAutoPromotionCompletedUtc on every successful cycle (including
+/// dry-run cycles, since the cycle still ran, just produced no real
+/// promotions). At startup, if we're past today's run hour AND
+/// LastAutoPromotionCompletedUtc is null OR before today's run hour, we
+/// run a catch-up immediately.
+///
+/// Future schedulers (RosterExportService, etc.) can add their own
+/// columns here without a separate table per service.
+/// </summary>
+public class BotState
+{
+    public int Id { get; set; }
+
+    /// <summary>
+    /// Timestamp of the last successfully-completed AutoPromotionService cycle.
+    /// Null if no cycle has ever completed (fresh DB).
+    ///
+    /// "Successfully completed" means RunAutoPromotionAsync finished without
+    /// throwing. Individual member-level errors inside the cycle don't
+    /// invalidate the timestamp — those get logged and skipped, the cycle
+    /// itself still completes.
+    /// </summary>
+    public DateTime? LastAutoPromotionCompletedUtc { get; set; }
+}

@@ -38,6 +38,19 @@ namespace ClanGuardBot.Services;
 /// Promotions can be disabled globally (AutoPromotionDryRun) or per-tier via
 /// AutoPromotionDryRunRanks — useful for rolling out new tiers alongside
 /// existing live ones.
+///
+/// ── Deploy-during-cycle catch-up ──
+/// If the bot is redeployed during the configured run hour (or shortly
+/// after), the standard scheduling path would silently skip today's cycle:
+/// `nextRun = today's run hour` is in the past, the code pushes it to
+/// tomorrow, and today's eligible members wait an extra day.
+///
+/// To prevent that, on startup we check BotState.LastAutoPromotionCompletedUtc.
+/// If the most recent run hour is in the past AND no run has been recorded
+/// after that run hour, we run a catch-up immediately. This is idempotent:
+/// the catch-up itself stamps LastAutoPromotionCompletedUtc, so a second
+/// restart on the same day after the catch-up sees the timestamp is current
+/// and skips.
 /// </summary>
 public class AutoPromotionService : BackgroundService
 {
@@ -126,6 +139,20 @@ public class AutoPromotionService : BackgroundService
             string.Join(",", dryRunRanks),
             _config.AutoPromotionAnnouncementDelaySeconds);
 
+        // ── Catch-up check ──
+        // If we're past today's run hour and no run has been recorded for
+        // today's window, run a catch-up immediately. This handles the case
+        // where the bot was redeployed at or shortly after the run hour and
+        // would otherwise have silently skipped today's cycle.
+        try
+        {
+            await RunCatchUpIfNeededAsync(stoppingToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during auto-promotion catch-up check");
+        }
+
         while (!stoppingToken.IsCancellationRequested)
         {
             var delay = GetDelayUntilNextRun();
@@ -148,6 +175,73 @@ public class AutoPromotionService : BackgroundService
                 _logger.LogError(ex, "Error during auto-promotion cycle");
             }
         }
+    }
+
+    /// <summary>
+    /// On startup, decides whether to run an immediate catch-up cycle to
+    /// recover from a deploy that crossed the configured run hour.
+    ///
+    /// ── Decision logic ──
+    /// Compute todayRunHourUtc = today's date at AutoPromotionRunHourUtc.
+    /// If now &lt; todayRunHourUtc, today's run hasn't happened yet — normal
+    /// scheduling will fire it on time, no catch-up needed.
+    ///
+    /// If now &gt;= todayRunHourUtc, today's run hour has already arrived. We
+    /// need to know whether a cycle has actually completed since then. Read
+    /// BotState.LastAutoPromotionCompletedUtc:
+    ///   • null → fresh DB or first deploy after this feature shipped, run
+    ///     a catch-up. This produces one extra cycle on the very first
+    ///     deploy after the schema migration; the cycle is idempotent
+    ///     (already-promoted users are no longer eligible) so this is
+    ///     harmless.
+    ///   • &lt; todayRunHourUtc → most recent recorded run was before today's
+    ///     run hour, meaning today's run got skipped. Run a catch-up.
+    ///   • &gt;= todayRunHourUtc → today's run already completed. Skip
+    ///     catch-up; the main loop will schedule tomorrow's run normally.
+    ///
+    /// ── Idempotency ──
+    /// RunAutoPromotionAsync stamps LastAutoPromotionCompletedUtc on
+    /// success. A second restart on the same day will see the timestamp is
+    /// after todayRunHourUtc and skip the catch-up. A user who got promoted
+    /// in the catch-up cycle will not be eligible again in the second
+    /// catch-up anyway (their RankHistory.AssignedAt got reset to "now"
+    /// when promoted), so even if catch-up did re-run it would be a no-op
+    /// for that user.
+    /// </summary>
+    private async Task RunCatchUpIfNeededAsync(CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+        var runHour = Math.Clamp(_config.AutoPromotionRunHourUtc, 0, 23);
+        var todayRunHourUtc = new DateTime(now.Year, now.Month, now.Day, runHour, 0, 0, DateTimeKind.Utc);
+
+        if (now < todayRunHourUtc)
+        {
+            _logger.LogInformation(
+                "Auto-promotion: today's run hour ({RunHour:HH:mm} UTC) is still in the future; no catch-up needed",
+                todayRunHourUtc);
+            return;
+        }
+
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+        var state = await GetOrCreateBotStateAsync(db, ct);
+        var lastRun = state.LastAutoPromotionCompletedUtc;
+
+        if (lastRun.HasValue && lastRun.Value >= todayRunHourUtc)
+        {
+            _logger.LogInformation(
+                "Auto-promotion: today's run already completed at {LastRun:yyyy-MM-dd HH:mm} UTC; no catch-up needed",
+                lastRun.Value);
+            return;
+        }
+
+        _logger.LogInformation(
+            "Auto-promotion: catch-up triggered. Today's run hour ({RunHour:HH:mm} UTC) has passed and the most recent recorded run was {LastRun}.",
+            todayRunHourUtc,
+            lastRun.HasValue ? lastRun.Value.ToString("yyyy-MM-dd HH:mm UTC") : "never");
+
+        await RunAutoPromotionAsync(ct);
     }
 
     /// <summary>
@@ -184,7 +278,43 @@ public class AutoPromotionService : BackgroundService
             }
         }
 
+        // Stamp the completion timestamp regardless of dry-run mode. The cycle
+        // itself ran; whether it produced real promotions doesn't change
+        // whether we should consider today's slot "consumed". Skipping the
+        // stamp on dry-run cycles would cause every dry-run deploy to
+        // re-trigger catch-up, adding noise without value.
+        try
+        {
+            using var scope = _services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+            var state = await GetOrCreateBotStateAsync(db, ct);
+            state.LastAutoPromotionCompletedUtc = DateTime.UtcNow;
+            await db.SaveChangesAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            // Don't fail the whole cycle if state-stamping fails. The cost is
+            // an extra catch-up on the next restart, which is harmless.
+            _logger.LogWarning(ex, "Failed to stamp BotState.LastAutoPromotionCompletedUtc");
+        }
+
         _logger.LogInformation("Auto-promotion cycle complete");
+    }
+
+    /// <summary>
+    /// Loads the singleton BotState row, creating it if missing. Always
+    /// returns a tracked entity so callers can mutate fields and SaveChanges.
+    /// </summary>
+    private static async Task<BotState> GetOrCreateBotStateAsync(BotDbContext db, CancellationToken ct)
+    {
+        var state = await db.BotStates.FirstOrDefaultAsync(ct);
+        if (state is null)
+        {
+            state = new BotState();
+            db.BotStates.Add(state);
+            await db.SaveChangesAsync(ct);
+        }
+        return state;
     }
 
     private async Task ProcessGuildAsync(SocketGuild guild, CancellationToken ct)
