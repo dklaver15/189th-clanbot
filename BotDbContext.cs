@@ -16,6 +16,7 @@ public class BotDbContext : DbContext
     public DbSet<OnboardingReminder> OnboardingReminders => Set<OnboardingReminder>();
     public DbSet<CalendarEvent>      CalendarEvents      => Set<CalendarEvent>();
     public DbSet<EventAttendance>    EventAttendances    => Set<EventAttendance>();
+    public DbSet<BotState>           BotStates           => Set<BotState>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -85,6 +86,9 @@ public class BotDbContext : DbContext
             // Sweep query: "events that ended recently but haven't been snapshotted"
             e.HasIndex(a => a.CalendarEventId);
         });
+
+        // BotState is a singleton table — only one row, no indexes needed.
+        // The primary key on Id is sufficient.
     }
 }
 
