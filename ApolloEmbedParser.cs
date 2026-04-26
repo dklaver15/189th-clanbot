@@ -76,21 +76,59 @@ public static partial class ApolloEmbedParser
         DateTime startUtc;
         DateTime endUtc;
 
-        // Strategy 1: Discord unix timestamps (<t:UNIX:X>) anywhere in the embed
+        // ── Strategy 1: Discord unix timestamps (<t:UNIX:X>) anywhere in embed ──
+        //
+        // Apollo's "Time" field typically looks like:
+        //   "<t:START:F> - <t:END:t> [[Add to Google]](...)
+        //    <:countdown:...> <t:START:R>"
+        //
+        // That's three <t:> tokens per event: start (full format), end (time-only
+        // format), and start (relative format) for the countdown. The third token
+        // duplicates the start's unix value but uses :R formatting.
+        //
+        // ── The bug we're fixing ──
+        // An earlier version sorted ALL parsed timestamps and took position [1] as
+        // the end. With three tokens producing values [START, END, START], the
+        // sorted order is [START, START, END] and position [1] is a duplicate of
+        // the start, not the end. The "is timestamps[1] more than 15 minutes after
+        // start" guard then failed (zero distance), and the parser silently fell
+        // back to a 2-hour duration default.
+        //
+        // The 2026-04-25 Helldivers event (7 AM – 9 PM CDT, 14 hours) was a
+        // dramatic instance: the 12:00 UTC start parsed correctly, but the 02:00
+        // UTC end was clobbered to 14:00 UTC (start + 2 hours) because of this
+        // duplicate-collision bug. Attendance for the entire event window was
+        // miscredited until the EndUtc was manually corrected via SQL.
+        //
+        // ── The fix ──
+        //   1. Deduplicate parsed timestamps by Unix value before sorting, so the
+        //      :R duplicate of the start is collapsed.
+        //   2. Take min and max of the distinct set as start and end. Min/max is
+        //      more defensive than position-based picking against future Apollo
+        //      embed format changes (e.g. an additional metadata timestamp showing
+        //      up somewhere in the embed wouldn't break end detection).
+        //   3. Keep the 15-minute floor between start and end. Some embeds may
+        //      contain a metadata-style timestamp very close to the start (event
+        //      creation time, last edit, etc.) that shouldn't be interpreted as
+        //      the end. If the latest distinct timestamp is within 15 minutes of
+        //      the earliest, fall back to the duration default rather than
+        //      producing a sub-15-minute event.
         var tsMatches = TimestampRegex().Matches(allText);
         if (tsMatches.Count > 0)
         {
-            var timestamps = tsMatches
+            var distinct = tsMatches
                 .Select(m => DateTimeOffset.FromUnixTimeSeconds(long.Parse(m.Groups[1].Value)).UtcDateTime)
+                .Distinct()
                 .OrderBy(t => t)
                 .ToList();
 
-            startUtc = timestamps[0];
-            endUtc   = timestamps.Count >= 2 && timestamps[1] > startUtc.AddMinutes(15)
-                ? timestamps[1]
+            startUtc = distinct[0];
+
+            endUtc = distinct.Count >= 2 && distinct[^1] > startUtc.AddMinutes(15)
+                ? distinct[^1]
                 : startUtc.AddMinutes(ParseDurationMinutes(embed));
         }
-        // Strategy 2: Apollo plain-text "Time" field
+        // ── Strategy 2: Apollo plain-text "Time" field ──
         // e.g. "Saturday, March 28, 2026 at 18:00 – 20:00 [Add to Google]"
         else
         {
