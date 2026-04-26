@@ -18,9 +18,51 @@ namespace ClanGuardBot.Services;
 ///
 /// Voice time is capped per-session via MaxSingleSessionHours so stuck or orphaned
 /// voice sessions cannot inflate a user's "active" status.
+///
+/// ── Notification retry policy ──
+/// Notifications can fail for legitimate reasons (channel temporarily
+/// unreachable, bot lost permission, network blip). On failure, we stamp
+/// LastNotificationAttemptUtc and let the next cycle try again — no
+/// give-up after a few attempts, because some failures resolve themselves
+/// within a day or two.
+///
+/// However, if a record has been failing to notify for more than
+/// NotificationGiveUpWindowDays, we mark it as resolved ("given up") so
+/// it stops occupying the pending-notification queue forever. The
+/// 2026-04-25 backlog of 156 stale records from February onward — caused
+/// by a permissions issue on #awol-list that was only fixed months later
+/// — was the motivating case. With a give-up window in place, those
+/// records would have been auto-resolved within a week instead of piling
+/// up indefinitely.
+///
+/// If the underlying issue is fixed and the user is still AWOL, the next
+/// cycle's Step 2 will see no pending record and create a fresh one.
+/// Given-up records are NOT deleted; they're simply marked NotificationSent=true
+/// with a synthetic NotificationSentAt timestamp, so audit history is
+/// preserved.
+///
+/// ── Role-removed cleanup ──
+/// Step 2 already handles "user got active again" — when activity rises
+/// above threshold, the bot removes the AWOL role and resolves any pending
+/// records. But the role can also be removed externally:
+///   • Officer manually removes via Discord UI
+///   • User leaves and rejoins the server
+///   • Mass role cleanup during a clan event
+///   • Bot was offline when removal happened via /awol-exempt or activity
+///
+/// In any of these cases, the AwolRecord would otherwise stay pending
+/// forever. Step 3 now also checks "does the user still have the AWOL role?"
+/// before attempting notification; if not, the record is resolved as
+/// "role no longer present" and notification is skipped.
 /// </summary>
 public class AwolCheckService : BackgroundService
 {
+    /// <summary>
+    /// Records older than this with at least one failed notification attempt
+    /// are considered "given up." See class doc for rationale.
+    /// </summary>
+    private static readonly TimeSpan NotificationGiveUpWindow = TimeSpan.FromDays(7);
+
     private readonly IServiceProvider _services;
     private readonly DiscordSocketClient _client;
     private readonly ILogger<AwolCheckService> _logger;
@@ -51,8 +93,10 @@ public class AwolCheckService : BackgroundService
         // Give guilds a moment to finish downloading members
         await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
 
-        _logger.LogInformation("AWOL check service started. Running every {Interval} minutes.",
-            _config.CheckIntervalMinutes);
+        _logger.LogInformation(
+            "AWOL check service started. Running every {Interval} minutes. NotificationGiveUpWindow={GiveUp}d.",
+            _config.CheckIntervalMinutes,
+            (int)NotificationGiveUpWindow.TotalDays);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -283,12 +327,71 @@ public class AwolCheckService : BackgroundService
                      && r.AssignedAt <= graceCutoff)
             .ToListAsync(ct);
 
+        // Counters for end-of-step summary logging.
+        var notified  = 0;
+        var givenUp   = 0;
+        var roleGone  = 0;
+        var userGone  = 0;
+        var failed    = 0;
+
         foreach (var record in pendingNotifications)
         {
+            // ── Give-up check ──
+            // If we've been trying for more than NotificationGiveUpWindow and
+            // still haven't succeeded, mark the record resolved with a
+            // synthetic NotificationSentAt and a log line so it's traceable.
+            // Only applies after at least one attempt has been recorded —
+            // otherwise a backlog from a long bot outage would all
+            // immediately give up without ever being tried.
+            var giveUpCutoff = DateTime.UtcNow - NotificationGiveUpWindow;
+            if (record.LastNotificationAttemptUtc.HasValue
+                && record.AssignedAt < giveUpCutoff)
+            {
+                record.NotificationSent = true;
+                record.NotificationSentAt = DateTime.UtcNow;
+                givenUp++;
+                _logger.LogInformation(
+                    "AWOL notification given up for {Username} ({UserId}) — assigned {AssignedAt:yyyy-MM-dd HH:mm} UTC, last attempt {LastAttempt:yyyy-MM-dd HH:mm} UTC, exceeded {Window}d retry window",
+                    record.Username, record.UserId,
+                    record.AssignedAt, record.LastNotificationAttemptUtc.Value,
+                    (int)NotificationGiveUpWindow.TotalDays);
+                continue;
+            }
+
+            // ── Role-removed cleanup ──
+            // The user might have left the guild, or had their AWOL role
+            // removed by a path that doesn't touch the AwolRecord (manual
+            // removal in Discord UI, /awol-exempt, mass cleanup, etc.). In
+            // either case the pending record is moot — close it and skip
+            // notification so we don't surface stale "AWOL Member — Ready
+            // for Review" embeds for users who aren't actually AWOL anymore.
             var member = guild.GetUser(record.UserId);
-            var activityWindowDays = member is not null
-                ? _config.GetWindowDaysForRoles(member.Roles.Select(r => r.Name))
-                : _config.WindowDays;
+            if (member is null)
+            {
+                record.NotificationSent = true;
+                record.NotificationSentAt = DateTime.UtcNow;
+                userGone++;
+                _logger.LogInformation(
+                    "AWOL notification skipped for {Username} ({UserId}): user no longer in guild",
+                    record.Username, record.UserId);
+                continue;
+            }
+
+            var hasAwolRole = member.Roles.Any(r => r.Id == awolRole.Id);
+            if (!hasAwolRole)
+            {
+                record.NotificationSent = true;
+                record.NotificationSentAt = DateTime.UtcNow;
+                roleGone++;
+                _logger.LogInformation(
+                    "AWOL notification skipped for {Username} ({UserId}): AWOL role no longer present",
+                    record.Username, record.UserId);
+                continue;
+            }
+
+            // ── Build the notification embed ──
+            var activityWindowDays =
+                _config.GetWindowDaysForRoles(member.Roles.Select(r => r.Name));
             var windowStart = DateTime.UtcNow.AddDays(-activityWindowDays);
 
             var messageCount = await db.MessageEvents
@@ -304,45 +407,53 @@ public class AwolCheckService : BackgroundService
                 .WithTitle("⚠️ AWOL Member — Ready for Review")
                 .WithColor(Color.Red)
                 .WithTimestamp(DateTimeOffset.UtcNow)
-                .AddField("User", member is not null
-                    ? $"{member.Mention} ({member.Username})"
-                    : $"{record.Username} (ID: {record.UserId})")
+                .AddField("User", $"{member.Mention} ({member.Username})")
                 .AddField("AWOL Since", record.AssignedAt.ToString("yyyy-MM-dd HH:mm UTC"), inline: true)
                 .AddField("Grace Period Expired",
                     record.AssignedAt.AddDays(_config.AwolGraceDays).ToString("yyyy-MM-dd HH:mm UTC"),
                     inline: true)
                 .AddField($"Messages ({activityWindowDays}d)", messageCount.ToString(), inline: true)
                 .AddField($"Voice Time ({activityWindowDays}d)",
-                    $"{voiceSeconds / 3600.0:F1} hours", inline: true);
-
-            if (member is not null)
-            {
-                embed.AddField("Joined Server",
-                    member.JoinedAt?.ToString("yyyy-MM-dd") ?? "Unknown", inline: true);
-                embed.AddField("Roles",
+                    $"{voiceSeconds / 3600.0:F1} hours", inline: true)
+                .AddField("Joined Server",
+                    member.JoinedAt?.ToString("yyyy-MM-dd") ?? "Unknown", inline: true)
+                .AddField("Roles",
                     string.Join(", ", member.Roles
                         .Where(r => !r.IsEveryone)
-                        .Select(r => r.Name)));
-            }
+                        .Select(r => r.Name)))
+                .WithFooter("ClanGuard Bot • Use server moderation tools to take action");
 
-            embed.WithFooter("ClanGuard Bot • Use server moderation tools to take action");
+            // Stamp the attempt timestamp BEFORE posting, so a retry policy can
+            // reason about "we tried" even if SendMessageAsync throws and the
+            // catch block runs. SaveChangesAsync at the end of the loop persists
+            // both success and failure attempts.
+            record.LastNotificationAttemptUtc = DateTime.UtcNow;
 
             try
             {
                 await hqChannel.SendMessageAsync(embed: embed.Build());
                 record.NotificationSent = true;
                 record.NotificationSentAt = DateTime.UtcNow;
+                notified++;
 
                 _logger.LogInformation("Posted AWOL notification for {Username} in {Guild} #{Channel}",
                     record.Username, guild.Name, hqChannel.Name);
             }
             catch (Exception ex)
             {
+                failed++;
                 _logger.LogError(ex, "Failed to send AWOL notification for {Username}", record.Username);
             }
         }
 
         await db.SaveChangesAsync(ct);
+
+        if (pendingNotifications.Count > 0)
+        {
+            _logger.LogInformation(
+                "AWOL Step 3 summary for {Guild}: notified={Notified}, given up={GivenUp}, role gone={RoleGone}, user gone={UserGone}, failed={Failed} (out of {Total} pending)",
+                guild.Name, notified, givenUp, roleGone, userGone, failed, pendingNotifications.Count);
+        }
     }
 
     private static bool IsExempt(SocketGuildUser member, List<string> exemptRoles)
