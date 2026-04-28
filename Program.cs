@@ -101,6 +101,13 @@ try
     builder.Services.AddSingleton<GuestReminderHandler>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<GuestReminderHandler>());
 
+    // BumpReminderHandler: listens for Disboard /bump success embeds and posts
+    // a reminder to the bump channel when the cooldown window expires without
+    // anyone bumping. Same singleton + hosted-service pattern as the other
+    // reminder handlers; Register(client) is called from DiscordBotService.
+    builder.Services.AddSingleton<BumpReminderHandler>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<BumpReminderHandler>());
+
     // ApolloEventHandler: parses #events channel posts and syncs to Google Calendar.
     builder.Services.AddSingleton<ApolloEventHandler>();
 

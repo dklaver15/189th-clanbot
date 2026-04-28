@@ -21,6 +21,7 @@ public class DiscordBotService : IHostedService
     private readonly TicketReminderHandler _ticketReminderHandler;
     private readonly GuestReminderHandler _guestReminderHandler;
     private readonly OnboardingReminderHandler _onboardingReminderHandler;
+    private readonly BumpReminderHandler _bumpReminderHandler;
     private readonly ApolloEventHandler _apolloEventHandler;
     private readonly CompEventCommandHandler _compEventHandler;
     private readonly PromoteCommandHandler _promoteHandler;
@@ -39,6 +40,7 @@ public class DiscordBotService : IHostedService
         TicketReminderHandler ticketReminderHandler,
         GuestReminderHandler guestReminderHandler,
         OnboardingReminderHandler onboardingReminderHandler,
+        BumpReminderHandler bumpReminderHandler,
         ApolloEventHandler apolloEventHandler,
         CompEventCommandHandler compEventHandler,
         PromoteCommandHandler promoteHandler,
@@ -56,6 +58,7 @@ public class DiscordBotService : IHostedService
         _ticketReminderHandler     = ticketReminderHandler;
         _guestReminderHandler      = guestReminderHandler;
         _onboardingReminderHandler = onboardingReminderHandler;
+        _bumpReminderHandler       = bumpReminderHandler;
         _apolloEventHandler        = apolloEventHandler;
         _compEventHandler          = compEventHandler;
         _promoteHandler            = promoteHandler;
@@ -78,6 +81,7 @@ public class DiscordBotService : IHostedService
         _ticketReminderHandler.Register(_client);
         _guestReminderHandler.Register(_client);
         _onboardingReminderHandler.Register(_client);
+        _bumpReminderHandler.Register(_client);
         _apolloEventHandler.Register(_client);
         _compEventHandler.Register(_client);
         _promoteHandler.Register(_client);

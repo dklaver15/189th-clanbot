@@ -17,6 +17,7 @@ public class BotDbContext : DbContext
     public DbSet<CalendarEvent>      CalendarEvents      => Set<CalendarEvent>();
     public DbSet<EventAttendance>    EventAttendances    => Set<EventAttendance>();
     public DbSet<BotState>           BotStates           => Set<BotState>();
+    public DbSet<BumpState>          BumpStates          => Set<BumpState>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -89,6 +90,13 @@ public class BotDbContext : DbContext
 
         // BotState is a singleton table — only one row, no indexes needed.
         // The primary key on Id is sufficient.
+
+        modelBuilder.Entity<BumpState>(e =>
+        {
+            // One row per guild — keyed by GuildId for upsert semantics in
+            // BumpReminderHandler.HandleBumpSuccessAsync.
+            e.HasIndex(b => b.GuildId).IsUnique();
+        });
     }
 }
 
