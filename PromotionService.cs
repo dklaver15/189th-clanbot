@@ -72,7 +72,21 @@ public class PromotionService
 
     /// <summary>
     /// Blurb templates for the auto-promotion announcement.
-    /// Placeholders: {mention}, {fromRank}, {toRank} (all full-name rank strings).
+    /// Placeholders: {mention}, {fromRank}, {toRank}.
+    /// {fromRank} and {toRank} are the full English rank names (e.g. "Sergeant"),
+    /// not the Discord role shorthand. Templates that don't include {fromRank}
+    /// are intentional — sometimes "promoted to X" reads cleaner than
+    /// "promoted from Y to X" when the new rank is the focus.
+    ///
+    /// ── Why so many variants ──
+    /// Members fed back that automated promotion announcements felt
+    /// less genuine when the same 1–2 templates rotated through every
+    /// cycle — the repetition itself signals "this is from a script."
+    /// 15 variants give a much wider distribution and break the
+    /// "I've seen this exact line before" pattern. Combined with the
+    /// 10-minute spacing between announcements, a typical evening's
+    /// promotions now feel like individual recognition rather than a
+    /// burst of identical notifications.
     /// </summary>
     private static readonly string[] AnnouncementTemplates =
     {
@@ -80,6 +94,17 @@ public class PromotionService
         "⭐ {mention} has earned a promotion to **{toRank}**! Welcome to the next step up — hooah!",
         "🪖 A new stripe for {mention}! Promoted from **{fromRank}** to **{toRank}**. Outstanding work.",
         "🎉 Promotion time! {mention} moves up from **{fromRank}** to **{toRank}**. The 189th salutes you.",
+        "⭐ {mention} earned a promotion to **{toRank}**. Well done.",
+        "🎖️ Congratulations to {mention} on the promotion to **{toRank}** — you put in the work.",
+        "🪖 {mention} has been promoted from **{fromRank}** to **{toRank}**. The 189th is proud to have you.",
+        "📣 Attention all hands: {mention} is now **{toRank}**. Outstanding effort.",
+        "🪖 New rank, same standard. Congrats to {mention} on reaching **{toRank}**.",
+        "⭐ Promotion announcement: {mention} advances to **{toRank}**. Keep up the great work.",
+        "🪖 {mention} just leveled up to **{toRank}**. Well earned.",
+        "🎉 The 189th recognizes {mention} for promotion from **{fromRank}** to **{toRank}**. Outstanding.",
+        "⭐ Up the chain goes {mention} — promoted to **{toRank}**. Excellent work.",
+        "🪖 Stripes earned. {mention} is now **{toRank}**. The 189th thanks you for your service.",
+        "🎉 {mention} answered the call and put in the time. Promoted to **{toRank}**. Well done.",
     };
 
     public PromotionService(
@@ -258,10 +283,13 @@ public class PromotionService
         var fromFull = RankFullNames.TryGetValue(fromRankShort, out var f) ? f : fromRankShort;
         var toFull = RankFullNames.TryGetValue(toRankShort, out var t) ? t : toRankShort;
 
-        // Pick a template pseudo-randomly based on user + timestamp so announcements
-        // don't all look the same back-to-back.
-        var idx = (int)((member.Id + (ulong)DateTime.UtcNow.Ticks) % (ulong)AnnouncementTemplates.Length);
-        var template = AnnouncementTemplates[idx];
+        // Pick a template at random. Random.Shared is thread-safe and avoids
+        // the seed-bias problem of the previous (member.Id + ticks) % length
+        // approach, which made each user's template selection partly biased
+        // by their user ID. With 15 templates and a true random pick, two
+        // back-to-back announcements have a 14/15 chance of using different
+        // wording — high enough that the cycle as a whole reads as varied.
+        var template = AnnouncementTemplates[Random.Shared.Next(AnnouncementTemplates.Length)];
 
         var message = template
             .Replace("{mention}", member.Mention)
