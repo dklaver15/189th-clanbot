@@ -250,6 +250,43 @@ public class BotConfig
     /// </summary>
     public double MaxSingleSessionHours { get; set; } = 12.0;
 
+    // ─── Bump Reminder Settings ──────────────────────────────────────
+
+    /// <summary>
+    /// Master switch for the BumpReminderHandler. When false, the handler
+    /// ignores Disboard messages and skips startup recovery.
+    /// </summary>
+    public bool BumpReminderEnabled { get; set; } = true;
+
+    /// <summary>
+    /// How long to wait after the last observed Disboard bump before reminding
+    /// the channel. Disboard's actual cooldown is 2h; the default 2.5h is a
+    /// soft buffer so a member who notices the timer just past 2h has time to
+    /// bump before the bot fires an unnecessary reminder.
+    /// </summary>
+    public double BumpReminderDelayHours { get; set; } = 2.5;
+
+    /// <summary>
+    /// Discord channel ID where bump reminders are posted. Defaults to the
+    /// general-chat channel that auto-promotion announcements use.
+    /// </summary>
+    public ulong BumpReminderChannelId { get; set; } = 1421928902963494922;
+
+    /// <summary>
+    /// Discord user ID of the Disboard bot. The standard public Disboard bot
+    /// is 302050872383242240 — only override this if Disboard ever migrates
+    /// to a new bot account.
+    /// </summary>
+    public ulong DisboardBotId { get; set; } = 302050872383242240;
+
+    /// <summary>
+    /// On bot restart, if a scheduled reminder was missed by less than this
+    /// many minutes, fire it immediately. Anything older is considered stale
+    /// (someone may have bumped during downtime) and the reminder is shifted
+    /// forward by a full BumpReminderDelayHours window instead.
+    /// </summary>
+    public int BumpReminderRestartGraceMinutes { get; set; } = 30;
+
     // ─── Helpers ─────────────────────────────────────────────────────
 
     public List<string> GetExemptRolesList() =>
