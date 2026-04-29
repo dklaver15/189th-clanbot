@@ -48,6 +48,15 @@ public class BotConfig
     /// </summary>
     public string ExemptRoles { get; set; } = "Admin,Moderator,Retired,Bot,Bot Whisperer";
 
+    /// <summary>
+    /// Name of the role for clan members on Reserve status. Reserve members are
+    /// fully exempt from AWOL tracking — they will never be assigned the AWOL
+    /// role and will never be kicked by /kick-awols. Tracked separately from
+    /// ExemptRoles so that "Reserve" carries explicit clan-doctrine meaning
+    /// (active-but-paused members) rather than being lumped in with bots/admins.
+    /// </summary>
+    public string ReserveRoleName { get; set; } = "Reserve";
+
     /// <summary>Path to the Google service account credentials JSON file.</summary>
     public string GoogleCredentialsPath { get; set; } = "google-credentials.json";
 
@@ -161,6 +170,15 @@ public class BotConfig
     /// Must exactly match one of the rank names in RankRoles (case-insensitive).
     /// </summary>
     public string PromoteDemoteMinRank { get; set; } = "2ndLT";
+
+    /// <summary>
+    /// The minimum rank required to use the /kick-awols and /clear-awol-list commands.
+    /// Must exactly match one of the rank names in RankRoles (case-insensitive).
+    /// Members at or above this rank are also PROTECTED from being kicked by
+    /// /kick-awols, even if they somehow ended up flagged AWOL — this is the
+    /// safety net against a tracking bug nuking leadership.
+    /// </summary>
+    public string AwolKickMinRank { get; set; } = "MAJ";
 
     // ─── Auto-Promotion Settings ─────────────────────────────────────
 
@@ -289,8 +307,27 @@ public class BotConfig
 
     // ─── Helpers ─────────────────────────────────────────────────────
 
-    public List<string> GetExemptRolesList() =>
-        ExemptRoles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+    /// <summary>
+    /// Returns the exempt-roles list with ReserveRoleName appended (if set).
+    /// AwolCheckService uses this so Reserve members are treated identically
+    /// to Admin/Moderator/etc. — never assigned AWOL, never tracked. The
+    /// kick command also re-checks Reserve explicitly as a belt-and-suspenders
+    /// guard in case a Reserve role was added between AWOL assignment and kick.
+    /// </summary>
+    public List<string> GetExemptRolesList()
+    {
+        var list = ExemptRoles
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToList();
+
+        if (!string.IsNullOrWhiteSpace(ReserveRoleName)
+            && !list.Contains(ReserveRoleName, StringComparer.OrdinalIgnoreCase))
+        {
+            list.Add(ReserveRoleName);
+        }
+
+        return list;
+    }
 
     public List<string> GetShortWindowRolesList() =>
         ShortWindowRoles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();

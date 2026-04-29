@@ -93,6 +93,17 @@ try
     // attendance history.
     builder.Services.AddSingleton<EventCreditCommandHandler>();
 
+    // KickAwolsCommandHandler: /kick-awols slash command for officers
+    // (AwolKickMinRank+). Iterates over members with the AWOL role and removes
+    // them from the server, with multiple safety guards (Reserve role, min rank,
+    // role hierarchy) and per-member audit rows written to AwolKickAuditRecords.
+    builder.Services.AddSingleton<KickAwolsCommandHandler>();
+
+    // ClearAwolListCommandHandler: /clear-awol-list slash command for officers
+    // (AwolKickMinRank+). Wipes the awol-list HQ channel so the reviewing
+    // officer doesn't have to scroll through months of stale embeds.
+    builder.Services.AddSingleton<ClearAwolListCommandHandler>();
+
     // TicketReminderHandler: singleton for event registration + hosted service for startup recovery.
     builder.Services.AddSingleton<TicketReminderHandler>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<TicketReminderHandler>());

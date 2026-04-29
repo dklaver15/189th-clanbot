@@ -6,18 +6,19 @@ namespace ClanGuardBot.Data;
 
 public class BotDbContext : DbContext
 {
-    public DbSet<UserActivity>       UserActivities      => Set<UserActivity>();
-    public DbSet<AwolRecord>         AwolRecords         => Set<AwolRecord>();
-    public DbSet<MessageEvent>       MessageEvents       => Set<MessageEvent>();
-    public DbSet<VoiceSession>       VoiceSessions       => Set<VoiceSession>();
-    public DbSet<RankHistory>        RankHistories       => Set<RankHistory>();
-    public DbSet<TicketReminder>     TicketReminders     => Set<TicketReminder>();
-    public DbSet<GuestReminder>      GuestReminders      => Set<GuestReminder>();
-    public DbSet<OnboardingReminder> OnboardingReminders => Set<OnboardingReminder>();
-    public DbSet<CalendarEvent>      CalendarEvents      => Set<CalendarEvent>();
-    public DbSet<EventAttendance>    EventAttendances    => Set<EventAttendance>();
-    public DbSet<BotState>           BotStates           => Set<BotState>();
-    public DbSet<BumpState>          BumpStates          => Set<BumpState>();
+    public DbSet<UserActivity>        UserActivities      => Set<UserActivity>();
+    public DbSet<AwolRecord>          AwolRecords         => Set<AwolRecord>();
+    public DbSet<AwolKickAuditRecord> AwolKickAudits      => Set<AwolKickAuditRecord>();
+    public DbSet<MessageEvent>        MessageEvents       => Set<MessageEvent>();
+    public DbSet<VoiceSession>        VoiceSessions       => Set<VoiceSession>();
+    public DbSet<RankHistory>         RankHistories       => Set<RankHistory>();
+    public DbSet<TicketReminder>      TicketReminders     => Set<TicketReminder>();
+    public DbSet<GuestReminder>       GuestReminders      => Set<GuestReminder>();
+    public DbSet<OnboardingReminder>  OnboardingReminders => Set<OnboardingReminder>();
+    public DbSet<CalendarEvent>       CalendarEvents      => Set<CalendarEvent>();
+    public DbSet<EventAttendance>     EventAttendances    => Set<EventAttendance>();
+    public DbSet<BotState>            BotStates           => Set<BotState>();
+    public DbSet<BumpState>           BumpStates          => Set<BumpState>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -32,6 +33,20 @@ public class BotDbContext : DbContext
         {
             entity.HasIndex(e => new { e.GuildId, e.UserId });
             entity.HasIndex(e => new { e.NotificationSent, e.AssignedAt });
+        });
+
+        modelBuilder.Entity<AwolKickAuditRecord>(entity =>
+        {
+            // Primary lookup: "show me all kick events in this guild, newest first"
+            entity.HasIndex(e => new { e.GuildId, e.ProcessedAt });
+
+            // Per-user history: "did we ever kick this user before, and when?"
+            // Useful when a former member wants to come back and we need to
+            // check whether they were kicked recently and why.
+            entity.HasIndex(e => new { e.GuildId, e.UserId, e.ProcessedAt });
+
+            // Per-invoker audit: "what kick runs has this officer initiated?"
+            entity.HasIndex(e => new { e.InvokerId, e.ProcessedAt });
         });
 
         modelBuilder.Entity<MessageEvent>(e =>

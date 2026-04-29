@@ -29,6 +29,8 @@ public class DiscordBotService : IHostedService
     private readonly SetNickCommandHandler _setNickHandler;
     private readonly SeedPromotionCreditCommandHandler _seedHandler;
     private readonly EventCreditCommandHandler _eventCreditHandler;
+    private readonly KickAwolsCommandHandler _kickAwolsHandler;
+    private readonly ClearAwolListCommandHandler _clearAwolListHandler;
     private readonly ILogger<DiscordBotService> _logger;
     private readonly BotConfig _config;
 
@@ -48,6 +50,8 @@ public class DiscordBotService : IHostedService
         SetNickCommandHandler setNickHandler,
         SeedPromotionCreditCommandHandler seedHandler,
         EventCreditCommandHandler eventCreditHandler,
+        KickAwolsCommandHandler kickAwolsHandler,
+        ClearAwolListCommandHandler clearAwolListHandler,
         ILogger<DiscordBotService> logger,
         IOptions<BotConfig> config)
     {
@@ -66,6 +70,8 @@ public class DiscordBotService : IHostedService
         _setNickHandler            = setNickHandler;
         _seedHandler               = seedHandler;
         _eventCreditHandler        = eventCreditHandler;
+        _kickAwolsHandler          = kickAwolsHandler;
+        _clearAwolListHandler      = clearAwolListHandler;
         _logger                    = logger;
         _config                    = config.Value;
     }
@@ -89,6 +95,8 @@ public class DiscordBotService : IHostedService
         _setNickHandler.Register(_client);
         _seedHandler.Register(_client);
         _eventCreditHandler.Register(_client);
+        _kickAwolsHandler.Register(_client);
+        _clearAwolListHandler.Register(_client);
 
         await _client.LoginAsync(TokenType.Bot, _config.Token);
         await _client.StartAsync();
@@ -206,6 +214,30 @@ public class DiscordBotService : IHostedService
                     .WithDescription("Remove 1 manual event credit from a member at their current rank (CPT+ only)")
                     .AddOption("member", ApplicationCommandOptionType.User,
                         "The member to debit", isRequired: true)
+                    .Build(),
+
+                // /kick-awols — bulk-kick all members holding the AWOL role.
+                // Multiple safety guards: Reserve role, min rank, role hierarchy.
+                // Per-member audit rows written to AwolKickAuditRecords.
+                // Defaults to neither confirm nor dry-run; one of the two
+                // booleans must be passed explicitly.
+                new SlashCommandBuilder()
+                    .WithName("kick-awols")
+                    .WithDescription($"Kick all members currently flagged AWOL ({_config.AwolKickMinRank}+ only)")
+                    .AddOption("confirm", ApplicationCommandOptionType.Boolean,
+                        "Set to true to actually kick members", isRequired: false)
+                    .AddOption("dry-run", ApplicationCommandOptionType.Boolean,
+                        "Set to true to preview without kicking (recommended first)", isRequired: false)
+                    .Build(),
+
+                // /clear-awol-list — wipe the HQ channel so the reviewing
+                // officer doesn't have to scroll through stale embeds.
+                // Destructive: requires confirm:true.
+                new SlashCommandBuilder()
+                    .WithName("clear-awol-list")
+                    .WithDescription($"Delete all messages in #{_config.HqChannelName} ({_config.AwolKickMinRank}+ only)")
+                    .AddOption("confirm", ApplicationCommandOptionType.Boolean,
+                        "Set to true to confirm deletion", isRequired: false)
                     .Build(),
             };
 
