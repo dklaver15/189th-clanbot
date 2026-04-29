@@ -497,7 +497,14 @@ public class AwolCheckService : BackgroundService
                 .WithTitle("⚠️ AWOL Member — Ready for Review")
                 .WithColor(Color.Red)
                 .WithTimestamp(DateTimeOffset.UtcNow)
-                .AddField("User", $"{member.Mention} ({member.Username})")
+                // User field layout note: lead with the bold display name (so the
+                // reviewing officer sees "SSG.GRAVESTARR" at a glance), then the
+                // raw Discord username in parens for cross-referencing the roster
+                // sheet, then the mention pill at the end. The mention is what's
+                // tappable on mobile to open the profile — leading with it caused
+                // "You don't have access to this link" errors on iOS when the
+                // raw user-ID link was tapped instead of an in-server mention.
+                .AddField("User", $"**{member.DisplayName}** ({member.Username}) — {member.Mention}")
                 .AddField("AWOL Since", record.AssignedAt.ToString("yyyy-MM-dd HH:mm UTC"), inline: true)
                 .AddField("Grace Period Expired",
                     record.AssignedAt.AddDays(_config.AwolGraceDays).ToString("yyyy-MM-dd HH:mm UTC"),
