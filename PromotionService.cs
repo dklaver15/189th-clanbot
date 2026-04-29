@@ -171,30 +171,31 @@ public class PromotionService
                 Error: $"Member already has the {rankInfo.NewRole} role");
         }
 
-        // ── Remove old role(s) ──────────────────────────────────────
-        var removedRoles = new List<string>();
+        // ── Remove all other rank roles ─────────────────────────────
+        // Defensive: strip every rank role except the target. This handles
+        // step-by-step promotions (RCT → PVT), skip-ahead /promote calls
+        // (RCT → SGT), the SMA special case (CSM or SGM → SMA), and any
+        // pre-existing state where a member has multiple rank roles
+        // (e.g. from an earlier failed promotion or manual role edit).
+        //
+        // Without this sweep, a single-role removal keyed off RankMap.OldRole
+        // leaves stale lower-rank roles in place forever — once a member ends
+        // up with two rank roles, GetCurrentRank picks the higher one and
+        // every future promotion strips only the next one above the stale
+        // role, perpetuating the broken state.
+        var allRankNames = _config.GetRankRolesList()
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        if (string.Equals(targetRankShorthand, "sma", StringComparison.OrdinalIgnoreCase))
+        var rolesToRemove = member.Roles
+            .Where(r => allRankNames.Contains(r.Name)
+                     && !r.Name.Equals(rankInfo.NewRole, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        var removedRoles = new List<string>();
+        foreach (var role in rolesToRemove)
         {
-            // SMA special case: remove either SGM or CSM (or both)
-            foreach (var sourceName in SmaSourceRoles)
-            {
-                var sourceRole = member.Roles.FirstOrDefault(r => r.Name == sourceName);
-                if (sourceRole is not null)
-                {
-                    await member.RemoveRoleAsync(sourceRole);
-                    removedRoles.Add(sourceName);
-                }
-            }
-        }
-        else
-        {
-            var oldRole = member.Roles.FirstOrDefault(r => r.Name == rankInfo.OldRole);
-            if (oldRole is not null)
-            {
-                await member.RemoveRoleAsync(oldRole);
-                removedRoles.Add(rankInfo.OldRole);
-            }
+            await member.RemoveRoleAsync(role);
+            removedRoles.Add(role.Name);
         }
 
         // ── Add new role ────────────────────────────────────────────

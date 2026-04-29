@@ -136,13 +136,24 @@ public class DemoteCommandHandler
             return;
         }
 
-        // ── Remove current (higher) role ────────────────────────────
+        // ── Remove all other rank roles ─────────────────────────────
+        // Defensive: strip every rank role except the target. Mirrors the
+        // sweep in PromotionService.PromoteAsync so demotions don't leave
+        // stale rank roles behind if a member is somehow holding more than
+        // one (e.g. from an earlier failed promotion or manual role edit).
+        var allRankNames = _config.GetRankRolesList()
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var rolesToRemove = member.Roles
+            .Where(r => allRankNames.Contains(r.Name)
+                     && !r.Name.Equals(rankInfo.NewRole, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
         var removedRoles = new List<string>();
-        var oldRole = member.Roles.FirstOrDefault(r => r.Name == rankInfo.OldRole);
-        if (oldRole is not null)
+        foreach (var role in rolesToRemove)
         {
-            await member.RemoveRoleAsync(oldRole);
-            removedRoles.Add(rankInfo.OldRole);
+            await member.RemoveRoleAsync(role);
+            removedRoles.Add(role.Name);
         }
 
         // ── Add new (lower) role ────────────────────────────────────
