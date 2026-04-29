@@ -11,9 +11,21 @@ using Microsoft.Extensions.Options;
 namespace ClanGuardBot.Handlers;
 
 /// <summary>
-/// Handles the GuildMemberUpdated event to detect rank role changes in real-time.
-/// When a member's rank changes, updates the RankHistory record with the exact timestamp.
-/// Also auto-prefixes nicknames on RCT gain and auto-logs new recruits to the Google Sheet.
+/// Handles the GuildMemberUpdated event for two role-driven business actions:
+///
+///   1. Rank tracking — when a member's rank role changes, update RankHistory
+///      with the exact timestamp. Auto-prefix nicknames on RCT gain and
+///      auto-log new recruits to the Google Sheet.
+///
+///   2. Exempt-role transitions — when a member GAINS an exempt role
+///      (Reserve, Admin, Moderator, Retired, etc. as defined by
+///      BotConfig.GetExemptRolesList()), strip the AWOL role if they have
+///      it and resolve any pending AwolRecords. This is the real-time
+///      counterpart to the self-healing pass in AwolCheckService Step 2 —
+///      together they ensure that the moment a member becomes exempt, any
+///      stuck AWOL state is cleaned up. Real-time path catches it within
+///      seconds; the periodic sweep is the safety net for missed gateway
+///      events (bot offline during the role change, etc.).
 ///
 /// ── Seed field handling ──
 /// Whenever this handler updates RankHistory.RankName, it also resets the seed
@@ -70,6 +82,25 @@ public class RankTrackingHandler
         var beforeRoleIds = before.Roles.Select(r => r.Id).ToHashSet();
         var afterRoleIds = after.Roles.Select(r => r.Id).ToHashSet();
         if (beforeRoleIds.SetEquals(afterRoleIds)) return;
+
+        // ── Exempt-role transition handling ──
+        // Run this BEFORE the rank-change logic because:
+        //   1. Reserve / Admin / etc. can be added without any rank change,
+        //      and the rank-change branch returns early when ranks match.
+        //   2. The two operations touch different DB tables (AwolRecords vs
+        //      RankHistories) so there's no ordering dependency.
+        // Wrapped in its own try/catch so a failure here does not block
+        // the rank-tracking logic below.
+        try
+        {
+            await HandleExemptRoleGainedAsync(before, after);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Error handling exempt-role transition for {Username} in {Guild}",
+                after.Username, after.Guild.Name);
+        }
 
         // Determine rank before and after using the configured rank roles list
         var rankRoles = _config.GetRankRolesList();
@@ -164,6 +195,109 @@ public class RankTrackingHandler
         {
             _logger.LogError(ex, "Error tracking rank change for {Username} in {Guild}",
                 after.Username, after.Guild.Name);
+        }
+    }
+
+    /// <summary>
+    /// If the member just GAINED an exempt role (Reserve, Admin, Moderator, etc.)
+    /// AND currently holds the AWOL role, strip AWOL and resolve any pending
+    /// AwolRecords. No-op in all other cases.
+    ///
+    /// "Gained an exempt role" = was not exempt before, is exempt now. We do NOT
+    /// fire on every role change for a member who happens to be exempt — only
+    /// on the actual exempt transition. This avoids redundant DB lookups on
+    /// e.g. platoon changes for a Retired member.
+    ///
+    /// Also a no-op if the member doesn't currently have AWOL — most exempt-role
+    /// gains happen on members who weren't AWOL, and we don't want to spam the
+    /// log or do unnecessary DB work for them.
+    /// </summary>
+    private async Task HandleExemptRoleGainedAsync(SocketGuildUser before, SocketGuildUser after)
+    {
+        var exemptRoles = _config.GetExemptRolesList();
+
+        var wasExempt = before.Roles.Any(r =>
+            exemptRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase));
+        var isExempt = after.Roles.Any(r =>
+            exemptRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase));
+
+        // Only react to the "became exempt" transition.
+        if (!isExempt || wasExempt) return;
+
+        // Cheap check: skip if they don't have AWOL anyway.
+        var awolRole = after.Guild.Roles.FirstOrDefault(r =>
+            r.Name.Equals(_config.AwolRoleName, StringComparison.OrdinalIgnoreCase));
+        if (awolRole is null) return;
+
+        var hasAwol = after.Roles.Any(r => r.Id == awolRole.Id);
+        if (!hasAwol) return;
+
+        // Identify which exempt role(s) triggered this for the audit log line.
+        var triggeringRoles = string.Join(", ",
+            after.Roles.Where(r => exemptRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase))
+                       .Select(r => r.Name));
+
+        try
+        {
+            await after.RemoveRoleAsync(awolRole,
+                new RequestOptions
+                {
+                    AuditLogReason = $"AWOL auto-cleared: member gained exempt role(s) [{triggeringRoles}]"
+                });
+
+            _logger.LogInformation(
+                "Real-time AWOL clear: removed AWOL from {Username} ({UserId}) in {Guild} — gained exempt role(s): {Roles}",
+                after.Username, after.Id, after.Guild.Name, triggeringRoles);
+        }
+        catch (Discord.Net.HttpException ex) when (ex.HttpCode == System.Net.HttpStatusCode.Forbidden)
+        {
+            _logger.LogWarning(
+                "Could not remove AWOL from {Username}: insufficient permissions. " +
+                "AwolCheckService self-heal will retry on next cycle.",
+                after.Username);
+            // Fall through and resolve records anyway — the role stuck around but
+            // the member is exempt, so suppress the pending notification.
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to remove AWOL from {Username} on exempt-role transition",
+                after.Username);
+            return; // don't resolve records if we can't even remove the role
+        }
+
+        // Resolve any pending AwolRecords so they don't surface notifications
+        // for someone who is no longer functionally AWOL.
+        try
+        {
+            using var scope = _services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+            var pendingRecords = await db.AwolRecords
+                .Where(r => r.GuildId == after.Guild.Id
+                         && r.UserId == after.Id
+                         && !r.NotificationSent)
+                .ToListAsync();
+
+            if (pendingRecords.Count > 0)
+            {
+                foreach (var record in pendingRecords)
+                {
+                    record.NotificationSent = true;
+                    record.NotificationSentAt = DateTime.UtcNow;
+                }
+                await db.SaveChangesAsync();
+
+                _logger.LogInformation(
+                    "Resolved {Count} pending AwolRecord(s) for {Username} after exempt-role transition",
+                    pendingRecords.Count, after.Username);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to resolve AwolRecords for {Username} after exempt-role transition",
+                after.Username);
         }
     }
 
