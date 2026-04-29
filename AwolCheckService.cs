@@ -19,17 +19,23 @@ namespace ClanGuardBot.Services;
 /// Voice time is capped per-session via MaxSingleSessionHours so stuck or orphaned
 /// voice sessions cannot inflate a user's "active" status.
 ///
-/// ── Reserve exemption ──
+/// ── Reserve / exempt-role handling ──
 /// Members holding the role named in BotConfig.ReserveRoleName (default "Reserve")
-/// are fully exempt from AWOL tracking. They are skipped in Step 1 (no activity
-/// record is created), Step 2 (never assigned the AWOL role), and effectively
-/// Step 3 (no AWOL record exists to notify on). The exemption is implemented by
-/// BotConfig.GetExemptRolesList(), which appends ReserveRoleName to the regular
-/// ExemptRoles list — so anyone reading this code sees a single uniform exempt
-/// check, while the config keeps Reserve as a distinct named concept rather than
-/// burying it in ExemptRoles. The /kick-awols command performs an additional
-/// explicit Reserve check as belt-and-suspenders defense in case the role was
-/// added between AWOL assignment and kick.
+/// — and any role in BotConfig.ExemptRoles — are fully exempt from AWOL tracking.
+/// They are skipped in Step 1 (no activity record is created) and Step 2 (never
+/// assigned the AWOL role). The exemption is implemented by
+/// BotConfig.GetExemptRolesList(), which appends ReserveRoleName to ExemptRoles.
+///
+/// ── Self-healing exempt cleanup (Step 2 first pass) ──
+/// If an exempt member somehow ALREADY has the AWOL role when this service
+/// runs (e.g. they were AWOL when an officer applied Reserve and the
+/// real-time RankTrackingHandler missed it because the bot was offline), the
+/// new pre-pass at the top of Step 2 strips AWOL and resolves any pending
+/// AwolRecords. Without this, a Reserve+AWOL member would remain visibly
+/// AWOL forever (the regular activity branch is skipped by IsExempt and
+/// never reaches the "remove AWOL if active" path). RankTrackingHandler
+/// handles this transition in real-time; this self-heal is the safety net
+/// for missed gateway events.
 ///
 /// ── Notification retry policy ──
 /// Notifications can fail for legitimate reasons (channel temporarily
@@ -236,12 +242,66 @@ public class AwolCheckService : BackgroundService
         // ------------------------------------------------------------------
         // Step 2: Check each non-exempt member's activity in their window
         // ------------------------------------------------------------------
+        // Counter for end-of-step summary logging on the self-heal pass.
+        var selfHealedCount = 0;
+
         foreach (var member in guild.Users)
         {
             if (member.IsBot) continue;
-            // Reserve members are inside exemptRoles — they will never be
-            // assigned the AWOL role here. See class doc "Reserve exemption".
-            if (IsExempt(member, exemptRoles)) continue;
+
+            // ── Self-healing exempt cleanup ──
+            // If a member is exempt (Reserve / Admin / etc.) but somehow has
+            // the AWOL role, strip it here. This catches cases where the
+            // RankTrackingHandler real-time path missed the transition (bot
+            // offline, missed gateway event, etc.). Without this, a Reserve
+            // member who was AWOL before the role transition would remain
+            // visibly AWOL forever — the regular activity branch below is
+            // skipped by IsExempt and never reaches the "remove AWOL if
+            // active" code path.
+            if (IsExempt(member, exemptRoles))
+            {
+                var hasAwolRole = member.Roles.Any(r => r.Id == awolRole.Id);
+                if (hasAwolRole)
+                {
+                    try
+                    {
+                        await member.RemoveRoleAsync(awolRole,
+                            new RequestOptions { AuditLogReason = "AWOL self-heal: member is exempt (Reserve/Admin/etc.)" });
+
+                        var exemptRoleNames = string.Join(", ",
+                            member.Roles.Where(r => exemptRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase))
+                                        .Select(r => r.Name));
+
+                        _logger.LogInformation(
+                            "Self-healed: removed AWOL role from exempt member {Username} ({UserId}) in {Guild}. " +
+                            "Triggering exempt role(s): {ExemptRoles}",
+                            member.Username, member.Id, guild.Name, exemptRoleNames);
+
+                        var pendingRecords = await db.AwolRecords
+                            .Where(r => r.GuildId == guild.Id
+                                     && r.UserId == member.Id
+                                     && !r.NotificationSent)
+                            .ToListAsync(ct);
+
+                        foreach (var record in pendingRecords)
+                        {
+                            record.NotificationSent = true;
+                            record.NotificationSentAt = DateTime.UtcNow;
+                        }
+
+                        selfHealedCount++;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex,
+                            "Failed to self-heal AWOL on exempt member {Username} in {Guild}",
+                            member.Username, guild.Name);
+                    }
+                }
+
+                // Continue past — do not run the activity check on exempt members.
+                continue;
+            }
 
             var userWindowDays = _config.GetWindowDaysForRoles(member.Roles.Select(r => r.Name));
             var windowStart = DateTime.UtcNow.AddDays(-userWindowDays);
@@ -262,12 +322,12 @@ public class AwolCheckService : BackgroundService
 
             var meetsMessages = messageCount >= _config.MinMessages;
             var meetsVoice = voiceSeconds >= minVoiceSeconds;
-            var hasAwolRole = member.Roles.Any(r => r.Id == awolRole.Id);
+            var hasAwolRoleActive = member.Roles.Any(r => r.Id == awolRole.Id);
 
             if (meetsMessages || meetsVoice)
             {
                 // Active — remove AWOL if they have it
-                if (hasAwolRole)
+                if (hasAwolRoleActive)
                 {
                     try
                     {
@@ -300,7 +360,7 @@ public class AwolCheckService : BackgroundService
             else
             {
                 // Inactive — assign AWOL if they don't have it
-                if (!hasAwolRole)
+                if (!hasAwolRoleActive)
                 {
                     try
                     {
@@ -337,6 +397,13 @@ public class AwolCheckService : BackgroundService
             }
         }
         await db.SaveChangesAsync(ct);
+
+        if (selfHealedCount > 0)
+        {
+            _logger.LogInformation(
+                "AWOL self-heal removed AWOL role from {Count} exempt member(s) in {Guild}",
+                selfHealedCount, guild.Name);
+        }
 
         // ------------------------------------------------------------------
         // Step 3: Post HQ notifications for users past the grace period
