@@ -19,6 +19,18 @@ namespace ClanGuardBot.Services;
 /// Voice time is capped per-session via MaxSingleSessionHours so stuck or orphaned
 /// voice sessions cannot inflate a user's "active" status.
 ///
+/// ── Reserve exemption ──
+/// Members holding the role named in BotConfig.ReserveRoleName (default "Reserve")
+/// are fully exempt from AWOL tracking. They are skipped in Step 1 (no activity
+/// record is created), Step 2 (never assigned the AWOL role), and effectively
+/// Step 3 (no AWOL record exists to notify on). The exemption is implemented by
+/// BotConfig.GetExemptRolesList(), which appends ReserveRoleName to the regular
+/// ExemptRoles list — so anyone reading this code sees a single uniform exempt
+/// check, while the config keeps Reserve as a distinct named concept rather than
+/// burying it in ExemptRoles. The /kick-awols command performs an additional
+/// explicit Reserve check as belt-and-suspenders defense in case the role was
+/// added between AWOL assignment and kick.
+///
 /// ── Notification retry policy ──
 /// Notifications can fail for legitimate reasons (channel temporarily
 /// unreachable, bot lost permission, network blip). On failure, we stamp
@@ -93,10 +105,16 @@ public class AwolCheckService : BackgroundService
         // Give guilds a moment to finish downloading members
         await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
 
+        // Log the effective exempt roles list at startup so it's visible in logs
+        // that Reserve (and any other configured exemptions) are being honored.
+        var exemptList = _config.GetExemptRolesList();
         _logger.LogInformation(
-            "AWOL check service started. Running every {Interval} minutes. NotificationGiveUpWindow={GiveUp}d.",
+            "AWOL check service started. Running every {Interval} minutes. " +
+            "NotificationGiveUpWindow={GiveUp}d. Exempt roles ({Count}): {Roles}",
             _config.CheckIntervalMinutes,
-            (int)NotificationGiveUpWindow.TotalDays);
+            (int)NotificationGiveUpWindow.TotalDays,
+            exemptList.Count,
+            string.Join(", ", exemptList));
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -180,6 +198,9 @@ public class AwolCheckService : BackgroundService
                 _config.HqChannelName, guild.Name);
         }
 
+        // GetExemptRolesList() appends ReserveRoleName, so Reserve members are
+        // automatically treated as exempt for both Step 1 (activity record creation)
+        // and Step 2 (AWOL role assignment).
         var exemptRoles = _config.GetExemptRolesList();
         var minVoiceSeconds = (long)(_config.MinVoiceHours * 3600);
 
@@ -218,6 +239,8 @@ public class AwolCheckService : BackgroundService
         foreach (var member in guild.Users)
         {
             if (member.IsBot) continue;
+            // Reserve members are inside exemptRoles — they will never be
+            // assigned the AWOL role here. See class doc "Reserve exemption".
             if (IsExempt(member, exemptRoles)) continue;
 
             var userWindowDays = _config.GetWindowDaysForRoles(member.Roles.Select(r => r.Name));
