@@ -50,15 +50,30 @@ public class AwolKickAuditRecord
     ///   "Kicked"             — successfully removed from the server
     ///   "DryRunKicked"       — would have been kicked, but dry-run mode
     ///   "SkippedReserve"     — skipped because they had the Reserve role
-    ///   "SkippedHierarchy"   — bot's role wasn't above the member's top role
+    ///   "SkippedHierarchy"   — bot's role wasn't above the member's top role.
+    ///                          Set by the up-front guard OR by the kick-time
+    ///                          403 catch (which handles the case of roles
+    ///                          changing between snapshot and kick).
     ///   "SkippedProtected"   — at/above protected min rank (leadership safety)
-    ///   "Failed"             — Discord API call threw; see ErrorMessage
+    ///   "UserAlreadyLeft"    — Discord returned 404 at kick-time because the
+    ///                          member left the guild between AWOL list
+    ///                          enumeration and the kick attempt. Not a
+    ///                          failure — the desired outcome happened, just
+    ///                          not by our hand.
+    ///   "Failed"             — Discord API call threw something we couldn't
+    ///                          classify; see ErrorMessage for details.
     /// </summary>
     public string Outcome { get; set; } = string.Empty;
 
     /// <summary>The reason string passed to Discord's audit log on the kick.</summary>
     public string Reason { get; set; } = string.Empty;
 
-    /// <summary>If Outcome == "Failed", the exception message. Null otherwise.</summary>
+    /// <summary>
+    /// Set when the kick failed at the API layer. For "Failed" outcomes this
+    /// is the exception message (or "HTTP {code}: {message}" for HttpException).
+    /// Also set for "SkippedHierarchy" outcomes that were detected at kick-time
+    /// rather than by the up-front guard, so investigators can distinguish the
+    /// two cases.  Null for clean outcomes.
+    /// </summary>
     public string? ErrorMessage { get; set; }
 }
