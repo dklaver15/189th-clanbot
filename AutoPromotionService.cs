@@ -31,9 +31,17 @@ namespace ClanGuardBot.Services;
 /// CSM → SMA is intentionally NOT in the ladder; SMA is a singular position
 /// and should be assigned manually via /promote sma.
 ///
-/// Announcement posts are throttled via AutoPromotionAnnouncementDelaySeconds so
-/// a cycle that promotes many members doesn't burst-post and trip Discord rate
-/// limits or spam filters.
+/// ── Combined announcement post ──
+/// Per-cycle promotions are announced as a SINGLE combined post grouped by
+/// promotion tier (RCT→PVT, PVT→PFC, etc.). The previous per-user-with-spacing
+/// approach was changed because separated automated posts felt less genuine
+/// to members; one well-formatted combined post reads more like a clan
+/// recognition moment than a stream of bot notifications.
+///
+/// AutoPromotionAnnouncementDelaySeconds is no longer used by this service.
+/// The config knob is preserved in BotConfig for backward compatibility but
+/// has no effect — combined announcements always post as a single message
+/// (or a small number of messages if char-limit splitting is needed).
 ///
 /// Promotions can be disabled globally (AutoPromotionDryRun) or per-tier via
 /// AutoPromotionDryRunRanks — useful for rolling out new tiers alongside
@@ -133,11 +141,10 @@ public class AutoPromotionService : BackgroundService
 
         var dryRunRanks = _config.GetAutoPromotionDryRunRanksList();
         _logger.LogInformation(
-            "Auto-promotion service started. Running daily at {Hour:D2}:00 UTC. DryRun={DryRun}, DryRunRanks=[{DryRunRanks}], AnnouncementDelay={Delay}s",
+            "Auto-promotion service started. Running daily at {Hour:D2}:00 UTC. DryRun={DryRun}, DryRunRanks=[{DryRunRanks}]",
             _config.AutoPromotionRunHourUtc,
             _config.AutoPromotionDryRun,
-            string.Join(",", dryRunRanks),
-            _config.AutoPromotionAnnouncementDelaySeconds);
+            string.Join(",", dryRunRanks));
 
         // ── Catch-up check ──
         // If we're past today's run hour and no run has been recorded for
@@ -334,7 +341,9 @@ public class AutoPromotionService : BackgroundService
         var promoted = 0;
         var skipped = 0;
 
-        var pendingAnnouncements = new List<PendingAnnouncement>();
+        // Collect all promotions that fired this cycle so we can announce
+        // them as a single grouped post at the end.
+        var pendingAnnouncements = new List<PromotionService.GroupedPromotion>();
 
         foreach (var member in guild.Users)
         {
@@ -459,7 +468,7 @@ public class AutoPromotionService : BackgroundService
 
             promoted++;
 
-            pendingAnnouncements.Add(new PendingAnnouncement(
+            pendingAnnouncements.Add(new PromotionService.GroupedPromotion(
                 Member: member,
                 FromRankShort: tier.FromRank,
                 ToRankShort: result.NewRankName));
@@ -471,14 +480,19 @@ public class AutoPromotionService : BackgroundService
 
         if (pendingAnnouncements.Count > 0)
         {
-            await AnnounceAllAsync(guild, pendingAnnouncements, ct);
+            await AnnounceAllAsync(guild, pendingAnnouncements);
         }
     }
 
+    /// <summary>
+    /// Posts the combined grouped announcement for this cycle's promotions.
+    /// Single message (or a small number of messages if char-limit splitting
+    /// is needed) — the previous per-user-with-spacing approach was replaced
+    /// because separated automated posts felt less genuine to members.
+    /// </summary>
     private async Task AnnounceAllAsync(
         SocketGuild guild,
-        IReadOnlyList<PendingAnnouncement> announcements,
-        CancellationToken ct)
+        IReadOnlyList<PromotionService.GroupedPromotion> announcements)
     {
         string? channelName = _config.AutoPromotionAnnouncementChannel;
         if (_config.AutoPromotionAnnouncementChannelId != 0)
@@ -496,33 +510,7 @@ public class AutoPromotionService : BackgroundService
             }
         }
 
-        var delayMs = Math.Max(0, _config.AutoPromotionAnnouncementDelaySeconds * 1000);
-
-        _logger.LogInformation(
-            "Posting {Count} promotion announcement(s) to #{ChannelName} with {Delay}s spacing",
-            announcements.Count, channelName, _config.AutoPromotionAnnouncementDelaySeconds);
-
-        for (int i = 0; i < announcements.Count; i++)
-        {
-            if (ct.IsCancellationRequested) break;
-
-            var a = announcements[i];
-            await _promotion.AnnouncePromotionAsync(
-                guild,
-                a.Member,
-                fromRankShort: a.FromRankShort,
-                toRankShort: a.ToRankShort,
-                channelName: channelName);
-
-            if (i < announcements.Count - 1 && delayMs > 0)
-            {
-                try
-                {
-                    await Task.Delay(delayMs, ct);
-                }
-                catch (OperationCanceledException) { break; }
-            }
-        }
+        await _promotion.AnnounceCombinedPromotionsAsync(guild, announcements, channelName);
     }
 
     private string? GetCurrentRank(SocketGuildUser member)
@@ -545,9 +533,4 @@ public class AutoPromotionService : BackgroundService
         int MinMessages,
         double MinVoiceHours,
         int MinEvents = 0);
-
-    private record PendingAnnouncement(
-        SocketGuildUser Member,
-        string FromRankShort,
-        string ToRankShort);
 }
