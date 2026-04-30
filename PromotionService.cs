@@ -71,24 +71,13 @@ public class PromotionService
         };
 
     /// <summary>
-    /// Blurb templates for the auto-promotion announcement.
-    /// Placeholders: {mention}, {fromRank}, {toRank}.
-    /// {fromRank} and {toRank} are the full English rank names (e.g. "Sergeant"),
-    /// not the Discord role shorthand. Templates that don't include {fromRank}
-    /// are intentional — sometimes "promoted to X" reads cleaner than
-    /// "promoted from Y to X" when the new rank is the focus.
-    ///
-    /// ── Why so many variants ──
-    /// Members fed back that automated promotion announcements felt
-    /// less genuine when the same 1–2 templates rotated through every
-    /// cycle — the repetition itself signals "this is from a script."
-    /// 15 variants give a much wider distribution and break the
-    /// "I've seen this exact line before" pattern. Combined with the
-    /// 10-minute spacing between announcements, a typical evening's
-    /// promotions now feel like individual recognition rather than a
-    /// burst of identical notifications.
+    /// Templates for the per-user announcement (used by the /promote slash
+    /// command — single, ceremonial post per manual promotion).
+    /// Placeholders: {mention}, {fromRank}, {toRank} (full English rank names).
+    /// AutoPromotionService no longer uses these — it builds a single
+    /// combined post via GroupAnnouncementTemplates instead.
     /// </summary>
-    private static readonly string[] AnnouncementTemplates =
+    private static readonly string[] SingleUserAnnouncementTemplates =
     {
         "🎖️ Congratulations {mention}! You've been promoted from **{fromRank}** to **{toRank}**. Keep it up, soldier!",
         "⭐ {mention} has earned a promotion to **{toRank}**! Welcome to the next step up — hooah!",
@@ -106,6 +95,55 @@ public class PromotionService
         "🪖 Stripes earned. {mention} is now **{toRank}**. The 189th thanks you for your service.",
         "🎉 {mention} answered the call and put in the time. Promoted to **{toRank}**. Well done.",
     };
+
+    /// <summary>
+    /// Templates for the combined group-header announcement (used by
+    /// AutoPromotionService — one post per cycle, with members listed
+    /// underneath each header).
+    /// Placeholders: {fromRank}, {toRank} (full English rank names).
+    /// The {mention} placeholder is intentionally absent — callers append
+    /// the mention list as separate lines beneath each rendered template.
+    ///
+    /// ── Why this exists ──
+    /// Members fed back that automated promotion announcements felt less
+    /// genuine when each promotion was its own post. A single combined
+    /// post grouped by tier reads more like a clan recognition moment
+    /// than a stream of bot notifications.
+    ///
+    /// ── Why "the following" phrasing works for n=1 ──
+    /// "The following members are now Private" reads fine even with a
+    /// single name beneath it. Splitting templates into singular/plural
+    /// pairs would double the maintenance burden for marginal gain, so
+    /// the templates are intentionally written to read naturally for
+    /// any group size.
+    /// </summary>
+    private static readonly string[] GroupAnnouncementTemplates =
+    {
+        "🎖️ Congratulations to the following — promoted from **{fromRank}** to **{toRank}**. Keep it up, soldiers!",
+        "⭐ The following members earned a promotion to **{toRank}** — hooah!",
+        "🪖 New stripes for the following — promoted from **{fromRank}** to **{toRank}**. Outstanding work.",
+        "🎉 Promotion time! The following members move up from **{fromRank}** to **{toRank}**. The 189th salutes you.",
+        "⭐ The following members earned a promotion to **{toRank}**. Well done.",
+        "🎖️ Congratulations to the following on the promotion to **{toRank}** — you put in the work.",
+        "🪖 The following members have been promoted from **{fromRank}** to **{toRank}**. The 189th is proud to have you.",
+        "📣 Attention all hands: the following members are now **{toRank}**. Outstanding effort.",
+        "🪖 New rank, same standard. Congrats to the following on reaching **{toRank}**.",
+        "⭐ Promotion announcement: the following members advance to **{toRank}**. Keep up the great work.",
+        "🪖 The following members just leveled up to **{toRank}**. Well earned.",
+        "🎉 The 189th recognizes the following members for promotion from **{fromRank}** to **{toRank}**. Outstanding.",
+        "⭐ Up the chain goes the following — promoted to **{toRank}**. Excellent work.",
+        "🪖 Stripes earned. The following members are now **{toRank}**. The 189th thanks you for your service.",
+        "🎉 The following members answered the call and put in the time. Promoted to **{toRank}**. Well done.",
+    };
+
+    /// <summary>
+    /// Discord's hard limit on a single message is 2000 characters. We split
+    /// the combined announcement into multiple posts if a single rendered
+    /// message would exceed this. In practice a typical cycle (3-10 promos)
+    /// produces a message well under 1000 chars; the split path only fires
+    /// for unusually large catch-up cycles.
+    /// </summary>
+    private const int DiscordMessageCharLimit = 2000;
 
     public PromotionService(
         IServiceProvider services,
@@ -137,6 +175,17 @@ public class PromotionService
         DateTime? AssignedAt,
         DateTime? SeedAppliedAt,
         int SeedEvents);
+
+    /// <summary>
+    /// One member's promotion in a combined-announcement batch. Used as input
+    /// to AnnounceCombinedPromotionsAsync — AutoPromotionService builds a list
+    /// of these as it processes each member, then hands the whole list to the
+    /// announcer at the end of the cycle.
+    /// </summary>
+    public record GroupedPromotion(
+        SocketGuildUser Member,
+        string FromRankShort,
+        string ToRankShort);
 
     /// <summary>
     /// Performs the role swap and nickname update for a promotion.
@@ -259,9 +308,10 @@ public class PromotionService
     }
 
     /// <summary>
-    /// Posts a congratulatory announcement in the configured auto-promotion
-    /// announcement channel. Safe to call even if the channel can't be found —
-    /// will log a warning and move on.
+    /// Posts a single-user congratulatory announcement. Used by the /promote
+    /// slash command, where each manual promotion is its own post and the
+    /// {mention} ping is intentional. AutoPromotionService uses
+    /// AnnounceCombinedPromotionsAsync instead.
     /// </summary>
     public async Task AnnouncePromotionAsync(
         SocketGuild guild,
@@ -270,27 +320,14 @@ public class PromotionService
         string toRankShort,
         string channelName)
     {
-        var channel = guild.TextChannels.FirstOrDefault(c =>
-            c.Name.Equals(channelName, StringComparison.OrdinalIgnoreCase));
+        var channel = ResolveAnnouncementChannel(guild, channelName);
+        if (channel is null) return;
 
-        if (channel is null)
-        {
-            _logger.LogWarning(
-                "Auto-promotion announcement channel '{Channel}' not found in guild {Guild}",
-                channelName, guild.Name);
-            return;
-        }
+        var fromFull = ResolveFullRankName(fromRankShort);
+        var toFull   = ResolveFullRankName(toRankShort);
 
-        var fromFull = RankFullNames.TryGetValue(fromRankShort, out var f) ? f : fromRankShort;
-        var toFull = RankFullNames.TryGetValue(toRankShort, out var t) ? t : toRankShort;
-
-        // Pick a template at random. Random.Shared is thread-safe and avoids
-        // the seed-bias problem of the previous (member.Id + ticks) % length
-        // approach, which made each user's template selection partly biased
-        // by their user ID. With 15 templates and a true random pick, two
-        // back-to-back announcements have a 14/15 chance of using different
-        // wording — high enough that the cycle as a whole reads as varied.
-        var template = AnnouncementTemplates[Random.Shared.Next(AnnouncementTemplates.Length)];
+        var template = SingleUserAnnouncementTemplates[
+            Random.Shared.Next(SingleUserAnnouncementTemplates.Length)];
 
         var message = template
             .Replace("{mention}", member.Mention)
@@ -318,6 +355,166 @@ public class PromotionService
                 member.Username, channel.Name);
         }
     }
+
+    /// <summary>
+    /// Posts a single combined announcement covering ALL promotions in a
+    /// nightly cycle, grouped by tier (RCT→PVT first, then PVT→PFC, etc.).
+    /// Used by AutoPromotionService at the end of each cycle.
+    ///
+    /// ── Format ──
+    /// Per-tier section: a randomly-selected GroupAnnouncementTemplate
+    /// rendered with {fromRank}/{toRank}, followed by each promoted member
+    /// on its own line as a Discord mention. Sections separated by blank
+    /// lines for readability.
+    ///
+    /// ── Group ordering ──
+    /// Groups appear in the natural rank progression order (the order they
+    /// appear in RankMap, which goes RCT→PVT, PVT→PFC, ..., SGM→CSM, CSM→SMA).
+    /// This keeps the post scannable and matches how clan members think
+    /// about promotion progress.
+    ///
+    /// ── Length handling ──
+    /// Discord's hard 2000-char message limit applies. For typical cycles
+    /// (3-10 promotions) the rendered message lands well under 1000 chars
+    /// and posts in one shot. For oversized batches (e.g. a large catch-up
+    /// after extended downtime), the message is split on group boundaries
+    /// across multiple sequential posts, each independently picking a
+    /// random template per group.
+    ///
+    /// All mentioned members are pinged. Discord caps mentions at 50 per
+    /// message; in practice this isn't a constraint for promotion cycles.
+    /// </summary>
+    public async Task AnnounceCombinedPromotionsAsync(
+        SocketGuild guild,
+        IReadOnlyList<GroupedPromotion> promotions,
+        string channelName)
+    {
+        if (promotions.Count == 0) return;
+
+        var channel = ResolveAnnouncementChannel(guild, channelName);
+        if (channel is null) return;
+
+        // ── Group by tier, preserving rank progression order ──────────
+        // Iterate RankMap in declaration order so RCT→PVT is rendered
+        // first, then PVT→PFC, etc. Promotions with a target rank not in
+        // RankMap (shouldn't happen) fall through to a final pseudo-group
+        // ordered by their toRank string.
+        var byTier = promotions
+            .GroupBy(p => p.ToRankShort, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
+
+        var orderedGroups = new List<(string fromShort, string toShort, List<GroupedPromotion> members)>();
+
+        foreach (var (toShort, _) in RankMap)
+        {
+            if (!byTier.TryGetValue(toShort, out var members) || members.Count == 0) continue;
+            // All members in a group share the same fromRank by construction
+            // (since all promoted to the same toRank), so just take the first.
+            var fromShort = members[0].FromRankShort;
+            orderedGroups.Add((fromShort, toShort, members));
+            byTier.Remove(toShort);
+        }
+
+        // Anything left over (unexpected target ranks) appended at the end
+        foreach (var leftover in byTier)
+        {
+            orderedGroups.Add((leftover.Value[0].FromRankShort, leftover.Key, leftover.Value));
+        }
+
+        // ── Build per-group rendered text ─────────────────────────────
+        var groupTexts = new List<string>(orderedGroups.Count);
+        foreach (var (fromShort, toShort, members) in orderedGroups)
+        {
+            var template = GroupAnnouncementTemplates[
+                Random.Shared.Next(GroupAnnouncementTemplates.Length)];
+
+            var header = template
+                .Replace("{fromRank}", ResolveFullRankName(fromShort))
+                .Replace("{toRank}", ResolveFullRankName(toShort));
+
+            var mentionLines = string.Join("\n", members.Select(m => m.Member.Mention));
+            groupTexts.Add($"{header}\n{mentionLines}");
+        }
+
+        // ── Pack groups into messages within the char limit ───────────
+        var messageBatches = PackGroupsIntoMessages(groupTexts);
+        var allMentionedIds = promotions.Select(p => p.Member.Id).Distinct().ToList();
+
+        for (int i = 0; i < messageBatches.Count; i++)
+        {
+            var body = messageBatches[i];
+
+            try
+            {
+                await channel.SendMessageAsync(
+                    body,
+                    allowedMentions: new AllowedMentions
+                    {
+                        UserIds = allMentionedIds,
+                        MentionRepliedUser = false,
+                    });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "Failed to post combined promotion announcement (batch {Batch}/{Total}) in #{Channel}",
+                    i + 1, messageBatches.Count, channel.Name);
+                // Continue to next batch — don't let one failure drop subsequent batches
+            }
+        }
+
+        _logger.LogInformation(
+            "Posted combined promotion announcement ({Members} members across {Groups} group(s), {Batches} message(s)) in #{Channel}",
+            promotions.Count, orderedGroups.Count, messageBatches.Count, channel.Name);
+    }
+
+    /// <summary>
+    /// Packs pre-rendered group texts into one or more messages each under
+    /// the Discord char limit. Group boundaries are preserved — a single
+    /// group is never split mid-list (unless it alone exceeds the limit,
+    /// which would mean ~50+ mentions in one tier; not a real-world case).
+    /// </summary>
+    private static List<string> PackGroupsIntoMessages(List<string> groupTexts)
+    {
+        const string separator = "\n\n";
+        var batches = new List<string>();
+        var current = new System.Text.StringBuilder();
+
+        foreach (var group in groupTexts)
+        {
+            var addedLength = current.Length == 0 ? group.Length : separator.Length + group.Length;
+
+            if (current.Length > 0 && current.Length + addedLength > DiscordMessageCharLimit)
+            {
+                batches.Add(current.ToString());
+                current.Clear();
+            }
+
+            if (current.Length > 0) current.Append(separator);
+            current.Append(group);
+        }
+
+        if (current.Length > 0) batches.Add(current.ToString());
+        return batches;
+    }
+
+    private SocketTextChannel? ResolveAnnouncementChannel(SocketGuild guild, string channelName)
+    {
+        var channel = guild.TextChannels.FirstOrDefault(c =>
+            c.Name.Equals(channelName, StringComparison.OrdinalIgnoreCase));
+
+        if (channel is null)
+        {
+            _logger.LogWarning(
+                "Auto-promotion announcement channel '{Channel}' not found in guild {Guild}",
+                channelName, guild.Name);
+        }
+
+        return channel;
+    }
+
+    private static string ResolveFullRankName(string shortName) =>
+        RankFullNames.TryGetValue(shortName, out var full) ? full : shortName;
 
     /// <summary>
     /// Looks up when the member's current rank was assigned.
