@@ -504,8 +504,7 @@ public class AwolCheckService : BackgroundService
                 // tappable on mobile to open the profile — leading with it caused
                 // "You don't have access to this link" errors on iOS when the
                 // raw user-ID link was tapped instead of an in-server mention.
-                .AddField("User", $"**{member.DisplayName}** ({member.Username}) — {member.Mention}")
-                .AddField("AWOL Since", record.AssignedAt.ToString("yyyy-MM-dd HH:mm UTC"), inline: true)
+                .AddField("User", $"**[{member.DisplayName}](https://discord.com/users/{member.Id})** ({member.Username})")                .AddField("AWOL Since", record.AssignedAt.ToString("yyyy-MM-dd HH:mm UTC"), inline: true)
                 .AddField("Grace Period Expired",
                     record.AssignedAt.AddDays(_config.AwolGraceDays).ToString("yyyy-MM-dd HH:mm UTC"),
                     inline: true)
