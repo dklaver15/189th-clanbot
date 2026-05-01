@@ -46,21 +46,38 @@ public class BriefingNowCommandHandler
         client.SlashCommandExecuted += OnSlashCommandExecuted;
     }
 
-    private async Task OnSlashCommandExecuted(SocketSlashCommand cmd)
+    private Task OnSlashCommandExecuted(SocketSlashCommand cmd)
     {
-        if (cmd.Data.Name != "briefing-now") return;
+        if (cmd.Data.Name != "briefing-now") return Task.CompletedTask;
 
-        await cmd.DeferAsync(ephemeral: true);
+        // Dispatch off the gateway thread. The Claude API call inside
+        // HandleBriefingNowAsync takes 5–15 seconds, which is far too long to
+        // block Discord.NET's gateway loop. We return Task.CompletedTask
+        // immediately and let the work run in the background — DeferAsync +
+        // FollowupAsync work just as well from a Task.Run continuation.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await cmd.DeferAsync(ephemeral: true);
+                await HandleBriefingNowAsync(cmd);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Unexpected error in /briefing-now");
+                try
+                {
+                    await cmd.FollowupAsync($"❌ Unexpected error: {ex.Message}", ephemeral: true);
+                }
+                catch
+                {
+                    // Already responded, or interaction token expired — nothing
+                    // useful left to do beyond the log entry above.
+                }
+            }
+        });
 
-        try
-        {
-            await HandleBriefingNowAsync(cmd);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Unexpected error in /briefing-now");
-            await cmd.FollowupAsync($"❌ Unexpected error: {ex.Message}", ephemeral: true);
-        }
+        return Task.CompletedTask;
     }
 
     private async Task HandleBriefingNowAsync(SocketSlashCommand cmd)
