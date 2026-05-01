@@ -2,7 +2,7 @@ namespace ClanGuardBot.Briefing;
 
 /// <summary>
 /// Pre-aggregated, pre-filtered weekly snapshot sent to Claude.
-/// 
+///
 /// COST NOTE: This shape is the single biggest lever on briefing cost.
 /// Every field here represents a filtering or aggregation step done in C#
 /// to keep the prompt small. We send a few dozen line items, NOT the full
@@ -31,20 +31,22 @@ public sealed record BriefingContext
 public sealed record AwolRiskItem(
     string Gamertag,
     string CurrentRank,
-    int DaysSinceLastActivity,
-    /// <summary>One-line context, e.g. "missed last 3 ops, no Discord activity 12d".</summary>
+    /// <summary>Days since the AWOL role was assigned (proxy for inactivity duration).</summary>
+    int DaysSinceAwolAssigned,
+    /// <summary>One-line context, e.g. "flagged 5d ago, grace period elapsed".</summary>
     string TrendNote);
 
 public sealed record PromotionCandidate(
     string Gamertag,
     string CurrentRank,
     string ProposedRank,
-    int EventsAttendedLast30Days,
+    /// <summary>Cumulative events attended at current rank (bot-tracked + seed). Higher is more eligible.</summary>
+    int EventsAttendedAtRank,
     int DaysInRank);
 
 public sealed record NotableEvent(
     string EventName,
     DateTime Date,
     int Attendance,
-    /// <summary>"CompDiv" or "Clan" — matches your existing event source filter.</summary>
+    /// <summary>"Clan" or "CompDiv" — matches the existing event source filter.</summary>
     string Source);
