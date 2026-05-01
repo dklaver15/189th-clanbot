@@ -31,6 +31,7 @@ public class DiscordBotService : IHostedService
     private readonly EventCreditCommandHandler _eventCreditHandler;
     private readonly KickAwolsCommandHandler _kickAwolsHandler;
     private readonly ClearAwolListCommandHandler _clearAwolListHandler;
+    private readonly BriefingNowCommandHandler _briefingNowHandler;
     private readonly ILogger<DiscordBotService> _logger;
     private readonly BotConfig _config;
 
@@ -52,6 +53,7 @@ public class DiscordBotService : IHostedService
         EventCreditCommandHandler eventCreditHandler,
         KickAwolsCommandHandler kickAwolsHandler,
         ClearAwolListCommandHandler clearAwolListHandler,
+        BriefingNowCommandHandler briefingNowHandler,
         ILogger<DiscordBotService> logger,
         IOptions<BotConfig> config)
     {
@@ -72,6 +74,7 @@ public class DiscordBotService : IHostedService
         _eventCreditHandler        = eventCreditHandler;
         _kickAwolsHandler          = kickAwolsHandler;
         _clearAwolListHandler      = clearAwolListHandler;
+        _briefingNowHandler        = briefingNowHandler;
         _logger                    = logger;
         _config                    = config.Value;
     }
@@ -97,6 +100,7 @@ public class DiscordBotService : IHostedService
         _eventCreditHandler.Register(_client);
         _kickAwolsHandler.Register(_client);
         _clearAwolListHandler.Register(_client);
+        _briefingNowHandler.Register(_client);
 
         await _client.LoginAsync(TokenType.Bot, _config.Token);
         await _client.StartAsync();
@@ -238,6 +242,15 @@ public class DiscordBotService : IHostedService
                     .WithDescription($"Delete all messages in #{_config.HqChannelName} ({_config.AwolKickMinRank}+ only)")
                     .AddOption("confirm", ApplicationCommandOptionType.Boolean,
                         "Set to true to confirm deletion", isRequired: false)
+                    .Build(),
+
+                // /briefing-now — manually trigger the weekly officer briefing
+                // out of band from the Sunday cron. Honours the same DryRun
+                // config flag as the scheduled run, so officers can validate
+                // the pipeline without posting to HQ.
+                new SlashCommandBuilder()
+                    .WithName("briefing-now")
+                    .WithDescription($"Generate the weekly officer briefing immediately ({_config.BriefingNowMinRank}+ only)")
                     .Build(),
             };
 

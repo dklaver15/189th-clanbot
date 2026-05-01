@@ -180,6 +180,14 @@ public class BotConfig
     /// </summary>
     public string AwolKickMinRank { get; set; } = "MAJ";
 
+    /// <summary>
+    /// The minimum rank required to use the /briefing-now command, which
+    /// triggers the weekly officer briefing immediately. Defaults to "BG"
+    /// so only HQ-level leadership can trigger ad-hoc briefings to HQ.
+    /// Must exactly match one of the rank names in RankRoles (case-insensitive).
+    /// </summary>
+    public string BriefingNowMinRank { get; set; } = "BG";
+
     // ─── Auto-Promotion Settings ─────────────────────────────────────
 
     /// <summary>
