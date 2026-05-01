@@ -117,12 +117,44 @@ public sealed class WeeklyOfficerBriefingService(
             return;
         }
 
-        foreach (var chunk in ChunkForDiscord(content))
+        // Discord collapses consecutive bulleted sections into a single visual block,
+        // even when the source markdown has blank lines between them. Inject a
+        // zero-width-space line before every "### " header so the renderer
+        // treats them as separate blocks. The U+200B character is invisible.
+        var spaced = InjectSectionSpacers(content);
+
+        foreach (var chunk in ChunkForDiscord(spaced))
         {
             await channel.SendMessageAsync(chunk, options: new RequestOptions { CancelToken = ct });
         }
 
         logger.LogInformation("Posted weekly briefing to channel {Id}", _options.OfficerChannelId);
+    }
+
+    /// <summary>
+    /// Inserts a zero-width-space line before every Markdown H3 header so Discord
+    /// renders a visible gap between sections. Without this, sections that follow
+    /// a bulleted list collapse into the previous list visually — the "### Risk Watch"
+    /// header gets glued onto the last Promotion Candidates bullet.
+    /// </summary>
+    private static string InjectSectionSpacers(string content)
+    {
+        var lines = content.Split('\n');
+        var output = new System.Text.StringBuilder(content.Length + 64);
+
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i];
+            // First line is never preceded by a spacer; otherwise add one before any "### " header.
+            if (i > 0 && line.TrimStart().StartsWith("### "))
+            {
+                output.Append('\u200B').Append('\n');
+            }
+            output.Append(line);
+            if (i < lines.Length - 1) output.Append('\n');
+        }
+
+        return output.ToString();
     }
 
     private async Task WaitForDiscordReadyAsync(CancellationToken ct)
