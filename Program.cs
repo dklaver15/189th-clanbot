@@ -166,6 +166,12 @@ try
     // docker-compose from the ANTHROPIC_API_KEY GitHub Actions secret).
     builder.Services.AddWeeklyOfficerBriefing(builder.Configuration);
 
+    // BriefingNowCommandHandler: /briefing-now slash command for officers
+    // (AwolKickMinRank+). Triggers WeeklyOfficerBriefingService.RunBriefingNowAsync
+    // immediately so officers can run the briefing on demand without waiting
+    // for the Sunday cron. Honours the same DryRun config flag as the scheduled run.
+    builder.Services.AddSingleton<BriefingNowCommandHandler>();
+
     var app = builder.Build();
 
     // Ensure the database is created / migrated
