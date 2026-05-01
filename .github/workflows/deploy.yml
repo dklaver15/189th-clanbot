@@ -12,7 +12,7 @@ jobs:
           host: ${{ secrets.DROPLET_HOST }}
           username: root
           key: ${{ secrets.DROPLET_SSH_KEY }}
-          envs: GOOGLE_CREDENTIALS_BASE64
+          envs: GOOGLE_CREDENTIALS_BASE64,ANTHROPIC_API_KEY
           script: |
             cd /opt/clanguard
             git remote set-url origin https://${{ secrets.GH_PAT }}@github.com/dklaver15/189th-clanbot.git
@@ -23,3 +23,4 @@ jobs:
             docker compose up -d --force-recreate
         env:
           GOOGLE_CREDENTIALS_BASE64: ${{ secrets.GOOGLE_CREDENTIALS_BASE64 }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
