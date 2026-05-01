@@ -1,3 +1,4 @@
+using ClanGuardBot.Briefing;
 using ClanGuardBot.Data;
 using ClanGuardBot.Handlers;
 using ClanGuardBot.Models;
@@ -153,6 +154,17 @@ try
     // + hosted service so its background loop runs automatically.
     builder.Services.AddSingleton<RosterExportService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<RosterExportService>());
+
+    // ── AI / Weekly Briefing ─────────────────────────────────────────
+    // WeeklyOfficerBriefingService: scheduled background service that posts a
+    // weekly officer briefing to the HQ channel using Claude Sonnet 4.6.
+    // Registers IAiService (Claude HTTP client), IBriefingDataCollector, and
+    // itself as both a singleton + hosted service. Configuration sections:
+    //   "Claude"         { ApiKey, Model }
+    //   "WeeklyBriefing" { OfficerChannelId, RunOnDayUtc, RunAtUtc, DryRun, MaxOutputTokens }
+    // The API key is loaded from env var Claude__ApiKey in production (set by
+    // docker-compose from the ANTHROPIC_API_KEY GitHub Actions secret).
+    builder.Services.AddWeeklyOfficerBriefing(builder.Configuration);
 
     var app = builder.Build();
 
