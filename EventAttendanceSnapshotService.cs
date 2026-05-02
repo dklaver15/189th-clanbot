@@ -71,6 +71,15 @@ namespace ClanGuardBot.Services;
 /// give-up check is "EndUtc + retry window &lt; now", not "we tried once and
 /// gave up forever".
 ///
+/// ── Username capture ──
+/// Each EventAttendance row stores a snapshot of the user's display name at
+/// snapshot time. Live SocketGuildUser.DisplayName is the primary source;
+/// for the rare case where a user leaves the server between event end and
+/// snapshot run, we fall back to UserActivity.Username (which
+/// ActivityTrackingHandler keeps current and persists across membership
+/// changes). The captured name is what /attendance and any future readers
+/// surface when the user is no longer a guild member to mention.
+///
 /// ── Deleted events ──
 /// If a CalendarEvent gets deleted between event end and the next sweep, that
 /// event's attendance is lost (we can't snapshot what isn't there). The 5-min
@@ -356,19 +365,55 @@ public class EventAttendanceSnapshotService : BackgroundService
                 : credited;
         }
 
-        // Filter to users meeting the threshold and stage rows for write.
-        var now = DateTime.UtcNow;
-        var toInsert = perUser
+        // Filter to users meeting the threshold.
+        var qualifyingUsers = perUser
             .Where(kv => kv.Value >= thresholdSeconds)
-            .Select(kv => new EventAttendance
+            .ToList();
+
+        // Resolve a display name for each qualifier. Primary source is the
+        // live SocketGuildUser; fallback is UserActivity.Username (which
+        // ActivityTrackingHandler keeps current and persists across guild
+        // membership changes). The fallback case is the one this whole field
+        // exists for — users who attended an event then left the server
+        // before the snapshot ran.
+        //
+        // We batch the fallback lookup so we don't issue one query per
+        // unresolved user; for typical event sizes this is at most a handful
+        // of rows.
+        var guild = _client.GetGuild(evt.GuildId);
+
+        var unresolvedIds = qualifyingUsers
+            .Where(kv => guild?.GetUser(kv.Key) is null)
+            .Select(kv => kv.Key)
+            .ToList();
+
+        var fallbackUsernames = new Dictionary<ulong, string>();
+        if (unresolvedIds.Count > 0)
+        {
+            fallbackUsernames = await db.UserActivities
+                .Where(ua => ua.GuildId == evt.GuildId && unresolvedIds.Contains(ua.UserId))
+                .ToDictionaryAsync(ua => ua.UserId, ua => ua.Username, ct);
+        }
+
+        var now = DateTime.UtcNow;
+        var toInsert = qualifyingUsers
+            .Select(kv =>
             {
-                GuildId         = evt.GuildId,
-                UserId          = kv.Key,
-                CalendarEventId = evt.Id,
-                EventStartUtc   = evt.StartUtc,
-                EventEndUtc     = evt.EndUtc,
-                AttendedMinutes = (int)(kv.Value / 60),
-                RecordedAt      = now
+                var member = guild?.GetUser(kv.Key);
+                var displayName = member?.DisplayName
+                    ?? (fallbackUsernames.TryGetValue(kv.Key, out var fb) ? fb : string.Empty);
+
+                return new EventAttendance
+                {
+                    GuildId         = evt.GuildId,
+                    UserId          = kv.Key,
+                    CalendarEventId = evt.Id,
+                    Username        = displayName,
+                    EventStartUtc   = evt.StartUtc,
+                    EventEndUtc     = evt.EndUtc,
+                    AttendedMinutes = (int)(kv.Value / 60),
+                    RecordedAt      = now
+                };
             })
             .ToList();
 
