@@ -43,14 +43,15 @@ namespace ClanGuardBot.Handlers;
 /// those rows fudge their event times to "now at insert time."
 ///
 /// ── User name rendering ──
-/// Three-tier fallback per attendee:
-///   1. User is still in the guild → render &lt;@id&gt; mention (clickable,
-///      picks up the live nickname).
-///   2. User has left the guild but the EventAttendance row carries a
-///      snapshot-time Username → render that bold with a "(left)" marker.
-///   3. Neither → fall back to &lt;@id&gt;. Discord renders the raw ID and
-///      shows "you don't have access to this link" if clicked. Only
-///      pre-migration rows hit this branch in practice.
+/// We can't fully trust Discord's &lt;@id&gt; mention resolution — it sometimes
+/// fails to render even for users currently in the guild (observed in
+/// ephemeral messages, with stale viewer-side caches, or for users the
+/// viewer hasn't interacted with directly). When we have a snapshot-time
+/// Username, we render a markdown link to the user's Discord profile URL
+/// with the stored name as the link text: always-visible name, clickable
+/// when Discord can resolve the user, "(left)" suffix when our local
+/// guild cache no longer has a member object. Rows with no stored Username
+/// fall back to raw &lt;@id&gt;.
 ///
 /// ── Permissions ──
 /// MAJ+ only (hardcoded floor, same defensive pattern as
@@ -336,25 +337,40 @@ public class AttendanceCommandHandler
     }
 
     /// <summary>
-    /// Renders a user reference for the embed using a three-tier fallback:
-    ///   1. User is still in the guild → Discord mention (clickable, picks
-    ///      up live nickname).
-    ///   2. User has left, but the row carries a snapshot-time username →
-    ///      bold escaped name with "(left)" marker.
-    ///   3. Neither → raw mention syntax. Discord renders the bare ID; this
-    ///      is the legacy-row case for rows written before the Username
-    ///      column existed and that the migration backfill couldn't resolve
-    ///      (no UserActivity row for them either).
+    /// Renders a user reference for the embed.
+    ///
+    /// ── Why this isn't just &lt;@id&gt; ──
+    /// Discord's user-mention rendering is unreliable for our use case. In
+    /// ephemeral messages, and for users whose IDs the viewer's client
+    /// hasn't cached, &lt;@id&gt; can render as the literal string
+    /// "&lt;@123456&gt;" plus a "you don't have access to this link" error
+    /// when clicked. This was observed for several brand-new members on
+    /// 2026-05-02 even though guild.GetUser returned non-null — the bot's
+    /// view of guild membership and Discord's view of mention resolution
+    /// don't always agree.
+    ///
+    /// Instead, when we have a snapshot-time Username we render a markdown
+    /// link to the Discord profile URL. The link text is the stored name —
+    /// guaranteed to display correctly regardless of cache state — and the
+    /// URL opens the user's profile when Discord can resolve them, which
+    /// works for any user in a mutual server. A "(left)" marker is added
+    /// when our local guild cache no longer has a member object.
+    ///
+    /// Pre-migration legacy rows with no stored Username fall back to raw
+    /// &lt;@id&gt; mention syntax. That's the only path where rendering can
+    /// fail to a bare ID — same behaviour as before this column existed.
     /// </summary>
     private static string FormatUser(SocketGuild guild, ulong userId, string snapshotUsername)
     {
-        if (guild.GetUser(userId) is not null)
+        // No stored name — fall back to mention. Pre-migration legacy row.
+        if (string.IsNullOrEmpty(snapshotUsername))
             return $"<@{userId}>";
 
-        if (!string.IsNullOrEmpty(snapshotUsername))
-            return $"**{EscapeMarkdown(snapshotUsername)}** _(left)_";
+        var inGuild = guild.GetUser(userId) is not null;
+        var escaped = EscapeMarkdown(snapshotUsername);
+        var profileLink = $"[**{escaped}**](https://discord.com/users/{userId})";
 
-        return $"<@{userId}>";
+        return inGuild ? profileLink : $"{profileLink} _(left)_";
     }
 
     /// <summary>
