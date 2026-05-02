@@ -6,6 +6,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using System.IO;
 
 namespace ClanGuardBot.Services;
 
@@ -187,6 +188,39 @@ public class PromotionService
     /// first group, which reads cleaner in Discord than a flush join.
     /// </summary>
     private const string AutoPromotionHeaderSeparator = "\n\n";
+
+    /// <summary>
+    /// Filename used as the attachment name when uploading the 189th logo
+    /// alongside the announcement. The embed references this via the
+    /// <c>attachment://</c> URI scheme, so the on-disk filename and this
+    /// constant must agree.
+    /// </summary>
+    private const string LogoAttachmentFileName = "189th_logo.png";
+
+    /// <summary>
+    /// On-disk path to the 189th logo PNG (transparent background). The
+    /// file is expected to be deployed alongside the bot binary at
+    /// <c>Assets/189th_logo.png</c> — wire this up in the .csproj with:
+    /// <code>
+    /// &lt;ItemGroup&gt;
+    ///   &lt;Content Include="Assets\189th_logo.png"&gt;
+    ///     &lt;CopyToOutputDirectory&gt;PreserveNewest&lt;/CopyToOutputDirectory&gt;
+    ///   &lt;/Content&gt;
+    /// &lt;/ItemGroup&gt;
+    /// </code>
+    /// If the file is missing at runtime the announcement still posts —
+    /// just without the logo footer — so a missed deploy doesn't break
+    /// the promotion flow.
+    /// </summary>
+    private static readonly string LogoFilePath =
+        Path.Combine(AppContext.BaseDirectory, "Assets", LogoAttachmentFileName);
+
+    /// <summary>
+    /// Embed side-bar color for the logo footer. Sampled from the olive
+    /// khaki of the badge ring / "189TH" lettering so the thin colored
+    /// strip on the left of the embed card visually ties to the logo.
+    /// </summary>
+    private static readonly Color LogoEmbedColor = new(0x9C, 0x99, 0x66);
 
     public PromotionService(
         IServiceProvider services,
@@ -489,6 +523,21 @@ public class PromotionService
         var messageBatches = PackGroupsIntoMessages(groupTexts, headerReservedChars);
         var allMentionedIds = promotions.Select(p => p.Member.Id).Distinct().ToList();
 
+        // Logo is attached to the LAST batch only so it visually signs off
+        // the announcement. For the typical single-batch cycle the last
+        // batch IS the first batch, which means one message carries both
+        // the figlet header at top and the logo footer below — exactly
+        // what we want. Skip the logo entirely if the asset is missing
+        // (e.g. forgot to deploy it) so a missing file doesn't break
+        // the announcement.
+        var attachLogoOnLastBatch = File.Exists(LogoFilePath);
+        if (!attachLogoOnLastBatch)
+        {
+            _logger.LogWarning(
+                "Logo file not found at {Path} — promotion announcement will post without logo footer.",
+                LogoFilePath);
+        }
+
         for (int i = 0; i < messageBatches.Count; i++)
         {
             // Banner only on the first message of the cycle. Continuation
@@ -498,15 +547,39 @@ public class PromotionService
                 ? $"{AutoPromotionHeader}{AutoPromotionHeaderSeparator}{messageBatches[i]}"
                 : messageBatches[i];
 
+            var isLastBatch = i == messageBatches.Count - 1;
+            var allowedMentions = new AllowedMentions
+            {
+                UserIds = allMentionedIds,
+                MentionRepliedUser = false,
+            };
+
             try
             {
-                await channel.SendMessageAsync(
-                    body,
-                    allowedMentions: new AllowedMentions
-                    {
-                        UserIds = allMentionedIds,
-                        MentionRepliedUser = false,
-                    });
+                if (isLastBatch && attachLogoOnLastBatch)
+                {
+                    // Embed with only an Image set + an attached file referenced
+                    // via attachment:// renders the logo centered within the
+                    // embed card. Plain attached images are left-aligned in
+                    // the message column, which is why we go through an embed
+                    // instead of just calling SendFileAsync without one.
+                    var embed = new EmbedBuilder()
+                        .WithImageUrl($"attachment://{LogoAttachmentFileName}")
+                        .WithColor(LogoEmbedColor)
+                        .Build();
+
+                    await channel.SendFileAsync(
+                        filePath: LogoFilePath,
+                        text: body,
+                        embed: embed,
+                        allowedMentions: allowedMentions);
+                }
+                else
+                {
+                    await channel.SendMessageAsync(
+                        body,
+                        allowedMentions: allowedMentions);
+                }
             }
             catch (Exception ex)
             {
