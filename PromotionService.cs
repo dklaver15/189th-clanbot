@@ -148,17 +148,21 @@ public class PromotionService
 
     /// <summary>
     /// Banner prepended to the FIRST message of every combined auto-promotion
-    /// announcement. The "189th" figlet is wrapped in a triple-backtick fence
-    /// so Discord renders it in a monospace code block (proportional fonts
-    /// would mangle the alignment); "Promotions" is a bold markdown heading
-    /// outside the fence so it can scale naturally on narrow viewports
-    /// without being shackled to monospace width.
+    /// announcement. The "189th" + "Clan" figlet stack is wrapped in a
+    /// triple-backtick fence so Discord renders it in a monospace code block
+    /// (proportional fonts would mangle the alignment); "Promotions" is a
+    /// bold markdown heading outside the fence so it can scale naturally
+    /// on narrow viewports without being shackled to monospace width.
     ///
     /// ── Font / source ──
-    /// "189th" rendered with pyfiglet using the "smslant" font, the compact
-    /// version of the classic "slant" figlet font. Widest line is 21 chars,
-    /// which fits Discord mobile portrait code blocks (~28-char threshold)
-    /// without horizontal scrolling on any current client.
+    /// Both lines rendered with pyfiglet using the "smslant" font, the
+    /// compact version of the classic "slant" figlet font. "189th" is 21
+    /// chars wide; "Clan" is 17 chars wide and is left-padded by 2 spaces
+    /// to visually center it under "189th" — mirrors the layout of the
+    /// 189th badge logo (eagle + 189TH on top, CLAN centered below).
+    /// Widest line is 21 chars, which fits Discord mobile portrait code
+    /// blocks (~28-char threshold) without horizontal scrolling on any
+    /// current client.
     ///
     /// ── Why "Promotions" is no longer figlet ──
     /// At 10 letters, "Promotions" rendered as figlet is 40+ chars wide in
@@ -179,6 +183,10 @@ public class PromotionService
  <  ( _ ) _ \/ /_/ /
  / / _  \_, / __/ _ \
 /_/\___/___/\__/_//_/
+    _______
+   / ___/ /__ ____
+  / /__/ / _ `/ _ \
+  \___/_/\_,_/_//_/
 ```
 🎖️ **Promotions**";
 
