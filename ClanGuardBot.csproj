@@ -20,4 +20,15 @@
     <PackageReference Include="Serilog.Sinks.File" Version="6.0.0" />
   </ItemGroup>
 
+  <!--
+    Static assets bundled with the bot binary. Files listed here are copied
+    into the publish output (and therefore into /app inside the runtime
+    Docker image), making them available at runtime via AppContext.BaseDirectory.
+    Used by PromotionService for the 189th logo footer on auto-promotion
+    announcements.
+  -->
+  <ItemGroup>
+    <Content Include="Assets\189th_logo.png" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
