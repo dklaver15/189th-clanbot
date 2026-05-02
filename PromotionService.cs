@@ -146,41 +146,40 @@ public class PromotionService
     private const int DiscordMessageCharLimit = 2000;
 
     /// <summary>
-    /// ASCII-art banner prepended to the FIRST message of every combined
-    /// auto-promotion announcement. Wrapped in a triple-backtick fence so
-    /// Discord renders it in a monospace code block (proportional fonts
-    /// would mangle the alignment).
+    /// Banner prepended to the FIRST message of every combined auto-promotion
+    /// announcement. The "189th" figlet is wrapped in a triple-backtick fence
+    /// so Discord renders it in a monospace code block (proportional fonts
+    /// would mangle the alignment); "Promotions" is a bold markdown heading
+    /// outside the fence so it can scale naturally on narrow viewports
+    /// without being shackled to monospace width.
     ///
     /// ── Font / source ──
-    /// Generated with pyfiglet using the "smslant" font, which is the
-    /// compact version of the classic "slant" figlet font. "189th" is
-    /// rendered on top, "Promotions" stacked below — splitting the words
-    /// across two figlet renders keeps the per-line width down compared
-    /// to a single-line "189th Promotions" render (~68 chars).
+    /// "189th" rendered with pyfiglet using the "smslant" font, the compact
+    /// version of the classic "slant" figlet font. Widest line is 21 chars,
+    /// which fits Discord mobile portrait code blocks (~28-char threshold)
+    /// without horizontal scrolling on any current client.
+    ///
+    /// ── Why "Promotions" is no longer figlet ──
+    /// At 10 letters, "Promotions" rendered as figlet is 40+ chars wide in
+    /// any conventional font — too wide for mobile code blocks regardless
+    /// of font choice. Rendering it as a bold heading instead preserves the
+    /// visual hierarchy (logo on top, label below) without the width problem.
+    /// The previous combined banner (smslant 189th + smslant Promotions)
+    /// peaked at 46 chars and was getting clipped on portrait devices.
     ///
     /// ── First batch only ──
     /// On oversized catch-up cycles the announcement splits across multiple
     /// messages (see PackGroupsIntoMessages). The banner is only prepended
     /// to batch 0; subsequent continuation messages skip it so the header
     /// doesn't repeat down the channel.
-    ///
-    /// ── Width caveat ──
-    /// The widest line is 46 chars, which is over the ~40-char threshold
-    /// where Discord mobile starts horizontally scrolling code blocks on
-    /// the smallest portrait devices. Most mobile clients render it
-    /// without scrolling; the tiny minority that scroll do so by ~6 chars
-    /// (one quick swipe). Desktop renders cleanly.
     /// </summary>
     private const string AutoPromotionHeader = @"```
   ______ ___  __  __
  <  ( _ ) _ \/ /_/ /
  / / _  \_, / __/ _ \
 /_/\___/___/\__/_//_/
-   ___                      __  _
-  / _ \_______  __ _  ___  / /_(_)__  ___  ___
- / ___/ __/ _ \/  ' \/ _ \/ __/ / _ \/ _ \(_-<
-/_/  /_/  \___/_/_/_/\___/\__/_/\___/_//_/___/
-```";
+```
+🎖️ **Promotions**";
 
     /// <summary>
     /// Separator between the ASCII header and the announcement body.
