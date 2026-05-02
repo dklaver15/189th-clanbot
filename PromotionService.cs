@@ -145,6 +145,50 @@ public class PromotionService
     /// </summary>
     private const int DiscordMessageCharLimit = 2000;
 
+    /// <summary>
+    /// ASCII-art banner prepended to the FIRST message of every combined
+    /// auto-promotion announcement. Wrapped in a triple-backtick fence so
+    /// Discord renders it in a monospace code block (proportional fonts
+    /// would mangle the alignment).
+    ///
+    /// ── Font / source ──
+    /// Generated with pyfiglet using the "smslant" font, which is the
+    /// compact version of the classic "slant" figlet font. "189th" is
+    /// rendered on top, "Promotions" stacked below — splitting the words
+    /// across two figlet renders keeps the per-line width down compared
+    /// to a single-line "189th Promotions" render (~68 chars).
+    ///
+    /// ── First batch only ──
+    /// On oversized catch-up cycles the announcement splits across multiple
+    /// messages (see PackGroupsIntoMessages). The banner is only prepended
+    /// to batch 0; subsequent continuation messages skip it so the header
+    /// doesn't repeat down the channel.
+    ///
+    /// ── Width caveat ──
+    /// The widest line is 46 chars, which is over the ~40-char threshold
+    /// where Discord mobile starts horizontally scrolling code blocks on
+    /// the smallest portrait devices. Most mobile clients render it
+    /// without scrolling; the tiny minority that scroll do so by ~6 chars
+    /// (one quick swipe). Desktop renders cleanly.
+    /// </summary>
+    private const string AutoPromotionHeader = @"```
+  ______ ___  __  __
+ <  ( _ ) _ \/ /_/ /
+ / / _  \_, / __/ _ \
+/_/\___/___/\__/_//_/
+   ___                      __  _
+  / _ \_______  __ _  ___  / /_(_)__  ___  ___
+ / ___/ __/ _ \/  ' \/ _ \/ __/ / _ \/ _ \(_-<
+/_/  /_/  \___/_/_/_/\___/\__/_/\___/_//_/___/
+```";
+
+    /// <summary>
+    /// Separator between the ASCII header and the announcement body.
+    /// Two newlines = blank line between the closing code-fence and the
+    /// first group, which reads cleaner in Discord than a flush join.
+    /// </summary>
+    private const string AutoPromotionHeaderSeparator = "\n\n";
+
     public PromotionService(
         IServiceProvider services,
         ILogger<PromotionService> logger,
@@ -437,12 +481,23 @@ public class PromotionService
         }
 
         // ── Pack groups into messages within the char limit ───────────
-        var messageBatches = PackGroupsIntoMessages(groupTexts);
+        // Reserve space in the first batch for the ASCII header that gets
+        // prepended below — without this, a near-2000-char first batch
+        // would overflow Discord's limit once the banner is added.
+        var headerReservedChars =
+            AutoPromotionHeader.Length + AutoPromotionHeaderSeparator.Length;
+
+        var messageBatches = PackGroupsIntoMessages(groupTexts, headerReservedChars);
         var allMentionedIds = promotions.Select(p => p.Member.Id).Distinct().ToList();
 
         for (int i = 0; i < messageBatches.Count; i++)
         {
-            var body = messageBatches[i];
+            // Banner only on the first message of the cycle. Continuation
+            // messages (only produced for oversized catch-up cycles) skip
+            // it so the header doesn't repeat down the channel.
+            var body = i == 0
+                ? $"{AutoPromotionHeader}{AutoPromotionHeaderSeparator}{messageBatches[i]}"
+                : messageBatches[i];
 
             try
             {
@@ -473,8 +528,16 @@ public class PromotionService
     /// the Discord char limit. Group boundaries are preserved — a single
     /// group is never split mid-list (unless it alone exceeds the limit,
     /// which would mean ~50+ mentions in one tier; not a real-world case).
+    ///
+    /// <paramref name="firstBatchReservedChars"/> shrinks the effective
+    /// limit for the FIRST batch only. Used by the auto-promo path to make
+    /// room for the ASCII header that gets prepended before sending —
+    /// without the reservation, a near-limit first batch would overflow
+    /// Discord's 2000-char ceiling once the banner is added.
     /// </summary>
-    private static List<string> PackGroupsIntoMessages(List<string> groupTexts)
+    private static List<string> PackGroupsIntoMessages(
+        List<string> groupTexts,
+        int firstBatchReservedChars = 0)
     {
         const string separator = "\n\n";
         var batches = new List<string>();
@@ -484,7 +547,14 @@ public class PromotionService
         {
             var addedLength = current.Length == 0 ? group.Length : separator.Length + group.Length;
 
-            if (current.Length > 0 && current.Length + addedLength > DiscordMessageCharLimit)
+            // The first batch's effective limit is reduced by the reserved
+            // header size; once batch 0 has been flushed, subsequent batches
+            // get the full DiscordMessageCharLimit.
+            var effectiveLimit = batches.Count == 0
+                ? DiscordMessageCharLimit - firstBatchReservedChars
+                : DiscordMessageCharLimit;
+
+            if (current.Length > 0 && current.Length + addedLength > effectiveLimit)
             {
                 batches.Add(current.ToString());
                 current.Clear();
