@@ -29,6 +29,7 @@ public class DiscordBotService : IHostedService
     private readonly SetNickCommandHandler _setNickHandler;
     private readonly SeedPromotionCreditCommandHandler _seedHandler;
     private readonly EventCreditCommandHandler _eventCreditHandler;
+    private readonly AttendanceCommandHandler _attendanceHandler;
     private readonly KickAwolsCommandHandler _kickAwolsHandler;
     private readonly ClearAwolListCommandHandler _clearAwolListHandler;
     private readonly BriefingNowCommandHandler _briefingNowHandler;
@@ -51,6 +52,7 @@ public class DiscordBotService : IHostedService
         SetNickCommandHandler setNickHandler,
         SeedPromotionCreditCommandHandler seedHandler,
         EventCreditCommandHandler eventCreditHandler,
+        AttendanceCommandHandler attendanceHandler,
         KickAwolsCommandHandler kickAwolsHandler,
         ClearAwolListCommandHandler clearAwolListHandler,
         BriefingNowCommandHandler briefingNowHandler,
@@ -72,6 +74,7 @@ public class DiscordBotService : IHostedService
         _setNickHandler            = setNickHandler;
         _seedHandler               = seedHandler;
         _eventCreditHandler        = eventCreditHandler;
+        _attendanceHandler         = attendanceHandler;
         _kickAwolsHandler          = kickAwolsHandler;
         _clearAwolListHandler      = clearAwolListHandler;
         _briefingNowHandler        = briefingNowHandler;
@@ -98,6 +101,7 @@ public class DiscordBotService : IHostedService
         _setNickHandler.Register(_client);
         _seedHandler.Register(_client);
         _eventCreditHandler.Register(_client);
+        _attendanceHandler.Register(_client);
         _kickAwolsHandler.Register(_client);
         _clearAwolListHandler.Register(_client);
         _briefingNowHandler.Register(_client);
@@ -218,6 +222,16 @@ public class DiscordBotService : IHostedService
                     .WithDescription("Remove 1 manual event credit from a member at their current rank (CPT+ only)")
                     .AddOption("member", ApplicationCommandOptionType.User,
                         "The member to debit", isRequired: true)
+                    .Build(),
+
+                // /attendance — show today's clan-event attendance grouped by
+                // event. Pulls from CalendarEvents + EventAttendance and
+                // distinguishes "snapshot pending" from "0 qualifying" using
+                // CalendarEvent.LastSnapshotAttemptUtc. Manual credits added
+                // today appear in a separate section. Ephemeral, MAJ+ gated.
+                new SlashCommandBuilder()
+                    .WithName("attendance")
+                    .WithDescription("Show today's clan event attendance, grouped by event (MAJ+ only)")
                     .Build(),
 
                 // /kick-awols — bulk-kick all members holding the AWOL role.

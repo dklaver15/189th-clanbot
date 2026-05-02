@@ -94,6 +94,12 @@ try
     // attendance history.
     builder.Services.AddSingleton<EventCreditCommandHandler>();
 
+    // AttendanceCommandHandler: /attendance slash command. Shows today's clan-event
+    // attendance grouped by event, with explicit "snapshot pending" / "in progress"
+    // states for events that haven't been processed yet. Manual /add-event-credit
+    // rows added today appear in their own section. MAJ+ gated, ephemeral.
+    builder.Services.AddSingleton<AttendanceCommandHandler>();
+
     // KickAwolsCommandHandler: /kick-awols slash command for officers
     // (AwolKickMinRank+). Iterates over members with the AWOL role and removes
     // them from the server, with multiple safety guards (Reserve role, min rank,
