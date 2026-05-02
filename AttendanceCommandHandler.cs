@@ -42,6 +42,16 @@ namespace ClanGuardBot.Handlers;
 /// own bottom section, keyed by RecordedAt rather than EventStartUtc, since
 /// those rows fudge their event times to "now at insert time."
 ///
+/// ── User name rendering ──
+/// Three-tier fallback per attendee:
+///   1. User is still in the guild → render &lt;@id&gt; mention (clickable,
+///      picks up the live nickname).
+///   2. User has left the guild but the EventAttendance row carries a
+///      snapshot-time Username → render that bold with a "(left)" marker.
+///   3. Neither → fall back to &lt;@id&gt;. Discord renders the raw ID and
+///      shows "you don't have access to this link" if clicked. Only
+///      pre-migration rows hit this branch in practice.
+///
 /// ── Permissions ──
 /// MAJ+ only (hardcoded floor, same defensive pattern as
 /// EventCreditCommandHandler's CPT floor — config can't drift below intent).
@@ -191,7 +201,7 @@ public class AttendanceCommandHandler
             .OrderBy(a => a.RecordedAt)
             .ToListAsync();
 
-        var embed = BuildEmbed(now, todaysEvents, todaysAttendance, todaysManualCredits);
+        var embed = BuildEmbed(guild, now, todaysEvents, todaysAttendance, todaysManualCredits);
 
         _logger.LogInformation(
             "/attendance invoked by {Caller}: {EventCount} event(s), {AttendanceCount} attendance row(s), {ManualCount} manual credit(s) today",
@@ -206,6 +216,7 @@ public class AttendanceCommandHandler
     /// were added today).
     /// </summary>
     private static Embed BuildEmbed(
+        SocketGuild guild,
         DateTime now,
         List<CalendarEvent> todaysEvents,
         List<EventAttendance> todaysAttendance,
@@ -236,7 +247,7 @@ public class AttendanceCommandHandler
             {
                 var fieldName = TruncateFieldName(
                     $"📅 {ev.Title} — <t:{((DateTimeOffset)ev.StartUtc).ToUnixTimeSeconds()}:t>");
-                var fieldValue = BuildEventFieldValue(ev, attendanceByEventId, now);
+                var fieldValue = BuildEventFieldValue(guild, ev, attendanceByEventId, now);
                 builder.AddField(fieldName, fieldValue);
             }
         }
@@ -255,7 +266,7 @@ public class AttendanceCommandHandler
         if (orphaned.Count > 0)
         {
             var orphanedLines = orphaned
-                .Select(a => $"• <@{a.UserId}> — **{a.AttendedMinutes}** min (event id {a.CalendarEventId}, calendar entry no longer present)");
+                .Select(a => $"• {FormatUser(guild, a.UserId, a.Username)} — **{a.AttendedMinutes}** min (event id {a.CalendarEventId}, calendar entry no longer present)");
             builder.AddField(
                 "⚠️ Orphaned attendance",
                 TruncateFieldValue(string.Join("\n", orphanedLines)));
@@ -265,7 +276,7 @@ public class AttendanceCommandHandler
         if (todaysManualCredits.Count > 0)
         {
             var manualLines = todaysManualCredits
-                .Select(a => $"• <@{a.UserId}> — added <t:{((DateTimeOffset)a.RecordedAt).ToUnixTimeSeconds()}:t>");
+                .Select(a => $"• {FormatUser(guild, a.UserId, a.Username)} — added <t:{((DateTimeOffset)a.RecordedAt).ToUnixTimeSeconds()}:t>");
             builder.AddField(
                 $"✏️ Manual credits added today ({todaysManualCredits.Count})",
                 TruncateFieldValue(string.Join("\n", manualLines)));
@@ -290,6 +301,7 @@ public class AttendanceCommandHandler
     /// correctly.
     /// </summary>
     private static string BuildEventFieldValue(
+        SocketGuild guild,
         CalendarEvent ev,
         Dictionary<int, List<EventAttendance>> attendanceByEventId,
         DateTime now)
@@ -308,7 +320,7 @@ public class AttendanceCommandHandler
         if (attendanceByEventId.TryGetValue(ev.Id, out var attendees) && attendees.Count > 0)
         {
             var lines = attendees
-                .Select(a => $"• <@{a.UserId}> — **{a.AttendedMinutes}** min")
+                .Select(a => $"• {FormatUser(guild, a.UserId, a.Username)} — **{a.AttendedMinutes}** min")
                 .ToList();
             var header = $"✅ **{attendees.Count}** attendee(s) credited";
             return TruncateFieldValue(header + "\n" + string.Join("\n", lines));
@@ -321,6 +333,47 @@ public class AttendanceCommandHandler
 
         var attemptedAt = ev.LastSnapshotAttemptUtc.Value;
         return $"✅ _Snapshot complete — no qualifying attendees._\nLast attempt: <t:{((DateTimeOffset)attemptedAt).ToUnixTimeSeconds()}:R>";
+    }
+
+    /// <summary>
+    /// Renders a user reference for the embed using a three-tier fallback:
+    ///   1. User is still in the guild → Discord mention (clickable, picks
+    ///      up live nickname).
+    ///   2. User has left, but the row carries a snapshot-time username →
+    ///      bold escaped name with "(left)" marker.
+    ///   3. Neither → raw mention syntax. Discord renders the bare ID; this
+    ///      is the legacy-row case for rows written before the Username
+    ///      column existed and that the migration backfill couldn't resolve
+    ///      (no UserActivity row for them either).
+    /// </summary>
+    private static string FormatUser(SocketGuild guild, ulong userId, string snapshotUsername)
+    {
+        if (guild.GetUser(userId) is not null)
+            return $"<@{userId}>";
+
+        if (!string.IsNullOrEmpty(snapshotUsername))
+            return $"**{EscapeMarkdown(snapshotUsername)}** _(left)_";
+
+        return $"<@{userId}>";
+    }
+
+    /// <summary>
+    /// Escapes the Discord markdown characters that can appear in a stored
+    /// display name. Discord usernames are restricted (lowercase alphanumeric,
+    /// period, underscore), but server nicknames — which is what we actually
+    /// store via DisplayName — can contain anything, including the markdown
+    /// metacharacters that would otherwise mangle the embed formatting.
+    /// </summary>
+    private static string EscapeMarkdown(string value)
+    {
+        return value
+            .Replace("\\", "\\\\")
+            .Replace("*",  "\\*")
+            .Replace("_",  "\\_")
+            .Replace("~",  "\\~")
+            .Replace("`",  "\\`")
+            .Replace("|",  "\\|")
+            .Replace(">",  "\\>");
     }
 
     private static string TruncateFieldValue(string value)

@@ -32,7 +32,9 @@ namespace ClanGuardBot.Handlers;
 /// a real CalendarEvent"). The row's EventStartUtc and EventEndUtc are both
 /// set to "now" so promotion math (which counts rows where
 /// EventEndUtc &gt;= rankAssignedAt) sees this credit immediately.
-/// AttendedMinutes is 0 since it isn't real voice-session time.
+/// AttendedMinutes is 0 since it isn't real voice-session time. Username is
+/// captured from the target's live DisplayName so /attendance and other
+/// readers can surface a human name even if the user later leaves the server.
 ///
 /// /remove-event-credit deletes the most recent manual-adjustment row
 /// (CalendarEventId == 0) for the target user that falls within their
@@ -156,12 +158,16 @@ public class EventCreditCommandHandler
         // immediately counts toward eligibility on the next /run. Real
         // attendance rows always have EventStart < EventEnd; for a manual
         // credit, equal values are fine because nothing in the codebase reads
-        // the duration off this table.
+        // the duration off this table. Username comes from DisplayName so the
+        // row carries a human-readable identifier in case the target later
+        // leaves the server (matches what EventAttendanceSnapshotService does
+        // for organic rows).
         db.EventAttendances.Add(new EventAttendance
         {
             GuildId         = pre.Guild!.Id,
             UserId          = pre.Target!.Id,
             CalendarEventId = ManualAdjustmentCalendarEventId,
+            Username        = pre.Target.DisplayName,
             EventStartUtc   = now,
             EventEndUtc     = now,
             AttendedMinutes = 0,

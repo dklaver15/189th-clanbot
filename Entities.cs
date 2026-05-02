@@ -292,6 +292,32 @@ public class EventAttendance
     /// </summary>
     public int CalendarEventId { get; set; }
 
+    /// <summary>
+    /// Snapshot of the user's display name at the moment attendance was
+    /// recorded. Captures SocketGuildUser.DisplayName (server nickname →
+    /// global name → underlying username, in that order of preference) so
+    /// rank-prefixed clan nicknames like "MAJ.xAP3RONINx" survive in the
+    /// attendance log even after the user leaves the server.
+    ///
+    /// ── Why this exists ──
+    /// /attendance and any other attendance reader needs to render a human
+    /// name. For users still in the guild, a Discord mention &lt;@id&gt; works
+    /// great — the client substitutes the live display name. For users who
+    /// have left the guild between event time and read time, &lt;@id&gt;
+    /// renders as a raw ID with a "you don't have access to this link"
+    /// error if clicked. This field is the fallback identifier in that case.
+    ///
+    /// ── Lifecycle ──
+    /// Populated at write time by EventAttendanceSnapshotService (looking up
+    /// the SocketGuildUser at snapshot time, falling back to UserActivity
+    /// for the rare case where the user left between event end and snapshot)
+    /// and by EventCreditCommandHandler (from the SocketGuildUser supplied
+    /// to /add-event-credit). Empty string for rows written before this
+    /// column existed; the migration that added the column also runs a
+    /// one-shot backfill from UserActivity.Username for those rows.
+    /// </summary>
+    public string Username { get; set; } = string.Empty;
+
     /// <summary>Denormalized copy of CalendarEvent.StartUtc at snapshot time.</summary>
     public DateTime EventStartUtc { get; set; }
 
