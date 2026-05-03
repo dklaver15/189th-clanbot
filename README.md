@@ -8,7 +8,7 @@ A Discord bot that tracks clan member activity and flags inactive users for remo
 - **Tracks voice time** — records time spent in voice channels
 - **Assigns AWOL role** — users with <5 messages AND <1 hour voice get flagged
 - **Notifies HQ** — 2 days after AWOL assignment, posts to your HQ channel with full user details
-- **Slash commands** — members can check their own stats, officers can check others or exempt users
+- **Slash commands** — members can check their own stats, officers can check others or clear AWOL status
 
 ## Requirements
 
@@ -58,7 +58,7 @@ All settings are in `appsettings.json` and can be overridden via environment var
 |----------------------|------------|-------------|
 | `/awol-status`       | Everyone | Check your own activity stats |
 | `/awol-check @user`  | Officers+ | Check another user's activity |
-| `/awol-exempt @user` | Officers+ | Remove AWOL role and reset their window |
+| `/clear-awol @user`  | Officers+ | Clear a user's AWOL status (removes role and pending notifications) |
 
 ## Deploy to Digital Ocean
 

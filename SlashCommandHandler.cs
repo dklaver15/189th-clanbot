@@ -12,7 +12,7 @@ namespace ClanGuardBot.Handlers;
 
 /// <summary>
 /// Handles slash commands with full database integration for
-/// checking activity stats, looking up other users, exempting users from AWOL,
+/// checking activity stats, looking up other users, clearing AWOL status,
 /// and manually triggering a roster export.
 /// </summary>
 public class SlashCommandHandler
@@ -42,7 +42,7 @@ public class SlashCommandHandler
 
     private async Task HandleCommandAsync(SocketSlashCommand command)
     {
-        if (command.Data.Name is not ("awol-status" or "awol-check" or "awol-exempt" or "roster-export"))
+        if (command.Data.Name is not ("awol-status" or "awol-check" or "clear-awol" or "roster-export"))
             return;
 
         try
@@ -55,8 +55,8 @@ public class SlashCommandHandler
                 case "awol-check":
                     await HandleCheck(command);
                     break;
-                case "awol-exempt":
-                    await HandleExempt(command);
+                case "clear-awol":
+                    await HandleClearAwol(command);
                     break;
                 case "roster-export":
                     await HandleRosterExport(command);
@@ -175,8 +175,8 @@ public class SlashCommandHandler
         await command.FollowupAsync(embed: embed, ephemeral: true);
     }
 
-    /// <summary>/awol-exempt — remove AWOL and reset a user's window (officer+ only).</summary>
-    private async Task HandleExempt(SocketSlashCommand command)
+    /// <summary>/clear-awol — remove AWOL role and clear pending notifications (officer+ only).</summary>
+    private async Task HandleClearAwol(SocketSlashCommand command)
     {
         await command.DeferAsync(ephemeral: true);
 
@@ -227,10 +227,10 @@ public class SlashCommandHandler
         await db.SaveChangesAsync();
 
         await command.FollowupAsync(
-            $"✅ {targetUser.Mention} has been exempted. AWOL role removed.",
+            $"✅ AWOL status cleared for {targetUser.Mention}. Role removed and pending notifications closed.",
             ephemeral: true);
 
-        _logger.LogInformation("{Caller} exempted {Target} from AWOL in {Guild}",
+        _logger.LogInformation("{Caller} cleared AWOL status for {Target} in {Guild}",
             caller.Username, targetUser.Username, guild.Name);
     }
 

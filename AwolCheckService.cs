@@ -66,7 +66,7 @@ namespace ClanGuardBot.Services;
 ///   • Officer manually removes via Discord UI
 ///   • User leaves and rejoins the server
 ///   • Mass role cleanup during a clan event
-///   • Bot was offline when removal happened via /awol-exempt or activity
+///   • Bot was offline when removal happened via /clear-awol or activity
 ///
 /// In any of these cases, the AwolRecord would otherwise stay pending
 /// forever. Step 3 now also checks "does the user still have the AWOL role?"
@@ -451,7 +451,7 @@ public class AwolCheckService : BackgroundService
             // ── Role-removed cleanup ──
             // The user might have left the guild, or had their AWOL role
             // removed by a path that doesn't touch the AwolRecord (manual
-            // removal in Discord UI, /awol-exempt, mass cleanup, etc.). In
+            // removal in Discord UI, /clear-awol, mass cleanup, etc.). In
             // either case the pending record is moot — close it and skip
             // notification so we don't surface stale "AWOL Member — Ready
             // for Review" embeds for users who aren't actually AWOL anymore.

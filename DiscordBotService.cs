@@ -144,10 +144,10 @@ public class DiscordBotService : IHostedService
                     .Build(),
 
                 new SlashCommandBuilder()
-                    .WithName("awol-exempt")
-                    .WithDescription("Remove a user's AWOL role and reset their window (Officer+ only)")
+                    .WithName("clear-awol")
+                    .WithDescription("Clear a user's AWOL status — removes role and pending notifications (Officer+ only)")
                     .AddOption("user", ApplicationCommandOptionType.User,
-                        "The user to exempt", isRequired: true)
+                        "The user to clear", isRequired: true)
                     .Build(),
 
                 new SlashCommandBuilder()
