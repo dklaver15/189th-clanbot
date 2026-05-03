@@ -349,47 +349,69 @@ public class AttendanceCommandHandler
     /// view of guild membership and Discord's view of mention resolution
     /// don't always agree.
     ///
-    /// Instead, when we have a snapshot-time Username we render a markdown
-    /// link to the Discord profile URL. The link text is the stored name —
-    /// guaranteed to display correctly regardless of cache state — and the
-    /// URL opens the user's profile when Discord can resolve them, which
-    /// works for any user in a mutual server. A "(left)" marker is added
-    /// when our local guild cache no longer has a member object.
+    /// Instead we render a markdown link to the Discord profile URL with
+    /// the user's display name as the link text. The link text always
+    /// displays correctly regardless of cache state, and the URL opens
+    /// the user's profile when Discord can resolve them.
     ///
-    /// Pre-migration legacy rows with no stored Username fall back to raw
-    /// &lt;@id&gt; mention syntax. That's the only path where rendering can
-    /// fail to a bare ID — same behaviour as before this column existed.
+    /// ── Where the display name comes from ──
+    /// For users still in the guild, we pull SocketGuildUser.DisplayName
+    /// at render time. That gives us the nicest rendering — server
+    /// nicknames with rank prefixes ("SGT.Cobra", "MAJ.xAP3RONINx", etc.)
+    /// instead of the lowercase Discord @handle. The stored Username
+    /// column is the fallback for users who've since left the guild;
+    /// it's also what the migration backfill populated for pre-existing
+    /// rows, so historical rows for current members render with live
+    /// names automatically rather than the @handles in the column.
+    ///
+    /// Pre-migration legacy rows where the backfill found nothing fall
+    /// back to raw &lt;@id&gt; mention syntax — same behaviour as before
+    /// the column existed.
     /// </summary>
     private static string FormatUser(SocketGuild guild, ulong userId, string snapshotUsername)
     {
-        // No stored name — fall back to mention. Pre-migration legacy row.
-        if (string.IsNullOrEmpty(snapshotUsername))
-            return $"<@{userId}>";
+        var member = guild.GetUser(userId);
 
-        var inGuild = guild.GetUser(userId) is not null;
-        var escaped = EscapeMarkdown(snapshotUsername);
-        var profileLink = $"[**{escaped}**](https://discord.com/users/{userId})";
+        // Current member → live DisplayName, no "(left)" marker. Picks up
+        // server nicknames (rank prefixes etc.) which is the nicest rendering.
+        if (member is not null)
+        {
+            var displayName = EscapeForLinkText(member.DisplayName);
+            return $"[**{displayName}**](https://discord.com/users/{userId})";
+        }
 
-        return inGuild ? profileLink : $"{profileLink} _(left)_";
+        // Not in guild but we have a stored snapshot-time name → render that
+        // with the "(left)" marker.
+        if (!string.IsNullOrEmpty(snapshotUsername))
+        {
+            var stored = EscapeForLinkText(snapshotUsername);
+            return $"[**{stored}**](https://discord.com/users/{userId}) _(left)_";
+        }
+
+        // Pre-migration legacy row that backfill couldn't resolve — fall back
+        // to mention syntax. Discord may render it as raw ID; that's the
+        // same behaviour we had before this column existed.
+        return $"<@{userId}>";
     }
 
     /// <summary>
-    /// Escapes the Discord markdown characters that can appear in a stored
-    /// display name. Discord usernames are restricted (lowercase alphanumeric,
-    /// period, underscore), but server nicknames — which is what we actually
-    /// store via DisplayName — can contain anything, including the markdown
-    /// metacharacters that would otherwise mangle the embed formatting.
+    /// Strips characters from a name that would break embedded markdown link
+    /// syntax. Discord display names rarely contain these — the field is
+    /// here mainly to keep the rendering robust against an officer setting
+    /// an unusual nickname.
+    ///
+    /// Note: we deliberately do NOT escape underscores. Inside link text
+    /// (the [...] portion of a markdown link), Discord doesn't treat
+    /// underscores in the middle of a word as italic markers — escaping
+    /// them would render the backslash literally, which is what produced
+    /// the "cobrain\_action" rendering observed on the first deploy of
+    /// this method.
     /// </summary>
-    private static string EscapeMarkdown(string value)
+    private static string EscapeForLinkText(string value)
     {
         return value
-            .Replace("\\", "\\\\")
-            .Replace("*",  "\\*")
-            .Replace("_",  "\\_")
-            .Replace("~",  "\\~")
-            .Replace("`",  "\\`")
-            .Replace("|",  "\\|")
-            .Replace(">",  "\\>");
+            .Replace("[", string.Empty)
+            .Replace("]", string.Empty);
     }
 
     private static string TruncateFieldValue(string value)
