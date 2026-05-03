@@ -21,7 +21,12 @@ namespace ClanGuardBot.Handlers;
 ///   5. Persists a CalendarEvent DB record so edits/deletes stay in sync.
 ///
 /// MessageUpdated — updates the calendar event (title, times, AND description) if Apollo edits.
-/// MessageDeleted — removes the calendar event if the Apollo post is deleted.
+/// MessageDeleted — removes the calendar event ONLY when the deletion happens
+///   BEFORE the event runs (treated as cancellation). Post-event deletions
+///   are clan policy: Apollo messages are routinely removed from #events to
+///   keep the channel clean once an event has ended. The calendar entry
+///   persists as historical record. See HandleMessageDeletedAsync for the
+///   full reasoning.
 ///
 /// Channel identification prefers EventsTextChannelId (numeric, rename-proof) and
 /// falls back to EventsTextChannelName for backwards compatibility.
@@ -253,6 +258,41 @@ public class ApolloEventHandler
         }
     }
 
+    /// <summary>
+    /// Distinguishes pre-event (real cancellation) vs post-event (channel
+    /// cleanup) Apollo deletions and acts on the former, ignores the latter.
+    ///
+    /// ── Why the distinction matters ──
+    /// The 189th's policy is to remove an Apollo event's #events post once
+    /// the event has finished, to keep the channel tidy. Earlier versions
+    /// of this handler treated every Apollo message deletion as a request
+    /// to remove the calendar entry — which silently destroyed the
+    /// historical record of every event that had ever run, since each one
+    /// got cleaned up shortly after EndUtc. The 2026-05-02 reconciliation
+    /// pass surfaced this by deleting the few stragglers that had escaped
+    /// earlier passes; investigating *why* there were stragglers revealed
+    /// the policy mismatch.
+    ///
+    /// ── New behaviour ──
+    /// • Deletion BEFORE EndUtc: organizer is pulling the event back
+    ///   (wrong time, scheduling conflict, no longer happening). Treat as
+    ///   cancellation: remove the Google Calendar entry and the
+    ///   CalendarEvent row so they don't linger as ghosts. There can't be
+    ///   any EventAttendance rows pointing at the row yet, because the
+    ///   snapshot service only writes those after EndUtc.
+    /// • Deletion AT/AFTER EndUtc: routine channel cleanup. Preserve the
+    ///   Google Calendar entry as historical record and preserve the
+    ///   CalendarEvent row so EventAttendance.CalendarEventId references
+    ///   stay traceable for audits.
+    ///
+    /// ── Why the EndUtc cutoff is the right boundary ──
+    /// EventAttendanceSnapshotService runs ~5 minutes after EndUtc. Any
+    /// pre-event cancellation happens before any snapshot, so the "delete
+    /// the row" branch never has to worry about orphaning attendance
+    /// rows. Any post-event cleanup happens at or after EndUtc, when
+    /// snapshots have either run or are imminent — preserving the row
+    /// keeps the FK reference intact for those snapshots' lifetime.
+    /// </summary>
     private async Task HandleMessageDeletedAsync(ulong messageId)
     {
         try
@@ -265,13 +305,25 @@ public class ApolloEventHandler
 
             if (record is null) return;
 
+            // Post-event deletion → routine channel cleanup. Leave the
+            // calendar entry and DB row alone; both are historical record.
+            if (record.EndUtc <= DateTime.UtcNow)
+            {
+                _logger.LogDebug(
+                    "Apollo message {MessageId} deleted after event end; preserving calendar event '{Title}' (EndUtc={End:yyyy-MM-dd HH:mm} UTC) as historical record",
+                    messageId, record.Title, record.EndUtc);
+                return;
+            }
+
+            // Pre-event deletion → real cancellation. Remove both the
+            // Google Calendar entry and the DB row.
             await _calendarService.DeleteEventAsync(record.CalendarEventId);
             db.CalendarEvents.Remove(record);
             await db.SaveChangesAsync();
 
             _logger.LogInformation(
-                "Calendar event '{Title}' removed because Apollo message {MessageId} was deleted",
-                record.Title, messageId);
+                "Pre-event Apollo deletion: removed calendar event '{Title}' (messageId={MessageId}, EndUtc={End:yyyy-MM-dd HH:mm} UTC was in the future)",
+                record.Title, messageId, record.EndUtc);
         }
         catch (Exception ex)
         {
