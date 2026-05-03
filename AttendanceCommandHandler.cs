@@ -11,32 +11,39 @@ namespace ClanGuardBot.Handlers;
 
 /// <summary>
 /// Handles the /attendance slash command, which displays who has been credited
-/// for attending clan events that started today (UTC).
+/// for attending clan events in the rolling 24-hour window ending at command
+/// invocation time.
 ///
 /// ── Why this exists ──
 /// EventAttendanceSnapshotService writes durable EventAttendance rows shortly
 /// after each clan event ends. Officers periodically want a quick at-a-glance
-/// view of "who got credit today" — for spot checks, to confirm a recent event
-/// was processed at all, or to investigate complaints about missing credit.
+/// view of recent attendance — for spot checks, to confirm a recent event was
+/// processed at all, or to investigate complaints about missing credit.
 /// Without this command, the only way to see attendance was a sqlite3 query
 /// inside the running container.
 ///
-/// ── Day window ──
-/// "Today" is interpreted in UTC, matching how event times are stored
-/// (CalendarEvent.StartUtc, EventAttendance.EventStartUtc). For the 189th's
-/// schedule that's effectively the same as US-local today since clan events
-/// run evening US time. If that ever stops being true, the cutoff math at the
-/// top of HandleAttendanceAsync is the single thing to change.
+/// ── Time window ──
+/// Rolling 24 hours ending at command-invocation time. Picked over a "UTC
+/// today" window because the 189th plays evening Central time, which means
+/// a UTC-day window would drop the evening's events from view at midnight
+/// UTC (~7pm Central) just hours after they finished — exactly when an
+/// officer is most likely to spot-check attendance for those events.
+///
+/// Future events on the calendar (e.g. tomorrow's scheduled clan event)
+/// are excluded by capping the window's upper bound at "now". /attendance
+/// is for "what just happened," not "what's coming up."
 ///
 /// ── Data sources ──
-/// Pulls from BOTH CalendarEvents (to know which events happened today) and
-/// EventAttendance (to know who got credit). Two-source approach lets us
-/// classify each event into one of four states:
-///   • Hasn't started — scheduled later today; nothing to report
-///   • In progress — started, not yet ended; snapshot will run after end
-///   • Snapshot pending — ended, but LastSnapshotAttemptUtc is null
+/// Pulls from BOTH CalendarEvents (to know which events happened in window)
+/// and EventAttendance (to know who got credit). Two-source approach lets
+/// us classify each event into one of four states:
+///   • Hasn't started — kept as defensive code only; the window filter
+///     normally excludes future events so this state should not occur in
+///     practice.
+///   • In progress — started, not yet ended; snapshot will run after end.
+///   • Snapshot pending — ended, but LastSnapshotAttemptUtc is null.
 ///   • Snapshotted — list attendees (or "0 qualifying" if the snapshot ran
-///     and nobody met the threshold)
+///     and nobody met the threshold).
 ///
 /// Manual /add-event-credit rows (CalendarEventId == 0) are listed in their
 /// own bottom section, keyed by RecordedAt rather than EventStartUtc, since
@@ -160,91 +167,97 @@ public class AttendanceCommandHandler
 
         var guildId = guild.Id;
         var now = DateTime.UtcNow;
-        var todayStartUtc = now.Date;
-        var todayEndUtc = todayStartUtc.AddDays(1);
+
+        // Rolling 24-hour window ending at "now". Avoids the surprise of a
+        // UTC day-rollover dropping the evening's events from view at midnight
+        // UTC (~7pm Central) just hours after they finished. "Last 24 hours"
+        // tracks the natural intuition of "what just happened" regardless of
+        // when the command is run.
+        var windowStart = now.AddHours(-24);
 
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
-        // CalendarEvents that started today (UTC). Clan-source only — CompDiv
-        // events are excluded by EventAttendanceSnapshotService and shouldn't
-        // appear here either.
-        var todaysEvents = await db.CalendarEvents
+        // CalendarEvents that started in the rolling window. Clan-source only —
+        // CompDiv events are excluded by EventAttendanceSnapshotService and
+        // shouldn't appear here either. The StartUtc <= now bound keeps
+        // tomorrow's scheduled events out of the result.
+        var windowEvents = await db.CalendarEvents
             .Where(c => c.GuildId == guildId
-                     && c.StartUtc >= todayStartUtc
-                     && c.StartUtc < todayEndUtc
+                     && c.StartUtc >= windowStart
+                     && c.StartUtc <= now
                      && c.Source == ClanEventSource)
             .OrderBy(c => c.StartUtc)
             .ToListAsync();
 
-        // EventAttendance rows whose source event started today. Pulled by
-        // denormalized EventStartUtc so we still see them even if the
-        // originating CalendarEvent was deleted (same-day Apollo cleanup).
+        // EventAttendance rows whose source event started in the window.
+        // Pulled by denormalized EventStartUtc so we still see them even if
+        // the originating CalendarEvent was deleted (same-day Apollo cleanup).
         // Manual rows (CalendarEventId == 0) are included here but get
         // partitioned out below.
-        var todaysAttendance = await db.EventAttendances
+        var windowAttendance = await db.EventAttendances
             .Where(a => a.GuildId == guildId
-                     && a.EventStartUtc >= todayStartUtc
-                     && a.EventStartUtc < todayEndUtc)
+                     && a.EventStartUtc >= windowStart
+                     && a.EventStartUtc <= now)
             .ToListAsync();
 
-        // Manual /add-event-credit rows added today. Keyed by RecordedAt
-        // rather than EventStartUtc — the manual flow stamps EventStartUtc
-        // to "now at insert time" anyway, but RecordedAt is the field that
-        // semantically represents "when did the officer add this." Pulled
-        // separately because manual rows don't have meaningful EventStartUtc
-        // boundaries and shouldn't be grouped with real-event attendance.
-        var todaysManualCredits = await db.EventAttendances
+        // Manual /add-event-credit rows added during the window. Keyed by
+        // RecordedAt rather than EventStartUtc — the manual flow stamps
+        // EventStartUtc to "now at insert time" anyway, but RecordedAt is the
+        // field that semantically represents "when did the officer add this."
+        // Pulled separately because manual rows don't have meaningful
+        // EventStartUtc boundaries and shouldn't be grouped with real-event
+        // attendance. No upper bound needed: RecordedAt is always set to
+        // DateTime.UtcNow at insert and can't be in the future.
+        var windowManualCredits = await db.EventAttendances
             .Where(a => a.GuildId == guildId
                      && a.CalendarEventId == ManualAdjustmentCalendarEventId
-                     && a.RecordedAt >= todayStartUtc
-                     && a.RecordedAt < todayEndUtc)
+                     && a.RecordedAt >= windowStart)
             .OrderBy(a => a.RecordedAt)
             .ToListAsync();
 
-        var embed = BuildEmbed(guild, now, todaysEvents, todaysAttendance, todaysManualCredits);
+        var embed = BuildEmbed(guild, now, windowStart, windowEvents, windowAttendance, windowManualCredits);
 
         _logger.LogInformation(
-            "/attendance invoked by {Caller}: {EventCount} event(s), {AttendanceCount} attendance row(s), {ManualCount} manual credit(s) today",
-            caller.Username, todaysEvents.Count, todaysAttendance.Count, todaysManualCredits.Count);
+            "/attendance invoked by {Caller}: {EventCount} event(s), {AttendanceCount} attendance row(s), {ManualCount} manual credit(s) in window",
+            caller.Username, windowEvents.Count, windowAttendance.Count, windowManualCredits.Count);
 
         await command.FollowupAsync(embed: embed, ephemeral: true);
     }
 
     /// <summary>
-    /// Builds the embed with up to three sections: today's events (always
-    /// present), orphaned attendance (rare), and manual credits (when any
-    /// were added today).
+    /// Builds the embed with up to three sections: events in the window
+    /// (always present), orphaned attendance (rare), and manual credits
+    /// (when any were added in the window).
     /// </summary>
     private static Embed BuildEmbed(
         SocketGuild guild,
         DateTime now,
-        List<CalendarEvent> todaysEvents,
-        List<EventAttendance> todaysAttendance,
-        List<EventAttendance> todaysManualCredits)
+        DateTime windowStart,
+        List<CalendarEvent> windowEvents,
+        List<EventAttendance> windowAttendance,
+        List<EventAttendance> windowManualCredits)
     {
-        var todayStartUtc = now.Date;
-
         var builder = new EmbedBuilder()
-            .WithTitle("📋 Event Attendance — Today (UTC)")
+            .WithTitle("📋 Event Attendance — Last 24 Hours")
             .WithColor(Color.Blue)
-            .WithFooter($"Day: {todayStartUtc:yyyy-MM-dd} UTC • Generated {now:HH:mm} UTC");
+            .WithFooter($"Window: {windowStart:yyyy-MM-dd HH:mm} UTC → {now:yyyy-MM-dd HH:mm} UTC");
 
         // Group real-event attendance by CalendarEventId for fast lookup.
         // Manual rows are skipped here; they get their own section.
-        var attendanceByEventId = todaysAttendance
+        var attendanceByEventId = windowAttendance
             .Where(a => a.CalendarEventId != ManualAdjustmentCalendarEventId)
             .GroupBy(a => a.CalendarEventId)
             .ToDictionary(g => g.Key, g => g.OrderByDescending(a => a.AttendedMinutes).ToList());
 
-        // ── Section 1: Today's clan events ──
-        if (todaysEvents.Count == 0)
+        // ── Section 1: Events in window ──
+        if (windowEvents.Count == 0)
         {
-            builder.AddField("Events", "_No clan events were scheduled for today._");
+            builder.AddField("Events", "_No clan events in the last 24 hours._");
         }
         else
         {
-            foreach (var ev in todaysEvents)
+            foreach (var ev in windowEvents)
             {
                 var fieldName = TruncateFieldName(
                     $"📅 {ev.Title} — <t:{((DateTimeOffset)ev.StartUtc).ToUnixTimeSeconds()}:t>");
@@ -256,10 +269,10 @@ public class AttendanceCommandHandler
         // ── Section 2: Orphaned attendance ──
         // Attendance rows that point to a CalendarEventId we don't have a
         // CalendarEvent row for any more (Apollo message cleaned up after the
-        // snapshot ran). Edge case for same-day cleanup; usually empty.
-        var todaysEventIds = todaysEvents.Select(e => e.Id).ToHashSet();
+        // snapshot ran). Edge case for in-window cleanup; usually empty.
+        var windowEventIds = windowEvents.Select(e => e.Id).ToHashSet();
         var orphaned = attendanceByEventId
-            .Where(kvp => !todaysEventIds.Contains(kvp.Key))
+            .Where(kvp => !windowEventIds.Contains(kvp.Key))
             .SelectMany(kvp => kvp.Value)
             .OrderByDescending(a => a.AttendedMinutes)
             .ToList();
@@ -273,13 +286,13 @@ public class AttendanceCommandHandler
                 TruncateFieldValue(string.Join("\n", orphanedLines)));
         }
 
-        // ── Section 3: Manual credits added today ──
-        if (todaysManualCredits.Count > 0)
+        // ── Section 3: Manual credits added in window ──
+        if (windowManualCredits.Count > 0)
         {
-            var manualLines = todaysManualCredits
+            var manualLines = windowManualCredits
                 .Select(a => $"• {FormatUser(guild, a.UserId, a.Username)} — added <t:{((DateTimeOffset)a.RecordedAt).ToUnixTimeSeconds()}:t>");
             builder.AddField(
-                $"✏️ Manual credits added today ({todaysManualCredits.Count})",
+                $"✏️ Manual credits added in window ({windowManualCredits.Count})",
                 TruncateFieldValue(string.Join("\n", manualLines)));
         }
 
