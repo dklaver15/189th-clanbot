@@ -6,6 +6,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using System.Text;
 
 namespace ClanGuardBot.Handlers;
 
@@ -228,7 +229,8 @@ public class AttendanceCommandHandler
     /// <summary>
     /// Builds the embed with up to three sections: events in the window
     /// (always present), orphaned attendance (rare), and manual credits
-    /// (when any were added in the window).
+    /// (when any were added in the window). Long attendee lists are split
+    /// across multiple embed fields; see AddChunkedField.
     /// </summary>
     private static Embed BuildEmbed(
         SocketGuild guild,
@@ -261,8 +263,21 @@ public class AttendanceCommandHandler
             {
                 var fieldName = TruncateFieldName(
                     $"📅 {ev.Title} — <t:{((DateTimeOffset)ev.StartUtc).ToUnixTimeSeconds()}:t>");
-                var fieldValue = BuildEventFieldValue(guild, ev, attendanceByEventId, now);
-                builder.AddField(fieldName, fieldValue);
+                var (header, attendeeLines) = BuildEventContent(guild, ev, attendanceByEventId, now);
+
+                if (attendeeLines is null)
+                {
+                    // Non-attendee state (in progress, snapshot pending, no
+                    // qualifiers, etc.) — short single-field message.
+                    builder.AddField(fieldName, header);
+                }
+                else
+                {
+                    // Attendees present — may need chunking across fields if
+                    // the list is long enough to exceed Discord's 1024-char
+                    // field-value limit.
+                    AddChunkedField(builder, fieldName, header, attendeeLines);
+                }
             }
         }
 
@@ -280,41 +295,111 @@ public class AttendanceCommandHandler
         if (orphaned.Count > 0)
         {
             var orphanedLines = orphaned
-                .Select(a => $"• {FormatUser(guild, a.UserId, a.Username)} — **{a.AttendedMinutes}** min (event id {a.CalendarEventId}, calendar entry no longer present)");
-            builder.AddField(
-                "⚠️ Orphaned attendance",
-                TruncateFieldValue(string.Join("\n", orphanedLines)));
+                .Select(a => $"• {FormatUser(guild, a.UserId, a.Username)} — **{a.AttendedMinutes}** min (event id {a.CalendarEventId}, calendar entry no longer present)")
+                .ToList();
+            AddChunkedField(builder, "⚠️ Orphaned attendance", header: string.Empty, lines: orphanedLines);
         }
 
         // ── Section 3: Manual credits added in window ──
         if (windowManualCredits.Count > 0)
         {
             var manualLines = windowManualCredits
-                .Select(a => $"• {FormatUser(guild, a.UserId, a.Username)} — added <t:{((DateTimeOffset)a.RecordedAt).ToUnixTimeSeconds()}:t>");
-            builder.AddField(
+                .Select(a => $"• {FormatUser(guild, a.UserId, a.Username)} — added <t:{((DateTimeOffset)a.RecordedAt).ToUnixTimeSeconds()}:t>")
+                .ToList();
+            AddChunkedField(
+                builder,
                 $"✏️ Manual credits added in window ({windowManualCredits.Count})",
-                TruncateFieldValue(string.Join("\n", manualLines)));
+                header: string.Empty,
+                lines: manualLines);
         }
 
         return builder.Build();
     }
 
     /// <summary>
-    /// Renders the body of one event's field, picking the right message for
-    /// the event's current state. The state machine is:
+    /// Adds an arbitrary number of bullet lines to the embed, splitting them
+    /// across multiple fields when the total content would exceed Discord's
+    /// 1024-char field-value limit. The first field gets <paramref name="primaryName"/>;
+    /// continuation fields are named "↳ continued" so it's visually clear
+    /// they're part of the same group. An optional <paramref name="header"/>
+    /// (e.g. "✅ 24 attendee(s) credited") goes into the first field above
+    /// the lines; continuation fields contain only lines.
     ///
-    ///   StartUtc &gt; now              → "hasn't started"
+    /// Per-line length is assumed to be well under the field limit (no single
+    /// attendee or manual-credit line gets remotely close to 1024 chars).
+    /// We don't defensively split a single oversized line — if that ever
+    /// happens it means a username/title got pathologically long and the
+    /// upstream truncation is the right place to fix it.
+    /// </summary>
+    private static void AddChunkedField(
+        EmbedBuilder builder,
+        string primaryName,
+        string header,
+        List<string> lines)
+    {
+        const string ContinuationName = "↳ continued";
+
+        var current = new StringBuilder();
+        if (!string.IsNullOrEmpty(header))
+            current.Append(header);
+
+        var isFirstField = true;
+
+        foreach (var line in lines)
+        {
+            // Compute the size we'd land at if we appended this line. We
+            // include the leading newline only when the buffer already has
+            // content (so an empty header doesn't introduce a leading blank
+            // line).
+            var prefix = current.Length > 0 ? "\n" : string.Empty;
+            var projected = current.Length + prefix.Length + line.Length;
+
+            if (projected > DiscordFieldValueLimit)
+            {
+                // Flush the current chunk and start a fresh one with this
+                // line at the top.
+                builder.AddField(isFirstField ? primaryName : ContinuationName, current.ToString());
+                isFirstField = false;
+                current.Clear();
+                current.Append(line);
+            }
+            else
+            {
+                current.Append(prefix).Append(line);
+            }
+        }
+
+        // Flush any remaining content. The empty-current case (no header,
+        // no lines) doesn't happen given the callers in BuildEmbed always
+        // gate on a non-empty list, but the guard is cheap.
+        if (current.Length > 0)
+        {
+            builder.AddField(isFirstField ? primaryName : ContinuationName, current.ToString());
+        }
+    }
+
+    /// <summary>
+    /// Resolves what should be rendered for a single event, picking the
+    /// right message for the event's current state. Returns a tuple of
+    /// (header, attendeeLines) where attendeeLines is non-null only for
+    /// the "snapshotted with attendees" branch — that's the only state
+    /// that needs the chunked-field rendering path. All other states fit
+    /// in a single embed field by definition.
+    ///
+    /// State machine:
+    ///   StartUtc &gt; now              → "hasn't started" (defensive; the
+    ///                                   query filter normally excludes it)
     ///   StartUtc &lt;= now &lt; EndUtc    → "in progress"
-    ///   EndUtc &lt;= now AND attendees → list them
+    ///   EndUtc &lt;= now AND attendees → header + lines (chunked by caller)
     ///   EndUtc &lt;= now AND no rows AND LastSnapshotAttemptUtc null → "pending"
     ///   EndUtc &lt;= now AND no rows AND attempted                  → "0 qualifying"
     ///
-    /// We check for attendance rows BEFORE LastSnapshotAttemptUtc so a freshly
-    /// migrated DB (where LastSnapshotAttemptUtc may be null on rows that DO
-    /// already have attendance from before the column existed) still renders
-    /// correctly.
+    /// We check for attendance rows BEFORE LastSnapshotAttemptUtc so a
+    /// freshly migrated DB (where LastSnapshotAttemptUtc may be null on
+    /// rows that DO already have attendance from before the column existed)
+    /// still renders correctly.
     /// </summary>
-    private static string BuildEventFieldValue(
+    private static (string Header, List<string>? AttendeeLines) BuildEventContent(
         SocketGuild guild,
         CalendarEvent ev,
         Dictionary<int, List<EventAttendance>> attendanceByEventId,
@@ -322,12 +407,12 @@ public class AttendanceCommandHandler
     {
         if (ev.StartUtc > now)
         {
-            return "⏳ _Event hasn't started yet — no attendance to report._";
+            return ("⏳ _Event hasn't started yet — no attendance to report._", null);
         }
 
         if (now < ev.EndUtc)
         {
-            return $"🔴 _Event is in progress (ends <t:{((DateTimeOffset)ev.EndUtc).ToUnixTimeSeconds()}:R>). Attendance will be snapshotted after it ends._";
+            return ($"🔴 _Event is in progress (ends <t:{((DateTimeOffset)ev.EndUtc).ToUnixTimeSeconds()}:R>). Attendance will be snapshotted after it ends._", null);
         }
 
         // Event has ended.
@@ -337,16 +422,16 @@ public class AttendanceCommandHandler
                 .Select(a => $"• {FormatUser(guild, a.UserId, a.Username)} — **{a.AttendedMinutes}** min")
                 .ToList();
             var header = $"✅ **{attendees.Count}** attendee(s) credited";
-            return TruncateFieldValue(header + "\n" + string.Join("\n", lines));
+            return (header, lines);
         }
 
         if (!ev.LastSnapshotAttemptUtc.HasValue)
         {
-            return $"⏱️ _Event ended <t:{((DateTimeOffset)ev.EndUtc).ToUnixTimeSeconds()}:R>. Snapshot pending — runs every 5 minutes._";
+            return ($"⏱️ _Event ended <t:{((DateTimeOffset)ev.EndUtc).ToUnixTimeSeconds()}:R>. Snapshot pending — runs every 5 minutes._", null);
         }
 
         var attemptedAt = ev.LastSnapshotAttemptUtc.Value;
-        return $"✅ _Snapshot complete — no qualifying attendees._\nLast attempt: <t:{((DateTimeOffset)attemptedAt).ToUnixTimeSeconds()}:R>";
+        return ($"✅ _Snapshot complete — no qualifying attendees._\nLast attempt: <t:{((DateTimeOffset)attemptedAt).ToUnixTimeSeconds()}:R>", null);
     }
 
     /// <summary>
@@ -425,15 +510,6 @@ public class AttendanceCommandHandler
         return value
             .Replace("[", string.Empty)
             .Replace("]", string.Empty);
-    }
-
-    private static string TruncateFieldValue(string value)
-    {
-        if (value.Length <= DiscordFieldValueLimit)
-            return value;
-
-        const string suffix = "\n_…(truncated; query DB for full list)_";
-        return value.Substring(0, DiscordFieldValueLimit - suffix.Length) + suffix;
     }
 
     private static string TruncateFieldName(string name)
