@@ -354,13 +354,37 @@ public class BotConfig
 
     /// <summary>
     /// Returns the appropriate window days for a guild member based on their roles.
-    /// Members with any role in ShortWindowRoles get ShortWindowDays; others get WindowDays.
+    ///
+    /// Logic: members holding a role in ShortWindowRoles (typically "Guest,RCT")
+    /// get ShortWindowDays — UNLESS they also hold a higher-tier rank role
+    /// (any RankRoles entry NOT in ShortWindowRoles, e.g. PVT and above), in
+    /// which case the higher rank wins and they get the regular WindowDays.
+    ///
+    /// This handles Guest-promoted-to-PVT cases where the Guest role wasn't
+    /// stripped on promotion: PVT takes precedence over Guest, so the user
+    /// is correctly evaluated against the 28-day window rather than the
+    /// 14-day Guest window. Members with no short-window role at all get
+    /// WindowDays as before.
     /// </summary>
     public int GetWindowDaysForRoles(IEnumerable<string> memberRoleNames)
     {
+        var roleList = memberRoleNames.ToList();
         var shortRoles = GetShortWindowRolesList();
-        return memberRoleNames.Any(r => shortRoles.Contains(r, StringComparer.OrdinalIgnoreCase))
-            ? ShortWindowDays
-            : WindowDays;
+
+        var hasShortWindowRole = roleList.Any(r =>
+            shortRoles.Contains(r, StringComparer.OrdinalIgnoreCase));
+
+        if (!hasShortWindowRole)
+            return WindowDays;
+
+        // Holds a short-window role. Check whether they also hold a higher-tier
+        // rank role (any RankRoles entry NOT also in ShortWindowRoles). If so,
+        // the higher rank takes precedence — Guest+PVT means PVT, not Guest.
+        var rankRoles = GetRankRolesList();
+        var hasHigherRank = roleList.Any(r =>
+            rankRoles.Contains(r, StringComparer.OrdinalIgnoreCase)
+            && !shortRoles.Contains(r, StringComparer.OrdinalIgnoreCase));
+
+        return hasHigherRank ? WindowDays : ShortWindowDays;
     }
 }
