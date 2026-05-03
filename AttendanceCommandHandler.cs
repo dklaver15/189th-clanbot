@@ -94,11 +94,38 @@ public class AttendanceCommandHandler
     /// <summary>
     /// Discord embed field-value limit. Used to truncate the per-event
     /// attendee list defensively when an event has an unusually large
-    /// number of qualifying attendees. The other Discord limits (256 char
-    /// field name, 6000 char total embed, 25 fields max) are not currently
-    /// at risk for this command's typical output shape.
+    /// number of qualifying attendees.
     /// </summary>
     private const int DiscordFieldValueLimit = 1024;
+
+    /// <summary>
+    /// Discord's hard cap on the combined length of an embed's title,
+    /// description, footer text, author name, and all field name+value
+    /// pairs. Exceeding this returns 400 from the API and the followup
+    /// fails entirely — observable to officers as the generic
+    /// "Something went wrong" fallback. /attendance can hit this on a
+    /// heavy event day (many events × many attendees + orphan + manual
+    /// sections).
+    /// </summary>
+    private const int DiscordEmbedTotalLimit = 6000;
+
+    /// <summary>
+    /// Discord's hard cap on field count per embed. /attendance produces
+    /// one field per event plus continuation fields from chunked attendee
+    /// lists, so this can also be reached on a heavy day independently
+    /// of the total-char limit.
+    /// </summary>
+    private const int DiscordEmbedMaxFields = 25;
+
+    /// <summary>
+    /// Headroom held back from <see cref="DiscordEmbedTotalLimit"/> and
+    /// from <see cref="DiscordEmbedMaxFields"/> so that, when we have to
+    /// stop adding content, the final "output truncated" notice can
+    /// always fit. Without the reserve, hitting the cap mid-section
+    /// would leave the embed silently incomplete with no signal to the
+    /// reader.
+    /// </summary>
+    private const int TruncationSummaryReserve = 200;
 
     private readonly IServiceProvider _services;
     private readonly ILogger<AttendanceCommandHandler> _logger;
@@ -252,9 +279,12 @@ public class AttendanceCommandHandler
             .GroupBy(a => a.CalendarEventId)
             .ToDictionary(g => g.Key, g => g.OrderByDescending(a => a.AttendedMinutes).ToList());
 
+        var truncated = false;
+
         // ── Section 1: Events in window ──
         if (windowEvents.Count == 0)
         {
+            // Trivially small; well under any cap.
             builder.AddField("Events", "_No clan events in the last 24 hours._");
         }
         else
@@ -265,18 +295,25 @@ public class AttendanceCommandHandler
                     $"📅 {ev.Title} — <t:{((DateTimeOffset)ev.StartUtc).ToUnixTimeSeconds()}:t>");
                 var (header, attendeeLines) = BuildEventContent(guild, ev, attendanceByEventId, now);
 
+                bool added;
                 if (attendeeLines is null)
                 {
                     // Non-attendee state (in progress, snapshot pending, no
                     // qualifiers, etc.) — short single-field message.
-                    builder.AddField(fieldName, header);
+                    added = TryAddField(builder, fieldName, header);
                 }
                 else
                 {
                     // Attendees present — may need chunking across fields if
                     // the list is long enough to exceed Discord's 1024-char
                     // field-value limit.
-                    AddChunkedField(builder, fieldName, header, attendeeLines);
+                    added = AddChunkedField(builder, fieldName, header, attendeeLines);
+                }
+
+                if (!added)
+                {
+                    truncated = true;
+                    break;
                 }
             }
         }
@@ -297,7 +334,8 @@ public class AttendanceCommandHandler
             var orphanedLines = orphaned
                 .Select(a => $"• {FormatUser(guild, a.UserId, a.Username)} — **{a.AttendedMinutes}** min (event id {a.CalendarEventId}, calendar entry no longer present)")
                 .ToList();
-            AddChunkedField(builder, "⚠️ Orphaned attendance", header: string.Empty, lines: orphanedLines);
+            if (!AddChunkedField(builder, "⚠️ Orphaned attendance", header: string.Empty, lines: orphanedLines))
+                truncated = true;
         }
 
         // ── Section 3: Manual credits added in window ──
@@ -306,11 +344,22 @@ public class AttendanceCommandHandler
             var manualLines = windowManualCredits
                 .Select(a => $"• {FormatUser(guild, a.UserId, a.Username)} — added <t:{((DateTimeOffset)a.RecordedAt).ToUnixTimeSeconds()}:t>")
                 .ToList();
-            AddChunkedField(
-                builder,
-                $"✏️ Manual credits added in window ({windowManualCredits.Count})",
-                header: string.Empty,
-                lines: manualLines);
+            if (!AddChunkedField(
+                    builder,
+                    $"✏️ Manual credits added in window ({windowManualCredits.Count})",
+                    header: string.Empty,
+                    lines: manualLines))
+                truncated = true;
+        }
+
+        // ── Truncation notice ──
+        // We always reserve room for this final field via TruncationSummaryReserve,
+        // so a direct AddField is safe even when truncation occurred.
+        if (truncated)
+        {
+            builder.AddField(
+                "⚠️ Output truncated",
+                "_Embed size limit reached — some entries were omitted. Use sqlite to view the full list._");
         }
 
         return builder.Build();
@@ -330,8 +379,13 @@ public class AttendanceCommandHandler
     /// We don't defensively split a single oversized line — if that ever
     /// happens it means a username/title got pathologically long and the
     /// upstream truncation is the right place to fix it.
+    ///
+    /// Returns true if every line was added; false if the embed-level
+    /// total-size or field-count budget ran out before all lines fit.
+    /// Caller is expected to surface the partial-add as truncation in the
+    /// final embed.
     /// </summary>
-    private static void AddChunkedField(
+    private static bool AddChunkedField(
         EmbedBuilder builder,
         string primaryName,
         string header,
@@ -357,8 +411,9 @@ public class AttendanceCommandHandler
             if (projected > DiscordFieldValueLimit)
             {
                 // Flush the current chunk and start a fresh one with this
-                // line at the top.
-                builder.AddField(isFirstField ? primaryName : ContinuationName, current.ToString());
+                // line at the top. Bail if the embed-level budget is full.
+                if (!TryAddField(builder, isFirstField ? primaryName : ContinuationName, current.ToString()))
+                    return false;
                 isFirstField = false;
                 current.Clear();
                 current.Append(line);
@@ -374,8 +429,30 @@ public class AttendanceCommandHandler
         // gate on a non-empty list, but the guard is cheap.
         if (current.Length > 0)
         {
-            builder.AddField(isFirstField ? primaryName : ContinuationName, current.ToString());
+            if (!TryAddField(builder, isFirstField ? primaryName : ContinuationName, current.ToString()))
+                return false;
         }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Adds a field to the embed only if doing so leaves enough headroom
+    /// (<see cref="TruncationSummaryReserve"/> chars and 1 field slot) for
+    /// the final "output truncated" notice. Returns false when the embed
+    /// is too full to accept this field; the caller treats that as a
+    /// truncation signal and stops adding more from its section.
+    /// </summary>
+    private static bool TryAddField(EmbedBuilder builder, string name, string value)
+    {
+        var addedLength = name.Length + value.Length;
+        if (builder.Length + addedLength > DiscordEmbedTotalLimit - TruncationSummaryReserve)
+            return false;
+        if (builder.Fields.Count >= DiscordEmbedMaxFields - 1)
+            return false;
+
+        builder.AddField(name, value);
+        return true;
     }
 
     /// <summary>
