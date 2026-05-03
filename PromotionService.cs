@@ -571,7 +571,12 @@ public class PromotionService
                     // embed card. Plain attached images are left-aligned in
                     // the message column, which is why we go through an embed
                     // instead of just calling SendFileAsync without one.
+                    // The "\u200B" description is a zero-width space - it
+                    // gives the embed a non-empty body, which Discord renders
+                    // as a small gap above the image. Without it, the badge
+                    // butts directly against the message text above.
                     var embed = new EmbedBuilder()
+                        .WithDescription("\u200B")
                         .WithImageUrl($"attachment://{LogoAttachmentFileName}")
                         .WithColor(LogoEmbedColor)
                         .Build();
