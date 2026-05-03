@@ -143,21 +143,14 @@ try
     // voice state). Prevents orphaned sessions from inflating activity totals.
     builder.Services.AddHostedService<VoiceSessionCleanupService>();
 
-    // ApolloReconciliationService: one-shot startup pass that walks recent
-    // CalendarEvent rows and removes any whose source Apollo message is no
-    // longer present in #events. Catches MessageDeleted gateway events the
-    // bot missed while disconnected — the 2026-04-27 HellDivers dup-event
-    // incident motivated this. Runs after Discord ready + 10s grace, finishes
-    // well before EventAttendanceSnapshotService's 30s startup catch-up so
-    // orphan CalendarEvents are gone before they can be double-counted into
-    // EventAttendance rows.
-    builder.Services.AddHostedService<ApolloReconciliationService>();
-
     // EventAttendanceSnapshotService: timer-driven (default 5 min) + startup
     // catch-up pass. Writes EventAttendance rows shortly after each clan event
-    // ends, so attendance history survives CalendarEvent row deletion (which
-    // happens when Apollo messages are cleaned up). Consumed by AutoPromotionService
-    // for SGT+ eligibility checks.
+    // ends. Calendar entries are preserved as historical record per the
+    // "Apollo cleanup is not cancellation" policy in
+    // ApolloEventHandler.HandleMessageDeletedAsync, so CalendarEvents
+    // referenced here continue to exist for the lifetime of the EventAttendance
+    // rows that point at them. Consumed by AutoPromotionService for SGT+
+    // eligibility checks.
     builder.Services.AddHostedService<EventAttendanceSnapshotService>();
 
     // AutoPromotionService: nightly check that auto-promotes RCT → SGT based on
