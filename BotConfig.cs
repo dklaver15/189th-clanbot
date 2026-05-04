@@ -104,7 +104,7 @@ public class BotConfig
     /// Comma-separated list of rank role names in order from lowest to highest.
     /// Used to identify a user's current rank and track time-in-rank.
     /// </summary>
-    public string RankRoles { get; set; } = "RCT,PVT,PFC,SPC,CPL,SGT,SSG,SFC,MSG,1SG,SGM,CSM,SMA,2ndLT,1stLT,CPT,MAJ,LTC,COL,BG,MG,LTG,GEN,GoA";
+    public string RankRoles { get; set; } = "RCT,PVT,PFC,SPC,CPL,SGT,SSG,SFC,MSG,1SG,SGM,CSM,SMA,2ndLT,1stLT,CPT,MAJ,LTC,COL,BG,MG,LTG,GEN,GA";
 
     /// <summary>Name of the Discord category where ticket channels are created.</summary>
     public string TicketCategoryName { get; set; } = "TICKET CENTER";

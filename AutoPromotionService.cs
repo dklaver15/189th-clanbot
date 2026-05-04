@@ -334,6 +334,20 @@ public class AutoPromotionService : BackgroundService
         var tiers = DefaultTiers;
         var dryRunRanks = _config.GetAutoPromotionDryRunRanksList();
 
+        // ── Allowlist for the defensive ceiling check below ──
+        // Names of organizational roles that may legitimately be positioned
+        // ABOVE rank roles in Discord's role hierarchy (platoons, admin/mod,
+        // exempt roles, AWOL, Guest). Any other role positioned above a
+        // member's detected current rank role is treated as suspicious — most
+        // likely a senior rank role whose name doesn't match the configured
+        // RankRoles list — and disqualifies the member from this cycle.
+        // Computed once per guild rather than per member.
+        var allowedSeniorRoleNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        allowedSeniorRoleNames.UnionWith(_config.GetExemptRolesList());
+        allowedSeniorRoleNames.UnionWith(_config.GetPlatoonRolesList());
+        allowedSeniorRoleNames.UnionWith(_config.GetShortWindowRolesList());
+        allowedSeniorRoleNames.Add(_config.AwolRoleName);
+
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
@@ -364,6 +378,61 @@ public class AutoPromotionService : BackgroundService
                 _logger.LogDebug("Auto-promo skip: {User} is AWOL", member.Username);
                 skipped++;
                 continue;
+            }
+
+            // ── Defensive ceiling check ──
+            // GetCurrentRank() resolves a member's rank purely by NAME-matching
+            // their Discord roles against the configured RankRoles list. That
+            // works for the common case but silently fails when a Discord role
+            // name doesn't match the configured string (e.g. role "GA" vs.
+            // config "GoA"). Any senior member who also has a stale junior
+            // rank role lingering on them would then be detected as the
+            // junior rank and become "eligible" for an obviously-wrong
+            // promotion. (Real-world example: a member with the senior "GA"
+            // role plus a never-removed "RCT" role from when they first
+            // joined gets detected as RCT and promoted to PVT.)
+            //
+            // Use Discord's own role hierarchy as a backstop: if the member
+            // holds any role positioned ABOVE their detected current rank
+            // role — and that role isn't a known organizational role
+            // (platoon, exempt, AWOL, Guest), a Discord-managed role (bot
+            // integration), the @everyone role, or the Nitro booster role —
+            // they are functionally senior to the auto-promotion ladder and
+            // we refuse to act, logging a warning so the operator can fix
+            // the underlying name mismatch.
+            var currentRankRole = guild.Roles.FirstOrDefault(r =>
+                r.Name.Equals(currentRank, StringComparison.OrdinalIgnoreCase));
+
+            if (currentRankRole is not null)
+            {
+                var seniorRole = member.Roles
+                    .Where(r => r.Position > currentRankRole.Position
+                              && !r.IsManaged
+                              && !r.IsEveryone
+                              && r.Tags?.IsPremiumSubscriberRole != true
+                              && !allowedSeniorRoleNames.Contains(r.Name))
+                    .OrderByDescending(r => r.Position)
+                    .FirstOrDefault();
+
+                if (seniorRole is not null)
+                {
+                    _logger.LogWarning(
+                        "Auto-promo skip: {User} detected as {Current} but holds " +
+                        "higher-positioned role '{Senior}' (pos {SP} > {CP}). Likely a " +
+                        "role-name mismatch with RankRoles config — verify and clean up " +
+                        "stale junior roles before this member can be auto-promoted.",
+                        member.Username, currentRank, seniorRole.Name,
+                        seniorRole.Position, currentRankRole.Position);
+                    skipped++;
+                    continue;
+                }
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Auto-promo: detected rank '{Rank}' for {User} but no matching " +
+                    "Discord role found in guild; ceiling check disabled for this member",
+                    currentRank, member.Username);
             }
 
             // Pull full rank info (assigned-at + seed fields) in one call so

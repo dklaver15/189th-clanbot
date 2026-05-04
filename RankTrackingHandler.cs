@@ -52,6 +52,21 @@ public class RankTrackingHandler
     /// </summary>
     private const string AutoLogPendingMarker = "";
 
+    /// <summary>
+    /// Maximum apparent demotion (in number of rank-list indices) the realtime
+    /// handler will accept as a legitimate /demote operation. Larger drops are
+    /// almost certainly the result of a role-name mismatch between Discord and
+    /// the configured RankRoles list — a senior member's actual rank role
+    /// isn't being recognized, so GetHighestRank "sees" only a stale junior
+    /// rank role they happen to also hold and reports them as collapsing to
+    /// that rank. Real /demote operations are typically 1-2 ranks at a time;
+    /// this threshold gives that headroom while catching the suspicious
+    /// large-drop pattern. Drops larger than this are refused with a warning;
+    /// genuine large demotions can still be applied via direct DB update or
+    /// staged /demote calls.
+    /// </summary>
+    private const int MaxRealtimeDemotionGap = 2;
+
     public RankTrackingHandler(
         IServiceProvider services,
         ILogger<RankTrackingHandler> logger,
@@ -152,6 +167,36 @@ public class RankTrackingHandler
             }
             else
             {
+                // ── Defensive guard against silent overwrites ──
+                // Compute the rank-list index gap between the existing recorded
+                // rank and the rank we're about to assign. A drop of more than
+                // MaxRealtimeDemotionGap ranks is almost certainly the result of
+                // a role-name mismatch between Discord and the configured
+                // RankRoles list (e.g. a senior member's actual rank role isn't
+                // in the config, so GetHighestRank "sees" only their stale RCT
+                // role and reports them as dropping from senior rank to RCT).
+                // Refuse the update and log loudly. Real /demote operations of
+                // 1-2 ranks at a time still flow through normally; larger
+                // intentional demotions must be applied out-of-band.
+                var oldIdx = rankRoles.FindIndex(r =>
+                    r.Equals(rankRecord.RankName, StringComparison.OrdinalIgnoreCase));
+                var newIdx = rankRoles.FindIndex(r =>
+                    r.Equals(afterRank, StringComparison.OrdinalIgnoreCase));
+
+                if (oldIdx >= 0 && newIdx >= 0 && (oldIdx - newIdx) > MaxRealtimeDemotionGap)
+                {
+                    _logger.LogWarning(
+                        "Refusing realtime rank update: {Username} appears to drop " +
+                        "from {OldRank} to {NewRank} (gap = {Gap} ranks > {Max}). " +
+                        "Almost certainly a role-name mismatch with RankRoles config, " +
+                        "not a real demotion. Preserving existing RankHistory and " +
+                        "skipping side effects. Verify role configuration before " +
+                        "making manual corrections.",
+                        after.Username, rankRecord.RankName, afterRank,
+                        oldIdx - newIdx, MaxRealtimeDemotionGap);
+                    return; // skip RankHistory mutation AND side effects
+                }
+
                 // Rank changed — update with exact timestamp and clear the
                 // seed fields. The previous rank's seed represented events
                 // already credited AT THAT rank; it must not carry into the
