@@ -68,6 +68,12 @@ try
 
     builder.Services.AddSingleton<GamertagCommandHandler>();
 
+    // LookupCommandHandler: /lookup slash command. Takes a Discord user picker
+    // and returns that user's gamertags from the roster sheet (ephemeral, open
+    // to any member). Register() is called from DiscordBotService alongside the
+    // other command handlers.
+    builder.Services.AddSingleton<LookupCommandHandler>();
+
     // NOTE: RecruitCommandHandler was removed — recruits are now auto-logged by
     // RankTrackingHandler when a member gains the RCT role. See TryLogRecruitAsync
     // in RankTrackingHandler.cs.

@@ -11,6 +11,18 @@ namespace ClanGuardBot.Services;
 // RosterRow is defined in RosterExportService.cs
 
 /// <summary>
+/// Result of a gamertag lookup. All fields are non-null but may be empty strings.
+/// </summary>
+public record GamertagLookupResult(
+    string DiscordName,
+    string EA,
+    string Steam,
+    string PSN,
+    string Xbox,
+    string Embark,
+    string Bungie);
+
+/// <summary>
 /// Writes gamertag data to a Google Sheet.
 /// Expects a service account credentials JSON file.
 /// </summary>
@@ -116,6 +128,73 @@ public class GoogleSheetsService
         _logger.LogInformation("Appended gamertags for {DiscordName} ({DiscordId})", discordName, discordId);
 
         await SortSheetBySecondColumnAsync(service, spreadsheetId, sheetName);
+    }
+
+    /// <summary>
+    /// Looks up gamertags for a Discord user by ID, with fallback to name match for legacy rows.
+    /// Returns null if no row is found.
+    /// Columns: Discord ID | Discord Name | EA | Steam | PSN | Xbox | Embark | Bungie
+    /// </summary>
+    public async Task<GamertagLookupResult?> LookupGamertagsAsync(ulong discordId, string? fallbackName = null)
+    {
+        var credential = GoogleCredential
+            .FromFile(_config.GoogleCredentialsPath)
+            .CreateScoped(SheetsService.Scope.Spreadsheets);
+
+        using var service = new SheetsService(new BaseClientService.Initializer
+        {
+            HttpClientInitializer = credential,
+            ApplicationName = "ClanGuardBot"
+        });
+
+        var spreadsheetId = _config.GoogleSpreadsheetId;
+        var sheetName = _config.GoogleSheetName;
+        var range = $"{sheetName}!A:H";
+
+        var getRequest = service.Spreadsheets.Values.Get(spreadsheetId, range);
+        var getResponse = await getRequest.ExecuteAsync();
+
+        if (getResponse.Values is null) return null;
+
+        // First pass: match by Discord ID in column A
+        foreach (var row in getResponse.Values)
+        {
+            if (row.Count > 0 && string.Equals(row[0]?.ToString(), discordId.ToString(), StringComparison.Ordinal))
+            {
+                return RowToResult(row);
+            }
+        }
+
+        // Second pass: fall back to matching by Discord Name (legacy rows without ID)
+        if (!string.IsNullOrWhiteSpace(fallbackName))
+        {
+            foreach (var row in getResponse.Values)
+            {
+                var colA = row.Count > 0 ? row[0]?.ToString() ?? "" : "";
+                var colB = row.Count > 1 ? row[1]?.ToString() ?? "" : "";
+
+                if (string.Equals(colB, fallbackName, StringComparison.OrdinalIgnoreCase) ||
+                    (string.Equals(colA, fallbackName, StringComparison.OrdinalIgnoreCase) && !ulong.TryParse(colA, out _)))
+                {
+                    return RowToResult(row);
+                }
+            }
+        }
+
+        return null;
+
+        static GamertagLookupResult RowToResult(IList<object> row)
+        {
+            string Cell(int i) => row.Count > i ? row[i]?.ToString() ?? "" : "";
+            return new GamertagLookupResult(
+                DiscordName: Cell(1),
+                EA: Cell(2),
+                Steam: Cell(3),
+                PSN: Cell(4),
+                Xbox: Cell(5),
+                Embark: Cell(6),
+                Bungie: Cell(7));
+        }
     }
 
     /// <summary>
