@@ -11,9 +11,19 @@ namespace ClanGuardBot.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
-            migrationBuilder.DropIndex(
-                name: "IX_CalendarEvents_DiscordMessageId",
-                table: "CalendarEvents");
+            // ── Note ──────────────────────────────────────────────────────
+            // EF auto-generated a DropIndex("IX_CalendarEvents_DiscordMessageId")
+            // + CreateIndex("IX_CalendarEvents_DiscordMessageId_Unique") pair
+            // here due to model-snapshot drift: production already had the
+            // unique-filtered index (applied manually during the 2026-05-04/05
+            // duplicate-calendar-events cleanup), but the snapshot still
+            // recorded the older non-unique form. The auto-generated DROP
+            // failed against prod ("no such index") and put the bot into a
+            // restart loop. Both ops have been removed — the running schema
+            // already matches the model. The model snapshot was updated by
+            // this migration's `migrations add` and now correctly reflects
+            // the unique-filtered index, so future migrations will be clean.
+            // ──────────────────────────────────────────────────────────────
 
             migrationBuilder.CreateTable(
                 name: "ApolloEvents",
@@ -63,13 +73,6 @@ namespace ClanGuardBot.Migrations
                 });
 
             migrationBuilder.CreateIndex(
-                name: "IX_CalendarEvents_DiscordMessageId_Unique",
-                table: "CalendarEvents",
-                column: "DiscordMessageId",
-                unique: true,
-                filter: "\"DiscordMessageId\" <> 0");
-
-            migrationBuilder.CreateIndex(
                 name: "IX_ApolloEvents_DiscordMessageId",
                 table: "ApolloEvents",
                 column: "DiscordMessageId",
@@ -100,20 +103,14 @@ namespace ClanGuardBot.Migrations
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
+            // Inverse of Up(). Note: we deliberately do not recreate the
+            // older non-unique CalendarEvents index here — see comment in
+            // Up() for the snapshot-drift backstory.
             migrationBuilder.DropTable(
                 name: "ApolloEvents");
 
             migrationBuilder.DropTable(
                 name: "ApolloMessageLog");
-
-            migrationBuilder.DropIndex(
-                name: "IX_CalendarEvents_DiscordMessageId_Unique",
-                table: "CalendarEvents");
-
-            migrationBuilder.CreateIndex(
-                name: "IX_CalendarEvents_DiscordMessageId",
-                table: "CalendarEvents",
-                column: "DiscordMessageId");
         }
     }
 }
