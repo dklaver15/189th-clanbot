@@ -82,8 +82,23 @@ public class BotDbContext : DbContext
 
         modelBuilder.Entity<CalendarEvent>(e =>
         {
-            // Look up by Discord message ID to detect duplicates and handle edits/deletes
-            e.HasIndex(c => c.DiscordMessageId);
+            // Filtered unique index on DiscordMessageId. Replaces the previous
+            // non-unique IX_CalendarEvents_DiscordMessageId. Prevents duplicate
+            // inserts for the same Apollo message (DiscordMessageId != 0) while
+            // allowing CompDiv events (DiscordMessageId = 0) to share that
+            // sentinel value freely.
+            //
+            // This is the backstop for the per-message lock in
+            // ApolloEventHandler — see _messageLocks comment there for the
+            // 2026-05-04 / 2026-05-05 race this fixes. The lock prevents the
+            // race in normal operation; this constraint is what keeps a future
+            // code path that bypasses the lock from ever silently reintroducing
+            // duplicate rows.
+            e.HasIndex(c => c.DiscordMessageId)
+                .IsUnique()
+                .HasFilter("\"DiscordMessageId\" <> 0")
+                .HasDatabaseName("IX_CalendarEvents_DiscordMessageId_Unique");
+
             // Look up all events for a guild by source (Clan vs CompDiv)
             e.HasIndex(c => new { c.GuildId, c.Source });
         });

@@ -187,6 +187,18 @@ try
     // for the Sunday cron. Honours the same DryRun config flag as the scheduled run.
     builder.Services.AddSingleton<BriefingNowCommandHandler>();
 
+    // CleanupCalendarDupesCommandHandler: /cleanup-calendar-dupes slash command
+    // for officers (Officer+). Two-pass reconciliation that removes duplicate
+    // calendar entries created by past concurrent-write races between
+    // MessageReceived and MessageUpdated for the same Apollo post (the
+    // 2026-05-04 / 2026-05-05 incident). The per-message lock in
+    // ApolloEventHandler prevents new dupes; this command cleans up historical
+    // damage. dry_run defaults to true. Pass 1 handles in-DB dupes (deletes DB
+    // rows + corresponding GCal events). Pass 2 handles GCal orphans (events
+    // ApolloBackfill's older defensive cleanup left behind without removing
+    // their GCal counterpart).
+    builder.Services.AddSingleton<CleanupCalendarDupesCommandHandler>();
+
     var app = builder.Build();
 
     // Ensure the database is created / migrated

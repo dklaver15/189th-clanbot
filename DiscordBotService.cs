@@ -34,6 +34,7 @@ public class DiscordBotService : IHostedService
     private readonly KickAwolsCommandHandler _kickAwolsHandler;
     private readonly ClearAwolListCommandHandler _clearAwolListHandler;
     private readonly BriefingNowCommandHandler _briefingNowHandler;
+    private readonly CleanupCalendarDupesCommandHandler _cleanupCalendarDupesHandler;
     private readonly ILogger<DiscordBotService> _logger;
     private readonly BotConfig _config;
 
@@ -58,31 +59,33 @@ public class DiscordBotService : IHostedService
         KickAwolsCommandHandler kickAwolsHandler,
         ClearAwolListCommandHandler clearAwolListHandler,
         BriefingNowCommandHandler briefingNowHandler,
+        CleanupCalendarDupesCommandHandler cleanupCalendarDupesHandler,
         ILogger<DiscordBotService> logger,
         IOptions<BotConfig> config)
     {
-        _client                    = client;
-        _activityHandler           = activityHandler;
-        _gamertagHandler           = gamertagHandler;
-        _lookupHandler             = lookupHandler;
-        _rankHandler               = rankHandler;
-        _ticketReminderHandler     = ticketReminderHandler;
-        _guestReminderHandler      = guestReminderHandler;
-        _onboardingReminderHandler = onboardingReminderHandler;
-        _bumpReminderHandler       = bumpReminderHandler;
-        _apolloEventHandler        = apolloEventHandler;
-        _compEventHandler          = compEventHandler;
-        _promoteHandler            = promoteHandler;
-        _demoteHandler             = demoteHandler;
-        _setNickHandler            = setNickHandler;
-        _seedHandler               = seedHandler;
-        _eventCreditHandler        = eventCreditHandler;
-        _attendanceHandler         = attendanceHandler;
-        _kickAwolsHandler          = kickAwolsHandler;
-        _clearAwolListHandler      = clearAwolListHandler;
-        _briefingNowHandler        = briefingNowHandler;
-        _logger                    = logger;
-        _config                    = config.Value;
+        _client                      = client;
+        _activityHandler             = activityHandler;
+        _gamertagHandler             = gamertagHandler;
+        _lookupHandler               = lookupHandler;
+        _rankHandler                 = rankHandler;
+        _ticketReminderHandler       = ticketReminderHandler;
+        _guestReminderHandler        = guestReminderHandler;
+        _onboardingReminderHandler   = onboardingReminderHandler;
+        _bumpReminderHandler         = bumpReminderHandler;
+        _apolloEventHandler          = apolloEventHandler;
+        _compEventHandler            = compEventHandler;
+        _promoteHandler              = promoteHandler;
+        _demoteHandler               = demoteHandler;
+        _setNickHandler              = setNickHandler;
+        _seedHandler                 = seedHandler;
+        _eventCreditHandler          = eventCreditHandler;
+        _attendanceHandler           = attendanceHandler;
+        _kickAwolsHandler            = kickAwolsHandler;
+        _clearAwolListHandler        = clearAwolListHandler;
+        _briefingNowHandler          = briefingNowHandler;
+        _cleanupCalendarDupesHandler = cleanupCalendarDupesHandler;
+        _logger                      = logger;
+        _config                      = config.Value;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -109,6 +112,7 @@ public class DiscordBotService : IHostedService
         _kickAwolsHandler.Register(_client);
         _clearAwolListHandler.Register(_client);
         _briefingNowHandler.Register(_client);
+        _cleanupCalendarDupesHandler.Register(_client);
 
         await _client.LoginAsync(TokenType.Bot, _config.Token);
         await _client.StartAsync();
@@ -277,6 +281,16 @@ public class DiscordBotService : IHostedService
                     .WithName("briefing-now")
                     .WithDescription($"Generate the weekly officer briefing immediately ({_config.BriefingNowMinRank}+ only)")
                     .Build(),
+
+                // /cleanup-calendar-dupes — reconcile CalendarEvents and the
+                // Google Calendar against each other, removing duplicates
+                // created by past concurrent-write races between
+                // MessageReceived and MessageUpdated for the same Apollo post
+                // (the 2026-05-04 / 2026-05-05 incident). dry_run defaults to
+                // true; pass dry_run:false to actually apply changes. Officer+
+                // gated. The slash-command shape lives on the handler so the
+                // option list stays next to the code that consumes it.
+                CleanupCalendarDupesCommandHandler.BuildCommand(),
             };
 
             foreach (var guild in _client.Guilds)
