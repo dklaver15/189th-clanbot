@@ -199,9 +199,8 @@ public class PromotionService
 
     /// <summary>
     /// Filename used as the attachment name when uploading the 189th logo
-    /// alongside the announcement. The embed references this via the
-    /// <c>attachment://</c> URI scheme, so the on-disk filename and this
-    /// constant must agree.
+    /// alongside the announcement. The on-disk filename must match this
+    /// constant since it's referenced when calling <c>SendFileAsync</c>.
     /// </summary>
     private const string LogoAttachmentFileName = "189th_logo.png";
 
@@ -222,13 +221,6 @@ public class PromotionService
     /// </summary>
     private static readonly string LogoFilePath =
         Path.Combine(AppContext.BaseDirectory, "Assets", LogoAttachmentFileName);
-
-    /// <summary>
-    /// Embed side-bar color for the logo footer. Sampled from the olive
-    /// khaki of the badge ring / "189TH" lettering so the thin colored
-    /// strip on the left of the embed card visually ties to the logo.
-    /// </summary>
-    private static readonly Color LogoEmbedColor = new(0x9C, 0x99, 0x66);
 
     public PromotionService(
         IServiceProvider services,
@@ -566,25 +558,14 @@ public class PromotionService
             {
                 if (isLastBatch && attachLogoOnLastBatch)
                 {
-                    // Embed with only an Image set + an attached file referenced
-                    // via attachment:// renders the logo centered within the
-                    // embed card. Plain attached images are left-aligned in
-                    // the message column, which is why we go through an embed
-                    // instead of just calling SendFileAsync without one.
-                    // The "\u200B" description is a zero-width space - it
-                    // gives the embed a non-empty body, which Discord renders
-                    // as a small gap above the image. Without it, the badge
-                    // butts directly against the message text above.
-                    var embed = new EmbedBuilder()
-                        .WithDescription("\u200B")
-                        .WithImageUrl($"attachment://{LogoAttachmentFileName}")
-                        .WithColor(LogoEmbedColor)
-                        .Build();
-
+                    // Attach the logo file directly to the message instead of
+                    // wrapping it in an embed. Inline attached images render
+                    // in the message column without the embed card / colored
+                    // side bar, which keeps the announcement visually
+                    // lightweight on mobile.
                     await channel.SendFileAsync(
                         filePath: LogoFilePath,
                         text: body,
-                        embed: embed,
                         allowedMentions: allowedMentions);
                 }
                 else
