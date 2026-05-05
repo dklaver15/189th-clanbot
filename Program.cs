@@ -135,6 +135,12 @@ try
     // ApolloEventHandler: parses #events channel posts and syncs to Google Calendar.
     builder.Services.AddSingleton<ApolloEventHandler>();
 
+    // Phase 1: lossless capture of every Apollo message (parallel to ApolloEventHandler).
+    builder.Services.AddSingleton<ApolloMessageCaptureHandler>();
+
+    // Phase 2: parser worker drains ApolloMessageLog into ApolloEvents staging table.
+    builder.Services.AddHostedService<ApolloMessageParserWorker>();
+
     // CompEventCommandHandler: /comp-event slash command for CPT+ officers.
     builder.Services.AddSingleton<CompEventCommandHandler>();
 

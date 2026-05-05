@@ -19,6 +19,8 @@ public class BotDbContext : DbContext
     public DbSet<EventAttendance>     EventAttendances    => Set<EventAttendance>();
     public DbSet<BotState>            BotStates           => Set<BotState>();
     public DbSet<BumpState>           BumpStates          => Set<BumpState>();
+    public DbSet<ApolloMessageLog>    ApolloMessageLogs   => Set<ApolloMessageLog>();
+    public DbSet<ApolloEvent>         ApolloEvents        => Set<ApolloEvent>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -126,6 +128,40 @@ public class BotDbContext : DbContext
             // One row per guild — keyed by GuildId for upsert semantics in
             // BumpReminderHandler.HandleBumpSuccessAsync.
             e.HasIndex(b => b.GuildId).IsUnique();
+        });
+
+        // ── Phase 1: Apollo lossless capture ──────────────────────────
+        // Append-only log of every Apollo message Discord delivers. Written
+        // by ApolloMessageCaptureHandler. The unique index on
+        // (DiscordMessageId, RevisionNumber) is the structural backstop
+        // for the per-message lock in that handler — same belt-and-
+        // suspenders pattern as IX_CalendarEvents_DiscordMessageId_Unique
+        // above. The (ProcessedAt, CapturedAt) index drives the parser
+        // worker's "next batch of unprocessed rows" query.
+        modelBuilder.Entity<ApolloMessageLog>(e =>
+        {
+            e.ToTable("ApolloMessageLog");
+            e.Property(x => x.EventType).HasConversion<int>();
+
+            e.HasIndex(x => new { x.DiscordMessageId, x.RevisionNumber }).IsUnique();
+            e.HasIndex(x => new { x.ProcessedAt, x.CapturedAt });
+            e.HasIndex(x => x.CapturedAt);
+        });
+
+        // ── Phase 2: Apollo parsed event staging ──────────────────────
+        // Written by ApolloMessageParserWorker. Shadow of CalendarEvent
+        // for clan-sourced events during dual-run; Phase 3 cutover
+        // retires this table and has the worker write to CalendarEvent
+        // directly. Unique index on DiscordMessageId enforces the
+        // "one row per Apollo message, regardless of how many revisions
+        // arrived" upsert semantics.
+        modelBuilder.Entity<ApolloEvent>(e =>
+        {
+            e.ToTable("ApolloEvents");
+            e.Property(x => x.Status).HasConversion<int>();
+
+            e.HasIndex(x => x.DiscordMessageId).IsUnique();
+            e.HasIndex(x => new { x.GuildId, x.Status, x.ParsedStartUtc });
         });
     }
 }
