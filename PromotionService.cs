@@ -499,11 +499,33 @@ public class PromotionService
         }
 
         // ── Build per-group rendered text ─────────────────────────────
+        // Templates are dealt from a shuffled deck instead of picked
+        // independently per group. Picking each group's template with
+        // Random.Shared.Next(n) gave each pair an ~1/n collision chance
+        // (e.g. ~13% for two groups against 15 templates), so the same
+        // blurb sometimes appeared twice in the same announcement —
+        // breaks the "feels like a real recognition moment" framing.
+        // The deck guarantees no duplicates within a single message
+        // until all templates have been used. Reshuffle only fires
+        // when a cycle produces more groups than the deck has entries,
+        // which would require >15 distinct rank promotions on one run.
+        var templateDeck = BuildShuffledTemplateDeck(GroupAnnouncementTemplates, avoidFirst: null);
+        var deckIndex = 0;
+        string? lastTemplate = null;
+
         var groupTexts = new List<string>(orderedGroups.Count);
         foreach (var (fromShort, toShort, members) in orderedGroups)
         {
-            var template = GroupAnnouncementTemplates[
-                Random.Shared.Next(GroupAnnouncementTemplates.Length)];
+            if (deckIndex >= templateDeck.Count)
+            {
+                templateDeck = BuildShuffledTemplateDeck(
+                    GroupAnnouncementTemplates,
+                    avoidFirst: lastTemplate);
+                deckIndex = 0;
+            }
+
+            var template = templateDeck[deckIndex++];
+            lastTemplate = template;
 
             var header = template
                 .Replace("{fromRank}", ResolveFullRankName(fromShort))
@@ -632,6 +654,39 @@ public class PromotionService
 
         if (current.Length > 0) batches.Add(current.ToString());
         return batches;
+    }
+
+    /// <summary>
+    /// Returns a Fisher-Yates-shuffled copy of <paramref name="source"/>
+    /// for use as a template deck — deal one entry per group, top-to-bottom,
+    /// to guarantee no template repeats within a single announcement until
+    /// the deck is exhausted.
+    ///
+    /// When the caller is reshuffling for a second deal (more groups than
+    /// templates) it can pass the last-used template via
+    /// <paramref name="avoidFirst"/>; if the new shuffle happens to start
+    /// with that same template, we swap positions 0 and 1 to prevent an
+    /// adjacent duplicate at the deck boundary. No-op when the source has
+    /// fewer than two entries.
+    /// </summary>
+    private static List<string> BuildShuffledTemplateDeck(
+        string[] source,
+        string? avoidFirst)
+    {
+        var deck = new List<string>(source);
+
+        for (var i = deck.Count - 1; i > 0; i--)
+        {
+            var j = Random.Shared.Next(i + 1);
+            (deck[i], deck[j]) = (deck[j], deck[i]);
+        }
+
+        if (avoidFirst is not null && deck.Count >= 2 && deck[0] == avoidFirst)
+        {
+            (deck[0], deck[1]) = (deck[1], deck[0]);
+        }
+
+        return deck;
     }
 
     private SocketTextChannel? ResolveAnnouncementChannel(SocketGuild guild, string channelName)
