@@ -505,8 +505,13 @@ public class InviteCommandHandler
                     Label               = label,
                     IsVanity            = isVanity,
                     IsActive            = true,
-                    CreatedByDiscordId  = caller.Id,
-                    CreatedByUsername   = caller.Username,
+                    // Vanity URL belongs to the server, not a person — override
+                    // the snapshot so /invite list and /invite info don't
+                    // attribute it to whichever officer ran /invite assign
+                    // first. Clearing the ID also prevents a <@id> mention in
+                    // /invite info pointing at the wrong person.
+                    CreatedByDiscordId  = isVanity ? null : (ulong?)caller.Id,
+                    CreatedByUsername   = isVanity ? "DISCORD" : caller.Username,
                     CreatedAt           = DateTime.UtcNow,
                     DiscordCreatedAt    = isVanity ? null : matched.CreatedAt?.UtcDateTime,
                     ExpiresAt           = cachedExpiresAt,
@@ -525,6 +530,16 @@ public class InviteCommandHandler
                 existing.MaxUses    = cachedMaxUses;
                 existing.ExpiresAt  = cachedExpiresAt;
                 existing.ChannelId  = isVanity ? existing.ChannelId : matched.ChannelId;
+
+                // Same vanity override as the create path. Also serves as a
+                // self-heal for any vanity row that was snapshotted before
+                // this rule was in place — re-running /invite assign on the
+                // vanity URL will clean up the creator fields.
+                if (isVanity)
+                {
+                    existing.CreatedByDiscordId = null;
+                    existing.CreatedByUsername  = "DISCORD";
+                }
             }
 
             await db.SaveChangesAsync();
