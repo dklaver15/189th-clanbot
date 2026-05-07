@@ -629,7 +629,8 @@ public class InviteCommandHandler
                 IsVanity:    false,
                 IsLabeled:   src is not null,
                 IsRevoked:   false,
-                CreatedAt:   src?.CreatedAt ?? live.CreatedAt?.UtcDateTime ?? DateTime.UtcNow));
+                CreatedAt:   src?.CreatedAt ?? live.CreatedAt?.UtcDateTime ?? DateTime.UtcNow,
+                CreatedBy:   ResolveCreatorDisplayName(src, live.Inviter)));
         }
 
         // Pass 2: vanity (separate API; never appears in liveInvites)
@@ -645,7 +646,12 @@ public class InviteCommandHandler
                 IsVanity:    true,
                 IsLabeled:   vanitySrc is not null,
                 IsRevoked:   false,
-                CreatedAt:   vanitySrc?.CreatedAt ?? DateTime.UtcNow));
+                CreatedAt:   vanitySrc?.CreatedAt ?? DateTime.UtcNow,
+                // Vanity invites have no Inviter on the Discord API — they
+                // belong to the server, not a user. Fall back to the
+                // InviteSource snapshot (whoever ran /invite assign on the
+                // vanity URL) or "(unknown)".
+                CreatedBy:   ResolveCreatorDisplayName(vanitySrc, liveInviter: null)));
         }
 
         // Pass 3: InviteSource rows that no live invite matched (revoked/expired)
@@ -663,7 +669,9 @@ public class InviteCommandHandler
                 IsVanity:    src.IsVanity,
                 IsLabeled:   true,
                 IsRevoked:   true,
-                CreatedAt:   src.CreatedAt));
+                CreatedAt:   src.CreatedAt,
+                // No live invite to fetch Inviter from — only the snapshot.
+                CreatedBy:   ResolveCreatorDisplayName(src, liveInviter: null)));
         }
 
         if (rows.Count == 0)
@@ -713,15 +721,17 @@ public class InviteCommandHandler
 
         // ── Render to a code-block table ────────────────────────────
         // Compute column widths from the data so labels and codes don't
-        // get truncated harder than needed. Cap label at 24 chars to
-        // keep the table from going extreme.
-        const int LabelHardCap = 24;
-        int codeWidth  = Math.Max("CODE".Length,  rows.Max(r => r.Code.Length));
-        int labelWidth = Math.Max("LABEL".Length, Math.Min(rows.Max(r => r.Label.Length), LabelHardCap));
-        int usesWidth  = Math.Max("USES".Length,  rows.Max(r => FormatUses(r).Length));
-        int expWidth   = Math.Max("EXPIRES".Length, rows.Max(r => FormatExpires(r).Length));
+        // get truncated harder than needed. Cap label at 24 chars and
+        // creator at 18 chars to keep the table from going extreme.
+        const int LabelHardCap   = 24;
+        const int CreatorHardCap = 18;
+        int codeWidth    = Math.Max("CODE".Length,  rows.Max(r => r.Code.Length));
+        int labelWidth   = Math.Max("LABEL".Length, Math.Min(rows.Max(r => r.Label.Length), LabelHardCap));
+        int usesWidth    = Math.Max("USES".Length,  rows.Max(r => FormatUses(r).Length));
+        int expWidth     = Math.Max("EXPIRES".Length, rows.Max(r => FormatExpires(r).Length));
+        int creatorWidth = Math.Max("CREATED BY".Length, Math.Min(rows.Max(r => r.CreatedBy.Length), CreatorHardCap));
 
-        var header = $"{"CODE".PadRight(codeWidth)}  {"LABEL".PadRight(labelWidth)}  {"USES".PadRight(usesWidth)}  {"EXPIRES".PadRight(expWidth)}  FLAGS";
+        var header = $"{"CODE".PadRight(codeWidth)}  {"LABEL".PadRight(labelWidth)}  {"USES".PadRight(usesWidth)}  {"EXPIRES".PadRight(expWidth)}  CREATED BY";
         var divider = new string('─', header.Length);
 
         var pages = new List<StringBuilder>();
@@ -733,13 +743,16 @@ public class InviteCommandHandler
             var labelTrunc = row.Label.Length > LabelHardCap
                 ? row.Label[..(LabelHardCap - 1)] + "…"
                 : row.Label;
+            var creatorTrunc = row.CreatedBy.Length > CreatorHardCap
+                ? row.CreatedBy[..(CreatorHardCap - 1)] + "…"
+                : row.CreatedBy;
 
             var line =
                 $"{row.Code.PadRight(codeWidth)}  " +
                 $"{labelTrunc.PadRight(labelWidth)}  " +
                 $"{FormatUses(row).PadRight(usesWidth)}  " +
                 $"{FormatExpires(row).PadRight(expWidth)}  " +
-                $"{FormatFlags(row)}\n";
+                $"{creatorTrunc}\n";
 
             // If adding this line would push the page past Discord's
             // description limit, close the current code block and start a
@@ -831,6 +844,31 @@ public class InviteCommandHandler
         return string.Join(" ", flags);
     }
 
+    /// <summary>
+    /// Resolve a display name for the invite creator. Prefers the snapshot
+    /// captured on InviteSource (stable across username changes); falls back
+    /// to the live Inviter from Discord's API when no source row exists
+    /// (i.e. unlabeled invites). Returns "(unknown)" when neither source has
+    /// a value — typically very old invites whose creator Discord no longer
+    /// surfaces.
+    /// </summary>
+    private static string ResolveCreatorDisplayName(InviteSource? source, IUser? liveInviter)
+    {
+        if (source is not null && !string.IsNullOrWhiteSpace(source.CreatedByUsername))
+            return source.CreatedByUsername;
+
+        if (liveInviter is not null)
+        {
+            // GlobalName is the public display name (Discord's 2023+ display
+            // name change); Username is the underlying handle. Prefer the
+            // friendlier GlobalName when set.
+            if (!string.IsNullOrWhiteSpace(liveInviter.GlobalName)) return liveInviter.GlobalName;
+            if (!string.IsNullOrWhiteSpace(liveInviter.Username))   return liveInviter.Username;
+        }
+
+        return "(unknown)";
+    }
+
     private sealed record InviteListRow(
         string Code,
         string Label,
@@ -840,7 +878,8 @@ public class InviteCommandHandler
         bool IsVanity,
         bool IsLabeled,
         bool IsRevoked,
-        DateTime CreatedAt);
+        DateTime CreatedAt,
+        string CreatedBy);
 
     // ── /invite info ────────────────────────────────────────────────
     //
@@ -912,59 +951,166 @@ public class InviteCommandHandler
                 .ToListAsync();
         }
 
-        if (source is null && totalJoinCount == 0)
+        // ── Pull live invite data for this code ─────────────────────
+        // Without this, /invite info on an unlabeled live invite would
+        // fall through to "no data" — even though Discord's API has
+        // plenty to show (creator, channel, expiry). We check vanity
+        // first since GetVanityInviteAsync is a separate endpoint, then
+        // fall back to scanning GetInvitesAsync for a regular match.
+        var guild = (command.Channel as SocketGuildChannel)?.Guild;
+        IInviteMetadata? live = null;
+        bool liveIsVanity = false;
+        if (guild is not null)
+        {
+            try
+            {
+                var v = await guild.GetVanityInviteAsync();
+                if (v is not null && string.Equals(v.Code, code, StringComparison.Ordinal))
+                {
+                    live = v;
+                    liveIsVanity = true;
+                }
+            }
+            catch { /* no vanity URL configured — fine */ }
+
+            if (live is null)
+            {
+                try
+                {
+                    var invites = await guild.GetInvitesAsync();
+                    live = invites.FirstOrDefault(i => string.Equals(i.Code, code, StringComparison.Ordinal));
+                }
+                catch (Exception ex)
+                {
+                    // Don't fail the whole command if Discord refuses — just
+                    // proceed with whatever we have in the DB. Logged for
+                    // visibility but not surfaced to the officer.
+                    _logger.LogWarning(ex, "Failed to fetch live invite list during /invite info code={Code}", code);
+                }
+            }
+        }
+
+        // Bail only if we have nothing at all to show — no source row,
+        // no historical attribution rows, AND no live invite. Otherwise
+        // we always have *something* worth rendering.
+        if (source is null && totalJoinCount == 0 && live is null)
         {
             await command.FollowupAsync(
-                $"No data for code `{code}`. It might not exist, or might be a code we've never seen a join for. Use `/invite assign code:{code} label:<name>` to start tracking it.",
+                $"No data for code `{code}`. Discord doesn't recognize it, we have no source row, and no joins have ever been attributed to it.",
                 ephemeral: true);
             return;
         }
 
         // ── Build the metadata embed ────────────────────────────────
-        var color = source?.IsActive == false ? Color.DarkGrey
-                  : source?.IsVanity        == true ? Color.Gold
+        // Color reflects state at a glance — grey for revoked, gold for
+        // vanity, blue for active labeled, light grey for unlabeled.
+        var isUnlabeled = source is null;
+        var isRevoked   = source is not null ? !source.IsActive : (live is null && totalJoinCount > 0);
+        var isVanity    = source?.IsVanity ?? liveIsVanity;
+
+        var color = isRevoked   ? Color.DarkGrey
+                  : isVanity    ? Color.Gold
+                  : isUnlabeled ? Color.LightGrey
                   : Color.Blue;
 
-        var title = source is null
-            ? $"📨 Invite info — `{code}` (no source row)"
-            : $"📨 Invite info — {source.Label}";
+        // Title carries the label (real or "(unlabeled)") so officers
+        // scanning ephemeral replies can match the row they're drilling
+        // into without parsing fields.
+        var titleLabel = source?.Label ?? "(unlabeled)";
+        var title = $"📨 Invite info — {titleLabel}";
 
         var embed = new EmbedBuilder()
             .WithTitle(title)
             .WithColor(color);
 
-        if (source is not null)
+        // ── Status: unified across the five possible states ─────────
+        //   1. source revoked               → "Revoked"
+        //   2. no source, no live, has joins → "Revoked (no source row)"
+        //   3. source active vanity         → "Active (vanity URL)"
+        //   4. source active regular        → "Active"
+        //   5. no source, live found        → "Active (unlabeled)"
+        string status = (source, live, totalJoinCount) switch
         {
-            var status = !source.IsActive ? "Revoked"
-                       : source.IsVanity   ? "Active (vanity URL)"
-                       : "Active";
-            embed.AddField("Status", status, inline: true);
-            embed.AddField("Code",   $"`{source.Code}`", inline: true);
+            ({ IsActive: false }, _, _)   => "Revoked",
+            (null, null, > 0)             => "Revoked (no source row)",
+            ({ IsVanity: true }, _, _)    => "Active (vanity URL)",
+            ({ IsActive: true }, _, _)    => "Active",
+            (null, not null, _) when liveIsVanity => "Active (unlabeled, vanity URL)",
+            (null, not null, _)           => "Active (unlabeled)",
+            _                             => "Unknown",
+        };
+        embed.AddField("Status", status, inline: true);
+        embed.AddField("Code",   $"`{code}`", inline: true);
 
-            if (source.ChannelId is ulong chId)
-                embed.AddField("Channel", $"<#{chId}>", inline: true);
+        // Channel — prefer source's stored channel, fall back to live.
+        ulong? channelId = source?.ChannelId
+                           ?? (live is not null && !liveIsVanity ? live.ChannelId : null);
+        if (channelId is ulong chId)
+            embed.AddField("Channel", $"<#{chId}>", inline: true);
 
-            if (source.CreatedByDiscordId is ulong creatorId)
-                embed.AddField("Created by", $"<@{creatorId}>", inline: true);
-
-            embed.AddField("Created", DiscordTimestamp(source.CreatedAt, 'R'), inline: true);
-
-            if (source.ExpiresAt is DateTime exp)
-                embed.AddField("Expires", DiscordTimestamp(exp, 'R'), inline: true);
-            else
-                embed.AddField("Expires", "never", inline: true);
-
-            if (source.MaxUses is int cap)
-                embed.AddField("Max uses", cap.ToString(), inline: true);
-
-            if (!source.IsActive && source.DeactivatedAt is DateTime deact)
-                embed.AddField("Deactivated", DiscordTimestamp(deact, 'R'), inline: true);
-
-            if (!string.IsNullOrWhiteSpace(source.Notes))
-                embed.AddField("Notes", source.Notes, inline: false);
+        // Created by — prefer source snapshot, fall back to live Inviter.
+        // Mention the user when we have an ID; otherwise show the snapshot
+        // text or live username (no `@` since it's plain text in that case).
+        if (source?.CreatedByDiscordId is ulong creatorId)
+        {
+            embed.AddField("Created by", $"<@{creatorId}>", inline: true);
         }
+        else if (live?.Inviter is IUser inviter)
+        {
+            embed.AddField("Created by", $"<@{inviter.Id}>", inline: true);
+        }
+        else if (source is not null && !string.IsNullOrWhiteSpace(source.CreatedByUsername))
+        {
+            embed.AddField("Created by", source.CreatedByUsername, inline: true);
+        }
+        // else: skip — vanity URL with no source row, or very old invite
+        // whose creator Discord no longer surfaces.
+
+        // Created — prefer source's authored timestamp, fall back to live.
+        DateTime? createdAt = source?.CreatedAt
+                              ?? live?.CreatedAt?.UtcDateTime;
+        if (createdAt is DateTime ca)
+            embed.AddField("Created", DiscordTimestamp(ca, 'R'), inline: true);
+
+        // Expires — prefer source's cached expiry, fall back to computing
+        // from the live invite's MaxAge + CreatedAt. Vanity never expires.
+        DateTime? expiresAt = source?.ExpiresAt
+                              ?? (live is not null && !liveIsVanity ? ComputeExpiresAt(live) : null);
+        if (isVanity)
+            embed.AddField("Expires", "never (vanity)", inline: true);
+        else if (expiresAt is DateTime exp)
+            embed.AddField("Expires", DiscordTimestamp(exp, 'R'), inline: true);
+        else
+            embed.AddField("Expires", "never", inline: true);
+
+        // Max uses — same precedence pattern.
+        int? maxUses = source?.MaxUses
+                       ?? (live is not null && (live.MaxUses ?? 0) > 0 ? live.MaxUses : null);
+        if (maxUses is int cap)
+            embed.AddField("Max uses", cap.ToString(), inline: true);
+
+        // Current uses (live only — historical for revoked invites is
+        // captured by Total joins attributed below).
+        if (live is not null)
+            embed.AddField("Current uses", (live.Uses ?? 0).ToString(), inline: true);
+
+        if (source is not null && !source.IsActive && source.DeactivatedAt is DateTime deact)
+            embed.AddField("Deactivated", DiscordTimestamp(deact, 'R'), inline: true);
+
+        if (source is not null && !string.IsNullOrWhiteSpace(source.Notes))
+            embed.AddField("Notes", source.Notes, inline: false);
 
         embed.AddField("Total joins attributed", totalJoinCount.ToString(), inline: true);
+
+        // Hint for unlabeled invites — surfaces the natural next step
+        // (assign a label) right where the officer is already looking.
+        if (isUnlabeled && live is not null)
+        {
+            embed.AddField(
+                "💡 Suggestion",
+                $"This invite has no label. Run `/invite assign code:{code} label:<name>` to start tracking it.",
+                inline: false);
+        }
 
         // ── Recent joins list ───────────────────────────────────────
         if (recentJoins.Count == 0)
