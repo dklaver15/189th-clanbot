@@ -208,6 +208,14 @@ try
     // their GCal counterpart).
     builder.Services.AddSingleton<CleanupCalendarDupesCommandHandler>();
 
+    // CommandsCommandHandler: /command-catalog self-service slash command. Returns
+    // a rank-filtered table of every slash command the bot exposes. Open to
+    // every member; rendered ephemerally. The catalog of entries inside
+    // CommandsCommandHandler.BuildCatalog MUST be kept in sync with the
+    // SlashCommandBuilder list in DiscordBotService.OnReadyAsync — adding,
+    // removing, or re-gating a command requires updating both.
+    builder.Services.AddSingleton<CommandsCommandHandler>();
+
     var app = builder.Build();
 
     // Ensure the database is created / migrated
