@@ -18,6 +18,15 @@ namespace ClanGuardBot.Handlers;
 /// gives every member a one-shot, ephemeral view of their available toolkit
 /// without leaking commands they can't use.
 ///
+/// ── Pagination ──
+/// The catalog renders in pages of PageSize entries with Previous / Page X/Y /
+/// Next buttons. Buttons are namespaced with the ButtonIdPrefix custom-id so
+/// other future button handlers don't collide. Each click re-runs the catalog
+/// filter against the caller's current roles — state is fully derived from
+/// (caller + target page), nothing is cached, so role changes mid-session are
+/// reflected on the next click. component.UpdateAsync edits the original
+/// ephemeral message in place rather than posting a new one.
+///
 /// ── How permissions are evaluated ──
 /// Each catalog entry carries its own predicate that mirrors the permission
 /// gate enforced by the actual command's handler. The catalog and the gated
@@ -54,6 +63,20 @@ public class CommandsCommandHandler
 {
     public const string CommandName = "command-catalog";
 
+    /// <summary>
+    /// Custom-id prefix for every component button this handler attaches.
+    /// Other button handlers (current or future) must use a different prefix
+    /// so HandleButtonAsync only acts on its own clicks.
+    /// </summary>
+    private const string ButtonIdPrefix = "cmdcat:";
+
+    /// <summary>
+    /// How many catalog rows fit on one page. With 19 registered commands
+    /// (as of writing) this gives 4 pages — enough to demonstrate pagination
+    /// while keeping each page comfortably scannable.
+    /// </summary>
+    private const int PageSize = 6;
+
     private readonly ILogger<CommandsCommandHandler> _logger;
     private readonly BotConfig _config;
 
@@ -69,6 +92,7 @@ public class CommandsCommandHandler
     public void Register(DiscordSocketClient client)
     {
         client.SlashCommandExecuted += HandleCommandAsync;
+        client.ButtonExecuted       += HandleButtonAsync;
     }
 
     private async Task HandleCommandAsync(SocketSlashCommand command)
@@ -100,14 +124,7 @@ public class CommandsCommandHandler
             return;
         }
 
-        var catalog = BuildCatalog(_config);
-        var rankRoles = _config.GetRankRolesList();
-
-        var visible = catalog
-            .Where(e => e.CanUse(caller, _config))
-            .OrderBy(e => e.SortKey(rankRoles))
-            .ThenBy(e => e.Name, StringComparer.Ordinal)
-            .ToList();
+        var visible = BuildVisibleList(caller);
 
         if (visible.Count == 0)
         {
@@ -120,50 +137,213 @@ public class CommandsCommandHandler
             return;
         }
 
-        var embed = new EmbedBuilder()
-            .WithTitle("📖 Slash Command Reference")
-            .WithDescription(BuildTable(visible))
-            .WithColor(Color.Blue)
-            .WithFooter($"{visible.Count} command(s) available to you")
-            .Build();
-
-        await command.FollowupAsync(embed: embed, ephemeral: true);
+        var (embed, components) = BuildPage(visible, page: 0);
+        await command.FollowupAsync(embed: embed, components: components, ephemeral: true);
 
         _logger.LogInformation(
-            "/{Command} rendered for {User}: {Count} visible entries",
-            CommandName, caller.Username, visible.Count);
+            "/{Command} rendered for {User}: {Count} visible entries across {Pages} page(s)",
+            CommandName, caller.Username, visible.Count, PageCount(visible.Count));
     }
+
+    /// <summary>
+    /// Component-button handler for pagination. Filters by ButtonIdPrefix so
+    /// it doesn't react to other handlers' buttons. State is fully derived
+    /// from (caller + target page) — nothing cached, so roles changing
+    /// mid-session are reflected on the next click. UpdateAsync edits the
+    /// original ephemeral message in place.
+    /// </summary>
+    private async Task HandleButtonAsync(SocketMessageComponent component)
+    {
+        if (!component.Data.CustomId.StartsWith(ButtonIdPrefix, StringComparison.Ordinal))
+            return;
+
+        try
+        {
+            var targetPage = ParseGotoPage(component.Data.CustomId);
+            if (targetPage is null)
+            {
+                // Unknown action under our prefix (e.g. the disabled "noop"
+                // page-indicator button that Discord shouldn't even fire for,
+                // but in case a client does, ack it without changing state).
+                await component.DeferAsync();
+                return;
+            }
+
+            if (component.User is not SocketGuildUser caller)
+            {
+                await component.DeferAsync();
+                return;
+            }
+
+            var visible = BuildVisibleList(caller);
+            var (embed, components) = BuildPage(visible, targetPage.Value);
+
+            await component.UpdateAsync(msg =>
+            {
+                msg.Embed = embed;
+                msg.Components = components;
+            });
+
+            _logger.LogDebug(
+                "/{Command} pagination: {User} -> page {Page}",
+                CommandName, caller.Username, targetPage.Value + 1);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error handling /{Command} pagination button", CommandName);
+            try
+            {
+                // RespondAsync rather than FollowupAsync because the original
+                // interaction may not have been deferred yet at the failure point.
+                await component.RespondAsync(
+                    "Something went wrong navigating pages. Try running /command-catalog again.",
+                    ephemeral: true);
+            }
+            catch { /* already responded or interaction expired */ }
+        }
+    }
+
+    /// <summary>
+    /// Parse a "cmdcat:goto:N" custom-id into the target 0-indexed page.
+    /// Returns null for any other shape (including the disabled-noop button).
+    /// </summary>
+    private static int? ParseGotoPage(string customId)
+    {
+        var parts = customId.Split(':');
+        if (parts.Length < 3) return null;
+        if (parts[1] != "goto") return null;
+        if (!int.TryParse(parts[2], out var page)) return null;
+        return page;
+    }
+
+    /// <summary>
+    /// Build the rank-filtered, sorted list of catalog entries the caller can
+    /// currently use. Pulled out so both the slash-command entry point and the
+    /// button-update path share one code path.
+    /// </summary>
+    private List<CommandEntry> BuildVisibleList(SocketGuildUser caller)
+    {
+        var catalog = BuildCatalog(_config);
+        var rankRoles = _config.GetRankRolesList();
+        return catalog
+            .Where(e => e.CanUse(caller, _config))
+            .OrderBy(e => e.SortKey(rankRoles))
+            .ThenBy(e => e.Name, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Render one page of the visible-commands list, returning the embed and
+    /// (when pagination applies) the button row. When the entire list fits on
+    /// a single page the components are null and Discord won't show buttons.
+    /// </summary>
+    private static (Embed Embed, MessageComponent? Components) BuildPage(
+        List<CommandEntry> all, int page)
+    {
+        var totalPages = PageCount(all.Count);
+        var safePage = Math.Clamp(page, 0, totalPages - 1);
+        var pageItems = all.Skip(safePage * PageSize).Take(PageSize).ToList();
+
+        var embed = new EmbedBuilder()
+            .WithTitle("📖 Slash Command Reference")
+            .WithDescription(BuildTable(pageItems))
+            .WithColor(Color.Blue)
+            .WithFooter(
+                $"Page {safePage + 1} of {totalPages} • {all.Count} command(s) available to you")
+            .Build();
+
+        if (totalPages <= 1) return (embed, null);
+
+        // Three-button row: Previous, page indicator (disabled, acts as label),
+        // Next. Discord auto-disables click handling on disabled buttons but we
+        // still namespace its custom-id under our prefix so HandleButtonAsync
+        // can early-return cleanly if any client ever does fire it.
+        var components = new ComponentBuilder()
+            .WithButton(
+                label: "« Previous",
+                customId: $"{ButtonIdPrefix}goto:{safePage - 1}",
+                style: ButtonStyle.Secondary,
+                disabled: safePage == 0)
+            .WithButton(
+                label: $"Page {safePage + 1} / {totalPages}",
+                customId: $"{ButtonIdPrefix}noop",
+                style: ButtonStyle.Secondary,
+                disabled: true)
+            .WithButton(
+                label: "Next »",
+                customId: $"{ButtonIdPrefix}goto:{safePage + 1}",
+                style: ButtonStyle.Secondary,
+                disabled: safePage >= totalPages - 1)
+            .Build();
+
+        return (embed, components);
+    }
+
+    private static int PageCount(int total) =>
+        Math.Max(1, (int)Math.Ceiling(total / (double)PageSize));
 
     // ── Rendering ────────────────────────────────────────────────────
 
     /// <summary>
-    /// Builds a fixed-width 3-column code-block table. Discord renders code
-    /// blocks in monospace so the columns line up. On mobile the block becomes
-    /// horizontally scrollable rather than wrapping — preferable to ragged
-    /// columns. Total width sized to fit comfortably on desktop while staying
-    /// well under the 4096-char embed-description cap (the full 19-row table
-    /// comes in around 1.8 KB, plus the surrounding code fences).
+    /// Builds a bordered code-block table. Discord renders code blocks in
+    /// monospace so columns + verticals line up. Row layout per entry:
+    ///
+    ///   Command                   │ Min       │ Description
+    ///                             │           │
+    ///   /awol-status              │ Everyone  │ Show your current activity stats
+    ///                             │           │
+    ///   /calendar                 │ Everyone  │ Show upcoming events…
+    ///
+    /// The blank row between entries keeps the column verticals (│) continuous
+    /// rather than breaking into per-row mini-tables, while still giving each
+    /// entry visible breathing room. On mobile the block becomes horizontally
+    /// scrollable rather than wrapping — preferable to ragged columns.
+    ///
+    /// Total row width with current column sizes is ~104 chars, well under the
+    /// 4096-char embed-description cap with PageSize=6 entries per page.
     /// </summary>
     private static string BuildTable(List<CommandEntry> entries)
     {
         const int nameWidth = 24;   // longest registered command is /cleanup-calendar-dupes (23 chars w/ slash)
         const int permWidth = 9;    // "Everyone" is 8; rank labels like "2ndLT+" fit in 6
-        const int descWidth = 50;
+        const int descWidth = 65;   // every current description fits unwrapped
+
+        // Three column-segments separated by " │ " on content rows and
+        // matching "─┼─" on the header rule. Each Pad+1 width on either side
+        // of the separator gives the verticals visual breathing room without
+        // wasting much horizontal space.
+        string headerRule =
+            new string('─', nameWidth + 2) + "┼" +
+            new string('─', permWidth + 2) + "┼" +
+            new string('─', descWidth + 2);
+
+        // Continuation row that preserves the column verticals through the
+        // breathing-room gap between entries. Only the first two columns get
+        // explicit trailing spaces — the third column's trailing whitespace
+        // would just bloat the description without adding visual structure.
+        string blankRow =
+            new string(' ', nameWidth + 2) + "│" +
+            new string(' ', permWidth + 2) + "│";
 
         var sb = new StringBuilder();
         sb.AppendLine("```");
-        sb.Append("Command".PadRight(nameWidth)).Append("  ")
-          .Append("Min".PadRight(permWidth)).Append("  ")
-          .AppendLine("Description");
-        sb.Append(new string('─', nameWidth)).Append("  ")
-          .Append(new string('─', permWidth)).Append("  ")
-          .AppendLine(new string('─', descWidth));
 
-        foreach (var entry in entries)
+        // Header
+        sb.Append(' ').Append(Fit("Command", nameWidth)).Append(" │ ")
+          .Append(Fit("Min", permWidth)).Append(" │ ")
+          .AppendLine("Description");
+        sb.AppendLine(headerRule);
+
+        // Rows, with a blank-with-verticals row inserted between consecutive entries.
+        for (int i = 0; i < entries.Count; i++)
         {
-            sb.Append(Fit($"/{entry.Name}", nameWidth)).Append("  ")
-              .Append(Fit(entry.PermissionLabel, permWidth)).Append("  ")
+            var entry = entries[i];
+            sb.Append(' ').Append(Fit($"/{entry.Name}", nameWidth)).Append(" │ ")
+              .Append(Fit(entry.PermissionLabel, permWidth)).Append(" │ ")
               .AppendLine(Fit(entry.Description, descWidth, truncationEllipsis: true));
+
+            if (i < entries.Count - 1)
+                sb.AppendLine(blankRow);
         }
 
         sb.AppendLine("```");
