@@ -7,38 +7,70 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using System.Text;
 
 namespace ClanGuardBot.Handlers;
 
 /// <summary>
-/// Handles /invite create and /invite assign — the Phase 1 surface for
-/// labeling Discord invites so InviteAttributionService can credit joins
-/// to the right source ("Website", "Facebook", a recruiter's name, etc).
-///
-/// Both commands respond ephemerally so neither the link nor the label
-/// gets posted to a public channel; only the invoking officer sees the
-/// reply.
+/// Handles the full /invite command surface: create, assign (Phase 1) plus
+/// list, info, stats, revoke (Phase 2). All responses are ephemeral so
+/// neither links nor labels leak to public channels.
 ///
 /// ── Permission model ──
-/// Gated by BotConfig.InviteManagementMinRank, a separate config value
-/// from PromoteDemoteMinRank so recruiters can manage their own invite
-/// links without inheriting promote/demote privileges. Admins bypass.
+/// Per-subcommand, intentionally split:
+///   • create  — Discord's native "Create Invite" channel permission only,
+///               so anyone who can already make an invite via the Discord
+///               UI can also make a labeled one.
+///   • assign  — InviteManagementMinRank (default 2ndLT). Relabeling can
+///               rewrite labels other officers depend on.
+///   • list    — open to anyone. Read-only registry.
+///   • info    — InviteManagementMinRank (default 2ndLT). Surfaces
+///               individual recruit attribution which is more sensitive
+///               than aggregate stats.
+///   • stats   — open to anyone. Aggregate counts only, no individual
+///               recruit names.
+///   • revoke  — InviteManagementMinRank (default 2ndLT) AND requires
+///               confirm:true. Destructive — kills the live link.
+/// Admins bypass the rank gates entirely.
 ///
 /// ── /invite create ──
 /// Creates a fresh Discord invite via the Discord API in the channel the
-/// command was run in (sensible default — officers usually want recruits
-/// to land where they were invited from). The optional `expires` and
-/// `max-uses` arguments are passed straight through to Discord's API as
-/// max_age / max_uses; Discord enforces both natively. We do NOT run any
-/// expiration timer on our side. We cache the values for fast /invite
-/// list rendering only.
+/// command was run in. The optional `expires` and `max-uses` arguments
+/// are passed straight through to Discord's API as max_age / max_uses;
+/// Discord enforces both natively. We do NOT run any expiration timer on
+/// our side. We cache the values for fast /invite list rendering only.
 ///
 /// ── /invite assign ──
-/// Retroactively labels an invite that already exists — useful for the
-/// vanity URL (which doesn't get auto-seeded), for invites created via
-/// the Discord UI before the bot was wired, or for relabeling a
-/// previously-mislabeled link. Doesn't change the invite itself, only
-/// our InviteSource row.
+/// Retroactively labels an invite that already exists — the vanity URL
+/// (which doesn't get auto-seeded), invites created via the Discord UI
+/// before the bot was wired, or relabeling a previously-mislabeled link.
+/// Doesn't change the invite itself, only our InviteSource row.
+/// Reserved sentinel labels ("Vanity", "Unknown", "Ambiguous",
+/// "Unattributed") are blocked for non-vanity invites to prevent
+/// collision with attribution-time fallbacks; the vanity URL itself is
+/// exempt from this check (it's the legitimate use of "Vanity").
+///
+/// ── /invite list ──
+/// Tabular registry of every tracked invite plus any unlabeled Discord
+/// invites the bot can see. Three-key sort: uses descending → label A→Z
+/// → creation date oldest-first. Inactive (revoked/expired) sources are
+/// included; vanity, unlabeled, and revoked rows get a trailing flag tag.
+///
+/// ── /invite info ──
+/// Drill-down on a single code: source metadata + the most recent N
+/// attributed joins from InviteJoin. Default 25 joins, max 50.
+///
+/// ── /invite stats ──
+/// Aggregate counts in a chosen window (7d / 30d / 90d / all). Two
+/// sections: joins by label, top member referrers. Mirrors what the
+/// weekly briefing surfaces but on demand.
+///
+/// ── /invite revoke ──
+/// Calls Discord's delete-invite API. The InviteDeleted gateway event
+/// (handled by InviteAttributionService) flips InviteSource.IsActive to
+/// false — single deactivation flow for both manual revocation here and
+/// natural expiration. Historical InviteJoin rows keep their
+/// LabelSnapshot, so attribution stays intact forever.
 /// </summary>
 public class InviteCommandHandler
 {
@@ -74,7 +106,8 @@ public class InviteCommandHandler
         var sub = command.Data.Options.FirstOrDefault();
         if (sub is null)
         {
-            await command.RespondAsync("Missing subcommand. Try `/invite create` or `/invite assign`.",
+            await command.RespondAsync(
+                "Missing subcommand. Try `/invite create`, `/invite assign`, `/invite list`, `/invite info`, `/invite stats`, or `/invite revoke`.",
                 ephemeral: true);
             return;
         }
@@ -88,6 +121,18 @@ public class InviteCommandHandler
                     break;
                 case "assign":
                     await HandleAssign(command, sub);
+                    break;
+                case "list":
+                    await HandleList(command, sub);
+                    break;
+                case "info":
+                    await HandleInfo(command, sub);
+                    break;
+                case "stats":
+                    await HandleStats(command, sub);
+                    break;
+                case "revoke":
+                    await HandleRevoke(command, sub);
                     break;
                 default:
                     await command.RespondAsync($"Unknown subcommand `{sub.Name}`.", ephemeral: true);
@@ -170,9 +215,9 @@ public class InviteCommandHandler
             return;
         }
 
-        // Reject sentinel values to keep the data model honest. If a label
-        // collides with an attribution sentinel, /invite stats can't tell
-        // joins-via-Vanity from joins-via-some-link-the-officer-named-Vanity.
+        // /invite create always produces a non-vanity invite, so the
+        // reserved-label check applies unconditionally here. (The vanity
+        // exemption lives in /invite assign — see the comment there.)
         if (IsReservedLabel(label))
         {
             await command.FollowupAsync(
@@ -349,13 +394,13 @@ public class InviteCommandHandler
             await command.FollowupAsync("`label` must be 80 characters or fewer.", ephemeral: true);
             return;
         }
-        if (IsReservedLabel(label))
-        {
-            await command.FollowupAsync(
-                $"`{label}` is a reserved label used internally for attribution. Pick something else.",
-                ephemeral: true);
-            return;
-        }
+
+        // NOTE: reserved-label check moved below the vanity-detection block.
+        // The vanity URL is the legitimate use of the label "Vanity" — it
+        // must be exempt from the collision guard. For non-vanity invites
+        // the check still applies (preventing a regular invite from being
+        // mislabeled with a sentinel name that would scramble attribution
+        // stats grouping).
 
         var notes = sub.Options.FirstOrDefault(o => o.Name == "notes")?.Value as string;
 
@@ -406,6 +451,19 @@ public class InviteCommandHandler
         {
             await command.FollowupAsync(
                 $"Discord doesn't recognize invite code `{code}`. Make sure it's the part after `discord.gg/` and that the invite hasn't expired.",
+                ephemeral: true);
+            return;
+        }
+
+        // Reserved-label check: blocked for non-vanity invites only. The
+        // vanity URL legitimately *is* the "Vanity" label — exempting it
+        // here lets officers label discord.gg/<slug> with the natural
+        // name. For all other invites, blocking sentinel collisions still
+        // matters.
+        if (!isVanity && IsReservedLabel(label))
+        {
+            await command.FollowupAsync(
+                $"`{label}` is a reserved label used internally for attribution. Pick something else.",
                 ephemeral: true);
             return;
         }
@@ -483,6 +541,731 @@ public class InviteCommandHandler
             _logger.LogError(ex, "Failed to upsert InviteSource for /invite assign");
             await command.FollowupAsync("Failed to save the label. Check the bot logs.", ephemeral: true);
         }
+    }
+
+    // ── /invite list ────────────────────────────────────────────────
+    //
+    // Open to anyone — it's a read-only registry. Renders a code-block
+    // table for monospaced alignment so officers can scan rows quickly.
+    // If the result exceeds Discord's 4096-character description budget,
+    // we split across multiple followup messages.
+
+    private const int InviteListDescriptionBudget = 3800; // headroom under 4096
+
+    private async Task HandleList(SocketSlashCommand command, SocketSlashCommandDataOption sub)
+    {
+        await command.DeferAsync(ephemeral: true);
+
+        if (command.GuildId is null)
+        {
+            await command.FollowupAsync("This command can only be used in a server.", ephemeral: true);
+            return;
+        }
+
+        var guild = (command.Channel as SocketGuildChannel)?.Guild;
+        if (guild is null)
+        {
+            await command.FollowupAsync("Couldn't resolve the guild.", ephemeral: true);
+            return;
+        }
+
+        // ── Pull all the data in parallel ───────────────────────────
+        IReadOnlyCollection<IInviteMetadata> liveInvites;
+        IInviteMetadata? vanity = null;
+        try
+        {
+            liveInvites = await guild.GetInvitesAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to fetch invites for /invite list");
+            await command.FollowupAsync("Couldn't fetch the invite list from Discord. Try again.", ephemeral: true);
+            return;
+        }
+
+        try { vanity = await guild.GetVanityInviteAsync(); }
+        catch { /* no vanity URL configured — that's fine */ }
+
+        List<InviteSource> sources;
+        using (var scope = _services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+            sources = await db.InviteSources
+                .Where(s => s.GuildId == command.GuildId.Value)
+                .ToListAsync();
+        }
+
+        // ── Merge into a unified row set ────────────────────────────
+        // Each row represents one invite with whatever data we have:
+        // - Real label from InviteSource if present, else "(unlabeled)"
+        // - Live use count from Discord if invite still exists, else
+        //   InviteSource's last-known state (for revoked/expired)
+        // - Status flags: vanity, unlabeled, revoked
+        var sourcesByCode = sources.ToDictionary(s => s.Code, StringComparer.Ordinal);
+        var rows = new List<InviteListRow>();
+
+        // Pass 1: every live regular invite Discord knows about
+        foreach (var live in liveInvites)
+        {
+            sourcesByCode.TryGetValue(live.Code, out var src);
+            rows.Add(new InviteListRow(
+                Code:        live.Code,
+                Label:       src?.Label ?? "(unlabeled)",
+                Uses:        live.Uses ?? 0,
+                MaxUses:     (live.MaxUses ?? 0) > 0 ? live.MaxUses : null,
+                ExpiresAt:   ComputeExpiresAt(live),
+                IsVanity:    false,
+                IsLabeled:   src is not null,
+                IsRevoked:   false,
+                CreatedAt:   src?.CreatedAt ?? live.CreatedAt?.UtcDateTime ?? DateTime.UtcNow));
+        }
+
+        // Pass 2: vanity (separate API; never appears in liveInvites)
+        if (vanity is not null)
+        {
+            sourcesByCode.TryGetValue(vanity.Code, out var vanitySrc);
+            rows.Add(new InviteListRow(
+                Code:        vanity.Code,
+                Label:       vanitySrc?.Label ?? "(unlabeled)",
+                Uses:        vanity.Uses ?? 0,
+                MaxUses:     null, // vanity has no use cap
+                ExpiresAt:   null, // vanity never expires
+                IsVanity:    true,
+                IsLabeled:   vanitySrc is not null,
+                IsRevoked:   false,
+                CreatedAt:   vanitySrc?.CreatedAt ?? DateTime.UtcNow));
+        }
+
+        // Pass 3: InviteSource rows that no live invite matched (revoked/expired)
+        var liveCodes = liveInvites.Select(i => i.Code)
+            .Concat(vanity is null ? Array.Empty<string>() : new[] { vanity.Code })
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var src in sources.Where(s => !liveCodes.Contains(s.Code)))
+        {
+            rows.Add(new InviteListRow(
+                Code:        src.Code,
+                Label:       src.Label,
+                Uses:        0, // we don't store cumulative uses; Discord's gone
+                MaxUses:     src.MaxUses,
+                ExpiresAt:   src.ExpiresAt,
+                IsVanity:    src.IsVanity,
+                IsLabeled:   true,
+                IsRevoked:   true,
+                CreatedAt:   src.CreatedAt));
+        }
+
+        if (rows.Count == 0)
+        {
+            await command.FollowupAsync("No invites found in this server.", ephemeral: true);
+            return;
+        }
+
+        // ── Sort: uses desc → label asc → creation asc ──────────────
+        // Three keys because at zero-use volumes there's a long tail and
+        // alphabetical-by-label is more useful than chronological as the
+        // tiebreaker. Creation date is the final tiebreaker for invites
+        // sharing both use count and label.
+        rows.Sort((a, b) =>
+        {
+            int c = b.Uses.CompareTo(a.Uses);                                   // uses desc
+            if (c != 0) return c;
+            c = string.Compare(a.Label, b.Label, StringComparison.OrdinalIgnoreCase); // label asc
+            if (c != 0) return c;
+            return a.CreatedAt.CompareTo(b.CreatedAt);                          // creation asc
+        });
+
+        // ── Render to a code-block table ────────────────────────────
+        // Compute column widths from the data so labels and codes don't
+        // get truncated harder than needed. Cap label at 24 chars to
+        // keep the table from going extreme.
+        const int LabelHardCap = 24;
+        int codeWidth  = Math.Max("CODE".Length,  rows.Max(r => r.Code.Length));
+        int labelWidth = Math.Max("LABEL".Length, Math.Min(rows.Max(r => r.Label.Length), LabelHardCap));
+        int usesWidth  = Math.Max("USES".Length,  rows.Max(r => FormatUses(r).Length));
+        int expWidth   = Math.Max("EXPIRES".Length, rows.Max(r => FormatExpires(r).Length));
+
+        var header = $"{"CODE".PadRight(codeWidth)}  {"LABEL".PadRight(labelWidth)}  {"USES".PadRight(usesWidth)}  {"EXPIRES".PadRight(expWidth)}  FLAGS";
+        var divider = new string('─', header.Length);
+
+        var pages = new List<StringBuilder>();
+        var current = new StringBuilder();
+        current.Append("```\n").Append(header).Append('\n').Append(divider).Append('\n');
+
+        foreach (var row in rows)
+        {
+            var labelTrunc = row.Label.Length > LabelHardCap
+                ? row.Label[..(LabelHardCap - 1)] + "…"
+                : row.Label;
+
+            var line =
+                $"{row.Code.PadRight(codeWidth)}  " +
+                $"{labelTrunc.PadRight(labelWidth)}  " +
+                $"{FormatUses(row).PadRight(usesWidth)}  " +
+                $"{FormatExpires(row).PadRight(expWidth)}  " +
+                $"{FormatFlags(row)}\n";
+
+            // If adding this line would push the page past Discord's
+            // description limit, close the current code block and start a
+            // new page. Each page must end with ``` and the next must
+            // open with ``` to keep the monospace formatting.
+            if (current.Length + line.Length + 4 > InviteListDescriptionBudget)
+            {
+                current.Append("```");
+                pages.Add(current);
+                current = new StringBuilder();
+                current.Append("```\n").Append(header).Append('\n').Append(divider).Append('\n');
+            }
+            current.Append(line);
+        }
+        current.Append("```");
+        pages.Add(current);
+
+        // ── Send pages ──────────────────────────────────────────────
+        var summary = $"**{rows.Count}** total invite(s) — " +
+                      $"{rows.Count(r => r.IsLabeled && !r.IsRevoked)} labeled active, " +
+                      $"{rows.Count(r => !r.IsLabeled)} unlabeled, " +
+                      $"{rows.Count(r => r.IsRevoked)} revoked";
+
+        if (pages.Count == 1)
+        {
+            await command.FollowupAsync($"{summary}\n{pages[0]}", ephemeral: true);
+        }
+        else
+        {
+            await command.FollowupAsync($"{summary}\n_(showing across {pages.Count} pages)_\n{pages[0]}", ephemeral: true);
+            for (int i = 1; i < pages.Count; i++)
+            {
+                await command.FollowupAsync($"_Page {i + 1}/{pages.Count}_\n{pages[i]}", ephemeral: true);
+            }
+        }
+
+        _logger.LogInformation(
+            "{Caller} ran /invite list — {Total} rows ({Labeled} labeled, {Unlabeled} unlabeled, {Revoked} revoked)",
+            command.User.Username, rows.Count,
+            rows.Count(r => r.IsLabeled && !r.IsRevoked),
+            rows.Count(r => !r.IsLabeled),
+            rows.Count(r => r.IsRevoked));
+    }
+
+    private static DateTime? ComputeExpiresAt(IInviteMetadata invite)
+    {
+        if ((invite.MaxAge ?? 0) <= 0 || !invite.CreatedAt.HasValue) return null;
+        return invite.CreatedAt.Value.UtcDateTime.AddSeconds(invite.MaxAge!.Value);
+    }
+
+    private static string FormatUses(InviteListRow r) =>
+        r.MaxUses is int cap ? $"{r.Uses}/{cap}" : $"{r.Uses}";
+
+    private static string FormatExpires(InviteListRow r)
+    {
+        if (r.IsRevoked) return "—";
+        if (r.ExpiresAt is null) return "never";
+
+        var delta = r.ExpiresAt.Value - DateTime.UtcNow;
+        if (delta.TotalSeconds <= 0) return "expired";
+        if (delta.TotalDays    >= 1) return $"{(int)delta.TotalDays}d";
+        if (delta.TotalHours   >= 1) return $"{(int)delta.TotalHours}h";
+        return $"{(int)delta.TotalMinutes}m";
+    }
+
+    private static string FormatFlags(InviteListRow r)
+    {
+        var flags = new List<string>();
+        if (r.IsVanity)       flags.Add("[vanity]");
+        if (!r.IsLabeled)     flags.Add("[unlabeled]");
+        if (r.IsRevoked)      flags.Add("[revoked]");
+        return string.Join(" ", flags);
+    }
+
+    private sealed record InviteListRow(
+        string Code,
+        string Label,
+        int Uses,
+        int? MaxUses,
+        DateTime? ExpiresAt,
+        bool IsVanity,
+        bool IsLabeled,
+        bool IsRevoked,
+        DateTime CreatedAt);
+
+    // ── /invite info ────────────────────────────────────────────────
+    //
+    // Drill-down on one code: source metadata + recent attributed joins.
+    // Gated at InviteManagementMinRank because individual recruit
+    // attribution is more sensitive than aggregate stats — you can see
+    // exactly which member joined via which link.
+
+    private const int InfoRecentJoinsDefault = 25;
+    private const int InfoRecentJoinsMax     = 50;
+
+    private async Task HandleInfo(SocketSlashCommand command, SocketSlashCommandDataOption sub)
+    {
+        await command.DeferAsync(ephemeral: true);
+
+        if (command.GuildId is null)
+        {
+            await command.FollowupAsync("This command can only be used in a server.", ephemeral: true);
+            return;
+        }
+
+        var caller = command.User as SocketGuildUser;
+        if (caller is null || !HasInvitePermission(caller))
+        {
+            await command.FollowupAsync(
+                $"You need {_config.InviteManagementMinRank}+ to view invite details.",
+                ephemeral: true);
+            return;
+        }
+
+        var code = (sub.Options.FirstOrDefault(o => o.Name == "code")?.Value as string)?.Trim();
+        if (string.IsNullOrWhiteSpace(code))
+        {
+            await command.FollowupAsync("`code` is required.", ephemeral: true);
+            return;
+        }
+
+        int limit = InfoRecentJoinsDefault;
+        var limitOpt = sub.Options.FirstOrDefault(o => o.Name == "limit")?.Value;
+        if (limitOpt is not null)
+        {
+            var asLong = Convert.ToInt64(limitOpt);
+            if (asLong < 1 || asLong > InfoRecentJoinsMax)
+            {
+                await command.FollowupAsync(
+                    $"`limit` must be between 1 and {InfoRecentJoinsMax}.", ephemeral: true);
+                return;
+            }
+            limit = (int)asLong;
+        }
+
+        InviteSource? source;
+        List<InviteJoin> recentJoins;
+        int totalJoinCount;
+        using (var scope = _services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+            source = await db.InviteSources
+                .FirstOrDefaultAsync(s => s.GuildId == command.GuildId.Value && s.Code == code);
+
+            totalJoinCount = await db.InviteJoins
+                .CountAsync(j => j.GuildId == command.GuildId.Value && j.InviteCode == code);
+
+            recentJoins = await db.InviteJoins
+                .Where(j => j.GuildId == command.GuildId.Value && j.InviteCode == code)
+                .OrderByDescending(j => j.JoinedAt)
+                .Take(limit)
+                .ToListAsync();
+        }
+
+        if (source is null && totalJoinCount == 0)
+        {
+            await command.FollowupAsync(
+                $"No data for code `{code}`. It might not exist, or might be a code we've never seen a join for. Use `/invite assign code:{code} label:<name>` to start tracking it.",
+                ephemeral: true);
+            return;
+        }
+
+        // ── Build the metadata embed ────────────────────────────────
+        var color = source?.IsActive == false ? Color.DarkGrey
+                  : source?.IsVanity        == true ? Color.Gold
+                  : Color.Blue;
+
+        var title = source is null
+            ? $"📨 Invite info — `{code}` (no source row)"
+            : $"📨 Invite info — {source.Label}";
+
+        var embed = new EmbedBuilder()
+            .WithTitle(title)
+            .WithColor(color);
+
+        if (source is not null)
+        {
+            var status = !source.IsActive ? "Revoked"
+                       : source.IsVanity   ? "Active (vanity URL)"
+                       : "Active";
+            embed.AddField("Status", status, inline: true);
+            embed.AddField("Code",   $"`{source.Code}`", inline: true);
+
+            if (source.ChannelId is ulong chId)
+                embed.AddField("Channel", $"<#{chId}>", inline: true);
+
+            if (source.CreatedByDiscordId is ulong creatorId)
+                embed.AddField("Created by", $"<@{creatorId}>", inline: true);
+
+            embed.AddField("Created", DiscordTimestamp(source.CreatedAt, 'R'), inline: true);
+
+            if (source.ExpiresAt is DateTime exp)
+                embed.AddField("Expires", DiscordTimestamp(exp, 'R'), inline: true);
+            else
+                embed.AddField("Expires", "never", inline: true);
+
+            if (source.MaxUses is int cap)
+                embed.AddField("Max uses", cap.ToString(), inline: true);
+
+            if (!source.IsActive && source.DeactivatedAt is DateTime deact)
+                embed.AddField("Deactivated", DiscordTimestamp(deact, 'R'), inline: true);
+
+            if (!string.IsNullOrWhiteSpace(source.Notes))
+                embed.AddField("Notes", source.Notes, inline: false);
+        }
+
+        embed.AddField("Total joins attributed", totalJoinCount.ToString(), inline: true);
+
+        // ── Recent joins list ───────────────────────────────────────
+        if (recentJoins.Count == 0)
+        {
+            embed.AddField("Recent joins", "_None yet._", inline: false);
+        }
+        else
+        {
+            var sb = new StringBuilder();
+            foreach (var join in recentJoins)
+            {
+                var when = DiscordTimestamp(join.JoinedAt, 'R');
+                var ambig = join.IsAmbiguous ? " *(ambiguous)*" : "";
+                sb.AppendLine($"• {when} — **{join.Username}**{ambig}");
+
+                // Stay clear of Discord's 1024-char field limit
+                if (sb.Length > 950)
+                {
+                    sb.AppendLine("_…truncated to fit_");
+                    break;
+                }
+            }
+
+            var fieldName = recentJoins.Count < totalJoinCount
+                ? $"Recent joins (showing {recentJoins.Count} of {totalJoinCount})"
+                : $"Recent joins ({recentJoins.Count})";
+
+            embed.AddField(fieldName, sb.ToString(), inline: false);
+        }
+
+        await command.FollowupAsync(embed: embed.Build(), ephemeral: true);
+
+        _logger.LogInformation(
+            "{Caller} ran /invite info code={Code}", caller.Username, code);
+    }
+
+    // ── /invite stats ───────────────────────────────────────────────
+    //
+    // Aggregate counts in a chosen window. Open to anyone — same data
+    // shape the briefing surfaces, but on demand.
+
+    private async Task HandleStats(SocketSlashCommand command, SocketSlashCommandDataOption sub)
+    {
+        await command.DeferAsync(ephemeral: true);
+
+        if (command.GuildId is null)
+        {
+            await command.FollowupAsync("This command can only be used in a server.", ephemeral: true);
+            return;
+        }
+
+        var windowOpt = (sub.Options.FirstOrDefault(o => o.Name == "window")?.Value as string) ?? "7d";
+        if (!TryParseStatsWindow(windowOpt, out var since, out var windowLabel))
+        {
+            await command.FollowupAsync(
+                "Invalid `window`. Use `7d`, `30d`, `90d`, or `all`.", ephemeral: true);
+            return;
+        }
+
+        // ── Aggregate ────────────────────────────────────────────────
+        List<(string Label, int Count)> bySource;
+        List<(ulong InviterId, int Count)> topReferrers;
+        int totalJoins;
+        int ambiguousJoins;
+        using (var scope = _services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+            var baseQuery = db.InviteJoins
+                .Where(j => j.GuildId == command.GuildId.Value);
+            if (since is DateTime sinceUtc)
+                baseQuery = baseQuery.Where(j => j.JoinedAt >= sinceUtc);
+
+            totalJoins = await baseQuery.CountAsync();
+            ambiguousJoins = await baseQuery.CountAsync(j => j.IsAmbiguous);
+
+            bySource = (await baseQuery
+                    .GroupBy(j => j.LabelSnapshot)
+                    .Select(g => new { Label = g.Key, Count = g.Count() })
+                    .ToListAsync())
+                .OrderByDescending(x => x.Count)
+                .ThenBy(x => x.Label, StringComparer.OrdinalIgnoreCase)
+                .Select(x => (x.Label, x.Count))
+                .ToList();
+
+            // Top referrers: only joins via regular invites with a known
+            // inviter (vanity has no inviter, ambiguous joins can't be
+            // attributed to one person).
+            topReferrers = (await baseQuery
+                    .Where(j => j.InviterDiscordId != null && !j.IsAmbiguous)
+                    .GroupBy(j => j.InviterDiscordId!.Value)
+                    .Select(g => new { InviterId = g.Key, Count = g.Count() })
+                    .OrderByDescending(g => g.Count)
+                    .Take(10)
+                    .ToListAsync())
+                .Select(x => (x.InviterId, x.Count))
+                .ToList();
+        }
+
+        if (totalJoins == 0)
+        {
+            await command.FollowupAsync(
+                $"No joins in {windowLabel}.", ephemeral: true);
+            return;
+        }
+
+        // ── Render embed ────────────────────────────────────────────
+        var embed = new EmbedBuilder()
+            .WithTitle($"📨 Invite stats — {windowLabel}")
+            .WithColor(Color.Blue)
+            .WithDescription($"**{totalJoins}** total join(s){(ambiguousJoins > 0 ? $" • {ambiguousJoins} ambiguous" : "")}");
+
+        // Sources by label
+        if (bySource.Count > 0)
+        {
+            var sb = new StringBuilder();
+            foreach (var (label, count) in bySource)
+            {
+                var pct = totalJoins > 0 ? (count * 100.0 / totalJoins) : 0;
+                sb.AppendLine($"• **{label}** — {count} ({pct:0}%)");
+                if (sb.Length > 950) { sb.AppendLine("_…truncated_"); break; }
+            }
+            embed.AddField("Joins by source", sb.ToString(), inline: false);
+        }
+
+        // Top referrers
+        if (topReferrers.Count > 0)
+        {
+            var sb = new StringBuilder();
+            int rank = 1;
+            foreach (var (inviterId, count) in topReferrers)
+            {
+                sb.AppendLine($"`{rank}.` <@{inviterId}> — {count}");
+                rank++;
+                if (sb.Length > 950) { sb.AppendLine("_…truncated_"); break; }
+            }
+            embed.AddField("Top referrers", sb.ToString(), inline: false);
+        }
+        else
+        {
+            embed.AddField("Top referrers",
+                "_No personal-invite referrals in this window._ (Vanity, unknown, and ambiguous joins don't credit a referrer.)",
+                inline: false);
+        }
+
+        await command.FollowupAsync(embed: embed.Build(), ephemeral: true);
+
+        _logger.LogInformation(
+            "{Caller} ran /invite stats window={Window} — {Total} joins, {Sources} sources, {Referrers} referrers",
+            command.User.Username, windowLabel, totalJoins, bySource.Count, topReferrers.Count);
+    }
+
+    /// <summary>
+    /// Parse the four allowed window values. Returns the lower bound (or
+    /// null for "all") and a human-readable label for the embed title.
+    /// </summary>
+    private static bool TryParseStatsWindow(string raw, out DateTime? since, out string label)
+    {
+        var now = DateTime.UtcNow;
+        switch (raw.Trim().ToLowerInvariant())
+        {
+            case "7d":  since = now.AddDays(-7);  label = "last 7 days";  return true;
+            case "30d": since = now.AddDays(-30); label = "last 30 days"; return true;
+            case "90d": since = now.AddDays(-90); label = "last 90 days"; return true;
+            case "all": since = null;             label = "all time";     return true;
+            default:    since = null;             label = "";             return false;
+        }
+    }
+
+    // ── /invite revoke ──────────────────────────────────────────────
+    //
+    // Destructive. Two-step: without confirm:true we show a preview and
+    // bail; with confirm:true we call Discord's delete-invite API. The
+    // existing InviteDeleted handler in InviteAttributionService handles
+    // the row-deactivation side — single code path for both manual and
+    // natural revocation.
+
+    private async Task HandleRevoke(SocketSlashCommand command, SocketSlashCommandDataOption sub)
+    {
+        await command.DeferAsync(ephemeral: true);
+
+        if (command.GuildId is null)
+        {
+            await command.FollowupAsync("This command can only be used in a server.", ephemeral: true);
+            return;
+        }
+
+        var caller = command.User as SocketGuildUser;
+        if (caller is null || !HasInvitePermission(caller))
+        {
+            await command.FollowupAsync(
+                $"You need {_config.InviteManagementMinRank}+ to revoke tracked invites.",
+                ephemeral: true);
+            return;
+        }
+
+        var code = (sub.Options.FirstOrDefault(o => o.Name == "code")?.Value as string)?.Trim();
+        if (string.IsNullOrWhiteSpace(code))
+        {
+            await command.FollowupAsync("`code` is required.", ephemeral: true);
+            return;
+        }
+
+        var confirmRaw = sub.Options.FirstOrDefault(o => o.Name == "confirm")?.Value;
+        bool confirmed = confirmRaw is bool b && b;
+
+        var guild = (command.Channel as SocketGuildChannel)?.Guild;
+        if (guild is null)
+        {
+            await command.FollowupAsync("Couldn't resolve the guild.", ephemeral: true);
+            return;
+        }
+
+        // ── Find the invite (regular or vanity) ─────────────────────
+        IInviteMetadata? matched = null;
+        bool isVanity = false;
+        try
+        {
+            var vanity = await guild.GetVanityInviteAsync();
+            if (vanity is not null && string.Equals(vanity.Code, code, StringComparison.Ordinal))
+            {
+                matched = vanity;
+                isVanity = true;
+            }
+        }
+        catch { /* no vanity URL */ }
+
+        if (matched is null)
+        {
+            try
+            {
+                var invites = await guild.GetInvitesAsync();
+                matched = invites.FirstOrDefault(i => string.Equals(i.Code, code, StringComparison.Ordinal));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to fetch invites for /invite revoke");
+                await command.FollowupAsync("Couldn't fetch the invite list from Discord. Try again.", ephemeral: true);
+                return;
+            }
+        }
+
+        // ── Vanity URL guard ────────────────────────────────────────
+        // The vanity URL can't be deleted via the invite API — it's
+        // managed in Server Settings → Vanity URL. We could call
+        // ModifyVanityUrlAsync to clear it, but that's a separate
+        // destructive action with broader implications, so we punt.
+        if (isVanity)
+        {
+            await command.FollowupAsync(
+                $"`{code}` is the vanity URL. It can't be revoked via this command — remove it from " +
+                "**Server Settings → Vanity URL** instead. The InviteSource row will keep historical attribution either way.",
+                ephemeral: true);
+            return;
+        }
+
+        // ── Look up our row for the preview / revoke confirmation ──
+        InviteSource? source;
+        using (var scope = _services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+            source = await db.InviteSources
+                .FirstOrDefaultAsync(s => s.GuildId == command.GuildId.Value && s.Code == code);
+        }
+
+        if (matched is null && source is null)
+        {
+            await command.FollowupAsync(
+                $"No invite found for code `{code}` — Discord doesn't recognize it and we have no source row either.",
+                ephemeral: true);
+            return;
+        }
+
+        if (matched is null && source is not null && !source.IsActive)
+        {
+            await command.FollowupAsync(
+                $"`{code}` is already revoked (deactivated <t:{new DateTimeOffset(source.DeactivatedAt ?? source.CreatedAt, TimeSpan.Zero).ToUnixTimeSeconds()}:R>). Nothing to do.",
+                ephemeral: true);
+            return;
+        }
+
+        // ── Preview path ────────────────────────────────────────────
+        if (!confirmed)
+        {
+            var labelLine = source is not null ? $"**{source.Label}**" : "**(unlabeled)**";
+            var usesLine = matched is not null
+                ? $"{matched.Uses ?? 0}{((matched.MaxUses ?? 0) > 0 ? $"/{matched.MaxUses}" : "")} use(s)"
+                : "(no live invite)";
+            var expiresLine = matched is not null && (matched.MaxAge ?? 0) > 0 && matched.CreatedAt.HasValue
+                ? DiscordTimestamp(matched.CreatedAt.Value.UtcDateTime.AddSeconds(matched.MaxAge!.Value), 'R')
+                : "never";
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"⚠️ **About to revoke** {labelLine} (`{code}`)");
+            sb.AppendLine($"• Channel: {(source?.ChannelId is ulong chId ? $"<#{chId}>" : "(unknown)")}");
+            sb.AppendLine($"• Current uses: {usesLine}");
+            sb.AppendLine($"• Expires: {expiresLine}");
+            sb.AppendLine();
+            sb.AppendLine("Run again with `confirm:true` to proceed. Historical attribution rows will be preserved.");
+
+            await command.FollowupAsync(sb.ToString(), ephemeral: true);
+            return;
+        }
+
+        // ── Revoke path ─────────────────────────────────────────────
+        // Discord's delete-invite endpoint is per-invite; we can call it
+        // even if our InviteSource row is missing. The InviteDeleted
+        // gateway event will fire and our handler will flip IsActive=false
+        // (or no-op if there's no row).
+        if (matched is null)
+        {
+            // We have a stale source row but no live invite — nothing to
+            // delete on Discord's side. Just mark our row inactive so
+            // /invite list stops surfacing it as a "still pending" row.
+            using var scope = _services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+            if (source is not null && source.IsActive)
+            {
+                source.IsActive = false;
+                source.DeactivatedAt = DateTime.UtcNow;
+                db.InviteSources.Update(source);
+                await db.SaveChangesAsync();
+            }
+            await command.FollowupAsync(
+                $"`{code}` was already gone from Discord. Marked our row inactive.",
+                ephemeral: true);
+            _logger.LogInformation("{Caller} marked stale InviteSource {Code} inactive", caller.Username, code);
+            return;
+        }
+
+        try
+        {
+            await matched.DeleteAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Discord rejected DeleteAsync for invite {Code}", code);
+            await command.FollowupAsync(
+                $"Discord refused to delete the invite: {ex.Message}",
+                ephemeral: true);
+            return;
+        }
+
+        // The InviteDeleted gateway event will arrive shortly and the
+        // existing handler will flip IsActive=false + set DeactivatedAt.
+        // We don't write that state ourselves to keep the deactivation
+        // flow single-pathed.
+        var labelForLog = source?.Label ?? "(unlabeled)";
+        await command.FollowupAsync(
+            $"✅ Revoked **{labelForLog}** (`{code}`). Historical attribution preserved.",
+            ephemeral: true);
+
+        _logger.LogInformation(
+            "{Caller} revoked invite {Code} (label='{Label}')",
+            caller.Username, code, labelForLog);
     }
 
     // ── Helpers ─────────────────────────────────────────────────────
@@ -591,6 +1374,41 @@ public class InviteCommandHandler
                     "Friendly label, e.g. \"Vanity\", \"Website\"", isRequired: true)
                 .AddOption("notes", ApplicationCommandOptionType.String,
                     "Optional officer note", isRequired: false))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("list")
+                .WithDescription("List every tracked invite (and any unlabeled live invites in the server)")
+                .WithType(ApplicationCommandOptionType.SubCommand))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("info")
+                .WithDescription("Show detailed info and recent joins for a specific invite code")
+                .WithType(ApplicationCommandOptionType.SubCommand)
+                .AddOption("code", ApplicationCommandOptionType.String,
+                    "The invite code to look up", isRequired: true)
+                .AddOption("limit", ApplicationCommandOptionType.Integer,
+                    $"How many recent joins to show (1–{InfoRecentJoinsMax}). Default: {InfoRecentJoinsDefault}.",
+                    isRequired: false))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("stats")
+                .WithDescription("Show join counts by label and top referrers in a time window")
+                .WithType(ApplicationCommandOptionType.SubCommand)
+                .AddOption(new SlashCommandOptionBuilder()
+                    .WithName("window")
+                    .WithDescription("Time window. Default: 7d.")
+                    .WithType(ApplicationCommandOptionType.String)
+                    .WithRequired(false)
+                    .AddChoice("Last 7 days",  "7d")
+                    .AddChoice("Last 30 days", "30d")
+                    .AddChoice("Last 90 days", "90d")
+                    .AddChoice("All time",     "all")))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("revoke")
+                .WithDescription("Revoke a tracked invite. Pass confirm:true to actually delete it.")
+                .WithType(ApplicationCommandOptionType.SubCommand)
+                .AddOption("code", ApplicationCommandOptionType.String,
+                    "The invite code to revoke", isRequired: true)
+                .AddOption("confirm", ApplicationCommandOptionType.Boolean,
+                    "Set true to actually revoke. Without this, you'll see a preview.",
+                    isRequired: false))
             .Build();
     }
 }
