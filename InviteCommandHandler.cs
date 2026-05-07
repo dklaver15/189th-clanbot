@@ -595,6 +595,21 @@ public class InviteCommandHandler
             return;
         }
 
+        // Filter out invites created by the Disboard bot. Disboard's /bump
+        // flow auto-creates a fresh invite each time the server is bumped
+        // to its directory listing, which means up to ~12 Disboard-owned
+        // invites can accumulate per day. They aren't real recruitment
+        // links any officer would pick up and share, just operational
+        // artifacts. Identified by Inviter.Id matching the well-known
+        // Disboard bot ID we already track for BumpReminderHandler.
+        // Pairs with the matching skip in
+        // InviteAttributionService.AttributeAsync — joins via Disboard
+        // codes get recorded as Unattributed rather than attributed
+        // through to a Disboard-owned code as "Unknown".
+        liveInvites = liveInvites
+            .Where(i => i.Inviter?.Id != _config.DisboardBotId)
+            .ToList();
+
         try { vanity = await guild.GetVanityInviteAsync(); }
         catch { /* no vanity URL configured — that's fine */ }
 
@@ -619,6 +634,14 @@ public class InviteCommandHandler
         // Pass 1: every live regular invite Discord knows about
         foreach (var live in liveInvites)
         {
+            // Skip invites created by ignored bots (e.g. Disboard's /bump
+            // flow). They're operational noise, not recruitment data, and
+            // they'd otherwise clutter /invite list with rows officers
+            // can't act on. Same filter that InviteAttributionService
+            // applies on the attribution side, kept consistent here.
+            if (live.Inviter is not null && _config.IsIgnoredInviter(live.Inviter.Id))
+                continue;
+
             sourcesByCode.TryGetValue(live.Code, out var src);
             rows.Add(new InviteListRow(
                 Code:        live.Code,
@@ -660,6 +683,14 @@ public class InviteCommandHandler
             .ToHashSet(StringComparer.Ordinal);
         foreach (var src in sources.Where(s => !liveCodes.Contains(s.Code)))
         {
+            // Defensive: same ignored-inviter check as Pass 1, applied to
+            // the source-row's stored creator ID. In practice this never
+            // hits today (we don't auto-create source rows for Disboard's
+            // bump invites) but it keeps the filter consistent if a future
+            // /invite assign ever labels one.
+            if (src.CreatedByDiscordId is ulong srcInviterId && _config.IsIgnoredInviter(srcInviterId))
+                continue;
+
             rows.Add(new InviteListRow(
                 Code:        src.Code,
                 Label:       src.Label,

@@ -5,6 +5,7 @@ using Discord.WebSocket;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
 
 namespace ClanGuardBot.Services;
@@ -44,6 +45,7 @@ public sealed class InviteAttributionService
     private readonly DiscordSocketClient _client;
     private readonly InviteCacheService _cache;
     private readonly ILogger<InviteAttributionService> _logger;
+    private readonly BotConfig _config;
 
     // Per-guild semaphore so UserJoined attribution serializes within a guild
     // while still letting other guild events run in parallel. The bot is
@@ -54,12 +56,14 @@ public sealed class InviteAttributionService
         IServiceProvider services,
         DiscordSocketClient client,
         InviteCacheService cache,
-        ILogger<InviteAttributionService> logger)
+        ILogger<InviteAttributionService> logger,
+        IOptions<BotConfig> config)
     {
         _services = services;
         _client   = client;
         _cache    = cache;
         _logger   = logger;
+        _config   = config.Value;
     }
 
     public void Register(DiscordSocketClient client)
@@ -254,6 +258,25 @@ public sealed class InviteAttributionService
                 // whose join was whose.
                 label = LabelAmbiguous;
                 ambiguous = true;
+            }
+
+            // ── Ignored-inviter short-circuit ───────────────────────
+            // Some bots (Disboard's bump flow) create short-lived invites
+            // as a side effect. Joins through those are operational noise,
+            // not recruitment data — we don't want them in /invite stats,
+            // /invite info, or the briefing. The cache must still roll
+            // forward so the *next* genuine join still diffs cleanly; we
+            // just skip writing the InviteJoin row.
+            if (inviterId.HasValue && _config.IsIgnoredInviter(inviterId.Value))
+            {
+                _cache.ReplaceAll(
+                    currentInvites.Select(i => (i.Code, i.Uses ?? 0)),
+                    currentVanityUses);
+
+                _logger.LogInformation(
+                    "Skipped attribution for {User}: invite {Code} was created by an ignored bot inviter ({InviterId})",
+                    user.Username, winningCode ?? "?", inviterId.Value);
+                return;
             }
 
             // ── Persist + roll cache forward ─────────────────────────
