@@ -12,9 +12,12 @@ using System.Text;
 namespace ClanGuardBot.Handlers;
 
 /// <summary>
-/// Handles the full /invite command surface: create, assign (Phase 1) plus
-/// list, info, stats, revoke (Phase 2). All responses are ephemeral so
-/// neither links nor labels leak to public channels.
+/// Handles the full /invite command surface: create, assign (Phase 1),
+/// list, info, stats, revoke (Phase 2), edit-notes (Phase 3). All
+/// responses are ephemeral so neither links nor labels leak to public
+/// channels. The /invite info command supports button-based pagination
+/// for invites with many attributed joins; pagination buttons stay
+/// clickable indefinitely (Discord doesn't expire button interactions).
 ///
 /// ── Permission model ──
 /// Per-subcommand, intentionally split:
@@ -94,6 +97,10 @@ public class InviteCommandHandler
     public void Register(DiscordSocketClient client)
     {
         client.SlashCommandExecuted += HandleCommandAsync;
+        // Pagination buttons on /invite info responses route through here.
+        // We only act on customIds starting with our prefix; everything else
+        // is silently ignored so other handlers' buttons aren't disturbed.
+        client.ButtonExecuted += HandleButtonAsync;
     }
 
     private async Task HandleCommandAsync(SocketSlashCommand command)
@@ -107,7 +114,7 @@ public class InviteCommandHandler
         if (sub is null)
         {
             await command.RespondAsync(
-                "Missing subcommand. Try `/invite create`, `/invite assign`, `/invite list`, `/invite info`, `/invite stats`, or `/invite revoke`.",
+                "Missing subcommand. Try `/invite create`, `/invite assign`, `/invite edit-notes`, `/invite list`, `/invite info`, `/invite stats`, or `/invite revoke`.",
                 ephemeral: true);
             return;
         }
@@ -121,6 +128,9 @@ public class InviteCommandHandler
                     break;
                 case "assign":
                     await HandleAssign(command, sub);
+                    break;
+                case "edit-notes":
+                    await HandleEditNotes(command, sub);
                     break;
                 case "list":
                     await HandleList(command, sub);
@@ -914,13 +924,27 @@ public class InviteCommandHandler
 
     // ── /invite info ────────────────────────────────────────────────
     //
-    // Drill-down on one code: source metadata + recent attributed joins.
-    // Gated at InviteManagementMinRank because individual recruit
+    // Drill-down on one code: source metadata + paginated attributed
+    // joins. Gated at InviteManagementMinRank because individual recruit
     // attribution is more sensitive than aggregate stats — you can see
     // exactly which member joined via which link.
+    //
+    // Pagination uses Discord button interactions. Page size is fixed at
+    // 25 (replaced the older limit:N arg). Buttons stay clickable
+    // indefinitely — Discord doesn't expire button interactions, only
+    // the underlying ephemeral message can age out, which takes long
+    // enough to not matter for officer use.
 
-    private const int InfoRecentJoinsDefault = 25;
-    private const int InfoRecentJoinsMax     = 50;
+    private const int InfoPageSize = 25;
+
+    /// <summary>
+    /// CustomId prefix for our pagination buttons. The full format is
+    /// "invite-info:&lt;code&gt;:&lt;page&gt;". Discord caps customId at
+    /// 100 chars; even with a 32-char vanity slug and a 4-digit page
+    /// number we stay well under that.
+    /// </summary>
+    private const string InfoButtonIdPrefix = "invite-info:";
+    private const string InfoLabelButtonIdPrefix = "invite-info-label:";
 
     private async Task HandleInfo(SocketSlashCommand command, SocketSlashCommandDataOption sub)
     {
@@ -948,47 +972,147 @@ public class InviteCommandHandler
             return;
         }
 
-        int limit = InfoRecentJoinsDefault;
-        var limitOpt = sub.Options.FirstOrDefault(o => o.Name == "limit")?.Value;
-        if (limitOpt is not null)
+        var guild = (command.Channel as SocketGuildChannel)?.Guild;
+        var result = await BuildInfoResponseAsync(guild, command.GuildId.Value, code, page: 0);
+
+        if (result.ErrorMessage is not null)
         {
-            var asLong = Convert.ToInt64(limitOpt);
-            if (asLong < 1 || asLong > InfoRecentJoinsMax)
-            {
-                await command.FollowupAsync(
-                    $"`limit` must be between 1 and {InfoRecentJoinsMax}.", ephemeral: true);
-                return;
-            }
-            limit = (int)asLong;
+            await command.FollowupAsync(result.ErrorMessage, ephemeral: true);
+            return;
         }
 
+        await command.FollowupAsync(
+            embed:      result.Embed,
+            components: result.Components,
+            ephemeral:  true);
+
+        _logger.LogInformation(
+            "{Caller} ran /invite info code={Code} (totalJoins={Total})",
+            caller.Username, code, result.TotalJoinCount);
+    }
+
+    /// <summary>
+    /// Routes button-click events. Only acts on customIds with our
+    /// pagination prefix; everything else is ignored so other handlers'
+    /// buttons aren't disturbed. (Discord delivers ButtonExecuted to
+    /// every subscribed handler, regardless of which message owns the
+    /// button.)
+    /// </summary>
+    private async Task HandleButtonAsync(SocketMessageComponent component)
+    {
+        var customId = component.Data.CustomId;
+        if (customId is null || !customId.StartsWith(InfoButtonIdPrefix, StringComparison.Ordinal))
+            return;
+
+        try
+        {
+            await HandleInfoButtonAsync(component, customId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error handling /invite info pagination button (customId={CustomId})", customId);
+            // Best-effort feedback — if the interaction was already deferred
+            // and ModifyOriginalResponseAsync failed, this followup may also
+            // fail; nothing we can do beyond logging at that point.
+            try
+            {
+                await component.FollowupAsync("Something went wrong loading that page. Try the command again.",
+                    ephemeral: true);
+            }
+            catch { /* swallowed */ }
+        }
+    }
+
+    private async Task HandleInfoButtonAsync(SocketMessageComponent component, string customId)
+    {
+        // Acknowledge within Discord's 3-second window. After this we have
+        // up to 15 minutes to update the original message.
+        await component.DeferAsync(ephemeral: true);
+
+        // Format: "invite-info:<code>:<page>" — split on ':' once and once
+        // again. Codes never contain colons (Discord codes are alphanumeric
+        // plus dashes/underscores).
+        var rest = customId.Substring(InfoButtonIdPrefix.Length);
+        var lastColon = rest.LastIndexOf(':');
+        if (lastColon < 1 || lastColon == rest.Length - 1)
+        {
+            _logger.LogWarning("Malformed pagination customId: {CustomId}", customId);
+            return;
+        }
+        var code = rest[..lastColon];
+        if (!int.TryParse(rest[(lastColon + 1)..], out var page) || page < 0)
+        {
+            _logger.LogWarning("Malformed page number in customId: {CustomId}", customId);
+            return;
+        }
+
+        if (component.GuildId is null)
+        {
+            // Edge: button was somehow clicked outside a guild context.
+            return;
+        }
+
+        var guild = (component.Channel as SocketGuildChannel)?.Guild;
+        var result = await BuildInfoResponseAsync(guild, component.GuildId.Value, code, page);
+
+        if (result.ErrorMessage is not null)
+        {
+            // The underlying invite/source/joins were deleted between the
+            // initial command and this click. Tell the user the data's gone
+            // rather than leaving them staring at stale buttons.
+            await component.ModifyOriginalResponseAsync(m =>
+            {
+                m.Content = result.ErrorMessage;
+                m.Embed = null;
+                m.Components = new ComponentBuilder().Build();
+            });
+            return;
+        }
+
+        await component.ModifyOriginalResponseAsync(m =>
+        {
+            m.Embed = result.Embed;
+            m.Components = result.Components;
+        });
+    }
+
+    /// <summary>
+    /// Builds the embed and pagination components for /invite info, given
+    /// a guild + code + page (0-indexed). Same code path serves both the
+    /// initial slash command and every subsequent button click — keeps
+    /// the rendering logic in one place. Returns ErrorMessage non-null
+    /// when there's nothing to display (caller chooses how to surface it).
+    /// </summary>
+    private async Task<InfoResponse> BuildInfoResponseAsync(
+        SocketGuild? guild, ulong guildId, string code, int page)
+    {
+        // Clamp page to non-negative. Higher bound is checked after we
+        // know totalJoinCount, since pageSize math depends on it.
+        if (page < 0) page = 0;
+
+        // ── DB queries ──────────────────────────────────────────────
         InviteSource? source;
-        List<InviteJoin> recentJoins;
+        List<InviteJoin> pageJoins;
         int totalJoinCount;
         using (var scope = _services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
             source = await db.InviteSources
-                .FirstOrDefaultAsync(s => s.GuildId == command.GuildId.Value && s.Code == code);
+                .FirstOrDefaultAsync(s => s.GuildId == guildId && s.Code == code);
 
             totalJoinCount = await db.InviteJoins
-                .CountAsync(j => j.GuildId == command.GuildId.Value && j.InviteCode == code);
+                .CountAsync(j => j.GuildId == guildId && j.InviteCode == code);
 
-            recentJoins = await db.InviteJoins
-                .Where(j => j.GuildId == command.GuildId.Value && j.InviteCode == code)
+            pageJoins = await db.InviteJoins
+                .Where(j => j.GuildId == guildId && j.InviteCode == code)
                 .OrderByDescending(j => j.JoinedAt)
-                .Take(limit)
+                .Skip(page * InfoPageSize)
+                .Take(InfoPageSize)
                 .ToListAsync();
         }
 
-        // ── Pull live invite data for this code ─────────────────────
-        // Without this, /invite info on an unlabeled live invite would
-        // fall through to "no data" — even though Discord's API has
-        // plenty to show (creator, channel, expiry). We check vanity
-        // first since GetVanityInviteAsync is a separate endpoint, then
-        // fall back to scanning GetInvitesAsync for a regular match.
-        var guild = (command.Channel as SocketGuildChannel)?.Guild;
+        // ── Live invite (regular or vanity) ─────────────────────────
         IInviteMetadata? live = null;
         bool liveIsVanity = false;
         if (guild is not null)
@@ -1013,28 +1137,22 @@ public class InviteCommandHandler
                 }
                 catch (Exception ex)
                 {
-                    // Don't fail the whole command if Discord refuses — just
-                    // proceed with whatever we have in the DB. Logged for
-                    // visibility but not surfaced to the officer.
                     _logger.LogWarning(ex, "Failed to fetch live invite list during /invite info code={Code}", code);
                 }
             }
         }
 
-        // Bail only if we have nothing at all to show — no source row,
-        // no historical attribution rows, AND no live invite. Otherwise
-        // we always have *something* worth rendering.
+        // Bail only if we have nothing at all to show.
         if (source is null && totalJoinCount == 0 && live is null)
         {
-            await command.FollowupAsync(
-                $"No data for code `{code}`. Discord doesn't recognize it, we have no source row, and no joins have ever been attributed to it.",
-                ephemeral: true);
-            return;
+            return new InfoResponse(
+                Embed: null,
+                Components: new ComponentBuilder().Build(),
+                TotalJoinCount: 0,
+                ErrorMessage: $"No data for code `{code}`. Discord doesn't recognize it, we have no source row, and no joins have ever been attributed to it.");
         }
 
         // ── Build the metadata embed ────────────────────────────────
-        // Color reflects state at a glance — grey for revoked, gold for
-        // vanity, blue for active labeled, light grey for unlabeled.
         var isUnlabeled = source is null;
         var isRevoked   = source is not null ? !source.IsActive : (live is null && totalJoinCount > 0);
         var isVanity    = source?.IsVanity ?? liveIsVanity;
@@ -1044,9 +1162,6 @@ public class InviteCommandHandler
                   : isUnlabeled ? Color.LightGrey
                   : Color.Blue;
 
-        // Title carries the label (real or "(unlabeled)") so officers
-        // scanning ephemeral replies can match the row they're drilling
-        // into without parsing fields.
         var titleLabel = source?.Label ?? "(unlabeled)";
         var title = $"📨 Invite info — {titleLabel}";
 
@@ -1054,12 +1169,6 @@ public class InviteCommandHandler
             .WithTitle(title)
             .WithColor(color);
 
-        // ── Status: unified across the five possible states ─────────
-        //   1. source revoked               → "Revoked"
-        //   2. no source, no live, has joins → "Revoked (no source row)"
-        //   3. source active vanity         → "Active (vanity URL)"
-        //   4. source active regular        → "Active"
-        //   5. no source, live found        → "Active (unlabeled)"
         string status = (source, live, totalJoinCount) switch
         {
             ({ IsActive: false }, _, _)   => "Revoked",
@@ -1073,38 +1182,22 @@ public class InviteCommandHandler
         embed.AddField("Status", status, inline: true);
         embed.AddField("Code",   $"`{code}`", inline: true);
 
-        // Channel — prefer source's stored channel, fall back to live.
         ulong? channelId = source?.ChannelId
                            ?? (live is not null && !liveIsVanity ? live.ChannelId : null);
         if (channelId is ulong chId)
             embed.AddField("Channel", $"<#{chId}>", inline: true);
 
-        // Created by — prefer source snapshot, fall back to live Inviter.
-        // Mention the user when we have an ID; otherwise show the snapshot
-        // text or live username (no `@` since it's plain text in that case).
         if (source?.CreatedByDiscordId is ulong creatorId)
-        {
             embed.AddField("Created by", $"<@{creatorId}>", inline: true);
-        }
         else if (live?.Inviter is IUser inviter)
-        {
             embed.AddField("Created by", $"<@{inviter.Id}>", inline: true);
-        }
         else if (source is not null && !string.IsNullOrWhiteSpace(source.CreatedByUsername))
-        {
             embed.AddField("Created by", source.CreatedByUsername, inline: true);
-        }
-        // else: skip — vanity URL with no source row, or very old invite
-        // whose creator Discord no longer surfaces.
 
-        // Created — prefer source's authored timestamp, fall back to live.
-        DateTime? createdAt = source?.CreatedAt
-                              ?? live?.CreatedAt?.UtcDateTime;
+        DateTime? createdAt = source?.CreatedAt ?? live?.CreatedAt?.UtcDateTime;
         if (createdAt is DateTime ca)
             embed.AddField("Created", DiscordTimestamp(ca, 'R'), inline: true);
 
-        // Expires — prefer source's cached expiry, fall back to computing
-        // from the live invite's MaxAge + CreatedAt. Vanity never expires.
         DateTime? expiresAt = source?.ExpiresAt
                               ?? (live is not null && !liveIsVanity ? ComputeExpiresAt(live) : null);
         if (isVanity)
@@ -1114,14 +1207,11 @@ public class InviteCommandHandler
         else
             embed.AddField("Expires", "never", inline: true);
 
-        // Max uses — same precedence pattern.
         int? maxUses = source?.MaxUses
                        ?? (live is not null && (live.MaxUses ?? 0) > 0 ? live.MaxUses : null);
         if (maxUses is int cap)
             embed.AddField("Max uses", cap.ToString(), inline: true);
 
-        // Current uses (live only — historical for revoked invites is
-        // captured by Total joins attributed below).
         if (live is not null)
             embed.AddField("Current uses", (live.Uses ?? 0).ToString(), inline: true);
 
@@ -1133,8 +1223,6 @@ public class InviteCommandHandler
 
         embed.AddField("Total joins attributed", totalJoinCount.ToString(), inline: true);
 
-        // Hint for unlabeled invites — surfaces the natural next step
-        // (assign a label) right where the officer is already looking.
         if (isUnlabeled && live is not null)
         {
             embed.AddField(
@@ -1143,21 +1231,31 @@ public class InviteCommandHandler
                 inline: false);
         }
 
-        // ── Recent joins list ───────────────────────────────────────
-        if (recentJoins.Count == 0)
+        // ── Recent joins page ───────────────────────────────────────
+        int totalPages = totalJoinCount == 0
+            ? 1
+            : (int)Math.Ceiling(totalJoinCount / (double)InfoPageSize);
+
+        // If a button click somehow arrived for a page beyond the current
+        // last page (e.g. joins were deleted), clamp to the last valid page
+        // so we render something useful instead of an empty list.
+        if (page >= totalPages) page = Math.Max(0, totalPages - 1);
+
+        if (totalJoinCount == 0)
         {
             embed.AddField("Recent joins", "_None yet._", inline: false);
         }
         else
         {
             var sb = new StringBuilder();
-            foreach (var join in recentJoins)
+            foreach (var join in pageJoins)
             {
                 var when = DiscordTimestamp(join.JoinedAt, 'R');
                 var ambig = join.IsAmbiguous ? " *(ambiguous)*" : "";
                 sb.AppendLine($"• {when} — **{join.Username}**{ambig}");
 
-                // Stay clear of Discord's 1024-char field limit
+                // Discord embed field value max is 1024 chars. 25 rows of
+                // ~50 chars each lands comfortably under that, but defensive.
                 if (sb.Length > 950)
                 {
                     sb.AppendLine("_…truncated to fit_");
@@ -1165,18 +1263,175 @@ public class InviteCommandHandler
                 }
             }
 
-            var fieldName = recentJoins.Count < totalJoinCount
-                ? $"Recent joins (showing {recentJoins.Count} of {totalJoinCount})"
-                : $"Recent joins ({recentJoins.Count})";
+            int startIdx = page * InfoPageSize + 1;
+            int endIdx   = Math.Min(startIdx + InfoPageSize - 1, totalJoinCount);
+            var fieldName = totalPages > 1
+                ? $"Recent joins (showing {startIdx}–{endIdx} of {totalJoinCount})"
+                : $"Recent joins ({totalJoinCount})";
 
             embed.AddField(fieldName, sb.ToString(), inline: false);
         }
 
-        await command.FollowupAsync(embed: embed.Build(), ephemeral: true);
+        // ── Build pagination buttons ────────────────────────────────
+        // Only attach buttons when there's more than one page. A single
+        // page of joins (or zero joins) shows the embed alone.
+        var components = totalPages > 1
+            ? BuildInfoComponents(code, page, totalPages)
+            : new ComponentBuilder().Build();
 
-        _logger.LogInformation(
-            "{Caller} ran /invite info code={Code}", caller.Username, code);
+        return new InfoResponse(
+            Embed: embed.Build(),
+            Components: components,
+            TotalJoinCount: totalJoinCount,
+            ErrorMessage: null);
     }
+
+    /// <summary>
+    /// Three-button row: ◀ Prev, "Page X / Y" (disabled label), Next ▶.
+    /// Boundary buttons disable themselves so a click can't fall off the
+    /// ends — Discord won't even send the event for a disabled button.
+    /// </summary>
+    private static MessageComponent BuildInfoComponents(string code, int currentPage, int totalPages)
+    {
+        var prevId  = $"{InfoButtonIdPrefix}{code}:{currentPage - 1}";
+        var nextId  = $"{InfoButtonIdPrefix}{code}:{currentPage + 1}";
+        var labelId = $"{InfoLabelButtonIdPrefix}{code}:{currentPage}:{totalPages}";
+
+        return new ComponentBuilder()
+            .WithButton(
+                label:    "◀ Prev",
+                customId: prevId,
+                style:    ButtonStyle.Secondary,
+                disabled: currentPage <= 0)
+            .WithButton(
+                // 1-indexed for users — easier to read.
+                label:    $"Page {currentPage + 1} / {totalPages}",
+                customId: labelId,
+                style:    ButtonStyle.Secondary,
+                disabled: true)
+            .WithButton(
+                label:    "Next ▶",
+                customId: nextId,
+                style:    ButtonStyle.Secondary,
+                disabled: currentPage >= totalPages - 1)
+            .Build();
+    }
+
+    /// <summary>
+    /// Bundle returned by BuildInfoResponseAsync. Either Embed +
+    /// Components are populated and ErrorMessage is null, OR
+    /// ErrorMessage is populated and the embed/components are empty.
+    /// Never both.
+    /// </summary>
+    private sealed record InfoResponse(
+        Embed? Embed,
+        MessageComponent Components,
+        int TotalJoinCount,
+        string? ErrorMessage);
+
+    // ── /invite edit-notes ──────────────────────────────────────────
+    //
+    // Update the Notes field on an existing InviteSource row. Distinct
+    // from /invite assign in two ways:
+    //   1. Doesn't touch the label.
+    //   2. Treats an empty/whitespace `notes` value as an explicit
+    //      *clear*. The assign path preserves existing notes when the
+    //      field is empty (defensive against accidentally wiping notes
+    //      via re-assign); this path is for officers who deliberately
+    //      want to edit, including erasing.
+    //
+    // Refuses on codes with no InviteSource row — labeling-then-noting
+    // is the intended flow. Notes without a label is a weird state.
+
+    private async Task HandleEditNotes(SocketSlashCommand command, SocketSlashCommandDataOption sub)
+    {
+        await command.DeferAsync(ephemeral: true);
+
+        if (command.GuildId is null)
+        {
+            await command.FollowupAsync("This command can only be used in a server.", ephemeral: true);
+            return;
+        }
+
+        var caller = command.User as SocketGuildUser;
+        if (caller is null || !HasInvitePermission(caller))
+        {
+            await command.FollowupAsync(
+                $"You need {_config.InviteManagementMinRank}+ to edit invite notes.",
+                ephemeral: true);
+            return;
+        }
+
+        var code = (sub.Options.FirstOrDefault(o => o.Name == "code")?.Value as string)?.Trim();
+        if (string.IsNullOrWhiteSpace(code))
+        {
+            await command.FollowupAsync("`code` is required.", ephemeral: true);
+            return;
+        }
+
+        // notes is required at the schema level so it's always present;
+        // we treat empty/whitespace as an explicit clear.
+        var notesRaw = (sub.Options.FirstOrDefault(o => o.Name == "notes")?.Value as string) ?? string.Empty;
+        var notes = notesRaw.Trim();
+
+        // Defensive cap at 500 chars. Discord embed fields max at 1024;
+        // capping below that leaves headroom for officers prefixing or
+        // suffixing context later. The create/assign paths don't cap;
+        // this is the editing surface so it's the right place to enforce.
+        const int NotesMaxLength = 500;
+        if (notes.Length > NotesMaxLength)
+        {
+            await command.FollowupAsync(
+                $"`notes` must be {NotesMaxLength} characters or fewer (got {notes.Length}).",
+                ephemeral: true);
+            return;
+        }
+
+        try
+        {
+            using var scope = _services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+            var existing = await db.InviteSources
+                .FirstOrDefaultAsync(s => s.GuildId == command.GuildId.Value && s.Code == code);
+
+            if (existing is null)
+            {
+                await command.FollowupAsync(
+                    $"No source row exists for `{code}`. Run `/invite assign code:{code} label:<name>` to label it first, " +
+                    "then come back here to set notes.",
+                    ephemeral: true);
+                return;
+            }
+
+            var oldNotes = existing.Notes ?? string.Empty;
+            existing.Notes = notes; // empty string is an explicit clear
+            await db.SaveChangesAsync();
+
+            // Build a clear officer-facing diff so it's obvious what changed.
+            // Using inline code blocks for the values so empty / whitespace
+            // changes are visible.
+            string Format(string s) => string.IsNullOrEmpty(s) ? "*(empty)*" : $"`{s}`";
+
+            var diff = oldNotes == notes
+                ? $"Notes on **{existing.Label}** (`{code}`) unchanged."
+                : $"Updated notes on **{existing.Label}** (`{code}`):\n" +
+                  $"• Before: {Format(oldNotes)}\n" +
+                  $"• After:  {Format(notes)}";
+
+            await command.FollowupAsync($"✅ {diff}", ephemeral: true);
+
+            _logger.LogInformation(
+                "{Caller} edited notes on invite {Code} (label='{Label}'): '{OldNotes}' -> '{NewNotes}'",
+                caller.Username, code, existing.Label, oldNotes, notes);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to edit notes on InviteSource code={Code}", code);
+            await command.FollowupAsync("Failed to save the notes. Check the bot logs.", ephemeral: true);
+        }
+    }
+
 
     // ── /invite stats ───────────────────────────────────────────────
     //
@@ -1606,6 +1861,15 @@ public class InviteCommandHandler
                 .AddOption("notes", ApplicationCommandOptionType.String,
                     "Optional officer note", isRequired: false))
             .AddOption(new SlashCommandOptionBuilder()
+                .WithName("edit-notes")
+                .WithDescription("Update the notes on an existing tracked invite (pass empty notes to clear)")
+                .WithType(ApplicationCommandOptionType.SubCommand)
+                .AddOption("code", ApplicationCommandOptionType.String,
+                    "The invite code whose notes you want to edit", isRequired: true)
+                .AddOption("notes", ApplicationCommandOptionType.String,
+                    "New notes (max 500 chars). Pass empty to clear existing notes.",
+                    isRequired: true))
+            .AddOption(new SlashCommandOptionBuilder()
                 .WithName("list")
                 .WithDescription("List every tracked invite (and any unlabeled live invites in the server)")
                 .WithType(ApplicationCommandOptionType.SubCommand)
@@ -1619,13 +1883,10 @@ public class InviteCommandHandler
                     .AddChoice("All",           "all")))
             .AddOption(new SlashCommandOptionBuilder()
                 .WithName("info")
-                .WithDescription("Show detailed info and recent joins for a specific invite code")
+                .WithDescription("Show detailed info and paginated joins for a specific invite code")
                 .WithType(ApplicationCommandOptionType.SubCommand)
                 .AddOption("code", ApplicationCommandOptionType.String,
-                    "The invite code to look up", isRequired: true)
-                .AddOption("limit", ApplicationCommandOptionType.Integer,
-                    $"How many recent joins to show (1–{InfoRecentJoinsMax}). Default: {InfoRecentJoinsDefault}.",
-                    isRequired: false))
+                    "The invite code to look up", isRequired: true))
             .AddOption(new SlashCommandOptionBuilder()
                 .WithName("stats")
                 .WithDescription("Show join counts by label and top referrers in a time window")
