@@ -8,7 +8,7 @@ using System.Text;
 namespace ClanGuardBot.Handlers;
 
 /// <summary>
-/// Handles the /commands slash command — a self-service catalog of every
+/// Handles the /command-catalog slash command — a self-service catalog of every
 /// slash command the bot exposes, filtered to only those the caller can
 /// actually run at their current rank or permission set.
 ///
@@ -52,7 +52,7 @@ namespace ClanGuardBot.Handlers;
 /// </summary>
 public class CommandsCommandHandler
 {
-    public const string CommandName = "commands";
+    public const string CommandName = "command-catalog";
 
     private readonly ILogger<CommandsCommandHandler> _logger;
     private readonly BotConfig _config;
@@ -130,8 +130,8 @@ public class CommandsCommandHandler
         await command.FollowupAsync(embed: embed, ephemeral: true);
 
         _logger.LogInformation(
-            "/commands rendered for {User}: {Count} visible entries",
-            caller.Username, visible.Count);
+            "/{Command} rendered for {User}: {Count} visible entries",
+            CommandName, caller.Username, visible.Count);
     }
 
     // ── Rendering ────────────────────────────────────────────────────
@@ -287,7 +287,7 @@ public class CommandsCommandHandler
                 "Everyone", everyone, SortEveryone()),
             new("calendar", "Show upcoming events from the clan calendar",
                 "Everyone", everyone, SortEveryone()),
-            new("commands", "Show this list of available slash commands",
+            new("command-catalog", "Show this list of available slash commands",
                 "Everyone", everyone, SortEveryone()),
             new("gamertags", "Enter your gamertags (EA, Steam, PSN, Xbox, etc.)",
                 "Everyone", everyone, SortEveryone()),
