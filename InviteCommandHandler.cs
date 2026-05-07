@@ -569,6 +569,18 @@ public class InviteCommandHandler
             return;
         }
 
+        // Parse the filter choice. Default to "active" — the day-to-day
+        // case is "what's live right now"; revoked invites are useful for
+        // audits but rarely the thing you want to scan past every time.
+        var filter = (sub.Options.FirstOrDefault(o => o.Name == "filter")?.Value as string)?.Trim().ToLowerInvariant()
+                     ?? "active";
+        if (filter is not ("active" or "inactive" or "all"))
+        {
+            await command.FollowupAsync(
+                "`filter` must be `active`, `inactive`, or `all`.", ephemeral: true);
+            return;
+        }
+
         // ── Pull all the data in parallel ───────────────────────────
         IReadOnlyCollection<IInviteMetadata> liveInvites;
         IInviteMetadata? vanity = null;
@@ -660,6 +672,31 @@ public class InviteCommandHandler
             return;
         }
 
+        // Apply the active/inactive filter. We capture the unfiltered total
+        // first so the summary line can show "filtered from N total" — that
+        // signals to the user that the default `active` filter may be hiding
+        // rows they'd otherwise see, without them having to remember the
+        // filter exists.
+        int totalUnfiltered = rows.Count;
+        rows = filter switch
+        {
+            "active"   => rows.Where(r => !r.IsRevoked).ToList(),
+            "inactive" => rows.Where(r =>  r.IsRevoked).ToList(),
+            _          => rows,
+        };
+
+        if (rows.Count == 0)
+        {
+            var emptyMsg = filter switch
+            {
+                "active"   => $"No active invites. ({totalUnfiltered} revoked — try `filter:inactive` or `filter:all`.)",
+                "inactive" => $"No revoked invites yet. ({totalUnfiltered} active — try `filter:active` or `filter:all`.)",
+                _          => "No invites found in this server.",
+            };
+            await command.FollowupAsync(emptyMsg, ephemeral: true);
+            return;
+        }
+
         // ── Sort: uses desc → label asc → creation asc ──────────────
         // Three keys because at zero-use volumes there's a long tail and
         // alphabetical-by-label is more useful than chronological as the
@@ -721,10 +758,26 @@ public class InviteCommandHandler
         pages.Add(current);
 
         // ── Send pages ──────────────────────────────────────────────
-        var summary = $"**{rows.Count}** total invite(s) — " +
-                      $"{rows.Count(r => r.IsLabeled && !r.IsRevoked)} labeled active, " +
-                      $"{rows.Count(r => !r.IsLabeled)} unlabeled, " +
-                      $"{rows.Count(r => r.IsRevoked)} revoked";
+        // Summary line tailored to the filter so we don't show meaningless
+        // sub-counts (e.g. "0 revoked" under filter:active is just noise).
+        // When filtered, append "(filtered from N total)" so the user
+        // knows there's more they're not seeing without expanding the filter.
+        var summary = filter switch
+        {
+            "active" =>
+                $"**{rows.Count}** active invite(s) — " +
+                $"{rows.Count(r => r.IsLabeled)} labeled, " +
+                $"{rows.Count(r => !r.IsLabeled)} unlabeled" +
+                (totalUnfiltered > rows.Count ? $" _(filtered from {totalUnfiltered} total)_" : ""),
+            "inactive" =>
+                $"**{rows.Count}** revoked invite(s)" +
+                (totalUnfiltered > rows.Count ? $" _(filtered from {totalUnfiltered} total)_" : ""),
+            _ =>
+                $"**{rows.Count}** total invite(s) — " +
+                $"{rows.Count(r => r.IsLabeled && !r.IsRevoked)} labeled active, " +
+                $"{rows.Count(r => !r.IsLabeled)} unlabeled, " +
+                $"{rows.Count(r => r.IsRevoked)} revoked",
+        };
 
         if (pages.Count == 1)
         {
@@ -740,11 +793,12 @@ public class InviteCommandHandler
         }
 
         _logger.LogInformation(
-            "{Caller} ran /invite list — {Total} rows ({Labeled} labeled, {Unlabeled} unlabeled, {Revoked} revoked)",
-            command.User.Username, rows.Count,
+            "{Caller} ran /invite list filter={Filter} — {Total} rows ({Labeled} labeled, {Unlabeled} unlabeled, {Revoked} revoked, {Hidden} hidden by filter)",
+            command.User.Username, filter, rows.Count,
             rows.Count(r => r.IsLabeled && !r.IsRevoked),
             rows.Count(r => !r.IsLabeled),
-            rows.Count(r => r.IsRevoked));
+            rows.Count(r => r.IsRevoked),
+            totalUnfiltered - rows.Count);
     }
 
     private static DateTime? ComputeExpiresAt(IInviteMetadata invite)
@@ -1377,7 +1431,15 @@ public class InviteCommandHandler
             .AddOption(new SlashCommandOptionBuilder()
                 .WithName("list")
                 .WithDescription("List every tracked invite (and any unlabeled live invites in the server)")
-                .WithType(ApplicationCommandOptionType.SubCommand))
+                .WithType(ApplicationCommandOptionType.SubCommand)
+                .AddOption(new SlashCommandOptionBuilder()
+                    .WithName("filter")
+                    .WithDescription("Which invites to show. Default: active.")
+                    .WithType(ApplicationCommandOptionType.String)
+                    .WithRequired(false)
+                    .AddChoice("Active only",   "active")
+                    .AddChoice("Inactive only", "inactive")
+                    .AddChoice("All",           "all")))
             .AddOption(new SlashCommandOptionBuilder()
                 .WithName("info")
                 .WithDescription("Show detailed info and recent joins for a specific invite code")
