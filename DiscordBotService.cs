@@ -1,6 +1,5 @@
 using ClanGuardBot.Handlers;
 using ClanGuardBot.Models;
-using ClanGuardBot.Services;
 using Discord;
 using Discord.WebSocket;
 using Microsoft.Extensions.Hosting;
@@ -37,8 +36,7 @@ public class DiscordBotService : IHostedService
     private readonly ClearAwolListCommandHandler _clearAwolListHandler;
     private readonly BriefingNowCommandHandler _briefingNowHandler;
     private readonly CleanupCalendarDupesCommandHandler _cleanupCalendarDupesHandler;
-    private readonly InviteAttributionService _inviteAttribution;
-    private readonly InviteCommandHandler _inviteCommandHandler;
+    private readonly CalendarCommandHandler _calendarHandler;
     private readonly ILogger<DiscordBotService> _logger;
     private readonly BotConfig _config;
 
@@ -65,8 +63,7 @@ public class DiscordBotService : IHostedService
         ClearAwolListCommandHandler clearAwolListHandler,
         BriefingNowCommandHandler briefingNowHandler,
         CleanupCalendarDupesCommandHandler cleanupCalendarDupesHandler,
-        InviteAttributionService inviteAttribution,
-        InviteCommandHandler inviteCommandHandler,
+        CalendarCommandHandler calendarHandler,
         ILogger<DiscordBotService> logger,
         IOptions<BotConfig> config)
     {
@@ -92,8 +89,7 @@ public class DiscordBotService : IHostedService
         _clearAwolListHandler        = clearAwolListHandler;
         _briefingNowHandler          = briefingNowHandler;
         _cleanupCalendarDupesHandler = cleanupCalendarDupesHandler;
-        _inviteAttribution           = inviteAttribution;
-        _inviteCommandHandler        = inviteCommandHandler;
+        _calendarHandler             = calendarHandler;
         _logger                      = logger;
         _config                      = config.Value;
     }
@@ -124,8 +120,7 @@ public class DiscordBotService : IHostedService
         _clearAwolListHandler.Register(_client);
         _briefingNowHandler.Register(_client);
         _cleanupCalendarDupesHandler.Register(_client);
-        _inviteAttribution.Register(_client);
-        _inviteCommandHandler.Register(_client);
+        _calendarHandler.Register(_client);
 
         await _client.LoginAsync(TokenType.Bot, _config.Token);
         await _client.StartAsync();
@@ -305,12 +300,17 @@ public class DiscordBotService : IHostedService
                 // option list stays next to the code that consumes it.
                 CleanupCalendarDupesCommandHandler.BuildCommand(),
 
-                // /invite create + /invite assign — tracked invite link
-                // management for join attribution. Same pattern as the
-                // cleanup command above: the slash-command shape lives on
-                // InviteCommandHandler so the option list stays next to the
-                // dispatch code that consumes it.
-                InviteCommandHandler.BuildCommand(),
+                // /calendar — ephemeral day-grouped view of upcoming events
+                // on the clan's Google Calendar. Open to all members; queries
+                // GCal directly so it reflects manual edits made via the
+                // calendar UI as well as bot-managed Apollo + CompDiv events.
+                new SlashCommandBuilder()
+                    .WithName("calendar")
+                    .WithDescription("Show upcoming events from the clan calendar")
+                    .AddOption("days", ApplicationCommandOptionType.Integer,
+                        "How many days ahead to show (1–30, default 7)",
+                        isRequired: false)
+                    .Build(),
             };
 
             foreach (var guild in _client.Guilds)

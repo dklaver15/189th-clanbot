@@ -224,6 +224,42 @@ public class GoogleCalendarService
         return all;
     }
 
+    /// <summary>
+    /// Lists ALL events in the configured calendar within [fromUtc, toUtc]
+    /// regardless of source tag. Includes Clan-tagged events, CompDiv-tagged
+    /// events, AND any events added directly via the Google Calendar UI
+    /// (which won't carry an extendedProperty source tag at all).
+    ///
+    /// Used by /calendar to render a complete day-by-day view for clan
+    /// members. The /cleanup-calendar-dupes path keeps using
+    /// ListClanEventsAsync because it specifically needs to compare against
+    /// the bot's CalendarEvent rows, all of which are clan-sourced.
+    ///
+    /// Paginates via NextPageToken to be safe across wide windows.
+    /// </summary>
+    public async Task<List<Event>> ListAllEventsAsync(DateTime fromUtc, DateTime toUtc)
+    {
+        var all = new List<Event>();
+        string? pageToken = null;
+
+        do
+        {
+            var request = _calendar.Events.List(_config.GoogleCalendarId);
+            request.TimeMinDateTimeOffset = new DateTimeOffset(fromUtc, TimeSpan.Zero);
+            request.TimeMaxDateTimeOffset = new DateTimeOffset(toUtc,   TimeSpan.Zero);
+            request.SingleEvents          = true;
+            request.OrderBy               = EventsResource.ListRequest.OrderByEnum.StartTime;
+            request.PageToken             = pageToken;
+
+            var response = await request.ExecuteAsync();
+            if (response.Items is not null) all.AddRange(response.Items);
+            pageToken = response.NextPageToken;
+        }
+        while (!string.IsNullOrEmpty(pageToken));
+
+        return all;
+    }
+
     // ─── Helpers ─────────────────────────────────────────────────────
 
     private static string Rfc3339(DateTime utc) =>
