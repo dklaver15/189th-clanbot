@@ -33,6 +33,12 @@ public interface IBriefingDataCollector
 ///   • Spotlight — single most-active member of the week by weighted score.
 ///   • WeekOverWeek — deltas vs the prior 7-day window for top-line numbers.
 ///
+/// ── v3 enrichments ──
+///   • RecruitmentSources + TopReferrers — joins this week broken down by
+///     labeled invite source, plus top member referrers. Sourced from
+///     InviteJoin via BriefingInviteSection. Independent of all other
+///     sections; lives in its own helper class for clarity.
+///
 /// ── Performance: batch activity loading ──
 /// Per-member message/voice queries scale with roster size (126+ active
 /// members today). Two GROUP BY queries replace 2N per-member queries:
@@ -157,9 +163,20 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
         var spotlightTask = SafeAsync(() => GetSpotlightAsync(guild, db, ctx7d, ct), "spotlight", null);
         var riskTask      = SafeAsync(() => GetRiskWatchAsync(guild, ctx14d, ct), "risk watch", []);
 
+        // ── v3: Recruitment sources + top referrers ──
+        // Lives in BriefingInviteSection so the new section doesn't tangle
+        // with the existing collector logic. Empty fallback covers both
+        // sub-results in one shot — same pattern as the topLine fallback above.
+        var inviteTask = SafeAsync(
+            () => BriefingInviteSection.CollectAsync(guild, db, weekStart, weekEnd, ct),
+            "recruitment sources",
+            (Sources: (IReadOnlyList<RecruitmentSourceItem>)Array.Empty<RecruitmentSourceItem>(),
+             Referrers: (IReadOnlyList<TopReferrerItem>)Array.Empty<TopReferrerItem>()));
+
         await Task.WhenAll(
             awolTask, promoTask, eventsTask, topLineTask,
-            priorTopLineTask, spotlightTask, riskTask);
+            priorTopLineTask, spotlightTask, riskTask,
+            inviteTask);
 
         var awolRisks = (await awolTask)
             .OrderByDescending(r => r.DaysSinceAwolAssigned)
@@ -184,6 +201,7 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
         var topLine = await topLineTask;
         var priorTopLine = await priorTopLineTask;
         var spotlight = await spotlightTask;
+        var (recruitmentSources, topReferrers) = await inviteTask;
 
         var deltas = new WeekOverWeekDeltas(
             EventsHeldDelta: topLine.EventsHeld - priorTopLine.EventsHeld,
@@ -205,15 +223,19 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
             NotableEvents = notableEvents,
             RiskWatch = riskWatch,
             Spotlight = spotlight,
+            RecruitmentSources = recruitmentSources,
+            TopReferrers = topReferrers,
             Anomalies = []
         };
 
         _logger.LogInformation(
             "Briefing context: {Awol} AWOL risks, {Promo} promo candidates, {Events} events, " +
-            "{Risk} risk-watch, spotlight={Spot}, {Members} active members, " +
+            "{Risk} risk-watch, {Sources} sources, {Referrers} referrers, " +
+            "spotlight={Spot}, {Members} active members, " +
             "WoW: events Δ{EventsDelta}, attendance Δ{AttendanceDelta}pp, recruits Δ{RecruitsDelta}",
             awolRisks.Count, promotionCandidates.Count, notableEvents.Count,
-            riskWatch.Count, spotlight?.Gamertag ?? "—", topLine.ActiveMemberCount,
+            riskWatch.Count, recruitmentSources.Count, topReferrers.Count,
+            spotlight?.Gamertag ?? "—", topLine.ActiveMemberCount,
             deltas.EventsHeldDelta, deltas.AverageAttendancePercentDelta, deltas.NewRecruitsDelta);
 
         return context;

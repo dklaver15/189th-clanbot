@@ -21,6 +21,8 @@ public class BotDbContext : DbContext
     public DbSet<BumpState>           BumpStates          => Set<BumpState>();
     public DbSet<ApolloMessageLog>    ApolloMessageLogs   => Set<ApolloMessageLog>();
     public DbSet<ApolloEvent>         ApolloEvents        => Set<ApolloEvent>();
+    public DbSet<InviteSource>        InviteSources       => Set<InviteSource>();
+    public DbSet<InviteJoin>          InviteJoins         => Set<InviteJoin>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -162,6 +164,40 @@ public class BotDbContext : DbContext
 
             e.HasIndex(x => x.DiscordMessageId).IsUnique();
             e.HasIndex(x => new { x.GuildId, x.Status, x.ParsedStartUtc });
+        });
+
+        // ── Tracked invite links ──────────────────────────────────────
+        // Two tables: InviteSource is the labeled-invite registry written
+        // by /invite create and /invite assign; InviteJoin is the append-
+        // only attribution log written on every UserJoined event observed
+        // by InviteAttributionService. See the entity XML docs for the
+        // full design rationale (label snapshotting, sentinel values for
+        // unattributed joins, etc).
+        modelBuilder.Entity<InviteSource>(e =>
+        {
+            // Code is globally unique at Discord's level but we still scope
+            // the unique index to (GuildId, Code) so a future multi-guild
+            // deployment can't accidentally collide.
+            e.HasIndex(s => new { s.GuildId, s.Code }).IsUnique();
+
+            // Drives /invite list "show me my live labeled invites for this guild".
+            e.HasIndex(s => new { s.GuildId, s.IsActive });
+
+            // Drives the "top referrers" briefing query and any future
+            // "what links did this officer create" lookup.
+            e.HasIndex(s => s.CreatedByDiscordId);
+        });
+
+        modelBuilder.Entity<InviteJoin>(e =>
+        {
+            // Primary briefing query: joins in (guild, time window) grouped by label.
+            e.HasIndex(j => new { j.GuildId, j.JoinedAt });
+
+            // /invite info drill-down: joins for a specific code.
+            e.HasIndex(j => new { j.GuildId, j.InviteCode });
+
+            // Future "this user's join history" lookup if we ever need it.
+            e.HasIndex(j => j.UserDiscordId);
         });
     }
 }

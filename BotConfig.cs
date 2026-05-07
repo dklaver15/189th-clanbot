@@ -188,6 +188,23 @@ public class BotConfig
     /// </summary>
     public string BriefingNowMinRank { get; set; } = "BG";
 
+    /// <summary>
+    /// The minimum rank required to (a) relabel an existing tracked invite
+    /// via /invite assign, and (b) revoke a tracked invite via /invite
+    /// revoke (Phase 2). Both operations are sensitive enough to gate —
+    /// /invite assign can rewrite labels other officers depend on, and
+    /// /invite revoke kills a live link.
+    ///
+    /// /invite create deliberately is NOT gated by this — it's gated by
+    /// Discord's native "Create Invite" channel permission so any member
+    /// who can already create an invite via the Discord UI can also create
+    /// a labeled one. Recruiters labeling their own personal links shouldn't
+    /// have to ladder-climb.
+    ///
+    /// Must exactly match one of the rank names in RankRoles (case-insensitive).
+    /// </summary>
+    public string InviteManagementMinRank { get; set; } = "2ndLT";
+
     // ─── Auto-Promotion Settings ─────────────────────────────────────
 
     /// <summary>

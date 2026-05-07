@@ -33,6 +33,7 @@ try
                        | GatewayIntents.GuildMessages
                        | GatewayIntents.GuildMembers
                        | GatewayIntents.GuildVoiceStates
+                       | GatewayIntents.GuildInvites
                        | GatewayIntents.MessageContent,
         AlwaysDownloadUsers = true,
         LogLevel            = LogSeverity.Info,
@@ -143,6 +144,30 @@ try
 
     // CompEventCommandHandler: /comp-event slash command for CPT+ officers.
     builder.Services.AddSingleton<CompEventCommandHandler>();
+
+    // ── Tracked invite links ─────────────────────────────────────────
+    // InviteCacheService: in-memory snapshot of "uses per invite code" used
+    // by InviteAttributionService to diff against fresh fetched counts on
+    // every UserJoined and figure out which invite a new member used.
+    // Singleton state container; doesn't subscribe to any Discord events
+    // itself (the attribution service owns those).
+    builder.Services.AddSingleton<InviteCacheService>();
+
+    // InviteAttributionService: gateway event handler that owns Ready /
+    // JoinedGuild / UserJoined / InviteCreated / InviteDeleted. Hydrates
+    // the cache on Ready, persists InviteJoin attribution rows on every
+    // UserJoined, and flips InviteSource.IsActive=false on InviteDeleted
+    // (single deactivation flow for both manual /invite revoke and
+    // natural Discord-enforced expiration). Register(client) is called
+    // from DiscordBotService alongside the other handlers.
+    builder.Services.AddSingleton<InviteAttributionService>();
+
+    // InviteCommandHandler: /invite create + /invite assign slash commands.
+    // /invite create is gated only by Discord's native "Create Invite"
+    // channel permission so any member who can already create invites can
+    // also create a labeled one; /invite assign is gated by
+    // BotConfig.InviteManagementMinRank.
+    builder.Services.AddSingleton<InviteCommandHandler>();
 
     // ── Hosted Services ──────────────────────────────────────────────
     builder.Services.AddHostedService<DiscordBotService>();
