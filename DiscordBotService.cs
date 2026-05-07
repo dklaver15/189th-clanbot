@@ -37,6 +37,7 @@ public class DiscordBotService : IHostedService
     private readonly BriefingNowCommandHandler _briefingNowHandler;
     private readonly CleanupCalendarDupesCommandHandler _cleanupCalendarDupesHandler;
     private readonly CalendarCommandHandler _calendarHandler;
+    private readonly CommandsCommandHandler _commandsHandler;
     private readonly ILogger<DiscordBotService> _logger;
     private readonly BotConfig _config;
 
@@ -64,6 +65,7 @@ public class DiscordBotService : IHostedService
         BriefingNowCommandHandler briefingNowHandler,
         CleanupCalendarDupesCommandHandler cleanupCalendarDupesHandler,
         CalendarCommandHandler calendarHandler,
+        CommandsCommandHandler commandsHandler,
         ILogger<DiscordBotService> logger,
         IOptions<BotConfig> config)
     {
@@ -90,6 +92,7 @@ public class DiscordBotService : IHostedService
         _briefingNowHandler          = briefingNowHandler;
         _cleanupCalendarDupesHandler = cleanupCalendarDupesHandler;
         _calendarHandler             = calendarHandler;
+        _commandsHandler             = commandsHandler;
         _logger                      = logger;
         _config                      = config.Value;
     }
@@ -121,6 +124,7 @@ public class DiscordBotService : IHostedService
         _briefingNowHandler.Register(_client);
         _cleanupCalendarDupesHandler.Register(_client);
         _calendarHandler.Register(_client);
+        _commandsHandler.Register(_client);
 
         await _client.LoginAsync(TokenType.Bot, _config.Token);
         await _client.StartAsync();
@@ -318,6 +322,17 @@ public class DiscordBotService : IHostedService
                         .WithRequired(false)
                         .AddChoice("List", "list")
                         .AddChoice("Grid (calendar style)", "grid"))
+                    .Build(),
+
+                // /commands — self-service catalog of every slash command,
+                // filtered to only those the caller can run at their current
+                // rank. Open to everyone; rendered ephemerally. Catalog of
+                // entries lives in CommandsCommandHandler.BuildCatalog and
+                // MUST be updated alongside this list when commands are added,
+                // removed, or have their permission gate changed.
+                new SlashCommandBuilder()
+                    .WithName(CommandsCommandHandler.CommandName)
+                    .WithDescription("Show every slash command available to you at your current rank")
                     .Build(),
             };
 
