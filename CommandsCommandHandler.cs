@@ -295,8 +295,20 @@ public class CommandsCommandHandler
     /// entry visible breathing room. On mobile the block becomes horizontally
     /// scrollable rather than wrapping — preferable to ragged columns.
     ///
-    /// Total row width with current column sizes is ~104 chars, well under the
-    /// 4096-char embed-description cap with PageSize=6 entries per page.
+    /// ── Bolding via ANSI ──
+    /// We use a ```ansi``` fence (instead of plain ```) so Discord's ANSI
+    /// renderer picks up \u001b[1m...\u001b[0m as bold. This applies to the
+    /// column headers and to each command name in the body. ANSI rendering is
+    /// fully supported on Discord desktop and the browser client; mobile
+    /// support has historically been patchy and may show the raw escape
+    /// sequences instead of bold text. If that turns out to be a problem for
+    /// the clan, revert by changing "ansi" back to no language tag and
+    /// swapping BoldFit calls back to Fit (3 call sites).
+    ///
+    /// Total row width with current column sizes is ~104 visible chars, well
+    /// under the 4096-char embed-description cap with PageSize=8 entries per
+    /// page. The ANSI control bytes don't take visible width and add ~16
+    /// chars per row to the raw string length — still comfortably under cap.
     /// </summary>
     private static string BuildTable(List<CommandEntry> entries)
     {
@@ -322,19 +334,19 @@ public class CommandsCommandHandler
             new string(' ', permWidth + 2) + "│";
 
         var sb = new StringBuilder();
-        sb.AppendLine("```");
+        sb.AppendLine("```ansi");
 
-        // Header
-        sb.Append(' ').Append(Fit("Command", nameWidth)).Append(" │ ")
-          .Append(Fit("Min", permWidth)).Append(" │ ")
-          .AppendLine("Description");
+        // Header — bold the column titles for visual hierarchy.
+        sb.Append(' ').Append(BoldFit("Command", nameWidth)).Append(" │ ")
+          .Append(BoldFit("Min", permWidth)).Append(" │ ")
+          .Append(Bold("Description")).AppendLine();
         sb.AppendLine(headerRule);
 
         // Rows, with a blank-with-verticals row inserted between consecutive entries.
         for (int i = 0; i < entries.Count; i++)
         {
             var entry = entries[i];
-            sb.Append(' ').Append(Fit($"/{entry.Name}", nameWidth)).Append(" │ ")
+            sb.Append(' ').Append(BoldFit($"/{entry.Name}", nameWidth)).Append(" │ ")
               .Append(Fit(entry.PermissionLabel, permWidth)).Append(" │ ")
               .AppendLine(Fit(entry.Description, descWidth, truncationEllipsis: true));
 
@@ -344,6 +356,27 @@ public class CommandsCommandHandler
 
         sb.AppendLine("```");
         return sb.ToString();
+    }
+
+    // ANSI escape sequences understood by Discord's renderer in ```ansi blocks.
+    // The escape character itself is U+001B (ESC).
+    private const string AnsiBold  = "\u001b[1m";
+    private const string AnsiReset = "\u001b[0m";
+
+    /// <summary>Wrap value in ANSI bold without padding.</summary>
+    private static string Bold(string value) => $"{AnsiBold}{value}{AnsiReset}";
+
+    /// <summary>
+    /// Bold-wrap then pad to the given width. Padding is applied OUTSIDE the
+    /// ANSI markers so trailing column whitespace stays plain — keeps the raw
+    /// string short and avoids any oddness if a client ever decides to color
+    /// padding spaces.
+    /// </summary>
+    private static string BoldFit(string value, int width)
+    {
+        if (value.Length > width) value = value[..width];
+        var padding = new string(' ', width - value.Length);
+        return $"{AnsiBold}{value}{AnsiReset}{padding}";
     }
 
     /// <summary>
