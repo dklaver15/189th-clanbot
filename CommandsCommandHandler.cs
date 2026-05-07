@@ -55,9 +55,8 @@ namespace ClanGuardBot.Handlers;
 ///
 /// ── Display format ──
 /// Renders in a single ephemeral embed with a fenced code-block table.
-/// Sorted by permission tier ascending (Everyone → Officer → 2ndLT+ → … → BG+),
-/// then alphabetically within tier — easy commands at the top, rare commands
-/// at the bottom, in roughly the order a member earns access to them.
+/// Sorted alphabetically by command name so a member looking for a known
+/// command finds it without having to scan past unfamiliar tiers.
 /// </summary>
 public class CommandsCommandHandler
 {
@@ -72,10 +71,10 @@ public class CommandsCommandHandler
 
     /// <summary>
     /// How many catalog rows fit on one page. With 19 registered commands
-    /// (as of writing) this gives 4 pages — enough to demonstrate pagination
-    /// while keeping each page comfortably scannable.
+    /// (as of writing) this gives 3 pages (8 + 8 + 3) — a comfortable
+    /// scan length per page without making pagination feel like overkill.
     /// </summary>
-    private const int PageSize = 6;
+    private const int PageSize = 8;
 
     private readonly ILogger<CommandsCommandHandler> _logger;
     private readonly BotConfig _config;
@@ -223,12 +222,9 @@ public class CommandsCommandHandler
     /// </summary>
     private List<CommandEntry> BuildVisibleList(SocketGuildUser caller)
     {
-        var catalog = BuildCatalog(_config);
-        var rankRoles = _config.GetRankRolesList();
-        return catalog
+        return BuildCatalog(_config)
             .Where(e => e.CanUse(caller, _config))
-            .OrderBy(e => e.SortKey(rankRoles))
-            .ThenBy(e => e.Name, StringComparer.Ordinal)
+            .OrderBy(e => e.Name, StringComparer.Ordinal)
             .ToList();
     }
 
@@ -370,13 +366,11 @@ public class CommandsCommandHandler
     /// <param name="Description">One-line summary shown in the table.</param>
     /// <param name="PermissionLabel">Display label, e.g. "Everyone", "Officer+", "2ndLT+".</param>
     /// <param name="CanUse">Predicate that mirrors the gate inside the actual command's handler.</param>
-    /// <param name="SortKey">Returns a tier int given the live RankRoles list. Lower sorts first.</param>
     private sealed record CommandEntry(
         string Name,
         string Description,
         string PermissionLabel,
-        Func<SocketGuildUser, BotConfig, bool> CanUse,
-        Func<List<string>, int> SortKey);
+        Func<SocketGuildUser, BotConfig, bool> CanUse);
 
     /// <summary>
     /// Build the full catalog of registered slash commands. Order here doesn't
@@ -430,24 +424,6 @@ public class CommandsCommandHandler
             });
         };
 
-        // ── Sort-key factories ──
-        // Tier scale: Everyone = 0, Officer = 1, then ranks pick up RankTierBase + RankRoles index.
-        // This puts the Officer band between universal and the lowest rank tier (currently 2ndLT
-        // at index 13 in the default RankRoles list, so its sort key is 15).
-        const int EveryoneTier = 0;
-        const int OfficerTier  = 1;
-        const int RankTierBase = 2;
-
-        static Func<List<string>, int> SortEveryone() => _ => EveryoneTier;
-        static Func<List<string>, int> SortOfficer()  => _ => OfficerTier;
-        static Func<List<string>, int> SortRank(string minRank) => ranks =>
-        {
-            var idx = ranks.FindIndex(r => r.Equals(minRank, StringComparison.OrdinalIgnoreCase));
-            // Unknown rank sinks to the bottom rather than crashing — better than throwing if
-            // someone misspells a min-rank in appsettings.json.
-            return idx < 0 ? int.MaxValue : RankTierBase + idx;
-        };
-
         // ── Permission labels ──
         // Config-backed labels reflect the live gate so renaming a min-rank in
         // appsettings.json updates the table without a code change. The two
@@ -460,64 +436,61 @@ public class CommandsCommandHandler
         const string attendanceLbl  = "MAJ+";   // SyncWithHandlers: AttendanceCommandHandler.MinRankFloor
 
         // ── Catalog ──
+        // Display order is alphabetical by command name (sorted at render
+        // time in BuildVisibleList), so order here is purely organizational.
+        // Grouped by permission tier for human readability when scanning the
+        // source — has no effect on the rendered table.
         return new List<CommandEntry>
         {
             // Everyone tier
             new("awol-status", "Show your current activity stats",
-                "Everyone", everyone, SortEveryone()),
+                "Everyone", everyone),
             new("calendar", "Show upcoming events from the clan calendar",
-                "Everyone", everyone, SortEveryone()),
+                "Everyone", everyone),
             new("command-catalog", "Show this list of available slash commands",
-                "Everyone", everyone, SortEveryone()),
+                "Everyone", everyone),
             new("gamertags", "Enter your gamertags (EA, Steam, PSN, Xbox, etc.)",
-                "Everyone", everyone, SortEveryone()),
+                "Everyone", everyone),
             new("lookup", "Look up someone's gamertags from the roster",
-                "Everyone", everyone, SortEveryone()),
+                "Everyone", everyone),
 
             // Officer tier
             new("awol-check", "Check another user's activity stats",
-                "Officer+", officer, SortOfficer()),
+                "Officer+", officer),
             new("clear-awol", "Clear a user's AWOL status",
-                "Officer+", officer, SortOfficer()),
+                "Officer+", officer),
             new("cleanup-calendar-dupes", "Reconcile calendar/GCal duplicate entries",
-                "Officer+", officer, SortOfficer()),
+                "Officer+", officer),
             new("roster-export", "Trigger a roster export to Google Sheets",
-                "Officer+", officer, SortOfficer()),
+                "Officer+", officer),
             new("setnick", "Change a member's nickname",
-                "Officer+", officerOrManageNicknames, SortOfficer()),
+                "Officer+", officerOrManageNicknames),
 
-            // Rank-gated tiers — sort by the current value of each min-rank in RankRoles
+            // Rank-gated tiers
             new("demote", "Demote a member to a lower rank",
-                promoteDemoteLbl, MinRank(config.PromoteDemoteMinRank),
-                SortRank(config.PromoteDemoteMinRank)),
+                promoteDemoteLbl, MinRank(config.PromoteDemoteMinRank)),
             new("promote", "Promote a member to the next rank",
-                promoteDemoteLbl, MinRank(config.PromoteDemoteMinRank),
-                SortRank(config.PromoteDemoteMinRank)),
+                promoteDemoteLbl, MinRank(config.PromoteDemoteMinRank)),
             new("seed-promotion-credit", "Apply Seed Events from the roster sheet to DB",
-                promoteDemoteLbl, MinRank(config.PromoteDemoteMinRank),
-                SortRank(config.PromoteDemoteMinRank)),
+                promoteDemoteLbl, MinRank(config.PromoteDemoteMinRank)),
 
             new("comp-event", "Create a competitive division event on the calendar",
-                compEventLbl, MinRank(config.CompEventMinRank),
-                SortRank(config.CompEventMinRank)),
+                compEventLbl, MinRank(config.CompEventMinRank)),
 
             new("add-event-credit", "Manually add 1 event credit at member's current rank",
-                eventCreditLbl, MinRank("CPT"), SortRank("CPT")),
+                eventCreditLbl, MinRank("CPT")),
             new("remove-event-credit", "Remove 1 manual event credit at member's current rank",
-                eventCreditLbl, MinRank("CPT"), SortRank("CPT")),
+                eventCreditLbl, MinRank("CPT")),
 
             new("attendance", "Show today's clan event attendance, grouped by event",
-                attendanceLbl, MinRank("MAJ"), SortRank("MAJ")),
+                attendanceLbl, MinRank("MAJ")),
             new("clear-awol-list", $"Delete all messages in #{config.HqChannelName}",
-                awolKickLbl, MinRank(config.AwolKickMinRank),
-                SortRank(config.AwolKickMinRank)),
+                awolKickLbl, MinRank(config.AwolKickMinRank)),
             new("kick-awols", "Kick all members currently flagged AWOL",
-                awolKickLbl, MinRank(config.AwolKickMinRank),
-                SortRank(config.AwolKickMinRank)),
+                awolKickLbl, MinRank(config.AwolKickMinRank)),
 
             new("briefing-now", "Generate the weekly officer briefing immediately",
-                briefingLbl, MinRank(config.BriefingNowMinRank),
-                SortRank(config.BriefingNowMinRank)),
+                briefingLbl, MinRank(config.BriefingNowMinRank)),
         };
     }
 }
