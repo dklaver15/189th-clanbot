@@ -304,12 +304,20 @@ public class DiscordBotService : IHostedService
                 // on the clan's Google Calendar. Open to all members; queries
                 // GCal directly so it reflects manual edits made via the
                 // calendar UI as well as bot-managed Apollo + CompDiv events.
+                // Two render modes: list (default) and grid.
                 new SlashCommandBuilder()
                     .WithName("calendar")
                     .WithDescription("Show upcoming events from the clan calendar")
                     .AddOption("days", ApplicationCommandOptionType.Integer,
                         "How many days ahead to show (1–30, default 7)",
                         isRequired: false)
+                    .AddOption(new SlashCommandOptionBuilder()
+                        .WithName("view")
+                        .WithDescription("Display style (default: list)")
+                        .WithType(ApplicationCommandOptionType.String)
+                        .WithRequired(false)
+                        .AddChoice("List", "list")
+                        .AddChoice("Grid (calendar style)", "grid"))
                     .Build(),
             };
 
