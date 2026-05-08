@@ -38,6 +38,8 @@ public class DiscordBotService : IHostedService
     private readonly CleanupCalendarDupesCommandHandler _cleanupCalendarDupesHandler;
     private readonly CalendarCommandHandler _calendarHandler;
     private readonly CommandsCommandHandler _commandsHandler;
+    private readonly InviteAttributionService _inviteAttributionService;
+    private readonly InviteCommandHandler _inviteCommandHandler;
     private readonly ILogger<DiscordBotService> _logger;
     private readonly BotConfig _config;
 
@@ -66,6 +68,8 @@ public class DiscordBotService : IHostedService
         CleanupCalendarDupesCommandHandler cleanupCalendarDupesHandler,
         CalendarCommandHandler calendarHandler,
         CommandsCommandHandler commandsHandler,
+        InviteAttributionService inviteAttributionService,
+        InviteCommandHandler inviteCommandHandler,
         ILogger<DiscordBotService> logger,
         IOptions<BotConfig> config)
     {
@@ -93,6 +97,8 @@ public class DiscordBotService : IHostedService
         _cleanupCalendarDupesHandler = cleanupCalendarDupesHandler;
         _calendarHandler             = calendarHandler;
         _commandsHandler             = commandsHandler;
+        _inviteAttributionService    = inviteAttributionService;
+        _inviteCommandHandler        = inviteCommandHandler;
         _logger                      = logger;
         _config                      = config.Value;
     }
@@ -125,6 +131,8 @@ public class DiscordBotService : IHostedService
         _cleanupCalendarDupesHandler.Register(_client);
         _calendarHandler.Register(_client);
         _commandsHandler.Register(_client);
+        _inviteAttributionService.Register(_client);
+        _inviteCommandHandler.Register(_client);
 
         await _client.LoginAsync(TokenType.Bot, _config.Token);
         await _client.StartAsync();
@@ -334,6 +342,17 @@ public class DiscordBotService : IHostedService
                     .WithName(CommandsCommandHandler.CommandName)
                     .WithDescription("Show every slash command available to you at your current rank")
                     .Build(),
+
+                // /invite — tracked invite link framework. Seven subcommands
+                // (create, assign, edit-notes, list, info, stats, revoke) for
+                // labeling invites and surfacing recruitment-source attribution.
+                // Per-subcommand permission model lives on the handler; the
+                // group itself is open. The slash-command shape lives on the
+                // handler so the subcommand list stays next to the code that
+                // consumes it. NOTE: also keep CommandsCommandHandler.BuildCatalog
+                // in sync when this changes — that's the /commands self-service
+                // catalog source of truth.
+                InviteCommandHandler.BuildCommand(),
             };
 
             foreach (var guild in _client.Guilds)

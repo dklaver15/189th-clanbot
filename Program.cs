@@ -33,6 +33,7 @@ try
                        | GatewayIntents.GuildMessages
                        | GatewayIntents.GuildMembers
                        | GatewayIntents.GuildVoiceStates
+                       | GatewayIntents.GuildInvites
                        | GatewayIntents.MessageContent,
         AlwaysDownloadUsers = true,
         LogLevel            = LogSeverity.Info,
@@ -143,6 +144,19 @@ try
 
     // /calendar: ephemeral day-grouped view of upcoming events from Google Calendar.
     builder.Services.AddSingleton<CalendarCommandHandler>();
+
+    // ── Tracked-invite framework (Phase 1+) ─────────────────────────
+    // Three services compose the feature:
+    //   • InviteCacheService — in-memory snapshot of every invite's use count
+    //     plus the vanity URL counter, hydrated on Ready, refreshed on each
+    //     UserJoined diff. Singleton (state lives across requests).
+    //   • InviteAttributionService — gateway event handler. Runs the diff
+    //     math when UserJoined fires and writes an InviteJoin row.
+    //   • InviteCommandHandler — /invite slash command surface.
+    // Wired into DiscordBotService.Register for slash + button events.
+    builder.Services.AddSingleton<InviteCacheService>();
+    builder.Services.AddSingleton<InviteAttributionService>();
+    builder.Services.AddSingleton<InviteCommandHandler>();
 
     // CompEventCommandHandler: /comp-event slash command for CPT+ officers.
     builder.Services.AddSingleton<CompEventCommandHandler>();
