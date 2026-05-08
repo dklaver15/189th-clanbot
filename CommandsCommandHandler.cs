@@ -54,9 +54,12 @@ namespace ClanGuardBot.Handlers;
 /// matching label here with a SyncWithHandlers note.
 ///
 /// ── Display format ──
-/// Renders in a single ephemeral embed with a fenced code-block table.
-/// Sorted alphabetically by command name so a member looking for a known
-/// command finds it without having to scan past unfamiliar tiers.
+/// Renders in a single ephemeral embed, with a style chosen by the caller via
+/// the optional `style` slash-command option (default Table):
+///   • Table — fenced code block with column verticals + ANSI bold (desktop-friendly).
+///   • List  — markdown-formatted entries, one command per two-line block
+///             (mobile-friendly; no monospace assumption).
+/// Both styles use the same alphabetical sort and the same pagination scheme.
 /// </summary>
 public class CommandsCommandHandler
 {
@@ -75,6 +78,20 @@ public class CommandsCommandHandler
     /// scan length per page without making pagination feel like overkill.
     /// </summary>
     private const int PageSize = 8;
+
+    /// <summary>Slash-command option name for picking the render style.</summary>
+    private const string StyleOptionName = "style";
+
+    /// <summary>
+    /// Render styles offered through the `style` slash-command option.
+    /// Encoded as a single character in pagination button custom-ids
+    /// (see ParseGotoTarget / BuildPage) to keep them compact.
+    /// </summary>
+    private enum RenderStyle
+    {
+        Table,  // code block with verticals + ANSI bold (desktop-friendly)
+        List    // markdown two-line blocks (mobile-friendly)
+    }
 
     private readonly ILogger<CommandsCommandHandler> _logger;
     private readonly BotConfig _config;
@@ -136,13 +153,48 @@ public class CommandsCommandHandler
             return;
         }
 
-        var (embed, components) = BuildPage(visible, page: 0);
+        var style = ReadStyleOption(command);
+        var (embed, components) = BuildPage(visible, page: 0, style);
         await command.FollowupAsync(embed: embed, components: components, ephemeral: true);
 
         _logger.LogInformation(
-            "/{Command} rendered for {User}: {Count} visible entries across {Pages} page(s)",
-            CommandName, caller.Username, visible.Count, PageCount(visible.Count));
+            "/{Command} rendered for {User} ({Style}): {Count} visible entries across {Pages} page(s)",
+            CommandName, caller.Username, style, visible.Count, PageCount(visible.Count));
     }
+
+    /// <summary>
+    /// Read the style option from the slash-command invocation. Returns
+    /// RenderStyle.Table when the option is absent or unrecognised — Table
+    /// is the original (pre-option) behaviour, so missing data falls back to
+    /// what existing users expect.
+    /// </summary>
+    private static RenderStyle ReadStyleOption(SocketSlashCommand command)
+    {
+        var raw = command.Data.Options
+            .FirstOrDefault(o => o.Name == StyleOptionName)?
+            .Value as string;
+        return ParseStyle(raw);
+    }
+
+    private static RenderStyle ParseStyle(string? raw) => raw switch
+    {
+        "list"  => RenderStyle.List,
+        "table" => RenderStyle.Table,
+        _       => RenderStyle.Table,   // null / unknown → default
+    };
+
+    /// <summary>Single-character code used in pagination button custom-ids.</summary>
+    private static char EncodeStyle(RenderStyle style) => style switch
+    {
+        RenderStyle.List => 'l',
+        _                => 't',
+    };
+
+    private static RenderStyle DecodeStyle(string code) => code switch
+    {
+        "l" => RenderStyle.List,
+        _   => RenderStyle.Table,
+    };
 
     /// <summary>
     /// Component-button handler for pagination. Filters by ButtonIdPrefix so
@@ -158,8 +210,8 @@ public class CommandsCommandHandler
 
         try
         {
-            var targetPage = ParseGotoPage(component.Data.CustomId);
-            if (targetPage is null)
+            var target = ParseGotoTarget(component.Data.CustomId);
+            if (target is null)
             {
                 // Unknown action under our prefix (e.g. the disabled "noop"
                 // page-indicator button that Discord shouldn't even fire for,
@@ -174,8 +226,10 @@ public class CommandsCommandHandler
                 return;
             }
 
+            var (targetPage, style) = target.Value;
+
             var visible = BuildVisibleList(caller);
-            var (embed, components) = BuildPage(visible, targetPage.Value);
+            var (embed, components) = BuildPage(visible, targetPage, style);
 
             await component.UpdateAsync(msg =>
             {
@@ -184,8 +238,8 @@ public class CommandsCommandHandler
             });
 
             _logger.LogDebug(
-                "/{Command} pagination: {User} -> page {Page}",
-                CommandName, caller.Username, targetPage.Value + 1);
+                "/{Command} pagination: {User} -> page {Page} ({Style})",
+                CommandName, caller.Username, targetPage + 1, style);
         }
         catch (Exception ex)
         {
@@ -203,16 +257,20 @@ public class CommandsCommandHandler
     }
 
     /// <summary>
-    /// Parse a "cmdcat:goto:N" custom-id into the target 0-indexed page.
-    /// Returns null for any other shape (including the disabled-noop button).
+    /// Parse a "cmdcat:goto:N:S" custom-id into (page, style). The style
+    /// segment (S) is a single char: 't' = Table, 'l' = List. Returns null
+    /// for any other shape (including the disabled "noop" button and any
+    /// pre-style-option custom-ids that might still be sitting in old
+    /// unrefreshed embeds — those will gracefully fall through and the user
+    /// can re-run /command-catalog to get a fresh embed).
     /// </summary>
-    private static int? ParseGotoPage(string customId)
+    private static (int Page, RenderStyle Style)? ParseGotoTarget(string customId)
     {
         var parts = customId.Split(':');
-        if (parts.Length < 3) return null;
+        if (parts.Length < 4) return null;
         if (parts[1] != "goto") return null;
         if (!int.TryParse(parts[2], out var page)) return null;
-        return page;
+        return (page, DecodeStyle(parts[3]));
     }
 
     /// <summary>
@@ -230,19 +288,28 @@ public class CommandsCommandHandler
 
     /// <summary>
     /// Render one page of the visible-commands list, returning the embed and
-    /// (when pagination applies) the button row. When the entire list fits on
-    /// a single page the components are null and Discord won't show buttons.
+    /// (when pagination applies) the button row. Body rendering is dispatched
+    /// to BuildTableBody / BuildListBody by RenderStyle. When the entire list
+    /// fits on a single page the components are null and Discord won't show
+    /// buttons. The chosen style is encoded into the button custom-ids so
+    /// clicking Next/Previous keeps the user in their picked style.
     /// </summary>
     private static (Embed Embed, MessageComponent? Components) BuildPage(
-        List<CommandEntry> all, int page)
+        List<CommandEntry> all, int page, RenderStyle style)
     {
         var totalPages = PageCount(all.Count);
         var safePage = Math.Clamp(page, 0, totalPages - 1);
         var pageItems = all.Skip(safePage * PageSize).Take(PageSize).ToList();
 
+        var body = style switch
+        {
+            RenderStyle.List => BuildListBody(pageItems),
+            _                => BuildTableBody(pageItems),
+        };
+
         var embed = new EmbedBuilder()
             .WithTitle("📖 Slash Command Reference")
-            .WithDescription(BuildTable(pageItems))
+            .WithDescription(body)
             .WithColor(Color.Blue)
             .WithFooter(
                 $"Page {safePage + 1} of {totalPages} • {all.Count} command(s) available to you")
@@ -254,10 +321,11 @@ public class CommandsCommandHandler
         // Next. Discord auto-disables click handling on disabled buttons but we
         // still namespace its custom-id under our prefix so HandleButtonAsync
         // can early-return cleanly if any client ever does fire it.
+        var styleCode = EncodeStyle(style);
         var components = new ComponentBuilder()
             .WithButton(
                 label: "« Previous",
-                customId: $"{ButtonIdPrefix}goto:{safePage - 1}",
+                customId: $"{ButtonIdPrefix}goto:{safePage - 1}:{styleCode}",
                 style: ButtonStyle.Secondary,
                 disabled: safePage == 0)
             .WithButton(
@@ -267,7 +335,7 @@ public class CommandsCommandHandler
                 disabled: true)
             .WithButton(
                 label: "Next »",
-                customId: $"{ButtonIdPrefix}goto:{safePage + 1}",
+                customId: $"{ButtonIdPrefix}goto:{safePage + 1}:{styleCode}",
                 style: ButtonStyle.Secondary,
                 disabled: safePage >= totalPages - 1)
             .Build();
@@ -310,7 +378,7 @@ public class CommandsCommandHandler
     /// page. The ANSI control bytes don't take visible width and add ~16
     /// chars per row to the raw string length — still comfortably under cap.
     /// </summary>
-    private static string BuildTable(List<CommandEntry> entries)
+    private static string BuildTableBody(List<CommandEntry> entries)
     {
         const int nameWidth = 24;   // longest registered command is /cleanup-calendar-dupes (23 chars w/ slash)
         const int permWidth = 9;    // "Everyone" is 8; rank labels like "2ndLT+" fit in 6
@@ -355,6 +423,41 @@ public class CommandsCommandHandler
         }
 
         sb.AppendLine("```");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Builds a markdown-formatted list body for mobile-friendly rendering.
+    /// Each entry occupies two content lines plus a blank-line separator:
+    ///
+    ///   **`/awol-status`** — Everyone
+    ///   Your activity stats
+    ///
+    ///   **`/calendar`** — Everyone
+    ///   Upcoming clan calendar events
+    ///
+    /// No code block — Discord's native markdown renderer handles bold and
+    /// inline-code styling, which works identically on desktop, web, and
+    /// mobile clients. The em dash (—) separates the command name from its
+    /// permission label without needing column alignment, sidestepping the
+    /// monospace assumptions that make the Table style wrap awkwardly on
+    /// narrow screens. Permission labels stay unstyled to keep the visual
+    /// emphasis on the command name itself.
+    ///
+    /// Total page size with PageSize=8 entries lands around ~1 KB — far
+    /// below the 4096-char embed-description cap.
+    /// </summary>
+    private static string BuildListBody(List<CommandEntry> entries)
+    {
+        var sb = new StringBuilder();
+        for (int i = 0; i < entries.Count; i++)
+        {
+            var entry = entries[i];
+            sb.Append("**`/").Append(entry.Name).Append("`** — ").AppendLine(entry.PermissionLabel);
+            sb.AppendLine(entry.Description);
+            if (i < entries.Count - 1)
+                sb.AppendLine();
+        }
         return sb.ToString();
     }
 

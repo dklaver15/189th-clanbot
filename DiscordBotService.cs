@@ -338,9 +338,20 @@ public class DiscordBotService : IHostedService
                 // entries lives in CommandsCommandHandler.BuildCatalog and
                 // MUST be updated alongside this list when commands are added,
                 // removed, or have their permission gate changed.
+                // The optional `style` option flips between the desktop-friendly
+                // code-block table and the mobile-friendly markdown list. Discord
+                // remembers the last-used option value within a picker session so
+                // mobile users only need to pick List once per sitting.
                 new SlashCommandBuilder()
                     .WithName(CommandsCommandHandler.CommandName)
                     .WithDescription("Show every slash command available to you at your current rank")
+                    .AddOption(new SlashCommandOptionBuilder()
+                        .WithName("style")
+                        .WithDescription("Display style (default: Table)")
+                        .WithType(ApplicationCommandOptionType.String)
+                        .WithRequired(false)
+                        .AddChoice("Table", "table")
+                        .AddChoice("List",  "list"))
                     .Build(),
 
                 // /invite — tracked invite link framework. Seven subcommands
