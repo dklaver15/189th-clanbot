@@ -165,14 +165,22 @@ public class UsageStatsCommandHandler
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
-        // Group by (CommandName, SubcommandPath) so /invite create and
-        // /invite list show as separate rows — they're distinct features
-        // from a usage-tracking perspective. EF Core 8 handles nullable
-        // group keys; null SubcommandPath rows (flat commands like
-        // /awol-status) collect under a single null bucket.
-        var rows = await db.CommandUsages
+        // Pull the minimal column set in window, then group in memory.
+        // EF Core's SQLite translator has historically struggled with
+        // Distinct().Count() inside a GroupBy projection ("could not be
+        // translated"), and TopRow's positional-record projection has its
+        // own translation edge cases. With 90-day retention plus the
+        // 189th's command volume, the in-window row count stays at a few
+        // thousand at most — trivially cheap to materialize and group
+        // client-side, with the upside that we can use ordinary LINQ
+        // without fighting the translator.
+        var raw = await db.CommandUsages
             .Where(c => c.GuildId == guildId && c.ExecutedAt >= cutoff)
-            .GroupBy(c => new { c.CommandName, c.SubcommandPath })
+            .Select(c => new { c.CommandName, c.SubcommandPath, c.UserId })
+            .ToListAsync();
+
+        var rows = raw
+            .GroupBy(r => new { r.CommandName, r.SubcommandPath })
             .Select(g => new TopRow(
                 g.Key.CommandName,
                 g.Key.SubcommandPath,
@@ -180,7 +188,7 @@ public class UsageStatsCommandHandler
                 g.Select(x => x.UserId).Distinct().Count()))
             .OrderByDescending(r => r.Uses)
             .Take(TopRows)
-            .ToListAsync();
+            .ToList();
 
         if (rows.Count == 0)
         {
