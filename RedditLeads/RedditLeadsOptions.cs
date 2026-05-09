@@ -6,10 +6,12 @@ namespace ClanGuardBot.RedditLeads;
 /// missing required fields fail the bot fast rather than silently
 /// running a broken polling loop.
 ///
-/// Secrets (ClientSecret, Password) are populated from environment
-/// variables in production via the standard ASP.NET Core config
-/// double-underscore mapping, e.g. RedditLeads__ClientSecret. The
-/// values committed to appsettings.json are placeholders.
+/// ── No credentials needed ──
+/// The lead service consumes Reddit's public RSS feed at
+/// /r/{sub}/new.rss, which requires no authentication. The previous
+/// OAuth-API version had ClientId/ClientSecret/Username/Password
+/// fields here; those were removed in the RSS migration when Reddit
+/// closed off new Data API app creation for non-moderation use cases.
 /// </summary>
 public sealed class RedditLeadsOptions
 {
@@ -21,48 +23,20 @@ public sealed class RedditLeadsOptions
     /// <summary>How often the polling loop wakes. Default 10 min.</summary>
     public int PollingIntervalMinutes { get; set; } = 10;
 
-    // ── Reddit OAuth credentials ─────────────────────────────────────
-
-    /// <summary>Client ID from the Reddit app (under the app name in /prefs/apps).</summary>
-    public string ClientId { get; set; } = string.Empty;
-
-    /// <summary>Client secret from the Reddit app. Populated from RedditLeads__ClientSecret env var.</summary>
-    public string ClientSecret { get; set; } = string.Empty;
-
-    /// <summary>Reddit username of the dedicated bot account (e.g. "189th_recruiter_bot").</summary>
-    public string Username { get; set; } = string.Empty;
-
-    /// <summary>Reddit password of the bot account. Populated from RedditLeads__Password env var.</summary>
-    public string Password { get; set; } = string.Empty;
-
     /// <summary>
-    /// Reddit User-Agent string. Required by Reddit's API rules — must
-    /// identify the application and the operator. Format Reddit prefers:
-    /// "platform:appname:version (by /u/yourusername)".
+    /// HTTP User-Agent string. Reddit's edge network blocks generic UAs
+    /// (curl, python-requests, empty). Format Reddit prefers:
+    /// "platform:appname:version (by /u/yourusername)". This is set on
+    /// the typed HttpClient at registration time; the polling service
+    /// inherits it on every request.
     /// </summary>
     public string UserAgent { get; set; } = "ClanGuard/1.0 by xAP3XRONINx";
-
-    // ── Discord posting target ───────────────────────────────────────
 
     /// <summary>Channel ID where lead embeds are posted. Discord perms gate visibility.</summary>
     public ulong LeadsChannelId { get; set; }
 
-    // ── Subreddit + matching tuning ──────────────────────────────────
-
     /// <summary>Comma-separated list of subreddits (no "r/" prefix), e.g. "Battlefield,Battlefield6,FindAClan".</summary>
     public string Subreddits { get; set; } = string.Empty;
-
-    /// <summary>
-    /// Posts whose author has a Reddit account younger than this are
-    /// silently skipped. Filters out throwaway/spam accounts.
-    /// </summary>
-    public int MinAccountAgeDays { get; set; } = 30;
-
-    /// <summary>
-    /// Posts whose author has less total karma than this are silently
-    /// skipped. Same throwaway filter.
-    /// </summary>
-    public int MinKarma { get; set; } = 50;
 
     /// <summary>
     /// Posts older than this when first observed are skipped. Bounds the
@@ -70,8 +44,6 @@ public sealed class RedditLeadsOptions
     /// and keeps officers focused on actionable, fresh leads.
     /// </summary>
     public int MaxPostAgeHours { get; set; } = 24;
-
-    // ── Helpers ──────────────────────────────────────────────────────
 
     public List<string> GetSubredditsList() =>
         Subreddits

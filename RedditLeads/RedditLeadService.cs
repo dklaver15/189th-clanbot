@@ -11,30 +11,27 @@ using Microsoft.Extensions.Options;
 namespace ClanGuardBot.RedditLeads;
 
 /// <summary>
-/// Polls the configured subreddits on a fixed cadence, runs each fresh
-/// post through LeadMatcher, and posts surviving posts to the leads
-/// channel as RedditLead embeds.
+/// Polls the configured subreddits on a fixed cadence via Reddit's public
+/// RSS feed, runs each fresh post through LeadMatcher, and posts surviving
+/// posts to the leads channel as RedditLead embeds.
 ///
 /// ── Pipeline order ──
-/// For each subreddit, for each post in /new:
+/// For each subreddit, for each post in /new.rss:
 ///   1. Recency floor (post created within MaxPostAgeHours) — kills cold-start floods.
 ///   2. Dedupe by RedditPostId — listing returns the same posts cycle to cycle.
 ///   3. LeadMatcher.MatchText — positive keyword + negative keyword.
-///   4. RedditApiClient.GetUserAboutAsync (the only second-network-call step).
-///   5. LeadMatcher.RejectAuthor — account age + karma.
-///   6. Insert row, post embed, stamp DiscordMessageId.
+///   4. Insert row, post embed, stamp DiscordMessageId.
 ///
-/// Author lookup is intentionally last so we never spend an /about call
-/// on a post that's going to fail text filtering anyway. With our 5-sub
-/// × every-10-min cadence, this keeps the per-cycle Reddit request count
-/// well under the 60/min OAuth limit.
+/// Previous OAuth-based pipeline had a tier-3 author quality floor that
+/// fetched /user/X/about for karma + account age. RSS doesn't expose those
+/// fields, so that step is gone — the keyword filter is the whole filter
+/// stack now. See RedditRssClient class doc for why we're on RSS at all.
 ///
 /// ── Failure isolation ──
 /// One bad subreddit must not kill the cycle. Each subreddit is wrapped
-/// in its own try/catch; a 503 on r/Battlefield doesn't stop r/FindAClan
-/// from being polled. Same for individual posts within a subreddit:
-/// one parse failure or one /about 500 shouldn't blow up the rest of
-/// the listing.
+/// in its own try/catch; a 503 from Reddit's CDN on r/Battlefield doesn't
+/// stop r/FindAClan from being polled. Same for individual posts within
+/// a subreddit: one parse failure shouldn't blow up the rest of the listing.
 ///
 /// ── Embed posting failures ──
 /// If the Discord post throws after the DB row was already committed,
@@ -53,14 +50,14 @@ namespace ClanGuardBot.RedditLeads;
 public sealed class RedditLeadService : BackgroundService
 {
     /// <summary>
-    /// Newest-N pull size. Reddit's max is 100; 25 gives us plenty of
-    /// headroom over a 10-min window even for the busiest sub we watch
-    /// (r/Battlefield) without paginating.
+    /// Newest-N pull size. Reddit's RSS endpoint accepts a limit param
+    /// up to 100; 25 gives us plenty of headroom over a 10-min window
+    /// even for the busiest sub we watch (r/Battlefield) without paginating.
     /// </summary>
     private const int ListingLimit = 25;
 
     /// <summary>
-    /// First ~350 chars of the post body. Matches RedditLeadEmbedBuilder's
+    /// Storage cap for the post body. Matches RedditLeadEmbedBuilder's
     /// ExcerptLimit so the embed never has to re-truncate a longer stored
     /// value. Stored as part of the row so a later edit/delete on Reddit
     /// can't rewrite our snapshot.
@@ -69,14 +66,14 @@ public sealed class RedditLeadService : BackgroundService
 
     private readonly IServiceProvider _services;
     private readonly DiscordSocketClient _client;
-    private readonly RedditApiClient _reddit;
+    private readonly RedditRssClient _reddit;
     private readonly RedditLeadsOptions _options;
     private readonly ILogger<RedditLeadService> _logger;
 
     public RedditLeadService(
         IServiceProvider services,
         DiscordSocketClient client,
-        RedditApiClient reddit,
+        RedditRssClient reddit,
         IOptions<RedditLeadsOptions> options,
         ILogger<RedditLeadService> logger)
     {
@@ -106,7 +103,7 @@ public sealed class RedditLeadService : BackgroundService
 
         var subs = _options.GetSubredditsList();
         _logger.LogInformation(
-            "RedditLeadService started. Polling {Count} subreddit(s) every {Min} min: {Subs}",
+            "RedditLeadService started (RSS mode). Polling {Count} subreddit(s) every {Min} min: {Subs}",
             subs.Count, _options.PollingIntervalMinutes, string.Join(", ", subs));
 
         while (!stoppingToken.IsCancellationRequested)
@@ -160,14 +157,14 @@ public sealed class RedditLeadService : BackgroundService
         var posts = await _reddit.GetNewPostsAsync(sub, ListingLimit, ct);
         if (posts.Count == 0) return 0;
 
-        // Step 1+2: cheap filters before any DB or extra network work.
+        // Step 1: cheap recency filter before any DB work.
         var recent = posts.Where(p => p.CreatedUtc >= freshFloor).ToList();
         if (recent.Count == 0) return 0;
 
         // Step 2: bulk dedupe — one query per subreddit instead of one per post.
         // Note this is intentionally racy with concurrent inserts elsewhere; the
         // unique index on RedditPostId is what guarantees correctness. The bulk
-        // query is just an optimisation to avoid extra /about calls.
+        // query is just an optimisation.
         var ids = recent.Select(p => p.Id).ToList();
         HashSet<string> alreadySeen;
         using (var scope = _services.CreateScope())
@@ -201,7 +198,8 @@ public sealed class RedditLeadService : BackgroundService
 
     private async Task<bool> TryProcessPostAsync(RedditPost post, CancellationToken ct)
     {
-        // Step 3: text filter (positive + negative).
+        // Step 3: text filter. Sole filter step in RSS mode — no author
+        // quality floor since RSS doesn't expose karma/age.
         var textResult = LeadMatcher.MatchText(post);
         if (!textResult.Passes)
         {
@@ -211,30 +209,21 @@ public sealed class RedditLeadService : BackgroundService
             return false;
         }
 
-        // Step 4: only fetch /about for posts that already cleared text.
-        var author = await _reddit.GetUserAboutAsync(post.Author, ct);
-
-        // Step 5: author quality floor.
-        var authorReject = LeadMatcher.RejectAuthor(author, _options);
-        if (authorReject is not null)
-        {
-            _logger.LogDebug(
-                "Post {PostId} from r/{Sub} (u/{Author}) rejected at author filter: {Reason}",
-                post.Id, post.Subreddit, post.Author, authorReject);
-            return false;
-        }
-
-        // Step 6: persist + post.
+        // Step 4: persist + post.
+        // AuthorAccountAgeDays + AuthorKarma stay at 0 — the embed builder
+        // handles "no author meta available" gracefully. Columns retained
+        // in the schema so we can wire them back up if Reddit ever re-opens
+        // Data API app creation.
         var lead = new RedditLead
         {
             RedditPostId         = post.Id,
             Subreddit            = post.Subreddit,
             AuthorUsername       = post.Author,
-            AuthorAccountAgeDays = author!.AccountAgeDays,
-            AuthorKarma          = author.TotalKarma,
+            AuthorAccountAgeDays = 0,
+            AuthorKarma          = 0,
             Title                = post.Title,
             Excerpt              = TruncateForStorage(post.Selftext),
-            Url                  = BuildPermalink(post.Permalink),
+            Url                  = post.Permalink,
             PostedAtUtc          = post.CreatedUtc,
             DiscoveredAtUtc      = DateTime.UtcNow,
             DiscordMessageId     = 0,
@@ -301,15 +290,5 @@ public sealed class RedditLeadService : BackgroundService
         // having to re-fetch from Reddit.
         if (s.Length <= ExcerptStorageLimit + 100) return s;
         return s[..(ExcerptStorageLimit + 99)].TrimEnd() + "…";
-    }
-
-    private static string BuildPermalink(string permalink)
-    {
-        if (string.IsNullOrEmpty(permalink)) return "https://www.reddit.com";
-        // Reddit returns permalinks like "/r/Battlefield6/comments/abc123/title/".
-        // Some occasionally arrive already absolute; guard for both.
-        if (permalink.StartsWith("http", StringComparison.OrdinalIgnoreCase))
-            return permalink;
-        return "https://www.reddit.com" + permalink;
     }
 }

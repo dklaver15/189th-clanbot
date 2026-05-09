@@ -22,25 +22,21 @@ public static class RedditLeadsServiceCollectionExtensions
             .AddOptions<RedditLeadsOptions>()
             .Bind(configuration.GetSection(RedditLeadsOptions.Section))
             // Validate only when the feature is enabled. A clean install with
-            // Enabled=false should boot fine even without secrets in place.
+            // Enabled=false should boot fine even with empty fields.
             .Validate(o =>
                 !o.Enabled
-                || (!string.IsNullOrWhiteSpace(o.ClientId)
-                    && !string.IsNullOrWhiteSpace(o.ClientSecret)
-                    && !string.IsNullOrWhiteSpace(o.Username)
-                    && !string.IsNullOrWhiteSpace(o.Password)
-                    && o.LeadsChannelId != 0
-                    && !string.IsNullOrWhiteSpace(o.Subreddits)),
-                "RedditLeads is enabled but ClientId / ClientSecret / Username / Password / LeadsChannelId / Subreddits must all be set")
+                || (o.LeadsChannelId != 0
+                    && !string.IsNullOrWhiteSpace(o.Subreddits)
+                    && !string.IsNullOrWhiteSpace(o.UserAgent)),
+                "RedditLeads is enabled but LeadsChannelId / Subreddits / UserAgent must all be set")
             .ValidateOnStart();
 
-        services.AddHttpClient<RedditApiClient>((sp, client) =>
+        services.AddHttpClient<RedditRssClient>((sp, client) =>
         {
             var opts = sp.GetRequiredService<IOptions<RedditLeadsOptions>>().Value;
-            // Reddit's rules require a descriptive User-Agent; missing or
-            // generic UAs (curl/python-requests/etc.) get aggressively
-            // rate-limited or blocked. We set it once on the typed client
-            // instead of per-request so token requests inherit it too.
+            // Reddit's edge blocks generic UAs (curl, python-requests, empty).
+            // Set once on the typed client so every request out of
+            // RedditRssClient inherits it.
             if (!string.IsNullOrWhiteSpace(opts.UserAgent))
                 client.DefaultRequestHeaders.UserAgent.ParseAdd(opts.UserAgent);
             client.Timeout = TimeSpan.FromSeconds(30);

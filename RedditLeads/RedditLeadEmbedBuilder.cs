@@ -55,12 +55,16 @@ public static class RedditLeadEmbedBuilder
             _                     => lead.Status.ToString(),
         };
 
-        var ageText   = FormatAccountAge(lead.AuthorAccountAgeDays);
-        var karmaText = FormatKarma(lead.AuthorKarma);
-
-        var meta =
-            $"**u/{lead.AuthorUsername}**  ·  account {ageText}  ·  {karmaText} karma\n" +
-            $"Posted: {DiscordTimestampRelative(lead.PostedAtUtc)}";
+        // Author meta line: render age + karma only when we have them
+        // (OAuth mode populates both; RSS mode leaves both at 0). When
+        // neither is available, just show the username — the embed stays
+        // tidy without "account 0d · 0 karma" placeholder noise.
+        var hasAuthorMeta = lead.AuthorAccountAgeDays > 0 || lead.AuthorKarma > 0;
+        var meta = hasAuthorMeta
+            ? $"**u/{lead.AuthorUsername}**  ·  account {FormatAccountAge(lead.AuthorAccountAgeDays)}  ·  {FormatKarma(lead.AuthorKarma)} karma\n" +
+              $"Posted: {DiscordTimestampRelative(lead.PostedAtUtc)}"
+            : $"**u/{lead.AuthorUsername}**\n" +
+              $"Posted: {DiscordTimestampRelative(lead.PostedAtUtc)}";
 
         var excerpt = string.IsNullOrWhiteSpace(lead.Excerpt)
             ? "_(no body text)_"

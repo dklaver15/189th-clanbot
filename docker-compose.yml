@@ -9,11 +9,6 @@ services:
       - DOTNET_ENVIRONMENT=Production
       - BotConfig__Token=${DISCORD_BOT_TOKEN}
       - Claude__ApiKey=${ANTHROPIC_API_KEY}
-      # Reddit lead service. The non-secret fields stay in appsettings.json
-      # (ClientId, Username, UserAgent, Subreddits) so they're visible in the
-      # repo for review. Secrets come in here from GitHub Actions secrets.
-      - RedditLeads__ClientSecret=${REDDIT_CLIENT_SECRET}
-      - RedditLeads__Password=${REDDIT_PASSWORD}
       # Override any config values via environment variables:
       # - BotConfig__HqChannelName=headquarters
       # - BotConfig__MinMessages=10

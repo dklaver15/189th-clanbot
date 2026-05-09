@@ -3,10 +3,10 @@ using System.Text.RegularExpressions;
 namespace ClanGuardBot.RedditLeads;
 
 /// <summary>
-/// Three-tier filter that decides whether a Reddit post is worth surfacing
+/// Two-tier filter that decides whether a Reddit post is worth surfacing
 /// to the leads channel. Designed to be tightenable without touching the
-/// service: keywords live as static arrays here, thresholds live in
-/// RedditLeadsOptions.
+/// service: keywords live as static arrays here, thresholds (none
+/// currently) would live in RedditLeadsOptions.
 ///
 /// ── Tier 1: positive keyword match ──
 /// At least one of the LFG-signal phrases must appear in the title or
@@ -22,11 +22,14 @@ namespace ClanGuardBot.RedditLeads;
 /// ad ("we're recruiting LFG-style players"), and the negative list
 /// catches that.
 ///
-/// ── Tier 3: quality floor ──
-/// Account age and karma checks happen against a fetched user profile.
-/// Stickied / NSFW posts are also dropped at this tier — stickied posts
-/// are usually mod announcements and NSFW is never in scope for our
-/// channel.
+/// ── No tier 3 (author quality floor) ──
+/// The previous OAuth-API version had an author age + karma floor as
+/// tier 3. Reddit's public RSS feed doesn't expose either field, and
+/// new Data API app creation is closed off for non-moderation cases,
+/// so we run without it. The keyword filter does the bulk of the work;
+/// throwaway-account noise is handled by officers hitting Skip.
+/// Stickied / NSFW post filtering also moved here from the OAuth
+/// version — RSS doesn't expose those flags either.
 /// </summary>
 public static class LeadMatcher
 {
@@ -84,29 +87,18 @@ public static class LeadMatcher
     }
 
     /// <summary>
-    /// Result of running a post through the text-side filters (tiers 1 and 2).
-    /// Author-side filtering happens separately because it requires an extra
-    /// API call we want to avoid for posts that won't pass text filtering anyway.
+    /// Result of running a post through the text-side filters.
     /// </summary>
     public sealed record TextMatchResult(bool Passes, string MatchedKeywords, string? RejectReason);
 
     /// <summary>
-    /// Run tiers 1 + 2. Cheap, no network. Returns the comma-separated list
-    /// of triggered positive keywords on a pass, or a human-readable
-    /// RejectReason on a miss (used in trace-level logs to debug "why did
-    /// this post not surface?" without re-fetching from Reddit).
+    /// Run both keyword tiers. Returns the comma-separated list of
+    /// triggered positive keywords on a pass, or a human-readable
+    /// RejectReason on a miss (used in trace-level logs to debug "why
+    /// did this post not surface?" without re-fetching from Reddit).
     /// </summary>
     public static TextMatchResult MatchText(RedditPost post)
     {
-        if (post.Stickied)         return new(false, "", "stickied");
-        if (post.Over18)           return new(false, "", "over_18");
-
-        // We deliberately don't filter on is_self. Link posts (e.g. "BF6 LFG —
-        // here's my gameplay clip") can still be legitimate leads if the title
-        // carries the LFG signal. The keyword filter and author quality floor
-        // are doing the real work; over-strict pre-filtering risks dropping
-        // good leads.
-
         var haystack = string.Concat(post.Title, "\n", post.Selftext);
 
         var positiveMatches = PositivePattern
@@ -123,21 +115,5 @@ public static class LeadMatcher
             return new(false, "", $"negative keyword: {negativeHit.Value}");
 
         return new(true, string.Join(", ", positiveMatches), null);
-    }
-
-    /// <summary>
-    /// Tier 3. Returns null if the author passes the floor, otherwise a
-    /// short reason string. A null author (Reddit /about returned 404)
-    /// is rejected as "deleted" — we can't verify the floor and the
-    /// signal-to-noise on those isn't worth the risk.
-    /// </summary>
-    public static string? RejectAuthor(RedditUser? author, RedditLeadsOptions options)
-    {
-        if (author is null) return "author profile missing";
-        if (author.AccountAgeDays < options.MinAccountAgeDays)
-            return $"account age {author.AccountAgeDays}d < {options.MinAccountAgeDays}d";
-        if (author.TotalKarma < options.MinKarma)
-            return $"karma {author.TotalKarma} < {options.MinKarma}";
-        return null;
     }
 }
