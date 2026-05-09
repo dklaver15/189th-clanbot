@@ -622,6 +622,8 @@ public class CommandsCommandHandler
                 attendanceLbl, MinRank("MAJ")),
             new("leads", "Reddit recruitment lead stats and recent feed",
                 attendanceLbl, MinRank("MAJ")),
+            new("usage-stats", "Slash-command usage log (leaderboard, per-member history, drill-down)",
+                attendanceLbl, MinRank("MAJ")),   // SyncWithHandlers: UsageStatsCommandHandler.MinRankFloor
             new("clear-awol-list", $"Delete all messages in #{config.HqChannelName}",
                 awolKickLbl, MinRank(config.AwolKickMinRank)),
             new("kick-awols", "Kick all members currently flagged AWOL",

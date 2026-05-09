@@ -40,6 +40,7 @@ public class DiscordBotService : IHostedService
     private readonly CalendarCommandHandler _calendarHandler;
     private readonly CommandsCommandHandler _commandsHandler;
     private readonly CommandUsageTrackingHandler _commandUsageHandler;
+    private readonly UsageStatsCommandHandler _usageStatsHandler;
     private readonly InviteAttributionService _inviteAttributionService;
     private readonly InviteCommandHandler _inviteCommandHandler;
     private readonly RedditLeadButtonHandler _redditLeadButtonHandler;
@@ -73,6 +74,7 @@ public class DiscordBotService : IHostedService
         CalendarCommandHandler calendarHandler,
         CommandsCommandHandler commandsHandler,
         CommandUsageTrackingHandler commandUsageHandler,
+        UsageStatsCommandHandler usageStatsHandler,
         InviteAttributionService inviteAttributionService,
         InviteCommandHandler inviteCommandHandler,
         RedditLeadButtonHandler redditLeadButtonHandler,
@@ -105,6 +107,7 @@ public class DiscordBotService : IHostedService
         _calendarHandler             = calendarHandler;
         _commandsHandler             = commandsHandler;
         _commandUsageHandler         = commandUsageHandler;
+        _usageStatsHandler           = usageStatsHandler;
         _inviteAttributionService    = inviteAttributionService;
         _inviteCommandHandler        = inviteCommandHandler;
         _redditLeadButtonHandler     = redditLeadButtonHandler;
@@ -142,6 +145,7 @@ public class DiscordBotService : IHostedService
         _calendarHandler.Register(_client);
         _commandsHandler.Register(_client);
         _commandUsageHandler.Register(_client);
+        _usageStatsHandler.Register(_client);
         _inviteAttributionService.Register(_client);
         _inviteCommandHandler.Register(_client);
         _redditLeadButtonHandler.Register(_client);
@@ -386,6 +390,18 @@ public class DiscordBotService : IHostedService
                 // is the read-side dashboard. NOTE: keep CommandsCommandHandler.BuildCatalog
                 // in sync when changing /leads.
                 RedditLeadsCommandHandler.BuildCommand(),
+
+                // /usage-stats — read side of the slash-command usage log
+                // written by CommandUsageTrackingHandler. Three subcommands
+                // (top, user, command) for officers (MAJ+) to see who's
+                // actually exercising the bot's command surface and which
+                // commands are getting traction. Pure analytics — NOT a
+                // signal feeding AutoPromotionService. The slash-command
+                // shape lives on the handler so the option list stays next
+                // to the code that consumes it. NOTE: also keep
+                // CommandsCommandHandler.BuildCatalog in sync when changing
+                // /usage-stats.
+                UsageStatsCommandHandler.BuildCommand(),
             };
 
             foreach (var guild in _client.Guilds)

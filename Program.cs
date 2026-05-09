@@ -247,6 +247,15 @@ try
     builder.Services.AddSingleton<CommandUsageTrackingHandler>();
     builder.Services.AddHostedService<CommandUsagePruneService>();
 
+    // UsageStatsCommandHandler: /usage-stats slash command (MAJ+). Reads
+    // the CommandUsages table written by CommandUsageTrackingHandler. Three
+    // subcommands: top (leaderboard), user (per-member history), command
+    // (per-command drill-down with parameter breakdown). Catalog entry
+    // lives in CommandsCommandHandler.BuildCatalog and the slash-command
+    // shape is registered in DiscordBotService.OnReadyAsync via
+    // UsageStatsCommandHandler.BuildCommand() — keep all three in sync.
+    builder.Services.AddSingleton<UsageStatsCommandHandler>();
+
     // ── Reddit recruitment leads ─────────────────────────────────────
     // RedditLeadService: polling background service that watches the
     // configured subreddits for LFG/"looking for clan" posts, runs each
