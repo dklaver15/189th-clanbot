@@ -188,7 +188,8 @@ public sealed class PatrolWatchCommandHandler
                 "*User Settings → Connections* — without that link, Discord can't see what you're playing on console.\n" +
                 "• Activity privacy is off in *User Settings → Activity Privacy*. Toggle on \"Display current activity as a status message.\"\n" +
                 "• You used `/patrol off` (use `/patrol on` to undo).\n" +
-                "• The squad is below 3 — duos don't trigger the embed.\n\n" +
+                "• The squad is below 3 — duos don't trigger the embed.\n" +
+                "• Your voice channel is excluded by design (the events category and AFK rooms — events have their own announcement system, AFK rooms aren't ops).\n\n" +
                 "**Privacy**\n" +
                 "Use `/patrol off` to hide yourself from these embeds. Squads still form without you on the roster line.")
             .WithColor(new Color(0xC9, 0xA6, 0x47))

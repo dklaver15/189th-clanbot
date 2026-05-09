@@ -82,13 +82,16 @@ public sealed class PatrolWatchService : IHostedService
 
         _client.UserVoiceStateUpdated += OnVoiceStateUpdated;
         _client.PresenceUpdated       += OnPresenceUpdated;
+        _client.Ready                 += OnReadyAsync;
 
         _logger.LogInformation(
-            "PatrolWatch started; channel={LfgChannelId}, minSquad={MinSquad}, debounce={Debounce}s, games=[{Games}]",
+            "PatrolWatch started; channel={LfgChannelId}, minSquad={MinSquad}, debounce={Debounce}s, games=[{Games}], excludedCategories={ExCats}, excludedChannels={ExChans}",
             _options.LfgChannelId,
             _options.MinSquadSize,
             _options.DebounceSeconds,
-            string.Join(", ", _options.MatchedGames.Select(g => g.DisplayName)));
+            string.Join(", ", _options.MatchedGames.Select(g => g.DisplayName)),
+            _options.ExcludedCategoryIds.Count,
+            _options.ExcludedChannelIds.Count);
 
         return Task.CompletedTask;
     }
@@ -99,6 +102,7 @@ public sealed class PatrolWatchService : IHostedService
 
         _client.UserVoiceStateUpdated -= OnVoiceStateUpdated;
         _client.PresenceUpdated       -= OnPresenceUpdated;
+        _client.Ready                 -= OnReadyAsync;
 
         return Task.CompletedTask;
     }
@@ -129,10 +133,65 @@ public sealed class PatrolWatchService : IHostedService
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// On Ready, sweep every voice channel in every guild and schedule a
+    /// recompute for the populated ones. This covers the cold-start gap:
+    /// without it, members already in voice when the bot booted would be
+    /// invisible to the watcher until something fired an event (mic toggle,
+    /// status change, anyone joining or leaving a VC).
+    ///
+    /// Ready fires once per gateway handshake. We don't subscribe to Connected
+    /// for reconnects — Discord.Net replays state diffs as gateway events on
+    /// reconnect, so the existing UserVoiceStateUpdated / PresenceUpdated
+    /// handlers cover that case without a second sweep.
+    ///
+    /// Each ScheduleRecompute call is debounced by DebounceSeconds, so embeds
+    /// land roughly 12s after Ready — fine for startup, and any events that
+    /// fire during that window coalesce into the same recompute.
+    /// </summary>
+    private Task OnReadyAsync()
+    {
+        var scanned   = 0;
+        var populated = 0;
+        var excluded  = 0;
+        var scheduled = 0;
+
+        foreach (var guild in _client.Guilds)
+        {
+            foreach (var vc in guild.VoiceChannels)
+            {
+                scanned++;
+                if (vc.ConnectedUsers.Count == 0) continue;
+                populated++;
+
+                if (IsExcluded(vc))
+                {
+                    excluded++;
+                    continue;
+                }
+
+                scheduled++;
+                ScheduleRecompute(vc);
+            }
+        }
+
+        _logger.LogInformation(
+            "PatrolWatch cold-start scan: {Scanned} VCs scanned, {Populated} populated, {Excluded} excluded, {Scheduled} recomputes scheduled",
+            scanned, populated, excluded, scheduled);
+
+        return Task.CompletedTask;
+    }
+
     // ── Debounce + recompute ────────────────────────────────────────
 
     private void ScheduleRecompute(SocketVoiceChannel channel)
     {
+        // Skip channels we don't watch (events category, AFK rooms, etc).
+        // Cheaper to bail here than to debounce + recompute + early-return —
+        // PresenceUpdated fires hard during big events and we'd rather not
+        // even allocate the per-channel CTS for excluded rooms.
+        if (IsExcluded(channel)) return;
+
         var newCts = new CancellationTokenSource();
 
         // Replace any pending debouncer for this channel. If two events come
@@ -278,6 +337,36 @@ public sealed class PatrolWatchService : IHostedService
             }
         }
         return null;
+    }
+
+    // ── Exclusions ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// True if this voice channel should be ignored by Patrol Watch entirely.
+    /// Three layers:
+    ///   1. The guild's official AFK channel (Discord-native concept — the
+    ///      VC that idle members get auto-moved into). Always excluded; no
+    ///      config needed.
+    ///   2. Any channel whose parent category is in ExcludedCategoryIds —
+    ///      typically the events category, since events have their own
+    ///      announcement surface and a Patrol Watch embed would just
+    ///      duplicate the noise.
+    ///   3. Any channel whose ID is in ExcludedChannelIds — for AFK rooms
+    ///      not registered as Discord's official AFK channel, mod-only
+    ///      VCs, etc.
+    /// Checked once at the top of ScheduleRecompute so excluded channels
+    /// never even allocate a debouncer CTS.
+    /// </summary>
+    private bool IsExcluded(SocketVoiceChannel channel)
+    {
+        if (channel.Guild.AFKChannel?.Id == channel.Id) return true;
+
+        if (_options.ExcludedChannelIds.Contains(channel.Id)) return true;
+
+        if (channel.CategoryId is ulong catId
+            && _options.ExcludedCategoryIds.Contains(catId)) return true;
+
+        return false;
     }
 
     // ── Embed lifecycle ─────────────────────────────────────────────

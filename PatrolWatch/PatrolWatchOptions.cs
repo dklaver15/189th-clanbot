@@ -56,6 +56,22 @@ public sealed class PatrolWatchOptions
     /// is a config push, not a redeploy.
     /// </summary>
     public List<MatchedGame> MatchedGames { get; set; } = new();
+
+    /// <summary>
+    /// Voice-channel category IDs to ignore entirely. Members in any VC under
+    /// one of these categories never count toward a patrol — typically the
+    /// events category, since events already have their own announcement
+    /// surface and a Patrol Watch embed would just duplicate the noise.
+    /// </summary>
+    public List<ulong> ExcludedCategoryIds { get; set; } = new();
+
+    /// <summary>
+    /// Specific voice-channel IDs to ignore (in addition to whole-category
+    /// exclusions and the guild's official AFK channel, which is auto-
+    /// excluded). Useful for AFK rooms not registered as Discord's official
+    /// AFK channel, "do not disturb" rooms, mod-only VCs, etc.
+    /// </summary>
+    public List<ulong> ExcludedChannelIds { get; set; } = new();
 }
 
 /// <summary>
