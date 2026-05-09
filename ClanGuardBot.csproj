@@ -30,5 +30,8 @@
   <ItemGroup>
     <Content Include="Assets\189th_logo.png" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+  <ItemGroup>
+    <Folder Include="RedditLeads\" />
+  </ItemGroup>
 
 </Project>

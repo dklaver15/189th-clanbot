@@ -1,5 +1,6 @@
 using ClanGuardBot.Handlers;
 using ClanGuardBot.Models;
+using ClanGuardBot.RedditLeads;
 using Discord;
 using Discord.WebSocket;
 using Microsoft.Extensions.Hosting;
@@ -40,6 +41,8 @@ public class DiscordBotService : IHostedService
     private readonly CommandsCommandHandler _commandsHandler;
     private readonly InviteAttributionService _inviteAttributionService;
     private readonly InviteCommandHandler _inviteCommandHandler;
+    private readonly RedditLeadButtonHandler _redditLeadButtonHandler;
+    private readonly RedditLeadsCommandHandler _redditLeadsCommandHandler;
     private readonly ILogger<DiscordBotService> _logger;
     private readonly BotConfig _config;
 
@@ -70,6 +73,8 @@ public class DiscordBotService : IHostedService
         CommandsCommandHandler commandsHandler,
         InviteAttributionService inviteAttributionService,
         InviteCommandHandler inviteCommandHandler,
+        RedditLeadButtonHandler redditLeadButtonHandler,
+        RedditLeadsCommandHandler redditLeadsCommandHandler,
         ILogger<DiscordBotService> logger,
         IOptions<BotConfig> config)
     {
@@ -99,6 +104,8 @@ public class DiscordBotService : IHostedService
         _commandsHandler             = commandsHandler;
         _inviteAttributionService    = inviteAttributionService;
         _inviteCommandHandler        = inviteCommandHandler;
+        _redditLeadButtonHandler     = redditLeadButtonHandler;
+        _redditLeadsCommandHandler   = redditLeadsCommandHandler;
         _logger                      = logger;
         _config                      = config.Value;
     }
@@ -133,6 +140,8 @@ public class DiscordBotService : IHostedService
         _commandsHandler.Register(_client);
         _inviteAttributionService.Register(_client);
         _inviteCommandHandler.Register(_client);
+        _redditLeadButtonHandler.Register(_client);
+        _redditLeadsCommandHandler.Register(_client);
 
         await _client.LoginAsync(TokenType.Bot, _config.Token);
         await _client.StartAsync();
@@ -364,6 +373,15 @@ public class DiscordBotService : IHostedService
                 // in sync when this changes — that's the /commands self-service
                 // catalog source of truth.
                 InviteCommandHandler.BuildCommand(),
+
+                // /leads — Reddit recruitment lead funnel. Two subcommands
+                // (stats, recent) for officers (MAJ+) to monitor what the
+                // RedditLeadService has surfaced and the conversion rate
+                // by subreddit. The button surface for individual leads
+                // lives on the embeds posted to the leads channel; this
+                // is the read-side dashboard. NOTE: keep CommandsCommandHandler.BuildCatalog
+                // in sync when changing /leads.
+                RedditLeadsCommandHandler.BuildCommand(),
             };
 
             foreach (var guild in _client.Guilds)

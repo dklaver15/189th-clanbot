@@ -2,6 +2,7 @@ using ClanGuardBot.Briefing;
 using ClanGuardBot.Data;
 using ClanGuardBot.Handlers;
 using ClanGuardBot.Models;
+using ClanGuardBot.RedditLeads;
 using ClanGuardBot.Services;
 using Discord;
 using Discord.WebSocket;
@@ -229,6 +230,21 @@ try
     // SlashCommandBuilder list in DiscordBotService.OnReadyAsync — adding,
     // removing, or re-gating a command requires updating both.
     builder.Services.AddSingleton<CommandsCommandHandler>();
+
+    // ── Reddit recruitment leads ─────────────────────────────────────
+    // RedditLeadService: polling background service that watches the
+    // configured subreddits for LFG/"looking for clan" posts, runs each
+    // through LeadMatcher's three-tier filter (positive keyword → negative
+    // keyword → author quality floor), and posts surviving leads to the
+    // leads channel as embeds with click-to-claim/contact/outcome buttons.
+    // RedditLeadButtonHandler routes the button clicks; RedditLeadsCommandHandler
+    // exposes /leads stats and /leads recent. All three (plus the typed
+    // Reddit HttpClient + options binding) are wired up by AddRedditLeads.
+    // Disabled-by-default in appsettings; enable via RedditLeads:Enabled
+    // once the bot Reddit account + script app credentials are in place.
+    // NOTE: also keep CommandsCommandHandler.BuildCatalog in sync when
+    // changing /leads, same as the rest of the slash-command surface.
+    builder.Services.AddRedditLeads(builder.Configuration);
 
     var app = builder.Build();
 

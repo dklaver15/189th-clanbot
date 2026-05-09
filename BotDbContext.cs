@@ -23,6 +23,7 @@ public class BotDbContext : DbContext
     public DbSet<ApolloEvent>         ApolloEvents        => Set<ApolloEvent>();
     public DbSet<InviteSource>        InviteSources       => Set<InviteSource>();
     public DbSet<InviteJoin>          InviteJoins         => Set<InviteJoin>();
+    public DbSet<RedditLead>          RedditLeads         => Set<RedditLead>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -198,6 +199,35 @@ public class BotDbContext : DbContext
 
             // Future "this user's join history" lookup if we ever need it.
             e.HasIndex(j => j.UserDiscordId);
+        });
+
+        // ── Reddit recruitment leads ──────────────────────────────────
+        // Written by RedditLeadService when a Reddit post passes LeadMatcher,
+        // mutated by RedditLeadButtonHandler as officers work the lead.
+        // The unique index on RedditPostId is the structural dedupe for
+        // the polling loop — same belt-and-suspenders pattern as the
+        // ApolloMessageLog and CalendarEvent unique indexes. The polling
+        // service does a bulk-existence query to filter listings before
+        // hitting the DB; this constraint is the floor that keeps any
+        // future code path that bypasses that query from silently
+        // double-inserting.
+        modelBuilder.Entity<RedditLead>(e =>
+        {
+            e.Property(x => x.Status).HasConversion<int>();
+
+            e.HasIndex(l => l.RedditPostId).IsUnique();
+
+            // Drives the polling service's bulk-dedupe query and the
+            // /leads recent listing.
+            e.HasIndex(l => l.DiscoveredAtUtc);
+
+            // Drives /leads stats per-subreddit grouping.
+            e.HasIndex(l => l.Subreddit);
+
+            // Drives /leads stats funnel queries ("how many in Claimed
+            // state right now?") and the future "stale claimed for >Nd"
+            // nag query if we ever add it.
+            e.HasIndex(l => l.Status);
         });
     }
 }

@@ -620,6 +620,8 @@ public class CommandsCommandHandler
 
             new("attendance", "Show today's clan event attendance, grouped by event",
                 attendanceLbl, MinRank("MAJ")),
+            new("leads", "Reddit recruitment lead stats and recent feed",
+                attendanceLbl, MinRank("MAJ")),
             new("clear-awol-list", $"Delete all messages in #{config.HqChannelName}",
                 awolKickLbl, MinRank(config.AwolKickMinRank)),
             new("kick-awols", "Kick all members currently flagged AWOL",
