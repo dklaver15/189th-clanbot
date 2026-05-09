@@ -25,6 +25,7 @@ public class BotDbContext : DbContext
     public DbSet<InviteJoin>          InviteJoins         => Set<InviteJoin>();
     public DbSet<RedditLead>          RedditLeads         => Set<RedditLead>();
     public DbSet<CommandUsage>        CommandUsages       => Set<CommandUsage>();
+    public DbSet<PatrolWatchOptOut>   PatrolWatchOptOuts  => Set<PatrolWatchOptOut>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -250,6 +251,19 @@ public class BotDbContext : DbContext
             // "Who's been using /command-catalog this month?" — supports
             // per-command leaderboards without scanning the whole table.
             e.HasIndex(c => new { c.GuildId, c.CommandName, c.ExecutedAt });
+        });
+
+        // ── Patrol Watch opt-outs ─────────────────────────────────────
+        // Per-member toggle, written by /patrol off and removed by /patrol on.
+        // Row present = opted out. Read on every recompute by PatrolWatchService
+        // to filter the matched-member set before posting / editing the embed.
+        modelBuilder.Entity<PatrolWatchOptOut>(e =>
+        {
+            // Drives the "is this member opted out?" lookup. Unique because we
+            // never want two opt-out rows for the same (guild, user) — /patrol off
+            // checks for an existing row before inserting, but the index is the
+            // structural backstop.
+            e.HasIndex(o => new { o.GuildId, o.UserId }).IsUnique();
         });
     }
 }

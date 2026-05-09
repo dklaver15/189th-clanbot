@@ -1,5 +1,6 @@
 using ClanGuardBot.Handlers;
 using ClanGuardBot.Models;
+using ClanGuardBot.PatrolWatch;
 using ClanGuardBot.RedditLeads;
 using Discord;
 using Discord.WebSocket;
@@ -45,6 +46,7 @@ public class DiscordBotService : IHostedService
     private readonly InviteCommandHandler _inviteCommandHandler;
     private readonly RedditLeadButtonHandler _redditLeadButtonHandler;
     private readonly RedditLeadsCommandHandler _redditLeadsCommandHandler;
+    private readonly PatrolWatchCommandHandler _patrolWatchCommandHandler;
     private readonly ILogger<DiscordBotService> _logger;
     private readonly BotConfig _config;
 
@@ -79,6 +81,7 @@ public class DiscordBotService : IHostedService
         InviteCommandHandler inviteCommandHandler,
         RedditLeadButtonHandler redditLeadButtonHandler,
         RedditLeadsCommandHandler redditLeadsCommandHandler,
+        PatrolWatchCommandHandler patrolWatchCommandHandler,
         ILogger<DiscordBotService> logger,
         IOptions<BotConfig> config)
     {
@@ -112,6 +115,7 @@ public class DiscordBotService : IHostedService
         _inviteCommandHandler        = inviteCommandHandler;
         _redditLeadButtonHandler     = redditLeadButtonHandler;
         _redditLeadsCommandHandler   = redditLeadsCommandHandler;
+        _patrolWatchCommandHandler   = patrolWatchCommandHandler;
         _logger                      = logger;
         _config                      = config.Value;
     }
@@ -150,6 +154,7 @@ public class DiscordBotService : IHostedService
         _inviteCommandHandler.Register(_client);
         _redditLeadButtonHandler.Register(_client);
         _redditLeadsCommandHandler.Register(_client);
+        _patrolWatchCommandHandler.Register(_client);
 
         await _client.LoginAsync(TokenType.Bot, _config.Token);
         await _client.StartAsync();
@@ -402,6 +407,15 @@ public class DiscordBotService : IHostedService
                 // CommandsCommandHandler.BuildCatalog in sync when changing
                 // /usage-stats.
                 UsageStatsCommandHandler.BuildCommand(),
+
+                // /patrol — Patrol Watch opt-out / info surface. Three
+                // subcommands (off, on, info). Open to all members; rendered
+                // ephemerally. The opt-out toggle is consumed by
+                // PatrolWatchService.DoRecomputeAsync to filter the matched-
+                // member set before posting the embed in #lfg. NOTE: also keep
+                // CommandsCommandHandler.BuildCatalog in sync when changing
+                // /patrol.
+                PatrolWatchCommandHandler.BuildCommand(),
             };
 
             foreach (var guild in _client.Guilds)

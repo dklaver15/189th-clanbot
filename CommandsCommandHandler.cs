@@ -589,6 +589,8 @@ public class CommandsCommandHandler
                 "Everyone", everyone),
             new("lookup", "Look up someone's gamertags from the roster",
                 "Everyone", everyone),
+            new("patrol", "Toggle your visibility on Patrol Watch embeds (off/on/info)",
+                "Everyone", everyone),
 
             // Officer tier
             new("awol-check", "Check another user's activity stats",
