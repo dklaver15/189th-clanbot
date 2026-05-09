@@ -24,6 +24,7 @@ public class BotDbContext : DbContext
     public DbSet<InviteSource>        InviteSources       => Set<InviteSource>();
     public DbSet<InviteJoin>          InviteJoins         => Set<InviteJoin>();
     public DbSet<RedditLead>          RedditLeads         => Set<RedditLead>();
+    public DbSet<CommandUsage>        CommandUsages       => Set<CommandUsage>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -228,6 +229,27 @@ public class BotDbContext : DbContext
             // state right now?") and the future "stale claimed for >Nd"
             // nag query if we ever add it.
             e.HasIndex(l => l.Status);
+        });
+
+        // ── Slash-command usage log ───────────────────────────────────
+        // Append-only log of every slash-command invocation, written by
+        // CommandUsageTrackingHandler and pruned to a 90-day window by
+        // CommandUsagePruneService. Indexes are tuned for the two read
+        // patterns we expect today (per-user history, per-command
+        // popularity) plus the prune cutoff scan.
+        modelBuilder.Entity<CommandUsage>(e =>
+        {
+            // Drives the nightly retention prune (CommandUsagePruneService).
+            e.HasIndex(c => c.ExecutedAt);
+
+            // "What has this user run lately?" — the most likely ad-hoc
+            // query when investigating whether a member is engaging with
+            // bot tooling.
+            e.HasIndex(c => new { c.GuildId, c.UserId, c.ExecutedAt });
+
+            // "Who's been using /command-catalog this month?" — supports
+            // per-command leaderboards without scanning the whole table.
+            e.HasIndex(c => new { c.GuildId, c.CommandName, c.ExecutedAt });
         });
     }
 }

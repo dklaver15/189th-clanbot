@@ -377,3 +377,51 @@ public class BotState
     /// </summary>
     public DateTime? LastAutoPromotionCompletedUtc { get; set; }
 }
+
+/// <summary>
+/// One row per slash-command invocation. Written by
+/// CommandUsageTrackingHandler on every SlashCommandExecuted event;
+/// pruned to the last 90 days by CommandUsagePruneService. Captures who
+/// ran what, when, and (for an explicit allowlist of choice/boolean
+/// params) the values they passed.
+///
+/// ── Out of scope ──
+/// This table is descriptive only. It is NOT consumed by AutoPromotionService
+/// or any other activity-scoring code path; running /command-catalog ten
+/// times in a row should not move a member's promotion eligibility.
+///
+/// ── Sensitive parameter values are dropped at write time ──
+/// /promote, /setnick, /demote, and the user-picker commands are intentionally
+/// absent from CommandUsageTrackingHandler.ParameterAllowlist, so their
+/// option values never reach this table — only the command name + invoker.
+/// The audit story for those commands lives elsewhere (rank history, role
+/// change events, log files).
+/// </summary>
+public class CommandUsage
+{
+    public int Id { get; set; }
+    public ulong GuildId { get; set; }       // 0 for DM invocations
+    public ulong UserId { get; set; }
+    public string Username { get; set; } = string.Empty;
+    public ulong ChannelId { get; set; }     // 0 for DM invocations
+
+    /// <summary>Top-level command name, e.g. "command-catalog", "invite".</summary>
+    public string CommandName { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Space-separated subcommand path for grouped commands, e.g. "create"
+    /// for /invite create or "stats" for /leads stats. Null for flat
+    /// commands like /command-catalog.
+    /// </summary>
+    public string? SubcommandPath { get; set; }
+
+    /// <summary>
+    /// JSON object of {param: value} for allowlisted leaf options only.
+    /// Null when the command has no allowlisted params or the user passed
+    /// none. See CommandUsageTrackingHandler.ParameterAllowlist for the
+    /// exhaustive list of (command, param) pairs whose values are stored.
+    /// </summary>
+    public string? Parameters { get; set; }
+
+    public DateTime ExecutedAt { get; set; }
+}

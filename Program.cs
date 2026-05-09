@@ -231,6 +231,22 @@ try
     // removing, or re-gating a command requires updating both.
     builder.Services.AddSingleton<CommandsCommandHandler>();
 
+    // ── Slash-command usage tracking ─────────────────────────────────
+    // CommandUsageTrackingHandler: subscribes to SlashCommandExecuted
+    // alongside the per-command handlers and writes one row to
+    // CommandUsages for every invocation. Captures command name,
+    // subcommand path, invoker, and (for an explicit allowlist of
+    // choice/boolean params) the values passed. Not an activity signal —
+    // AutoPromotionService does not consume CommandUsages. See the handler
+    // for the parameter allowlist; extend it when adding new flag-style
+    // options worth surfacing in usage analytics.
+    //
+    // CommandUsagePruneService: nightly sweep that deletes CommandUsages
+    // rows older than 90 days. Hot-path inserts stay independent of the
+    // retention policy.
+    builder.Services.AddSingleton<CommandUsageTrackingHandler>();
+    builder.Services.AddHostedService<CommandUsagePruneService>();
+
     // ── Reddit recruitment leads ─────────────────────────────────────
     // RedditLeadService: polling background service that watches the
     // configured subreddits for LFG/"looking for clan" posts, runs each

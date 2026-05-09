@@ -39,6 +39,7 @@ public class DiscordBotService : IHostedService
     private readonly CleanupCalendarDupesCommandHandler _cleanupCalendarDupesHandler;
     private readonly CalendarCommandHandler _calendarHandler;
     private readonly CommandsCommandHandler _commandsHandler;
+    private readonly CommandUsageTrackingHandler _commandUsageHandler;
     private readonly InviteAttributionService _inviteAttributionService;
     private readonly InviteCommandHandler _inviteCommandHandler;
     private readonly RedditLeadButtonHandler _redditLeadButtonHandler;
@@ -71,6 +72,7 @@ public class DiscordBotService : IHostedService
         CleanupCalendarDupesCommandHandler cleanupCalendarDupesHandler,
         CalendarCommandHandler calendarHandler,
         CommandsCommandHandler commandsHandler,
+        CommandUsageTrackingHandler commandUsageHandler,
         InviteAttributionService inviteAttributionService,
         InviteCommandHandler inviteCommandHandler,
         RedditLeadButtonHandler redditLeadButtonHandler,
@@ -102,6 +104,7 @@ public class DiscordBotService : IHostedService
         _cleanupCalendarDupesHandler = cleanupCalendarDupesHandler;
         _calendarHandler             = calendarHandler;
         _commandsHandler             = commandsHandler;
+        _commandUsageHandler         = commandUsageHandler;
         _inviteAttributionService    = inviteAttributionService;
         _inviteCommandHandler        = inviteCommandHandler;
         _redditLeadButtonHandler     = redditLeadButtonHandler;
@@ -138,6 +141,7 @@ public class DiscordBotService : IHostedService
         _cleanupCalendarDupesHandler.Register(_client);
         _calendarHandler.Register(_client);
         _commandsHandler.Register(_client);
+        _commandUsageHandler.Register(_client);
         _inviteAttributionService.Register(_client);
         _inviteCommandHandler.Register(_client);
         _redditLeadButtonHandler.Register(_client);
