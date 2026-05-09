@@ -32,6 +32,14 @@ namespace ClanGuardBot.RedditLeads;
 ///   filter the difference is invisible — every recent post is still
 ///   inside our window.
 ///
+/// ── What we DO get from RSS that the original implementation missed ──
+/// IsSelf (link-post vs self-post) IS detectable from RSS content
+/// markup, even though I initially assumed otherwise. See
+/// DetectIsSelfPost for the heuristic. This matters because aggregator
+/// subs (r/PS5LFG, r/XboxLFG, etc.) carry a lot of link-post directory
+/// entries that look noisy in the leads channel, and rejecting them
+/// upstream is much cleaner than blacklist-keyword whack-a-mole.
+///
 /// ── Rate limit ──
 /// Reddit's public RSS endpoints serve from CDN with no documented
 /// per-IP rate limit, but conservative observation suggests 60 req/min
@@ -166,9 +174,11 @@ public sealed class RedditRssClient
             : authorRaw;
 
         // <content type="html">&lt;...&gt;</content>. XDocument auto-decodes
-        // the XML entities, so .Value is the raw HTML markup. We strip tags
-        // for keyword matching + storage.
+        // the XML entities, so .Value is the raw HTML markup. We need the
+        // raw markup TWICE: once to detect link-vs-self post shape (which
+        // requires intact tags), then again stripped for storage + matching.
         var contentHtml = (string?)entry.Element(Atom + "content") ?? string.Empty;
+        var isSelf = DetectIsSelfPost(contentHtml);
         var selftext = HtmlToPlainText(contentHtml);
 
         // <category term="programming"/> — falls back to the requested sub
@@ -185,10 +195,69 @@ public sealed class RedditRssClient
             Selftext:  selftext,
             Permalink: url, // already a full https URL from the Atom feed
             CreatedUtc: postedUtc,
-            // RSS doesn't expose these — see class doc. Always false.
+            // Stickied / Over18 still aren't exposed by RSS — see class doc.
+            // IsSelf IS detectable via content shape, populated above.
             Stickied:  false,
             Over18:    false,
-            IsSelf:    true);
+            IsSelf:    isSelf);
+    }
+
+    /// <summary>
+    /// Inspects raw RSS content HTML to decide whether the entry is a
+    /// self post (text/markdown body) or a link post (URL submission).
+    ///
+    /// ── Why this matters ──
+    /// On aggregator subs like r/PS5LFG, r/XboxLFG, r/PCGameLFG, many
+    /// "posts" are link entries pointing to game-specific LFG subs.
+    /// Reddit's RSS hydrates the body of these link posts with the
+    /// linked sub's about/sidebar text, which is junk for our purposes
+    /// — the matcher would see "is the subreddit used to find players"
+    /// or "unofficial subreddit for X" boilerplate. Real LFG posts are
+    /// almost always self posts with the redditor's actual recruitment
+    /// pitch in the body.
+    ///
+    /// LeadMatcher uses this to reject link posts before keyword
+    /// matching, cutting the dominant source of noise on aggregator subs
+    /// without needing per-sub keyword maintenance.
+    ///
+    /// ── How we detect ──
+    /// Two signals from Reddit's RSS markup:
+    ///   1. A literal "[link]" string in the body — Reddit's RSS adds
+    ///      this as the visible anchor text on link posts. Self posts
+    ///      never contain this token in the rendered RSS body.
+    ///   2. A &lt;table&gt; element wrapping the body without an
+    ///      accompanying `&lt;div class="md"&gt;` — link posts use a
+    ///      table layout for thumbnail + link, self posts always wrap
+    ///      their markdown body in `div class="md"`.
+    ///
+    /// Either signal alone classifies as link. Both must be absent to
+    /// classify as self. This biases toward "self" on ambiguous markup
+    /// — better to surface a probable-real lead with weird formatting
+    /// than to silently drop one because Reddit changed a tag name.
+    ///
+    /// Empty body → treat as self. A self post with an empty body is
+    /// rare but legitimate (title-only LFG posts happen); a link post
+    /// will always have at least the [link] token, so empty body can't
+    /// be a link post.
+    /// </summary>
+    private static bool DetectIsSelfPost(string html)
+    {
+        if (string.IsNullOrWhiteSpace(html)) return true;
+
+        // Signal 1: the [link] anchor. Most reliable — appears in every
+        // link post's RSS body, never in self posts.
+        if (html.Contains("[link]", StringComparison.Ordinal))
+            return false;
+
+        // Signal 2: belt-and-suspenders backup. If markup uses table layout
+        // (link-post pattern) without the div.md wrapper (self-post pattern),
+        // also classify as link. Catches any future Reddit markup tweak that
+        // drops the [link] text while keeping the structural difference.
+        if (html.Contains("<table", StringComparison.Ordinal)
+            && !html.Contains("class=\"md\"", StringComparison.Ordinal))
+            return false;
+
+        return true;
     }
 
     private static string HtmlToPlainText(string html)
@@ -210,8 +279,9 @@ public sealed class RedditRssClient
 /// <summary>
 /// Minimal projection of a Reddit post — same shape as the previous
 /// OAuth-API version so downstream code (LeadMatcher, RedditLeadService)
-/// doesn't change. Stickied / Over18 / IsSelf are stubbed for RSS
-/// compatibility; see RedditRssClient class doc for why.
+/// doesn't change. Stickied / Over18 are stubbed for RSS compatibility
+/// (see RedditRssClient class doc); IsSelf is genuinely detected from
+/// the RSS content markup via DetectIsSelfPost.
 /// </summary>
 public sealed record RedditPost(
     string Id,

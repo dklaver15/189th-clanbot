@@ -3,10 +3,20 @@ using System.Text.RegularExpressions;
 namespace ClanGuardBot.RedditLeads;
 
 /// <summary>
-/// Two-tier filter that decides whether a Reddit post is worth surfacing
-/// to the leads channel. Designed to be tightenable without touching the
+/// Filter that decides whether a Reddit post is worth surfacing to the
+/// leads channel. Designed to be tightenable without touching the
 /// service: keywords live as static arrays here, thresholds (none
 /// currently) would live in RedditLeadsOptions.
+///
+/// ── Pre-tier: self-post check ──
+/// Link posts are rejected before keyword work. On aggregator subs
+/// (r/PS5LFG, r/XboxLFG, r/PCGameLFG) many "posts" are link entries
+/// pointing to game-specific LFG subs — Reddit's RSS hydrates the body
+/// of these with the linked sub's about text, which trips the keyword
+/// matcher with junk like "is the subreddit used to find players."
+/// Real LFG posts are almost always self posts; link posts are
+/// directory noise. IsSelf is detected by RedditRssClient from the
+/// RSS content markup.
 ///
 /// ── Tier 1: positive keyword match ──
 /// At least one of the LFG-signal phrases must appear in the title or
@@ -96,9 +106,19 @@ public static class LeadMatcher
     /// triggered positive keywords on a pass, or a human-readable
     /// RejectReason on a miss (used in trace-level logs to debug "why
     /// did this post not surface?" without re-fetching from Reddit).
+    ///
+    /// Pre-tier: link posts are rejected before any keyword work. On
+    /// aggregator subs (r/PS5LFG, r/XboxLFG, etc.) link posts are
+    /// directory entries pointing to game-specific subs, with a body
+    /// hydrated from the linked sub's about text. They look like LFG
+    /// posts to a regex but they're noise. RedditRssClient sets IsSelf
+    /// based on RSS content markup; we trust that signal here.
     /// </summary>
     public static TextMatchResult MatchText(RedditPost post)
     {
+        if (!post.IsSelf)
+            return new(false, "", "link post (directory entry, not a real LFG)");
+
         var haystack = string.Concat(post.Title, "\n", post.Selftext);
 
         var positiveMatches = PositivePattern
