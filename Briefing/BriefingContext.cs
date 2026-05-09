@@ -67,6 +67,14 @@ public sealed record BriefingContext
     /// </summary>
     public IReadOnlyList<TopReferrerItem> TopReferrers { get; init; } = [];
 
+    /// <summary>
+    /// Snapshot of the Reddit recruit-lead funnel for the briefing week.
+    /// Null when no leads were surfaced in the window — the prompt skips
+    /// the section in that case, matching the Spotlight convention.
+    /// Sourced from the RedditLeads table written by RedditLeadService.
+    /// </summary>
+    public RedditLeadsSnapshot? RedditLeads { get; init; }
+
     /// <summary>Free-form short notes for things that don't fit the other buckets.</summary>
     public IReadOnlyList<string> Anomalies { get; init; } = [];
 }
@@ -163,3 +171,47 @@ public sealed record TopReferrerItem(
     string Username,
     ulong DiscordUserId,
     int ReferralCount);
+
+/// <summary>
+/// Briefing-week snapshot of the Reddit recruit-lead funnel. Counts are
+/// scoped to leads DISCOVERED in the briefing week (not "all leads
+/// touched this week" — that would conflate weeks and confuse trend reading).
+/// StaleClaimedAllTime is the deliberate exception — see field doc.
+///
+/// Status counts mirror the LeadStatus enum:
+///   New | Claimed | Contacted | Joined | Declined | NoResponse | Skipped
+/// Sum of all status counts equals TotalSurfaced (every lead has exactly
+/// one status at briefing time).
+/// </summary>
+/// <param name="TotalSurfaced">Total leads inserted into RedditLeads in the briefing week.</param>
+/// <param name="StillNew">Surfaced this week, no officer has claimed yet — still sitting in the channel.</param>
+/// <param name="Claimed">Officer claimed but hasn't recorded a contact outcome yet.</param>
+/// <param name="Contacted">Officer claimed and reported reaching out to the redditor.</param>
+/// <param name="Joined">Lead converted to a Discord member (officer-recorded; not auto-detected).</param>
+/// <param name="Declined">Lead reached out, said no thanks.</param>
+/// <param name="NoResponse">Lead reached out, never heard back.</param>
+/// <param name="Skipped">Officer flagged the post as not worth pursuing — useful signal on matcher tuning.</param>
+/// <param name="BySubreddit">Top N producers in the briefing week, capped in the section helper. Empty when no leads.</param>
+/// <param name="StaleClaimedAllTime">
+/// All-time count of leads currently in Claimed status that were discovered
+/// more than StaleClaimedDaysThreshold days ago. Cross-week scope on purpose
+/// — the briefing is the right place to nudge officers about leads they
+/// claimed weeks ago and forgot about.
+/// </param>
+public sealed record RedditLeadsSnapshot(
+    int TotalSurfaced,
+    int StillNew,
+    int Claimed,
+    int Contacted,
+    int Joined,
+    int Declined,
+    int NoResponse,
+    int Skipped,
+    IReadOnlyList<RedditLeadSubredditBreakdown> BySubreddit,
+    int StaleClaimedAllTime);
+
+/// <param name="Subreddit">Subreddit name without the "r/" prefix, as stored on RedditLead.</param>
+/// <param name="SurfacedCount">Leads surfaced from this sub in the briefing week.</param>
+public sealed record RedditLeadSubredditBreakdown(
+    string Subreddit,
+    int SurfacedCount);

@@ -173,10 +173,19 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
             (Sources: (IReadOnlyList<RecruitmentSourceItem>)Array.Empty<RecruitmentSourceItem>(),
              Referrers: (IReadOnlyList<TopReferrerItem>)Array.Empty<TopReferrerItem>()));
 
+        // ── Recruit leads (Reddit RSS-sourced funnel) ──
+        // Same external-helper pattern as inviteTask. Returns null when the
+        // briefing window saw zero leads — the prompt treats null as "skip
+        // the section" so disabled-feature and quiet-week look identical.
+        var redditLeadsTask = SafeAsync<RedditLeadsSnapshot?>(
+            () => BriefingRedditLeadsSection.CollectAsync(db, weekStart, weekEnd, ct),
+            "recruit leads",
+            null);
+
         await Task.WhenAll(
             awolTask, promoTask, eventsTask, topLineTask,
             priorTopLineTask, spotlightTask, riskTask,
-            inviteTask);
+            inviteTask, redditLeadsTask);
 
         var awolRisks = (await awolTask)
             .OrderByDescending(r => r.DaysSinceAwolAssigned)
@@ -202,6 +211,7 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
         var priorTopLine = await priorTopLineTask;
         var spotlight = await spotlightTask;
         var (recruitmentSources, topReferrers) = await inviteTask;
+        var redditLeads = await redditLeadsTask;
 
         var deltas = new WeekOverWeekDeltas(
             EventsHeldDelta: topLine.EventsHeld - priorTopLine.EventsHeld,
@@ -225,16 +235,19 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
             Spotlight = spotlight,
             RecruitmentSources = recruitmentSources,
             TopReferrers = topReferrers,
+            RedditLeads = redditLeads,
             Anomalies = []
         };
 
         _logger.LogInformation(
             "Briefing context: {Awol} AWOL risks, {Promo} promo candidates, {Events} events, " +
             "{Risk} risk-watch, {Sources} sources, {Referrers} referrers, " +
+            "{Leads} recruit leads (stale claimed: {Stale}), " +
             "spotlight={Spot}, {Members} active members, " +
             "WoW: events Δ{EventsDelta}, attendance Δ{AttendanceDelta}pp, recruits Δ{RecruitsDelta}",
             awolRisks.Count, promotionCandidates.Count, notableEvents.Count,
             riskWatch.Count, recruitmentSources.Count, topReferrers.Count,
+            redditLeads?.TotalSurfaced ?? 0, redditLeads?.StaleClaimedAllTime ?? 0,
             spotlight?.Gamertag ?? "—", topLine.ActiveMemberCount,
             deltas.EventsHeldDelta, deltas.AverageAttendancePercentDelta, deltas.NewRecruitsDelta);
 
