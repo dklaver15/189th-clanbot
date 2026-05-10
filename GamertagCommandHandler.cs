@@ -102,11 +102,22 @@ public partial class GamertagCommandHandler
 
         // Send an ephemeral message with a button to open Modal 2
         var button = new ComponentBuilder()
-            .WithButton("Continue to Xbox / Embark / Bungie →", "gamertags_continue", ButtonStyle.Primary)
+            .WithButton("➡️ Continue to PAGE 2", "gamertags_continue", ButtonStyle.Primary)
             .Build();
 
+        const string message = """
+            ## ⚠️ Step 1 of 2 — Not Done Yet
+
+            ✅ Got your **EA**, **Steam**, and **PSN** tags.
+            ❌ Still need: **Xbox**, **Embark**, **Bungie**.
+
+            ***Your gamertags will NOT be saved until you complete Page 2.***
+            Click the button below to finish.
+            ⬇️
+            """;
+
         await modal.RespondAsync(
-            "✅ Got your EA, Steam, and PSN tags! Click the button below to enter the rest.",
+            message,
             components: button,
             ephemeral: true);
     }
