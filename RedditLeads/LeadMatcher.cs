@@ -14,6 +14,17 @@ namespace ClanGuardBot.RedditLeads;
 /// "selfgoverning" but does match "Lfg" / "LFG!". Multi-word phrases
 /// match across whitespace runs.
 ///
+/// The positive list is intentionally WIDE — it catches both structured-
+/// group asks ("looking for clan", "find a clan") and casual-friend
+/// asks ("looking for gaming buddy", "seeking pals", "lf duo"). The
+/// reasoning: 189th is a structured clan but the cost of an unseen
+/// real lead is much higher than the cost of an officer hitting Skip
+/// on a casual-friend post that isn't the right fit. Officers can
+/// dismiss a false positive in two seconds. Calibrate by reading
+/// rejection logs (`grep "reason=no positive"`) — anything in there
+/// that looks like a real recruitment ask is a missing positive
+/// keyword. Tightening the list later is a one-line change.
+///
 /// ── Tier 2: negative keyword reject ──
 /// Posts containing any of the recruiter-side phrases ("recruiting",
 /// "join our", etc.) are rejected outright — these are competing clans
@@ -54,17 +65,84 @@ public static class LeadMatcher
 {
     private static readonly string[] PositiveKeywords = new[]
     {
+        // ── Structured-group asks ──
+        // Original clan-focused phrasings. Cleanest signal that a poster
+        // is open to joining an organized community rather than just
+        // finding session partners.
         "lfg",
         "looking for clan",
         "looking for a clan",
         "looking for group",
         "looking for a group",
+        "looking for community",
+        "looking for a community",
         "need a clan",
         "find a clan",
+        "join a clan",
+        "join a community",
         "bf6 clan",
         "battlefield 6 clan",
         "battlefield clan",
-        "join a clan",
+
+        // ── "looking for + people-noun" patterns ──
+        // Casual-friend phrasings dominant on r/GamerPals, r/LookingForGroup,
+        // r/FindAClan. These are not "I want a clan" asks but the audience
+        // overlap is real — many casual-friend posters do convert when
+        // pitched a structured group with active voice / events.
+        "looking for friends",
+        "looking for a friend",
+        "looking for gaming",
+        "looking for buddies",
+        "looking for a buddy",
+        "looking for pals",
+        "looking for a pal",
+        "looking for someone",
+        "looking for people",
+        "looking for a duo",
+        "looking for a squad",
+        "looking for a team",
+        "looking for a partner",
+        "looking for chill",
+        "looking to play",
+
+        // ── "LF + people-noun" patterns ──
+        // Standalone "LF" abbreviation followed by a recruitment noun.
+        // We deliberately do NOT include bare "lf" — it triggers on
+        // single-session asks like "LF DPS for mythic raid" that aren't
+        // clan-recruitment relevant.
+        "lf friends",
+        "lf a friend",
+        "lf gaming",
+        "lf duo",
+        "lf squad",
+        "lf team",
+        "lf people",
+        "lf someone",
+        "lf community",
+        "lf buddy",
+        "lf buddies",
+        "lf partner",
+        "lf pals",
+
+        // ── "seeking + people-noun" patterns ──
+        "seeking pals",
+        "seeking friends",
+        "seeking a buddy",
+        "seeking a partner",
+        "seeking gaming",
+        "seeking people",
+
+        // ── Bare gaming-friend phrases ──
+        // Catch posts where the recruitment ask is phrased without a
+        // "looking for" / "lf" / "seeking" prefix, e.g. "Smite Friends"
+        // or "Coop partner needed".
+        "gaming friends",
+        "gaming buddy",
+        "gaming buddies",
+        "gaming pals",
+        "gaming partner",
+        "co-op partner",
+        "coop partner",
     };
 
     private static readonly string[] NegativeKeywords = new[]
