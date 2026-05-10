@@ -40,6 +40,18 @@ namespace ClanGuardBot.RedditLeads;
 /// entries that look noisy in the leads channel, and rejecting them
 /// upstream is much cleaner than blacklist-keyword whack-a-mole.
 ///
+/// ── Dead-sub detection ──
+/// When a sub is banned, deleted, privatized, or renamed, Reddit serves
+/// a 302 redirecting /r/{sub}/new.rss to /subreddits/search.rss?q={sub}.
+/// The default HttpClientHandler follows the redirect transparently, so
+/// without explicit detection we silently parse the search-results feed
+/// as if it were a posts feed — its entries describe OTHER subreddits
+/// matching the query, which often slip through the LFG keyword filter
+/// and pollute the leads channel with directory-style false positives.
+/// We compare the response's final RequestUri against the URL we asked
+/// for; on mismatch we log a warning and skip the cycle. Persistent
+/// warnings mean the sub should be removed from rotation in config.
+///
 /// ── Rate limit ──
 /// Reddit's public RSS endpoints serve from CDN with no documented
 /// per-IP rate limit, but conservative observation suggests 60 req/min
@@ -100,8 +112,33 @@ public sealed class RedditRssClient
         CancellationToken ct)
     {
         var url = string.Format(FeedUrlPattern, subreddit, Math.Clamp(limit, 1, 100));
+        var requestedUri = new Uri(url);
 
         using var response = await _httpClient.GetAsync(url, ct);
+
+        // Dead-sub redirect detection. Reddit returns 302 → /subreddits/search.rss
+        // when /r/{sub}/new.rss doesn't resolve (banned, deleted, privatized,
+        // renamed). The default HttpClientHandler follows that redirect silently
+        // and we end up scraping a stream of *other* subs that match the search
+        // query. The redirected feed has entries that read like "/r/COD_LFG -
+        // Looking for Group!" with the linked sub's about text in the body —
+        // they pass keyword matching and surface as false-positive leads.
+        //
+        // RequestMessage.RequestUri on the response reflects the FINAL URI after
+        // auto-redirects, so we can detect the mismatch without flipping the
+        // handler's AllowAutoRedirect (which would require DI surgery). On
+        // mismatch we treat it like any other transient failure: warn and skip
+        // the cycle. A persistent warning is the operator's signal to remove
+        // the sub from RedditLeadsOptions.Subreddits.
+        var finalUri = response.RequestMessage?.RequestUri;
+        if (finalUri is not null && !RequestUriResolvedAsExpected(requestedUri, finalUri))
+        {
+            _logger.LogWarning(
+                "Reddit RSS for r/{Sub} redirected to {FinalUri} — subreddit is likely deleted, banned, privatized, or renamed. Skipping cycle. Remove from rotation if this persists.",
+                subreddit, finalUri);
+            return Array.Empty<RedditPost>();
+        }
+
         if (!response.IsSuccessStatusCode)
         {
             // Reddit occasionally serves 503 from its CDN under load; treat
@@ -135,6 +172,21 @@ public sealed class RedditRssClient
             if (post is not null) posts.Add(post);
         }
         return posts;
+    }
+
+    /// <summary>
+    /// True when the final URI from the response refers to the same resource
+    /// we asked for — i.e. no auto-redirect to a different path occurred.
+    /// We compare host + path (case-insensitive) and ignore query strings,
+    /// which lets Reddit canonicalize trailing query params without tripping
+    /// the dead-sub warning. Host comparison defends against any future
+    /// subdomain canonicalization (www → old, etc.) that we'd want to know
+    /// about too.
+    /// </summary>
+    private static bool RequestUriResolvedAsExpected(Uri requested, Uri final)
+    {
+        return string.Equals(requested.Host, final.Host, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(requested.AbsolutePath, final.AbsolutePath, StringComparison.OrdinalIgnoreCase);
     }
 
     private static RedditPost? ParseEntry(XElement entry, string requestedSub)
