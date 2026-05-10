@@ -112,7 +112,9 @@ public partial class GamertagCommandHandler
             ❌ Still need: **Xbox**, **Embark**, **Bungie**.
 
             ***Your gamertags will NOT be saved until you complete Page 2.***
+            
             ⬇️ Click the button below to finish.
+            
             """;
 
         await modal.RespondAsync(
