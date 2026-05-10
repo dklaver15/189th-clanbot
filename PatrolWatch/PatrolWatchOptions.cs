@@ -91,4 +91,22 @@ public sealed class MatchedGame
     /// presence registration.
     /// </summary>
     public List<string> ActivitySubstrings { get; set; } = new();
+
+    /// <summary>
+    /// Hex color string for the embed's left accent bar when this game is
+    /// the dominant match. Format "#RRGGBB" or "RRGGBB" (no alpha). Falls
+    /// back to a default gold if empty or unparseable. Per-game accents
+    /// help readers parse "what game is this patrol on" at a glance without
+    /// reading the title.
+    /// </summary>
+    public string? AccentColor { get; set; }
+
+    /// <summary>
+    /// URL of an image (square works best — ~256x256) shown in the embed's
+    /// top-right corner when this game is the dominant match. Game logo /
+    /// box art works well. Leave empty to skip the thumbnail. Image must be
+    /// reachable from Discord's CDN — common hosts: Imgur, your own CDN, or
+    /// a private Discord upload (right-click → Copy Link).
+    /// </summary>
+    public string? ThumbnailUrl { get; set; }
 }

@@ -278,14 +278,18 @@ public sealed class PatrolWatchService : IHostedService
             // BF6 + someone on Arc Raiders sharing a VC). Most members on a
             // single game wins. Members on a different game don't appear on
             // *this* patrol's roster line.
-            var dominantGame = matched
-                .GroupBy(m => m.Game)
+            //
+            // Group by DisplayName (string) rather than reference equality on
+            // the MatchedGame object — two ActivitySubstrings can both map to
+            // the same logical game, and we want them counted together.
+            var dominantGroup = matched
+                .GroupBy(m => m.Game.DisplayName)
                 .OrderByDescending(g => g.Count())
-                .First()
-                .Key;
+                .First();
 
-            var rosterForEmbed = matched
-                .Where(m => m.Game == dominantGame)
+            var dominantGame = dominantGroup.First().Game;
+
+            var rosterForEmbed = dominantGroup
                 .Select(m => m.User)
                 .OrderBy(u => u.DisplayName, StringComparer.OrdinalIgnoreCase)
                 .ToList();
@@ -300,7 +304,7 @@ public sealed class PatrolWatchService : IHostedService
 
             if (existingState == null)
                 await CreateEmbedAsync(channel, rosterForEmbed, dominantGame);
-            else if (RosterChanged(existingState, rosterForEmbed, dominantGame))
+            else if (RosterChanged(existingState, rosterForEmbed, dominantGame.DisplayName))
                 await EditEmbedAsync(channel, existingState, rosterForEmbed, dominantGame);
         }
         else
@@ -312,7 +316,7 @@ public sealed class PatrolWatchService : IHostedService
 
     // ── Activity matching ───────────────────────────────────────────
 
-    private string? MatchActivity(SocketGuildUser member)
+    private MatchedGame? MatchActivity(SocketGuildUser member)
     {
         if (member.Activities == null || member.Activities.Count == 0) return null;
 
@@ -332,7 +336,7 @@ public sealed class PatrolWatchService : IHostedService
                 {
                     if (string.IsNullOrEmpty(sub)) continue;
                     if (name.Contains(sub, StringComparison.OrdinalIgnoreCase))
-                        return game.DisplayName;
+                        return game;
                 }
             }
         }
@@ -374,7 +378,7 @@ public sealed class PatrolWatchService : IHostedService
     private async Task CreateEmbedAsync(
         SocketVoiceChannel voiceChannel,
         List<SocketGuildUser> roster,
-        string game)
+        MatchedGame game)
     {
         var lfgChannel = ResolveLfgChannel(voiceChannel.Guild);
         if (lfgChannel == null) return;
@@ -392,12 +396,12 @@ public sealed class PatrolWatchService : IHostedService
                 MessageId      = msg.Id,
                 StartedAtUtc   = startedAt,
                 CurrentRoster  = roster.Select(u => u.Id).ToHashSet(),
-                CurrentGame    = game,
+                CurrentGame    = game.DisplayName,
             };
 
             _logger.LogInformation(
                 "PatrolWatch embed posted in #{LfgChannel} for VC {VoiceChannel} ({Members} on {Game})",
-                lfgChannel.Name, voiceChannel.Name, roster.Count, game);
+                lfgChannel.Name, voiceChannel.Name, roster.Count, game.DisplayName);
         }
         catch (Exception ex)
         {
@@ -411,7 +415,7 @@ public sealed class PatrolWatchService : IHostedService
         SocketVoiceChannel voiceChannel,
         PatrolState state,
         List<SocketGuildUser> roster,
-        string game)
+        MatchedGame game)
     {
         var lfgChannel = ResolveLfgChannel(voiceChannel.Guild);
         if (lfgChannel == null) return;
@@ -422,7 +426,7 @@ public sealed class PatrolWatchService : IHostedService
         {
             await lfgChannel.ModifyMessageAsync(state.MessageId, m => m.Embed = embed);
             state.CurrentRoster = roster.Select(u => u.Id).ToHashSet();
-            state.CurrentGame   = game;
+            state.CurrentGame   = game.DisplayName;
         }
         catch (Discord.Net.HttpException ex) when (ex.HttpCode == System.Net.HttpStatusCode.NotFound)
         {
@@ -494,20 +498,40 @@ public sealed class PatrolWatchService : IHostedService
 
     private static Embed BuildEmbed(
         List<SocketGuildUser> roster,
-        string game,
+        MatchedGame game,
         SocketVoiceChannel voiceChannel,
         DateTime startedAtUtc)
     {
-        var names = string.Join(", ", roster.Select(u => $"**{u.DisplayName}**"));
-        var description = $"{names} · in <#{voiceChannel.Id}>";
+        // Vertical bullet roster — scales much better than inline-comma joins
+        // for 4+ members and reads more like a deployment manifest.
+        var rosterLines = string.Join("\n",
+            roster.Select(u => $"- **{u.DisplayName}**"));
 
-        return new EmbedBuilder()
-            .WithTitle($"Squad on patrol — {game}")
+        // Discord's <t:unix:R> renders as a live-updating "X minutes ago"
+        // string that the client refreshes on its own — we don't have to
+        // edit the embed every minute to keep it fresh.
+        var unixStart = new DateTimeOffset(
+            DateTime.SpecifyKind(startedAtUtc, DateTimeKind.Utc)).ToUnixTimeSeconds();
+
+        var description =
+            $"{rosterLines}\n\n" +
+            $"In <#{voiceChannel.Id}> · started <t:{unixStart}:R>";
+
+        var color = ParseColor(game.AccentColor, fallback: new Color(0xC9, 0xA6, 0x47));
+
+        var builder = new EmbedBuilder()
+            .WithTitle($"Squad on patrol — {game.DisplayName}")
             .WithDescription(description)
             .WithFooter($"{roster.Count} on patrol")
             .WithTimestamp(startedAtUtc)
-            .WithColor(new Color(0xC9, 0xA6, 0x47)) // Gold to match 189th theming.
-            .Build();
+            .WithColor(color);
+
+        // Skip the thumbnail entirely if not configured, rather than passing
+        // an empty string (which Discord would reject).
+        if (!string.IsNullOrWhiteSpace(game.ThumbnailUrl))
+            builder.WithThumbnailUrl(game.ThumbnailUrl);
+
+        return builder.Build();
     }
 
     private static Embed BuildStandDownEmbed(string game, TimeSpan lasted)
@@ -516,11 +540,32 @@ public sealed class PatrolWatchService : IHostedService
             ? $"{(int)lasted.TotalHours}h {lasted.Minutes}m"
             : $"{lasted.Minutes}m";
 
+        // Stand-down keeps the muted brown across all games on purpose —
+        // the visual contrast (bright game-specific accent → uniform brown)
+        // is the at-a-glance signal that the patrol is over.
         return new EmbedBuilder()
             .WithTitle($"Patrol stood down — {game}")
             .WithDescription($"Lasted {formatted}.")
             .WithColor(new Color(0x6B, 0x61, 0x47))
             .Build();
+    }
+
+    /// <summary>
+    /// Parse a hex color string like "#C9A647" or "C9A647" into a Discord
+    /// Color. Returns the fallback for null, empty, or unparseable input.
+    /// Lenient on input format because config strings are easy to typo —
+    /// we'd rather render with the default gold than crash on a missing #.
+    /// </summary>
+    private static Color ParseColor(string? hex, Color fallback)
+    {
+        if (string.IsNullOrWhiteSpace(hex)) return fallback;
+        var trimmed = hex.TrimStart('#');
+        if (uint.TryParse(trimmed, System.Globalization.NumberStyles.HexNumber,
+                System.Globalization.CultureInfo.InvariantCulture, out var rgb))
+        {
+            return new Color(rgb);
+        }
+        return fallback;
     }
 
     // ── Helpers ─────────────────────────────────────────────────────
@@ -547,7 +592,7 @@ public sealed class PatrolWatchService : IHostedService
         return false;
     }
 
-    private record MatchedMember(SocketGuildUser User, string Game);
+    private record MatchedMember(SocketGuildUser User, MatchedGame Game);
 
     private sealed class PatrolState
     {
