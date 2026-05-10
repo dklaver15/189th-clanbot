@@ -105,6 +105,8 @@ public partial class GamertagCommandHandler
             .WithButton("➡️ Continue to PAGE 2", "gamertags_continue", ButtonStyle.Primary)
             .Build();
 
+        // Trailing \u200B (zero-width space) forces Discord to render the blank line
+        // between the text and the button — a literal blank line gets stripped.
         const string message = """
             ## ⚠️ Step 1 of 2 — Not Done Yet
 
@@ -112,10 +114,9 @@ public partial class GamertagCommandHandler
             ❌ Still need: **Xbox**, **Embark**, **Bungie**.
 
             ***Your gamertags will NOT be saved until you complete Page 2.***
-            
+
             ⬇️ Click the button below to finish.
-            
-            """;
+            """ + "\n\u200B";
 
         await modal.RespondAsync(
             message,
