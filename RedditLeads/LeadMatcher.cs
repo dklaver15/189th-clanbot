@@ -8,16 +8,6 @@ namespace ClanGuardBot.RedditLeads;
 /// service: keywords live as static arrays here, thresholds (none
 /// currently) would live in RedditLeadsOptions.
 ///
-/// ── Pre-tier: self-post check ──
-/// Link posts are rejected before keyword work. On aggregator subs
-/// (r/PS5LFG, r/XboxLFG, r/PCGameLFG) many "posts" are link entries
-/// pointing to game-specific LFG subs — Reddit's RSS hydrates the body
-/// of these with the linked sub's about text, which trips the keyword
-/// matcher with junk like "is the subreddit used to find players."
-/// Real LFG posts are almost always self posts; link posts are
-/// directory noise. IsSelf is detected by RedditRssClient from the
-/// RSS content markup.
-///
 /// ── Tier 1: positive keyword match ──
 /// At least one of the LFG-signal phrases must appear in the title or
 /// body. Word-boundary regex (case-insensitive) so "lfg" doesn't match
@@ -40,6 +30,25 @@ namespace ClanGuardBot.RedditLeads;
 /// throwaway-account noise is handled by officers hitting Skip.
 /// Stickied / NSFW post filtering also moved here from the OAuth
 /// version — RSS doesn't expose those flags either.
+///
+/// ── Why there's no IsSelf gate ──
+/// An earlier iteration rejected link posts up-front via post.IsSelf,
+/// on the theory that link entries on aggregator subs were directory-
+/// style noise (the linked sub's sidebar text leaking into the body).
+/// Validation against live RSS proved the heuristic was a false
+/// positive: Reddit appends a "[link]" footer to EVERY entry's RSS
+/// body — it's the permalink anchor, not a link-post signal — so the
+/// IsSelf detector classified ~100% of real LFG posts on healthy subs
+/// as link posts and silently dropped them. The original problem the
+/// gate was solving (directory-entry noise from r/PS5LFG, r/PCGameLFG,
+/// r/RecruitLTG) was actually caused by those subs being deleted /
+/// renamed and Reddit 302-redirecting the RSS feed to a search-results
+/// stream of OTHER subs. That's now handled upstream by RedditRssClient's
+/// dead-sub redirect detection. IsSelf is still populated on RedditPost
+/// for future analysis but the matcher no longer gates on it. If a
+/// link-post filter is ever needed again, build it against real link-
+/// post markup (not the [link] footer) and validate against a live
+/// audit script before re-enabling.
 /// </summary>
 public static class LeadMatcher
 {
@@ -104,21 +113,12 @@ public static class LeadMatcher
     /// <summary>
     /// Run both keyword tiers. Returns the comma-separated list of
     /// triggered positive keywords on a pass, or a human-readable
-    /// RejectReason on a miss (used in trace-level logs to debug "why
-    /// did this post not surface?" without re-fetching from Reddit).
-    ///
-    /// Pre-tier: link posts are rejected before any keyword work. On
-    /// aggregator subs (r/PS5LFG, r/XboxLFG, etc.) link posts are
-    /// directory entries pointing to game-specific subs, with a body
-    /// hydrated from the linked sub's about text. They look like LFG
-    /// posts to a regex but they're noise. RedditRssClient sets IsSelf
-    /// based on RSS content markup; we trust that signal here.
+    /// RejectReason on a miss (logged at Information level by the
+    /// service so we can audit "why didn't this lead come through?"
+    /// without re-fetching from Reddit).
     /// </summary>
     public static TextMatchResult MatchText(RedditPost post)
     {
-        if (!post.IsSelf)
-            return new(false, "", "link post (directory entry, not a real LFG)");
-
         var haystack = string.Concat(post.Title, "\n", post.Selftext);
 
         var positiveMatches = PositivePattern

@@ -27,6 +27,16 @@ namespace ClanGuardBot.RedditLeads;
 /// fields, so that step is gone — the keyword filter is the whole filter
 /// stack now. See RedditRssClient class doc for why we're on RSS at all.
 ///
+/// ── Rejection logging ──
+/// Every post that's rejected at the text filter is logged at Information
+/// level (not Debug) with a consistent, greppable shape:
+///   LeadMatcher rejected r/{Sub} post {PostId}: reason={Reason}, title={Title}
+/// This is the audit trail for "why didn't this lead come through?"
+/// investigations — `docker logs clanguard-bot | grep "LeadMatcher rejected"`
+/// shows every drop with the reason and a title prefix to spot-check
+/// against. Filter by reason with e.g. `grep "reason=negative keyword"`.
+/// Posts rejected upstream (stale, already-seen) aren't logged here.
+///
 /// ── Failure isolation ──
 /// One bad subreddit must not kill the cycle. Each subreddit is wrapped
 /// in its own try/catch; a 503 from Reddit's CDN on r/Battlefield doesn't
@@ -63,6 +73,13 @@ public sealed class RedditLeadService : BackgroundService
     /// can't rewrite our snapshot.
     /// </summary>
     private const int ExcerptStorageLimit = 350;
+
+    /// <summary>
+    /// Title-prefix length for rejection log lines. Long enough to make
+    /// a post identifiable when scanning logs, short enough to keep log
+    /// lines tractable. Anything over this is truncated with an ellipsis.
+    /// </summary>
+    private const int RejectionLogTitleLimit = 80;
 
     private readonly IServiceProvider _services;
     private readonly DiscordSocketClient _client;
@@ -203,9 +220,13 @@ public sealed class RedditLeadService : BackgroundService
         var textResult = LeadMatcher.MatchText(post);
         if (!textResult.Passes)
         {
-            _logger.LogDebug(
-                "Post {PostId} from r/{Sub} rejected at text filter: {Reason}",
-                post.Id, post.Subreddit, textResult.RejectReason);
+            // Information-level (not Debug) so the rejection trail is visible
+            // in default log output. Consistent shape: post ID, sub, reason,
+            // title prefix. Greppable: `grep "LeadMatcher rejected"` for the
+            // full stream; `grep "reason=negative keyword"` to filter by type.
+            _logger.LogInformation(
+                "LeadMatcher rejected r/{Sub} post {PostId}: reason={Reason}, title={Title}",
+                post.Subreddit, post.Id, textResult.RejectReason, TruncateTitleForLog(post.Title));
             return false;
         }
 
@@ -290,5 +311,17 @@ public sealed class RedditLeadService : BackgroundService
         // having to re-fetch from Reddit.
         if (s.Length <= ExcerptStorageLimit + 100) return s;
         return s[..(ExcerptStorageLimit + 99)].TrimEnd() + "…";
+    }
+
+    /// <summary>
+    /// Trim post titles for rejection log lines. Keeps lines scannable
+    /// while preserving enough of the title to spot false negatives
+    /// (real leads getting filtered) at a glance.
+    /// </summary>
+    private static string TruncateTitleForLog(string title)
+    {
+        if (string.IsNullOrEmpty(title)) return string.Empty;
+        if (title.Length <= RejectionLogTitleLimit) return title;
+        return title[..RejectionLogTitleLimit] + "...";
     }
 }
