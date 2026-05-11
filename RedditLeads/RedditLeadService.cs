@@ -22,6 +22,7 @@ namespace ClanGuardBot.RedditLeads;
 ///   3. LeadMatcher.MatchText — positive keyword + negative keyword + (for
 ///      subs in RedditLeads:GameFilteredSubs) game-keyword match.
 ///   4. Insert row, post embed, stamp DiscordMessageId.
+///   5. Cap: stop processing if MaxLeadsPerCycle is reached for this cycle.
 ///
 /// Previous OAuth-based pipeline had a tier-3 author quality floor that
 /// fetched /user/X/about for karma + account age. RSS doesn't expose those
@@ -29,6 +30,16 @@ namespace ClanGuardBot.RedditLeads;
 /// game filter (different mechanism, same tier number); see LeadMatcher
 /// class doc for the rationale. Author quality columns on RedditLead are
 /// retained at 0 in case Reddit ever re-opens Data API app creation.
+///
+/// ── Per-cycle cap ──
+/// MaxLeadsPerCycle bounds how many leads can be surfaced (DB row +
+/// embed) in a single cycle, sized to recruiter follow-up capacity.
+/// When the cap is hit, the cycle short-circuits — remaining posts and
+/// remaining subs are skipped without DB or Discord side effects, so
+/// they stay re-discoverable on the next poll via /new.rss. Sub
+/// ordering is config-order, so a high-volume early sub can starve
+/// later subs in a flood; see RedditLeadsOptions.MaxLeadsPerCycle doc
+/// for the rationale and remediation if that bites.
 ///
 /// ── Rejection logging ──
 /// Every post that's rejected at the text filter is logged at Information
@@ -39,7 +50,9 @@ namespace ClanGuardBot.RedditLeads;
 /// shows every drop with the reason and a title prefix to spot-check
 /// against. Filter by reason with e.g. `grep "reason=negative keyword"`
 /// or `grep "reason=no game keyword"`. Posts rejected upstream (stale,
-/// already-seen) aren't logged here.
+/// already-seen, cap-skipped) aren't logged here. Cap-hit events are
+/// logged separately at Information level so officers can spot floods:
+/// `grep "cycle cap reached"`.
 ///
 /// ── Failure isolation ──
 /// One bad subreddit must not kill the cycle. Each subreddit is wrapped
@@ -67,6 +80,10 @@ public sealed class RedditLeadService : BackgroundService
     /// Newest-N pull size. Reddit's RSS endpoint accepts a limit param
     /// up to 100; 25 gives us plenty of headroom over a 10-min window
     /// even for the busiest sub we watch (r/Battlefield) without paginating.
+    /// At 60-min polling, the per-sub-per-hour ceiling is also 25 — if
+    /// a sub regularly exceeds that, the oldest posts in the window will
+    /// age off /new.rss before the next poll. Bump to 50 or 100 if logs
+    /// show this happening.
     /// </summary>
     private const int ListingLimit = 25;
 
@@ -127,8 +144,8 @@ public sealed class RedditLeadService : BackgroundService
 
         var subs = _options.GetSubredditsList();
         _logger.LogInformation(
-            "RedditLeadService started (RSS mode). Polling {Count} subreddit(s) every {Min} min: {Subs}",
-            subs.Count, _options.PollingIntervalMinutes, string.Join(", ", subs));
+            "RedditLeadService started (RSS mode). Polling {Count} subreddit(s) every {Min} min (cap {Cap}/cycle): {Subs}",
+            subs.Count, _options.PollingIntervalMinutes, _options.MaxLeadsPerCycle, string.Join(", ", subs));
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -157,14 +174,23 @@ public sealed class RedditLeadService : BackgroundService
     {
         var subs = _options.GetSubredditsList();
         var freshFloor = DateTime.UtcNow.AddHours(-_options.MaxPostAgeHours);
+        var cap = _options.MaxLeadsPerCycle;
 
         var totalSurfaced = 0;
+        var capHit = false;
 
         foreach (var sub in subs)
         {
+            var remaining = cap - totalSurfaced;
+            if (remaining <= 0)
+            {
+                capHit = true;
+                break;
+            }
+
             try
             {
-                totalSurfaced += await ProcessSubredditAsync(sub, freshFloor, ct);
+                totalSurfaced += await ProcessSubredditAsync(sub, freshFloor, remaining, ct);
             }
             catch (Exception ex)
             {
@@ -172,12 +198,28 @@ public sealed class RedditLeadService : BackgroundService
             }
         }
 
+        if (capHit || totalSurfaced >= cap)
+        {
+            // Cap reached this cycle. Skipped posts stay in /new.rss and
+            // remain inside MaxPostAgeHours, so they'll be re-evaluated
+            // next cycle. Greppable: `grep "cycle cap reached"`.
+            _logger.LogInformation(
+                "RedditLead cycle cap reached ({Cap} leads); remaining posts/subs deferred to next cycle",
+                cap);
+        }
+
         if (totalSurfaced > 0)
             _logger.LogInformation("RedditLead cycle: {Count} new lead(s) surfaced across all subs", totalSurfaced);
     }
 
-    private async Task<int> ProcessSubredditAsync(string sub, DateTime freshFloor, CancellationToken ct)
+    private async Task<int> ProcessSubredditAsync(
+        string sub,
+        DateTime freshFloor,
+        int remainingCapacity,
+        CancellationToken ct)
     {
+        if (remainingCapacity <= 0) return 0;
+
         var posts = await _reddit.GetNewPostsAsync(sub, ListingLimit, ct);
         if (posts.Count == 0) return 0;
 
@@ -207,6 +249,13 @@ public sealed class RedditLeadService : BackgroundService
         var surfaced = 0;
         foreach (var post in fresh)
         {
+            // Cap check is on SURFACED count, not processed count. Posts
+            // that get rejected by the matcher don't count against the cap
+            // — only successfully posted leads do. This is intentional:
+            // the cap is sized to recruiter follow-up capacity, and rejected
+            // posts produce no follow-up burden.
+            if (surfaced >= remainingCapacity) break;
+
             try
             {
                 if (await TryProcessPostAsync(post, ct))

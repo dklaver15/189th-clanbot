@@ -20,8 +20,8 @@ public sealed class RedditLeadsOptions
     /// <summary>Master switch. When false, the polling service never starts.</summary>
     public bool Enabled { get; set; }
 
-    /// <summary>How often the polling loop wakes. Default 10 min.</summary>
-    public int PollingIntervalMinutes { get; set; } = 10;
+    /// <summary>How often the polling loop wakes. Default 60 min.</summary>
+    public int PollingIntervalMinutes { get; set; } = 60;
 
     /// <summary>
     /// HTTP User-Agent string. Reddit's edge network blocks generic UAs
@@ -44,6 +44,37 @@ public sealed class RedditLeadsOptions
     /// and keeps officers focused on actionable, fresh leads.
     /// </summary>
     public int MaxPostAgeHours { get; set; } = 24;
+
+    /// <summary>
+    /// Maximum number of leads surfaced (DB row + embed posted) per
+    /// polling cycle. Sized to recruiter capacity — if officers can
+    /// only follow up on N leads per cycle, surfacing more just buries
+    /// the queue.
+    ///
+    /// ── Per-cycle, not per-hour ──
+    /// Tied to PollingIntervalMinutes by definition. At the default
+    /// 60-min interval, "per cycle" == "per hour". If PollingIntervalMinutes
+    /// is changed, recompute the intended hourly rate before adjusting
+    /// this value (e.g. interval=30min + cap=10 → 20 leads/hour).
+    ///
+    /// ── Overflow behavior ──
+    /// When the cap is hit mid-cycle, remaining subs and remaining
+    /// posts within the current sub are skipped — no DB insert, no
+    /// embed. Those posts stay in Reddit's /new.rss feed and remain
+    /// inside the MaxPostAgeHours window, so the next cycle will
+    /// re-discover them and re-evaluate. No "queued" / "deferred"
+    /// state is persisted. Sustained floods past 24h naturally age out
+    /// without surfacing, which is the desired behavior — leads
+    /// recruiters couldn't get to are leads they wouldn't have worked.
+    ///
+    /// ── Sub ordering ──
+    /// Subs are processed in the order they appear in Subreddits, so
+    /// if a high-volume sub is first and eats the cap, later subs get
+    /// nothing that cycle. In practice cross-sub match volume usually
+    /// stays well under the cap; if that stops being true, switch
+    /// RunCycleAsync to round-robin or sort-by-newest.
+    /// </summary>
+    public int MaxLeadsPerCycle { get; set; } = 10;
 
     /// <summary>
     /// Comma-separated list of subreddit names (no "r/" prefix) where the
