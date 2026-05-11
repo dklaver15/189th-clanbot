@@ -78,6 +78,10 @@ public sealed class PatrolWatchOptions
 /// One game to surface in the Patrol Watch embed. DisplayName is what the
 /// embed shows; ActivitySubstrings is the list of Activity.Name fragments
 /// that count as "playing this game."
+///
+/// Also serves as the canonical "games we play" record consumed by the
+/// Reddit leads pipeline (LeadMatcher) via the RedditAliases field —
+/// see RedditAliases doc below.
 /// </summary>
 public sealed class MatchedGame
 {
@@ -91,6 +95,23 @@ public sealed class MatchedGame
     /// presence registration.
     /// </summary>
     public List<string> ActivitySubstrings { get; set; } = new();
+
+    /// <summary>
+    /// Reddit-vernacular aliases for this game. Consumed by LeadMatcher's
+    /// per-sub game filter on broad LFG subs (r/GamerPals etc.) where
+    /// passing the LFG keyword check isn't enough — the post must also
+    /// mention a game we play. Distinct from ActivitySubstrings because
+    /// Reddit posters write "bf6" / "hd2" / "hll" while Discord rich
+    /// presence never does. Acronyms welcome here.
+    ///
+    /// Empty list means this game contributes nothing to the Reddit filter
+    /// — fine for games we patrol but don't actively recruit for.
+    ///
+    /// Word-boundary regex applies on the Reddit side, so short aliases
+    /// like "hd2" won't match "shd24"; multi-word entries match across
+    /// flexible whitespace ("hell  let  loose" → match).
+    /// </summary>
+    public List<string> RedditAliases { get; set; } = new();
 
     /// <summary>
     /// Hex color string for the embed's left accent bar when this game is

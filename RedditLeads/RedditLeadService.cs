@@ -19,13 +19,16 @@ namespace ClanGuardBot.RedditLeads;
 /// For each subreddit, for each post in /new.rss:
 ///   1. Recency floor (post created within MaxPostAgeHours) — kills cold-start floods.
 ///   2. Dedupe by RedditPostId — listing returns the same posts cycle to cycle.
-///   3. LeadMatcher.MatchText — positive keyword + negative keyword.
+///   3. LeadMatcher.MatchText — positive keyword + negative keyword + (for
+///      subs in RedditLeads:GameFilteredSubs) game-keyword match.
 ///   4. Insert row, post embed, stamp DiscordMessageId.
 ///
 /// Previous OAuth-based pipeline had a tier-3 author quality floor that
 /// fetched /user/X/about for karma + account age. RSS doesn't expose those
-/// fields, so that step is gone — the keyword filter is the whole filter
-/// stack now. See RedditRssClient class doc for why we're on RSS at all.
+/// fields, so that step is gone. LeadMatcher's current tier 3 is a per-sub
+/// game filter (different mechanism, same tier number); see LeadMatcher
+/// class doc for the rationale. Author quality columns on RedditLead are
+/// retained at 0 in case Reddit ever re-opens Data API app creation.
 ///
 /// ── Rejection logging ──
 /// Every post that's rejected at the text filter is logged at Information
@@ -34,8 +37,9 @@ namespace ClanGuardBot.RedditLeads;
 /// This is the audit trail for "why didn't this lead come through?"
 /// investigations — `docker logs clanguard-bot | grep "LeadMatcher rejected"`
 /// shows every drop with the reason and a title prefix to spot-check
-/// against. Filter by reason with e.g. `grep "reason=negative keyword"`.
-/// Posts rejected upstream (stale, already-seen) aren't logged here.
+/// against. Filter by reason with e.g. `grep "reason=negative keyword"`
+/// or `grep "reason=no game keyword"`. Posts rejected upstream (stale,
+/// already-seen) aren't logged here.
 ///
 /// ── Failure isolation ──
 /// One bad subreddit must not kill the cycle. Each subreddit is wrapped
@@ -84,6 +88,7 @@ public sealed class RedditLeadService : BackgroundService
     private readonly IServiceProvider _services;
     private readonly DiscordSocketClient _client;
     private readonly RedditRssClient _reddit;
+    private readonly LeadMatcher _matcher;
     private readonly RedditLeadsOptions _options;
     private readonly ILogger<RedditLeadService> _logger;
 
@@ -91,12 +96,14 @@ public sealed class RedditLeadService : BackgroundService
         IServiceProvider services,
         DiscordSocketClient client,
         RedditRssClient reddit,
+        LeadMatcher matcher,
         IOptions<RedditLeadsOptions> options,
         ILogger<RedditLeadService> logger)
     {
         _services = services;
         _client   = client;
         _reddit   = reddit;
+        _matcher  = matcher;
         _options  = options.Value;
         _logger   = logger;
     }
@@ -215,9 +222,11 @@ public sealed class RedditLeadService : BackgroundService
 
     private async Task<bool> TryProcessPostAsync(RedditPost post, CancellationToken ct)
     {
-        // Step 3: text filter. Sole filter step in RSS mode — no author
-        // quality floor since RSS doesn't expose karma/age.
-        var textResult = LeadMatcher.MatchText(post);
+        // Step 3: text filter. Tier 1 (positive) + tier 2 (negative) always;
+        // tier 3 (per-sub game match) only for subs listed in
+        // RedditLeads:GameFilteredSubs. No author quality floor since RSS
+        // doesn't expose karma/age.
+        var textResult = _matcher.MatchText(post);
         if (!textResult.Passes)
         {
             // Information-level (not Debug) so the rejection trail is visible

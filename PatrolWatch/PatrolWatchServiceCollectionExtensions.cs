@@ -23,13 +23,13 @@ public static class PatrolWatchServiceCollectionExtensions
             // A clean install with Enabled=false should boot fine even with
             // an empty PatrolWatch section.
             .Validate(o =>
-                !o.Enabled
-                || (o.LfgChannelId != 0
-                    && o.MinSquadSize >= 2
-                    && o.MatchedGames.Count > 0
-                    && o.MatchedGames.All(g =>
-                        !string.IsNullOrWhiteSpace(g.DisplayName)
-                        && g.ActivitySubstrings.Count > 0)),
+                    !o.Enabled
+                    || (o.LfgChannelId != 0
+                        && o.MinSquadSize >= 2
+                        && o.MatchedGames.Count > 0
+                        && o.MatchedGames.All(g =>
+                            !string.IsNullOrWhiteSpace(g.DisplayName)
+                            && g.ActivitySubstrings.Count > 0)),
                 "PatrolWatch is enabled but LfgChannelId / MinSquadSize / MatchedGames must all be set, with at least one ActivitySubstring per game")
             .ValidateOnStart();
 

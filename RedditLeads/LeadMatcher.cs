@@ -1,12 +1,15 @@
 using System.Text.RegularExpressions;
+using ClanGuardBot.PatrolWatch;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace ClanGuardBot.RedditLeads;
 
 /// <summary>
 /// Filter that decides whether a Reddit post is worth surfacing to the
 /// leads channel. Designed to be tightenable without touching the
-/// service: keywords live as static arrays here, thresholds (none
-/// currently) would live in RedditLeadsOptions.
+/// service: positive/negative keywords live as static arrays here, the
+/// game-filter vocabulary is config-driven from appsettings.
 ///
 /// ── Tier 1: positive keyword match ──
 /// At least one of the LFG-signal phrases must appear in the title or
@@ -33,13 +36,41 @@ namespace ClanGuardBot.RedditLeads;
 /// ad ("we're recruiting LFG-style players"), and the negative list
 /// catches that.
 ///
-/// ── No tier 3 (author quality floor) ──
-/// The previous OAuth-API version had an author age + karma floor as
-/// tier 3. Reddit's public RSS feed doesn't expose either field, and
-/// new Data API app creation is closed off for non-moderation cases,
-/// so we run without it. The keyword filter does the bulk of the work;
-/// throwaway-account noise is handled by officers hitting Skip.
-/// Stickied / NSFW post filtering also moved here from the OAuth
+/// ── Tier 3: per-sub game filter ──
+/// Some subs (currently just r/GamerPals) are broad LFG aggregators
+/// covering every game under the sun. The tier-1 positive keywords
+/// pass casual-friend asks regardless of game, so without an extra
+/// gate the leads channel fills with posts for games we don't play.
+///
+/// Configuration lives in two places:
+/// • RedditLeads:GameFilteredSubs (comma-separated sub names) — which
+///   subs the filter applies to.
+/// • PatrolWatch:MatchedGames[].RedditAliases — the vocabulary, owned
+///   by each game's config entry so adding a game is one block, not
+///   two. We pull from PatrolWatch's MatchedGames because that's the
+///   canonical "games we play" record; the Reddit-vernacular aliases
+///   live there as a separate field from the Discord-activity
+///   substrings because the vocabularies are different.
+///
+/// All filtered subs share the same flattened alias regex — there's
+/// no use case yet for different game lists on different subs (broad
+/// LFG aggregators all want the same "any game we play" gate). If
+/// that changes, swap the shared regex for per-sub regexes here.
+///
+/// Subs NOT in GameFilteredSubs pass with the standard tier-1/tier-2
+/// pipeline only — behavior unchanged from before this tier existed.
+///
+/// The matched game is appended to MatchedKeywords so it surfaces in
+/// the embed and officers can see at a glance why a filtered-sub post
+/// made it through.
+///
+/// ── No author quality floor ──
+/// The previous OAuth-API version had an author age + karma floor.
+/// Reddit's public RSS feed doesn't expose either field, and new Data
+/// API app creation is closed off for non-moderation cases, so we run
+/// without it. The keyword filter does the bulk of the work; throwaway-
+/// account noise is handled by officers hitting Skip. Stickied / NSFW
+/// post filtering also moved to the keyword filter from the OAuth
 /// version — RSS doesn't expose those flags either.
 ///
 /// ── Why there's no IsSelf gate ──
@@ -56,12 +87,15 @@ namespace ClanGuardBot.RedditLeads;
 /// renamed and Reddit 302-redirecting the RSS feed to a search-results
 /// stream of OTHER subs. That's now handled upstream by RedditRssClient's
 /// dead-sub redirect detection. IsSelf is still populated on RedditPost
-/// for future analysis but the matcher no longer gates on it. If a
-/// link-post filter is ever needed again, build it against real link-
-/// post markup (not the [link] footer) and validate against a live
-/// audit script before re-enabling.
+/// for future analysis but the matcher no longer gates on it.
+///
+/// ── Singleton lifecycle ──
+/// Registered as a singleton in RedditLeadsServiceCollectionExtensions
+/// because the per-sub regex is built once from config at startup and
+/// is immutable thereafter. Thread-safe by construction (Regex
+/// instances and the readonly dictionary).
 /// </summary>
-public static class LeadMatcher
+public sealed class LeadMatcher
 {
     private static readonly string[] PositiveKeywords = new[]
     {
@@ -169,6 +203,65 @@ public static class LeadMatcher
     private static readonly Regex PositivePattern = BuildPattern(PositiveKeywords);
     private static readonly Regex NegativePattern = BuildPattern(NegativeKeywords);
 
+    /// <summary>
+    /// Sub-name → shared game regex. Built once from config in the
+    /// constructor. Empty when GameFilteredSubs is unset or no
+    /// RedditAliases are configured — tier 3 becomes a no-op in that
+    /// case, which is the disabled-feature state.
+    /// </summary>
+    private readonly Dictionary<string, Regex> _subGameFilters;
+
+    public LeadMatcher(
+        IOptions<RedditLeadsOptions> redditOptions,
+        IOptions<PatrolWatchOptions> patrolOptions,
+        ILogger<LeadMatcher> logger)
+    {
+        var filteredSubs = redditOptions.Value.GetGameFilteredSubsList();
+
+        // Flatten every game's RedditAliases into one keyword list. Distinct
+        // case-insensitive so duplicates across games don't bloat the regex.
+        var aliases = patrolOptions.Value.MatchedGames
+            .SelectMany(g => g.RedditAliases ?? new List<string>())
+            .Where(a => !string.IsNullOrWhiteSpace(a))
+            .Select(a => a.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        if (filteredSubs.Count == 0)
+        {
+            // Feature off — no subs configured. Don't warn; this is a
+            // valid steady state (e.g. when r/GamerPals isn't being
+            // polled in the current rotation).
+            _subGameFilters = new Dictionary<string, Regex>(StringComparer.OrdinalIgnoreCase);
+            return;
+        }
+
+        if (aliases.Length == 0)
+        {
+            // Subs configured but no aliases anywhere — would produce a
+            // filter that rejects every post on those subs. Almost
+            // certainly a misconfiguration; warn loudly and leave the
+            // filter empty so the affected subs fall back to standard
+            // tier-1/tier-2 behavior rather than going silent.
+            logger.LogWarning(
+                "RedditLeads:GameFilteredSubs is set ({Subs}) but PatrolWatch:MatchedGames has no RedditAliases. " +
+                "Game filter will be skipped — these subs will pass on tier 1+2 alone.",
+                string.Join(", ", filteredSubs));
+            _subGameFilters = new Dictionary<string, Regex>(StringComparer.OrdinalIgnoreCase);
+            return;
+        }
+
+        var sharedPattern = BuildPattern(aliases);
+        _subGameFilters = filteredSubs.ToDictionary(
+            s => s,
+            _ => sharedPattern,
+            StringComparer.OrdinalIgnoreCase);
+
+        logger.LogInformation(
+            "LeadMatcher game filter active for {SubCount} sub(s) [{Subs}] with {AliasCount} game alias(es)",
+            filteredSubs.Count, string.Join(", ", filteredSubs), aliases.Length);
+    }
+
     private static Regex BuildPattern(string[] phrases)
     {
         // Allow flexible whitespace inside multi-word phrases (e.g. "looking  for clan" or
@@ -189,13 +282,13 @@ public static class LeadMatcher
     public sealed record TextMatchResult(bool Passes, string MatchedKeywords, string? RejectReason);
 
     /// <summary>
-    /// Run both keyword tiers. Returns the comma-separated list of
-    /// triggered positive keywords on a pass, or a human-readable
-    /// RejectReason on a miss (logged at Information level by the
-    /// service so we can audit "why didn't this lead come through?"
-    /// without re-fetching from Reddit).
+    /// Run all keyword tiers. Returns the comma-separated list of
+    /// triggered positive keywords (plus matched game on filtered subs)
+    /// on a pass, or a human-readable RejectReason on a miss (logged at
+    /// Information level by the service so we can audit "why didn't
+    /// this lead come through?" without re-fetching from Reddit).
     /// </summary>
-    public static TextMatchResult MatchText(RedditPost post)
+    public TextMatchResult MatchText(RedditPost post)
     {
         var haystack = string.Concat(post.Title, "\n", post.Selftext);
 
@@ -211,6 +304,27 @@ public static class LeadMatcher
         var negativeHit = NegativePattern.Match(haystack);
         if (negativeHit.Success)
             return new(false, "", $"negative keyword: {negativeHit.Value}");
+
+        // Tier 3: per-sub game filter. Only runs if the post's sub is
+        // registered in _subGameFilters; otherwise behavior is unchanged
+        // from the pre-tier-3 days.
+        if (_subGameFilters.TryGetValue(post.Subreddit, out var gamePattern))
+        {
+            var gameMatches = gamePattern
+                .Matches(haystack)
+                .Select(m => m.Value.ToLowerInvariant())
+                .Distinct()
+                .ToList();
+
+            if (gameMatches.Count == 0)
+                return new(false, "", "no game keyword");
+
+            // Surface both the LFG signal and the matched game so the
+            // embed footer tells the officer not just "this is an LFG
+            // post" but "this is an LFG post for a game we play".
+            var combined = positiveMatches.Concat(gameMatches).Distinct();
+            return new(true, string.Join(", ", combined), null);
+        }
 
         return new(true, string.Join(", ", positiveMatches), null);
     }

@@ -45,8 +45,30 @@ public sealed class RedditLeadsOptions
     /// </summary>
     public int MaxPostAgeHours { get; set; } = 24;
 
+    /// <summary>
+    /// Comma-separated list of subreddit names (no "r/" prefix) where the
+    /// LFG keyword filter ALONE isn't strict enough — posts from these
+    /// subs must additionally mention one of the games we play (per
+    /// PatrolWatch.MatchedGames[].RedditAliases) to be surfaced. Intended
+    /// for broad LFG aggregators like r/GamerPals, r/gamerlfg,
+    /// r/LookingForGroup where the LFG signal is real but the game
+    /// usually isn't ours.
+    ///
+    /// Subs in this list MUST also appear in Subreddits — being here on
+    /// its own does nothing. Subs NOT in this list pass with the standard
+    /// positive/negative keyword pipeline only.
+    ///
+    /// Empty (default) disables the game-filter feature entirely.
+    /// </summary>
+    public string GameFilteredSubs { get; set; } = string.Empty;
+
     public List<string> GetSubredditsList() =>
         Subreddits
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToList();
+
+    public List<string> GetGameFilteredSubsList() =>
+        GameFilteredSubs
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .ToList();
 }
