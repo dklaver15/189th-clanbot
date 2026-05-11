@@ -110,6 +110,15 @@ try
     // rows added today appear in their own section. MAJ+ gated, ephemeral.
     builder.Services.AddSingleton<AttendanceCommandHandler>();
 
+    // SquadCommandHandler: /squads slash command. Pulls everyone currently in the
+    // events VC (BotConfig.EventsVoiceChannelId), randomizes them into 4-man squads
+    // for Vendetta, and posts the draw ephemerally with a 🎲 Reroll button so the
+    // running officer can reshuffle until the teams look fair. Officer+ gated
+    // (SyncWithHandlers: SquadCommandHandler.HasElevatedPermissions matches
+    // SlashCommandHandler.HasElevatedPermissions). Register() is called from
+    // DiscordBotService alongside the other command handlers.
+    builder.Services.AddSingleton<SquadCommandHandler>();
+
     // KickAwolsCommandHandler: /kick-awols slash command for officers
     // (AwolKickMinRank+). Iterates over members with the AWOL role and removes
     // them from the server, with multiple safety guards (Reserve role, min rank,

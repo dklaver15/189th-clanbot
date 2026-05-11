@@ -34,6 +34,7 @@ public class DiscordBotService : IHostedService
     private readonly SeedPromotionCreditCommandHandler _seedHandler;
     private readonly EventCreditCommandHandler _eventCreditHandler;
     private readonly AttendanceCommandHandler _attendanceHandler;
+    private readonly SquadCommandHandler _squadHandler;
     private readonly KickAwolsCommandHandler _kickAwolsHandler;
     private readonly ClearAwolListCommandHandler _clearAwolListHandler;
     private readonly BriefingNowCommandHandler _briefingNowHandler;
@@ -69,6 +70,7 @@ public class DiscordBotService : IHostedService
         SeedPromotionCreditCommandHandler seedHandler,
         EventCreditCommandHandler eventCreditHandler,
         AttendanceCommandHandler attendanceHandler,
+        SquadCommandHandler squadHandler,
         KickAwolsCommandHandler kickAwolsHandler,
         ClearAwolListCommandHandler clearAwolListHandler,
         BriefingNowCommandHandler briefingNowHandler,
@@ -103,6 +105,7 @@ public class DiscordBotService : IHostedService
         _seedHandler                 = seedHandler;
         _eventCreditHandler          = eventCreditHandler;
         _attendanceHandler           = attendanceHandler;
+        _squadHandler                = squadHandler;
         _kickAwolsHandler            = kickAwolsHandler;
         _clearAwolListHandler        = clearAwolListHandler;
         _briefingNowHandler          = briefingNowHandler;
@@ -157,6 +160,7 @@ public class DiscordBotService : IHostedService
         _seedHandler.Register(_client);
         _eventCreditHandler.Register(_client);
         _attendanceHandler.Register(_client);
+        _squadHandler.Register(_client);
         _kickAwolsHandler.Register(_client);
         _clearAwolListHandler.Register(_client);
         _briefingNowHandler.Register(_client);
@@ -304,6 +308,20 @@ public class DiscordBotService : IHostedService
                 new SlashCommandBuilder()
                     .WithName("attendance")
                     .WithDescription("Show today's clan event attendance, grouped by event (MAJ+ only)")
+                    .Build(),
+
+                // /squads — randomize everyone currently in the events VC into
+                // 4-man squads for Vendetta setup. Officer+ gated (mirrors
+                // SlashCommandHandler.HasElevatedPermissions — SyncWithHandlers:
+                // SquadCommandHandler.HasElevatedPermissions +
+                // CommandsCommandHandler.BuildCatalog). Ephemeral so the running
+                // officer can reroll repeatedly to balance teams before calling
+                // out party assignments; the 🎲 Reroll button doesn't need an
+                // invoker restriction because ephemeral messages are only
+                // visible to (and clickable by) the original invoker.
+                new SlashCommandBuilder()
+                    .WithName(SquadCommandHandler.CommandName)
+                    .WithDescription("Randomize everyone in the events VC into 4-man squads (Officer+ only)")
                     .Build(),
 
                 // /kick-awols — bulk-kick all members holding the AWOL role.

@@ -520,7 +520,8 @@ public class CommandsCommandHandler
         Func<SocketGuildUser, BotConfig, bool> everyone = (_, _) => true;
 
         // SyncWithHandlers: SlashCommandHandler.HasElevatedPermissions,
-        //                   CleanupCalendarDupesCommandHandler.HasElevatedPermissions
+        //                   CleanupCalendarDupesCommandHandler.HasElevatedPermissions,
+        //                   SquadCommandHandler.HasElevatedPermissions
         Func<SocketGuildUser, BotConfig, bool> officer = (user, cfg) =>
         {
             if (user.GuildPermissions.ManageRoles || user.GuildPermissions.Administrator)
@@ -603,6 +604,8 @@ public class CommandsCommandHandler
                 "Officer+", officer),
             new("setnick", "Change a member's nickname",
                 "Officer+", officerOrManageNicknames),
+            new("squads", "Randomize everyone in the events VC into 4-man squads",
+                "Officer+", officer),
 
             // Rank-gated tiers
             new("demote", "Demote a member to a lower rank",
