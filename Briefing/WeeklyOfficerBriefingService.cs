@@ -115,11 +115,14 @@ public sealed class WeeklyOfficerBriefingService(
     }
 
     /// <summary>
-    /// Posts the briefing to HQ as an embed (date range header + model footer)
-    /// with the full markdown briefing attached as a .md file. This keeps the
-    /// channel readable in scrollback — the embed acts as a per-week reference
-    /// card, and the attached file holds the full content rendered as markdown
-    /// by any viewer that opens it.
+    /// Posts the briefing to the briefings channel as TWO adjacent messages:
+    ///   1. An embed acting as a per-week reference card (date range + model footer).
+    ///   2. The full markdown briefing as a .md attachment.
+    ///
+    /// They are split because Discord's renderer always places attachments above
+    /// embeds within a single message — there is no flag to reverse that. Sending
+    /// the embed first as its own message keeps the card visually on top, which
+    /// makes scrollback easier to scan.
     /// </summary>
     private async Task PostToDiscordAsync(
         string content,
@@ -155,15 +158,20 @@ public sealed class WeeklyOfficerBriefingService(
             .WithTimestamp(DateTimeOffset.UtcNow)
             .Build();
 
+        // Embed first — this is the visual header card for the week.
+        await channel.SendMessageAsync(
+            embed: embed,
+            options: new RequestOptions { CancelToken = ct });
+
+        // Then the .md attachment underneath.
         await using var stream = new MemoryStream(Encoding.UTF8.GetBytes(content));
         await channel.SendFileAsync(
             stream,
             filename,
-            embed: embed,
             options: new RequestOptions { CancelToken = ct });
 
         logger.LogInformation(
-            "Posted weekly briefing to channel {Id} as embed + attachment '{Filename}'",
+            "Posted weekly briefing to channel {Id} (embed + attachment '{Filename}')",
             _options.OfficerChannelId, filename);
     }
 

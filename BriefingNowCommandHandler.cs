@@ -15,10 +15,10 @@ namespace ClanGuardBot.Handlers;
 ///
 /// Implementation notes:
 ///   • Permission gate is BotConfig.BriefingNowMinRank (default BG+).
-///     Briefing posts to the HQ channel; only HQ should be able to trigger it.
+///     Briefing posts to the briefings channel; only HQ should be able to trigger it.
 ///   • Discord requires a response within 3 seconds, so the command defers
 ///     immediately and uses follow-up messages for progress and result.
-///     The Claude API call typically takes 5–15 seconds.
+///     The Claude API call typically takes 10–30 seconds.
 ///   • The handler delegates the actual work to WeeklyOfficerBriefingService
 ///     so behaviour stays identical between scheduled and manual runs.
 /// </summary>
@@ -27,17 +27,20 @@ public class BriefingNowCommandHandler
     private readonly DiscordSocketClient _client;
     private readonly ILogger<BriefingNowCommandHandler> _logger;
     private readonly BotConfig _config;
+    private readonly WeeklyBriefingOptions _briefingOptions;
     private readonly WeeklyOfficerBriefingService _briefing;
 
     public BriefingNowCommandHandler(
         DiscordSocketClient client,
         ILogger<BriefingNowCommandHandler> logger,
         IOptions<BotConfig> config,
+        IOptions<WeeklyBriefingOptions> briefingOptions,
         WeeklyOfficerBriefingService briefing)
     {
         _client = client;
         _logger = logger;
         _config = config.Value;
+        _briefingOptions = briefingOptions.Value;
         _briefing = briefing;
     }
 
@@ -51,7 +54,7 @@ public class BriefingNowCommandHandler
         if (cmd.Data.Name != "briefing-now") return Task.CompletedTask;
 
         // Dispatch off the gateway thread. The Claude API call inside
-        // HandleBriefingNowAsync takes 5–15 seconds, which is far too long to
+        // HandleBriefingNowAsync takes 10–30 seconds, which is far too long to
         // block Discord.NET's gateway loop. We return Task.CompletedTask
         // immediately and let the work run in the background — DeferAsync +
         // FollowupAsync work just as well from a Task.Run continuation.
@@ -99,17 +102,20 @@ public class BriefingNowCommandHandler
             return;
         }
 
-        // ── Initial progress message — Claude calls take 5–15 seconds ────
+        // ── Initial progress message — Claude calls take 10–30 seconds ───
         await cmd.FollowupAsync(
-            "⏳ Generating briefing… this usually takes 5–15 seconds.",
+            "⏳ Generating briefing… this usually takes 10–30 seconds.",
             ephemeral: true);
 
         try
         {
             await _briefing.RunBriefingNowAsync();
 
+            // <#id> renders as a clickable channel link in the ephemeral, so the
+            // invoker can jump straight to the post they just triggered.
+            var channelMention = $"<#{_briefingOptions.OfficerChannelId}>";
             await cmd.FollowupAsync(
-                "✅ Briefing run complete. Check the HQ channel " +
+                $"✅ Briefing run complete. Check {channelMention} " +
                 "(or the bot logs if `DryRun` is enabled in config).",
                 ephemeral: true);
 
