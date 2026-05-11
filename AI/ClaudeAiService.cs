@@ -19,7 +19,13 @@ public interface IAiService
         CancellationToken ct = default);
 }
 
-public sealed record AiResult(string Text, int InputTokens, int OutputTokens)
+/// <summary>
+/// Result of a Claude completion. <see cref="Model"/> is the model id returned
+/// by the API (which may be a snapshot like "claude-sonnet-4-6-20250529" even
+/// when the request asked for an alias like "claude-sonnet-4-6"), so callers
+/// that surface it to users get the actual model that produced the response.
+/// </summary>
+public sealed record AiResult(string Text, string Model, int InputTokens, int OutputTokens)
 {
     /// <summary>Estimated USD cost at Sonnet 4.6 list pricing ($3/$15 per MTok).</summary>
     public decimal EstimatedCostUsd =>
@@ -81,11 +87,15 @@ public sealed class ClaudeAiService(
                 .Where(c => c.Type == "text" && !string.IsNullOrEmpty(c.Text))
                 .Select(c => c.Text));
 
-        var result = new AiResult(text, payload.Usage.InputTokens, payload.Usage.OutputTokens);
+        // Fall back to the configured model id if the API ever omits the field;
+        // the response field is required per the Messages API spec, so this is defensive.
+        var modelUsed = string.IsNullOrEmpty(payload.Model) ? _options.Model : payload.Model;
+
+        var result = new AiResult(text, modelUsed, payload.Usage.InputTokens, payload.Usage.OutputTokens);
 
         logger.LogInformation(
             "Claude {Model} usage: {Input} in + {Output} out tokens (~{Cost:C4})",
-            _options.Model, result.InputTokens, result.OutputTokens, result.EstimatedCostUsd);
+            result.Model, result.InputTokens, result.OutputTokens, result.EstimatedCostUsd);
 
         return result;
     }
@@ -104,6 +114,7 @@ public sealed class ClaudeAiService(
 
     private sealed record MessagesResponse
     {
+        public string? Model { get; init; }
         public required IReadOnlyList<ContentBlock> Content { get; init; }
         public required Usage Usage { get; init; }
     }

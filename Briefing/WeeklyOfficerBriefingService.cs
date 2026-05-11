@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using ClanGuardBot.AI;
 using Discord;
@@ -34,6 +35,13 @@ public sealed class WeeklyOfficerBriefingService(
     ILogger<WeeklyOfficerBriefingService> logger) : BackgroundService
 {
     private readonly WeeklyBriefingOptions _options = options.Value;
+
+    // Display dates in clan-local Eastern Time, matching CompEventCommandHandler.
+    // The scheduled Sunday 14:00 UTC run is still Sunday in ET; this only matters
+    // for /briefing-now invocations triggered late at night UTC, where the UTC
+    // date and ET date differ.
+    private static readonly TimeZoneInfo EasternTz =
+        TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
     private static readonly JsonSerializerOptions PromptJson = new()
     {
@@ -98,15 +106,27 @@ public sealed class WeeklyOfficerBriefingService(
         if (_options.DryRun)
         {
             logger.LogInformation(
-                "[DRY RUN] Briefing not posted. Cost ~{Cost:C4}.\n{Briefing}",
-                result.EstimatedCostUsd, result.Text);
+                "[DRY RUN] Briefing not posted. Model: {Model}. Cost ~{Cost:C4}.\n{Briefing}",
+                result.Model, result.EstimatedCostUsd, result.Text);
             return;
         }
 
-        await PostToDiscordAsync(result.Text, ct);
+        await PostToDiscordAsync(result.Text, result.Model, weekStart, weekEnd, ct);
     }
 
-    private async Task PostToDiscordAsync(string content, CancellationToken ct)
+    /// <summary>
+    /// Posts the briefing to HQ as an embed (date range header + model footer)
+    /// with the full markdown briefing attached as a .md file. This keeps the
+    /// channel readable in scrollback — the embed acts as a per-week reference
+    /// card, and the attached file holds the full content rendered as markdown
+    /// by any viewer that opens it.
+    /// </summary>
+    private async Task PostToDiscordAsync(
+        string content,
+        string model,
+        DateTime weekStartUtc,
+        DateTime weekEndUtc,
+        CancellationToken ct)
     {
         var rawChannel = await discord.GetChannelAsync(_options.OfficerChannelId);
         if (rawChannel is not IMessageChannel channel)
@@ -117,44 +137,34 @@ public sealed class WeeklyOfficerBriefingService(
             return;
         }
 
-        // Discord collapses consecutive bulleted sections into a single visual block,
-        // even when the source markdown has blank lines between them. Inject a
-        // zero-width-space line before every "### " header so the renderer
-        // treats them as separate blocks. The U+200B character is invisible.
-        var spaced = InjectSectionSpacers(content);
+        var weekStartEt = TimeZoneInfo.ConvertTimeFromUtc(weekStartUtc, EasternTz);
+        var weekEndEt = TimeZoneInfo.ConvertTimeFromUtc(weekEndUtc, EasternTz);
 
-        foreach (var chunk in ChunkForDiscord(spaced))
-        {
-            await channel.SendMessageAsync(chunk, options: new RequestOptions { CancelToken = ct });
-        }
+        // Always render month on both sides (e.g. "May 4 - May 11") so the format
+        // stays consistent whether or not the range crosses a month boundary.
+        var dateRange = $"{weekStartEt:MMMM d} - {weekEndEt:MMMM d}";
 
-        logger.LogInformation("Posted weekly briefing to channel {Id}", _options.OfficerChannelId);
-    }
+        // Filename uses week-ending date in ET so it sorts naturally and lines
+        // up with the title. Short form keeps the attachment label compact in Discord.
+        var filename = $"briefing-{weekEndEt:yyyy-MM-dd}.md";
 
-    /// <summary>
-    /// Inserts a zero-width-space line before every Markdown H3 header so Discord
-    /// renders a visible gap between sections. Without this, sections that follow
-    /// a bulleted list collapse into the previous list visually — the "### Risk Watch"
-    /// header gets glued onto the last Promotion Candidates bullet.
-    /// </summary>
-    private static string InjectSectionSpacers(string content)
-    {
-        var lines = content.Split('\n');
-        var output = new System.Text.StringBuilder(content.Length + 64);
+        var embed = new EmbedBuilder()
+            .WithTitle($"Weekly Officer Briefing — {dateRange}")
+            .WithColor(new Color(0x2B6CB0))
+            .WithFooter($"Model: {model}")
+            .WithTimestamp(DateTimeOffset.UtcNow)
+            .Build();
 
-        for (var i = 0; i < lines.Length; i++)
-        {
-            var line = lines[i];
-            // First line is never preceded by a spacer; otherwise add one before any "### " header.
-            if (i > 0 && line.TrimStart().StartsWith("### "))
-            {
-                output.Append('\u200B').Append('\n');
-            }
-            output.Append(line);
-            if (i < lines.Length - 1) output.Append('\n');
-        }
+        await using var stream = new MemoryStream(Encoding.UTF8.GetBytes(content));
+        await channel.SendFileAsync(
+            stream,
+            filename,
+            embed: embed,
+            options: new RequestOptions { CancelToken = ct });
 
-        return output.ToString();
+        logger.LogInformation(
+            "Posted weekly briefing to channel {Id} as embed + attachment '{Filename}'",
+            _options.OfficerChannelId, filename);
     }
 
     private async Task WaitForDiscordReadyAsync(CancellationToken ct)
@@ -180,44 +190,5 @@ public sealed class WeeklyOfficerBriefingService(
         var daysUntil = ((int)_options.RunOnDayUtc - (int)nowUtc.DayOfWeek + 7) % 7;
         var candidate = nowUtc.Date.AddDays(daysUntil) + _options.RunAtUtc.ToTimeSpan();
         return candidate <= nowUtc ? candidate.AddDays(7) : candidate;
-    }
-
-    /// <summary>
-    /// Discord caps messages at 2000 chars. Split on paragraph boundaries when possible,
-    /// fall back to hard chunking. Keeps a safety margin at 1900.
-    /// </summary>
-    private static IEnumerable<string> ChunkForDiscord(string content, int maxLen = 1900)
-    {
-        if (content.Length <= maxLen)
-        {
-            yield return content;
-            yield break;
-        }
-
-        var paragraphs = content.Split("\n\n", StringSplitOptions.None);
-        var buffer = new System.Text.StringBuilder();
-
-        foreach (var para in paragraphs)
-        {
-            // Single paragraph already too big — hard split.
-            if (para.Length > maxLen)
-            {
-                if (buffer.Length > 0) { yield return buffer.ToString(); buffer.Clear(); }
-                for (var i = 0; i < para.Length; i += maxLen)
-                    yield return para.Substring(i, Math.Min(maxLen, para.Length - i));
-                continue;
-            }
-
-            if (buffer.Length + para.Length + 2 > maxLen)
-            {
-                yield return buffer.ToString();
-                buffer.Clear();
-            }
-
-            if (buffer.Length > 0) buffer.Append("\n\n");
-            buffer.Append(para);
-        }
-
-        if (buffer.Length > 0) yield return buffer.ToString();
     }
 }
