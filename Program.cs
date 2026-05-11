@@ -145,6 +145,12 @@ try
     // Phase 2: parser worker drains ApolloMessageLog into ApolloEvents staging table.
     builder.Services.AddHostedService<ApolloMessageParserWorker>();
 
+    // Phase 3: drains CalendarOutbox to Google Calendar with retry + backoff.
+    // Runs unconditionally; the outbox is only populated when
+    // UseNewApolloPipeline=true, so it's a cheap no-op otherwise (one indexed
+    // SELECT every 10 seconds against an empty table).
+    builder.Services.AddHostedService<CalendarOutboxWorker>();
+
     // /calendar: ephemeral day-grouped view of upcoming events from Google Calendar.
     builder.Services.AddSingleton<CalendarCommandHandler>();
 

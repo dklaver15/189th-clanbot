@@ -26,6 +26,7 @@ public class BotDbContext : DbContext
     public DbSet<RedditLead>          RedditLeads         => Set<RedditLead>();
     public DbSet<CommandUsage>        CommandUsages       => Set<CommandUsage>();
     public DbSet<PatrolWatchOptOut>   PatrolWatchOptOuts  => Set<PatrolWatchOptOut>();
+    public DbSet<CalendarOutbox>      CalendarOutbox      => Set<CalendarOutbox>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -108,6 +109,23 @@ public class BotDbContext : DbContext
 
             // Look up all events for a guild by source (Clan vs CompDiv)
             e.HasIndex(c => new { c.GuildId, c.Source });
+        });
+
+        modelBuilder.Entity<CalendarOutbox>(e =>
+        {
+            // Drives the worker's "next batch to process" query — pending rows
+            // ordered by when they're due. Filtered to (CompletedAt, NextAttemptAt)
+            // because most queries look only at pending rows, but we keep
+            // CompletedAt as the leading column so the index also supports
+            // completed-row lookups for diagnostics.
+            e.HasIndex(o => new { o.CompletedAt, o.NextAttemptAt })
+                .HasDatabaseName("IX_CalendarOutbox_Pending");
+
+            // Investigative lookups: "show me all queue activity for this event".
+            e.HasIndex(o => o.CalendarEventId);
+
+            // Operation is stored as int — SQLite has no native enum type.
+            e.Property(o => o.Operation).HasConversion<int>();
         });
 
         modelBuilder.Entity<EventAttendance>(e =>

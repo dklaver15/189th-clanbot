@@ -425,3 +425,57 @@ public class CommandUsage
 
     public DateTime ExecutedAt { get; set; }
 }
+
+public enum CalendarOutboxOperation
+{
+    Create = 1,
+    Update = 2,
+    Delete = 3,
+}
+
+/// <summary>
+/// Durable queue of pending Google Calendar operations driven by the Phase 3
+/// Apollo pipeline. Each row represents one CalendarEvent state change that
+/// needs to be reflected in GCal: a Create (event newly parsed from Apollo),
+/// an Update (Apollo edited the post), or a Delete (Apollo pulled the post
+/// before EndUtc).
+///
+/// Written by ApolloMessageParserWorker when UseNewApolloPipeline=true.
+/// Drained by CalendarOutboxWorker on its own schedule with row-level
+/// exponential backoff via NextAttemptAt. Idempotent against duplicate
+/// processing because Create operations check CalendarEvent.CalendarEventId
+/// before calling GCal — if it's already populated, the create is folded
+/// into an update.
+///
+/// ── Why an outbox ──
+/// Pre-Phase-3, ApolloEventHandler called GoogleCalendarService synchronously
+/// inside the gateway-event callback. Transient GCal failures (5xx, throttling,
+/// auth refresh blip) became silent drift — the CalendarEvent row was written
+/// but the API call wasn't, and the inconsistency only surfaced when
+/// /cleanup-calendar-dupes ran. The outbox decouples the DB write from the
+/// external call so a failure is a deferred retry, not a lost operation.
+/// </summary>
+public class CalendarOutbox
+{
+    public int Id { get; set; }
+    public ulong GuildId { get; set; }
+    public CalendarOutboxOperation Operation { get; set; }
+
+    /// <summary>FK to CalendarEvent.Id (our internal id, not GoogleEventId).</summary>
+    public int CalendarEventId { get; set; }
+
+    /// <summary>
+    /// JSON-serialized CalendarOutboxPayload. Captured at enqueue time so a
+    /// later edit doesn't retroactively change what an in-flight queue row
+    /// will push to GCal. For Delete operations, this also carries the
+    /// Google event ID, because the CalendarEvent row is removed at enqueue
+    /// time and is no longer available when the worker processes the row.
+    /// </summary>
+    public string PayloadJson { get; set; } = string.Empty;
+
+    public int AttemptCount { get; set; }
+    public DateTime NextAttemptAt { get; set; }
+    public string? LastError { get; set; }
+    public DateTime? CompletedAt { get; set; }
+    public DateTime CreatedAt { get; set; }
+}

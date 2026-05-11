@@ -133,7 +133,22 @@ public class DiscordBotService : IHostedService
         _guestReminderHandler.Register(_client);
         _onboardingReminderHandler.Register(_client);
         _bumpReminderHandler.Register(_client);
-        _apolloEventHandler.Register(_client);
+
+        // Phase 3 cutover: when UseNewApolloPipeline is true, the parser worker
+        // + CalendarOutboxWorker own the Apollo→GCal path. ApolloEventHandler
+        // stays instantiated for emergency rollback (flip the flag back to
+        // false and restart) but never wires up its gateway subscriptions.
+        if (!_config.UseNewApolloPipeline)
+        {
+            _apolloEventHandler.Register(_client);
+        }
+        else
+        {
+            _logger.LogInformation(
+                "UseNewApolloPipeline=true; ApolloEventHandler.Register skipped. " +
+                "ApolloMessageParserWorker + CalendarOutboxWorker own the Apollo→GCal path.");
+        }
+
         _apolloCaptureHandler.Register(_client);
         _compEventHandler.Register(_client);
         _promoteHandler.Register(_client);

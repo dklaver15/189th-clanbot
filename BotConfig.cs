@@ -160,6 +160,22 @@ public class BotConfig
     public string ApolloBotName { get; set; } = "Apollo";
 
     /// <summary>
+    /// Phase 3 cutover flag for the Apollo→GCal pipeline.
+    ///
+    /// When false (default): ApolloEventHandler runs as the live path, parsing
+    /// Apollo posts inline and pushing to GCal synchronously. ApolloMessageParserWorker
+    /// writes parsed events to the ApolloEvent staging table for observability.
+    ///
+    /// When true: ApolloEventHandler is not registered. ApolloMessageParserWorker
+    /// writes directly to CalendarEvent and enqueues CalendarOutbox rows.
+    /// CalendarOutboxWorker drains the queue to GCal with retry + backoff.
+    ///
+    /// Flip the flag in appsettings.json and restart to cut over. No code
+    /// redeploy needed for the cutover itself; rollback is the reverse.
+    /// </summary>
+    public bool UseNewApolloPipeline { get; set; } = false;
+
+    /// <summary>
     /// The minimum rank required to use the /comp-event command.
     /// Must exactly match one of the rank names in RankRoles (case-insensitive).
     /// </summary>

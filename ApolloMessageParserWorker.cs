@@ -5,48 +5,50 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using Newtonsoft.Json;
 
 namespace ClanGuardBot.Services;
 
 /// <summary>
-/// Phase 2 of the Apollo sync rework: stage parsing on a separate timeline.
+/// Drains ApolloMessageLog into downstream state. Behaviour depends on the
+/// UseNewApolloPipeline feature flag:
 ///
-/// Polls ApolloMessageLog for unprocessed rows, reconstructs the embed via
-/// ApolloEmbedReconstructor, parses it with the existing ApolloEmbedParser,
-/// and upserts an ApolloEvent row reflecting the latest revision per message.
-/// Stamps ApolloMessageLog.ProcessedAt on success or ParseError on failure.
+/// ── Flag OFF (Phase 2 behaviour) ──
+/// Writes parsed events to the ApolloEvent staging table. Acts as a parallel
+/// observability surface alongside the live ApolloEventHandler; the two tables
+/// can be diffed to validate parser equivalence before cutover.
 ///
-/// ── Dual-run posture ──
-/// During Phase 2 the live ApolloEventHandler keeps writing to CalendarEvent
-/// as before. This worker writes ONLY to ApolloEvent. The two tables can then
-/// be diffed (see ApolloEvent class doc) to validate that the new parser path
-/// produces equivalent output before we cut over in Phase 3.
+/// ── Flag ON (Phase 3 behaviour) ──
+/// Bypasses the ApolloEvent table entirely. Upserts directly into CalendarEvent
+/// (the live published state) and enqueues a CalendarOutbox row to drive the
+/// asynchronous GCal push. The live ApolloEventHandler should be unregistered
+/// at startup when the flag is on, so this worker is the only writer to
+/// CalendarEvent for Apollo-sourced events.
 ///
 /// ── Why a separate worker, not synchronous in the capture handler ──
-/// Capture must never block on parsing. If the parser takes 200ms or hits a
-/// transient DB issue, Discord gateway delivery shouldn't suffer. The worker
-/// also gives us a natural retry surface (failed rows stay unprocessed; fix
-/// the parser, run the replay command, queue drains itself).
+/// Capture must never block on parsing or GCal. If a parse takes 200ms, or the
+/// outbox table is contended, Discord gateway delivery shouldn't suffer. The
+/// worker also gives us a natural retry surface — failed rows leave
+/// ProcessedAt=null so Phase 6 replay can pick them up.
 ///
 /// ── Failure handling ──
 ///   • Reconstructor throws / Parse returns null → stamp ParseError, set
-///     ProcessedAt=null so Phase 6 replay can pick it up after a fix. Log warn.
-///   • Database write fails → leave row unprocessed, retry on next tick. Log error.
-///   • Skip rows whose latest revision is Deleted but no prior Active state
-///     existed (ignored deletion of unknown message). Already filtered out
-///     during capture, but defensive here too.
+///     ProcessedAt=now so we don't reprocess on every tick. Phase 6 replay
+///     command can null ProcessedAt to force a retry after a parser fix.
+///   • Database write fails → row stays unprocessed, retries on next tick.
+///   • Tombstone for unknown message → silently mark processed.
 ///
 /// ── Ordering and revision handling ──
-/// Rows are processed oldest-CapturedAt-first. A given message may have
-/// multiple unprocessed revisions in the queue; the worker handles them in
-/// order. The ApolloEvent row reflects the LATEST revision processed; a
-/// Deleted revision flips Status to Cancelled rather than removing the row,
-/// so the audit trail is preserved.
+/// Rows are processed oldest-CapturedAt-first. A message may have multiple
+/// unprocessed revisions in the queue; the worker handles them in order. The
+/// downstream state (ApolloEvent or CalendarEvent) reflects the latest
+/// processed revision. A Deleted revision is handled specially per branch
+/// (see ProcessTombstone* below).
 ///
 /// ── Polling interval ──
-/// 15 seconds. Apollo edits are infrequent (a few per day at peak); shorter
-/// intervals just burn DB queries. Phase 5's health monitor will alert if
-/// queue depth grows beyond N or oldest unprocessed exceeds an SLA.
+/// 15 seconds. Apollo edits are infrequent at peak (a few per hour); shorter
+/// intervals just burn DB queries.
 /// </summary>
 public class ApolloMessageParserWorker : BackgroundService
 {
@@ -57,27 +59,30 @@ public class ApolloMessageParserWorker : BackgroundService
     private readonly IServiceProvider _services;
     private readonly DiscordSocketClient _client;
     private readonly ILogger<ApolloMessageParserWorker> _logger;
+    private readonly BotConfig _config;
 
     public ApolloMessageParserWorker(
         IServiceProvider services,
         DiscordSocketClient client,
-        ILogger<ApolloMessageParserWorker> logger)
+        ILogger<ApolloMessageParserWorker> logger,
+        IOptions<BotConfig> config)
     {
         _services = services;
         _client   = client;
         _logger   = logger;
+        _config   = config.Value;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         // Wait for Discord to be ready — not strictly needed (we only touch the
-        // DB), but keeps log noise sequenced with other startup services and
-        // avoids a flurry of work if the bot is in a restart loop.
+        // DB), but keeps log noise sequenced with other startup services.
         try { await Task.Delay(StartupGrace, stoppingToken); }
         catch (OperationCanceledException) { return; }
 
-        _logger.LogInformation("ApolloMessageParserWorker started; polling every {Seconds}s",
-            (int)PollInterval.TotalSeconds);
+        _logger.LogInformation(
+            "ApolloMessageParserWorker started; polling every {Seconds}s (UseNewApolloPipeline={Flag})",
+            (int)PollInterval.TotalSeconds, _config.UseNewApolloPipeline);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -134,22 +139,13 @@ public class ApolloMessageParserWorker : BackgroundService
 
     private async Task ProcessRowAsync(BotDbContext db, ApolloMessageLog row)
     {
-        // Tombstone path: flip the ApolloEvent to Cancelled if it exists.
+        // Tombstone path
         if (row.EventType == ApolloMessageEventType.Deleted)
         {
-            var existing = await db.ApolloEvents
-                .FirstOrDefaultAsync(e => e.DiscordMessageId == row.DiscordMessageId);
-
-            if (existing is not null && existing.Status != ApolloEventStatus.Cancelled)
-            {
-                existing.Status      = ApolloEventStatus.Cancelled;
-                existing.CancelledAt = DateTime.UtcNow;
-                existing.SourceLogId = row.Id;
-
-                _logger.LogInformation(
-                    "ApolloEvent for message {MessageId} ('{Title}') marked Cancelled",
-                    row.DiscordMessageId, existing.ParsedTitle);
-            }
+            if (_config.UseNewApolloPipeline)
+                await ProcessTombstoneNewPathAsync(db, row);
+            else
+                await ProcessTombstoneOldPathAsync(db, row);
 
             row.ProcessedAt = DateTime.UtcNow;
             row.ParseError  = null;
@@ -157,7 +153,7 @@ public class ApolloMessageParserWorker : BackgroundService
             return;
         }
 
-        // Created / Updated path: parse and upsert.
+        // Created / Updated path: parse first, then route by flag.
         if (row.PayloadJson is null)
         {
             // Should never happen — capture only writes null PayloadJson on
@@ -171,10 +167,10 @@ public class ApolloMessageParserWorker : BackgroundService
 
         if (embed is null)
         {
-            // Apollo always posts an embed, so a missing embed means this
-            // row isn't actually an event payload (some other Apollo message
-            // type, or a stripped post-deletion edit). Mark processed with no
-            // ApolloEvent side effect.
+            // Apollo always posts an embed, so a missing embed means this row
+            // isn't actually an event payload (some other Apollo message type,
+            // or a stripped post-deletion edit). Mark processed with no
+            // downstream side effect.
             row.ProcessedAt = DateTime.UtcNow;
             row.ParseError  = "Snapshot had no embed; nothing to parse";
             await db.SaveChangesAsync();
@@ -194,6 +190,38 @@ public class ApolloMessageParserWorker : BackgroundService
             return;
         }
 
+        if (_config.UseNewApolloPipeline)
+            await ProcessParsedNewPathAsync(db, row, parsed);
+        else
+            await ProcessParsedOldPathAsync(db, row, parsed);
+
+        row.ProcessedAt = DateTime.UtcNow;
+        row.ParseError  = null;
+        await db.SaveChangesAsync();
+    }
+
+    // ─── Old path (UseNewApolloPipeline=false): writes to ApolloEvent ────────
+
+    private async Task ProcessTombstoneOldPathAsync(BotDbContext db, ApolloMessageLog row)
+    {
+        var existing = await db.ApolloEvents
+            .FirstOrDefaultAsync(e => e.DiscordMessageId == row.DiscordMessageId);
+
+        if (existing is not null && existing.Status != ApolloEventStatus.Cancelled)
+        {
+            existing.Status      = ApolloEventStatus.Cancelled;
+            existing.CancelledAt = DateTime.UtcNow;
+            existing.SourceLogId = row.Id;
+
+            _logger.LogInformation(
+                "ApolloEvent for message {MessageId} ('{Title}') marked Cancelled",
+                row.DiscordMessageId, existing.ParsedTitle);
+        }
+    }
+
+    private async Task ProcessParsedOldPathAsync(
+        BotDbContext db, ApolloMessageLog row, ApolloEmbedParser.ParsedApolloEvent parsed)
+    {
         var contentHash = ComputeContentHash(parsed);
 
         var existingEvent = await db.ApolloEvents
@@ -240,12 +268,176 @@ public class ApolloMessageParserWorker : BackgroundService
                 row.DiscordMessageId, parsed.Title, parsed.StartUtc, parsed.EndUtc);
         }
         // else: hash matched and Status was Active → no-op (Apollo re-rendered
-        // the embed for an RSVP without changing event details).
-
-        row.ProcessedAt = DateTime.UtcNow;
-        row.ParseError  = null;
-        await db.SaveChangesAsync();
+        // for an RSVP without changing event details).
     }
+
+    // ─── New path (UseNewApolloPipeline=true): writes to CalendarEvent + outbox ─
+
+    /// <summary>
+    /// Tombstone in the new path. Mirrors ApolloEventHandler.HandleMessageDeletedAsync:
+    ///   • Pre-event deletion (EndUtc &gt; now): real cancellation. Enqueue a Delete
+    ///     outbox row, then remove the CalendarEvent. Doing the enqueue before the
+    ///     remove (in the same SaveChanges) means the outbox always has the GCal
+    ///     event ID available even though CalendarEvent is gone.
+    ///   • Post-event deletion (EndUtc &lt;= now): channel cleanup policy. Leave both
+    ///     the CalendarEvent row and the GCal entry as historical record.
+    /// </summary>
+    private async Task ProcessTombstoneNewPathAsync(BotDbContext db, ApolloMessageLog row)
+    {
+        var calEvent = await db.CalendarEvents
+            .FirstOrDefaultAsync(c => c.DiscordMessageId == row.DiscordMessageId);
+
+        if (calEvent is null) return;
+
+        if (calEvent.EndUtc <= DateTime.UtcNow)
+        {
+            _logger.LogDebug(
+                "Apollo message {MessageId} deleted after event end; preserving CalendarEvent '{Title}' as historical record",
+                row.DiscordMessageId, calEvent.Title);
+            return;
+        }
+
+        // Pre-event deletion → real cancellation.
+        if (!string.IsNullOrEmpty(calEvent.CalendarEventId))
+        {
+            // GCal entry exists; queue its deletion. Stash the GoogleEventId in
+            // the payload because we're about to nuke the CalendarEvent row.
+            db.CalendarOutbox.Add(new CalendarOutbox
+            {
+                GuildId         = row.GuildId,
+                Operation       = CalendarOutboxOperation.Delete,
+                CalendarEventId = calEvent.Id,
+                PayloadJson     = JsonConvert.SerializeObject(new CalendarOutboxPayload
+                {
+                    Title         = calEvent.Title,
+                    StartUtc      = calEvent.StartUtc,
+                    EndUtc        = calEvent.EndUtc,
+                    Description   = calEvent.Description,
+                    Source        = calEvent.Source,
+                    GoogleEventId = calEvent.CalendarEventId,
+                }),
+                NextAttemptAt = DateTime.UtcNow,
+                CreatedAt     = DateTime.UtcNow,
+            });
+        }
+        // else: CalendarEvent existed but never made it to GCal (Create still
+        // pending in the outbox). Removing the row is sufficient; the pending
+        // Create will skip itself when it sees the row is gone.
+
+        db.CalendarEvents.Remove(calEvent);
+
+        _logger.LogInformation(
+            "Pre-event Apollo deletion: queued GCal delete for '{Title}' (messageId={MessageId}, EndUtc was {End:yyyy-MM-dd HH:mm} UTC)",
+            calEvent.Title, row.DiscordMessageId, calEvent.EndUtc);
+    }
+
+    /// <summary>
+    /// Parse + upsert + enqueue in the new path. Mirrors ApolloEventHandler's
+    /// CREATE/UPDATE branching:
+    ///   • Existing CalendarEvent for this message → UPDATE path: write the new
+    ///     fields, enqueue an Update outbox row (or Create if no GoogleEventId yet).
+    ///   • No existing CalendarEvent → CREATE path: insert with empty
+    ///     CalendarEventId, enqueue a Create outbox row.
+    ///
+    /// All writes happen in one SaveChanges, so a partial state (CalendarEvent
+    /// without a paired outbox row, or vice versa) is structurally impossible.
+    /// </summary>
+    private async Task ProcessParsedNewPathAsync(
+        BotDbContext db, ApolloMessageLog row, ApolloEmbedParser.ParsedApolloEvent parsed)
+    {
+        var existing = await db.CalendarEvents
+            .FirstOrDefaultAsync(c => c.DiscordMessageId == row.DiscordMessageId);
+
+        var payload = new CalendarOutboxPayload
+        {
+            Title         = parsed.Title,
+            StartUtc      = parsed.StartUtc,
+            EndUtc        = parsed.EndUtc,
+            Description   = parsed.Description ?? "",
+            OrganizerName = parsed.OrganizerName ?? "",
+            OrganizerId   = parsed.OrganizerId,
+            Source        = "Clan",
+        };
+
+        if (existing is null)
+        {
+            // CREATE path
+            var calEvent = new CalendarEvent
+            {
+                GuildId          = row.GuildId,
+                DiscordMessageId = row.DiscordMessageId,
+                CalendarEventId  = string.Empty, // populated by outbox worker on success
+                Title            = parsed.Title,
+                StartUtc         = parsed.StartUtc,
+                EndUtc           = parsed.EndUtc,
+                Description      = parsed.Description ?? "",
+                Source           = "Clan",
+                CreatedAt        = DateTime.UtcNow,
+            };
+            db.CalendarEvents.Add(calEvent);
+
+            // Save once to materialize calEvent.Id, then enqueue with the FK.
+            await db.SaveChangesAsync();
+
+            db.CalendarOutbox.Add(new CalendarOutbox
+            {
+                GuildId         = row.GuildId,
+                Operation       = CalendarOutboxOperation.Create,
+                CalendarEventId = calEvent.Id,
+                PayloadJson     = JsonConvert.SerializeObject(payload),
+                NextAttemptAt   = DateTime.UtcNow,
+                CreatedAt       = DateTime.UtcNow,
+            });
+
+            _logger.LogInformation(
+                "CalendarEvent created for Apollo message {MessageId}: '{Title}' {Start}–{End} UTC (GCal create queued)",
+                row.DiscordMessageId, parsed.Title, parsed.StartUtc, parsed.EndUtc);
+            return;
+        }
+
+        // UPDATE path — apply changes only if something actually changed.
+        var changed =
+            existing.Title       != parsed.Title              ||
+            existing.StartUtc    != parsed.StartUtc           ||
+            existing.EndUtc      != parsed.EndUtc             ||
+            existing.Description != (parsed.Description ?? "");
+
+        if (!changed)
+        {
+            // Apollo re-rendered the embed for an RSVP — no event-field change,
+            // so nothing to push to GCal. Skip the enqueue entirely.
+            return;
+        }
+
+        existing.Title       = parsed.Title;
+        existing.StartUtc    = parsed.StartUtc;
+        existing.EndUtc      = parsed.EndUtc;
+        existing.Description = parsed.Description ?? "";
+
+        // If the original Create hasn't completed yet (no GoogleEventId), enqueue
+        // another Create — the outbox worker's idempotency check on CalendarEventId
+        // will fold this into an Update once the prior Create lands. Otherwise
+        // enqueue a normal Update.
+        var op = string.IsNullOrEmpty(existing.CalendarEventId)
+            ? CalendarOutboxOperation.Create
+            : CalendarOutboxOperation.Update;
+
+        db.CalendarOutbox.Add(new CalendarOutbox
+        {
+            GuildId         = row.GuildId,
+            Operation       = op,
+            CalendarEventId = existing.Id,
+            PayloadJson     = JsonConvert.SerializeObject(payload),
+            NextAttemptAt   = DateTime.UtcNow,
+            CreatedAt       = DateTime.UtcNow,
+        });
+
+        _logger.LogInformation(
+            "CalendarEvent updated for Apollo message {MessageId}: '{Title}' {Start}–{End} UTC (GCal {Op} queued)",
+            row.DiscordMessageId, parsed.Title, parsed.StartUtc, parsed.EndUtc, op);
+    }
+
+    // ─── Helpers ─────────────────────────────────────────────────────────────
 
     /// <summary>
     /// FNV-1a over the parser-relevant fields. Cheap and stable; we don't need
