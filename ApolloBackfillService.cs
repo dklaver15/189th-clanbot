@@ -54,6 +54,30 @@ public class ApolloBackfillService : BackgroundService
         // Extra buffer so the forward-listening ApolloEventHandler is registered first
         await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
 
+        // ── Phase 3 cutover ───────────────────────────────────────────────
+        // When the new pipeline is active, backfill is structurally unsafe:
+        // it walks channel history and writes CalendarEvents + GCal directly,
+        // racing with ApolloMessageParserWorker writing CalendarEvents and
+        // CalendarOutboxWorker pushing to GCal. The race can produce orphan
+        // GCal events when backfill's CREATE path beats the parser worker's
+        // outbox enqueue to the GCal API, then hits the unique index on
+        // CalendarEvents and silently rolls back the DB write.
+        //
+        // ApolloMessageCaptureHandler covers the forward path (every gateway-
+        // delivered Apollo message becomes an ApolloMessageLog row). The case
+        // backfill exists for — "bot was offline, missed messages in the
+        // channel" — is handled going forward by Phase 4's three-way
+        // reconciler. For Phase 3, skipping the channel-history walk is the
+        // safe trade.
+        if (_config.UseNewApolloPipeline)
+        {
+            _logger.LogInformation(
+                "Apollo backfill skipped: UseNewApolloPipeline=true. " +
+                "Forward path is handled by ApolloMessageCaptureHandler + ApolloMessageParserWorker + CalendarOutboxWorker; " +
+                "offline-gap recovery will be handled by Phase 4's three-way reconciler.");
+            return;
+        }
+
         foreach (var guild in _client.Guilds)
         {
             var eventsChannel = guild.TextChannels.FirstOrDefault(c =>
