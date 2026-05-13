@@ -103,10 +103,22 @@ public class InviteCommandHandler
         client.ButtonExecuted += HandleButtonAsync;
     }
 
-    private async Task HandleCommandAsync(SocketSlashCommand command)
+    private Task HandleCommandAsync(SocketSlashCommand command)
     {
-        if (command.Data.Name is not "invite") return;
+        if (command.Data.Name is not "invite") return Task.CompletedTask;
 
+        // Dispatch off the gateway thread. Subcommands like /invite list
+        // call Discord's GetInvitesAsync which can take several hundred
+        // milliseconds on busy guilds, and Discord.Net warns when an event
+        // handler doesn't return quickly. Returning Task.CompletedTask
+        // releases the gateway loop immediately; the real work runs on the
+        // threadpool. Matches the BriefingNowCommandHandler pattern.
+        _ = Task.Run(() => HandleCommandImplAsync(command));
+        return Task.CompletedTask;
+    }
+
+    private async Task HandleCommandImplAsync(SocketSlashCommand command)
+    {
         // Subcommand routing. Discord slash-command groups deliver the
         // subcommand as the first option; its own options live one level
         // deeper. We unwrap that here and dispatch to the right handler.
@@ -572,10 +584,25 @@ public class InviteCommandHandler
     //
     // Open to anyone — it's a read-only registry. Renders a code-block
     // table for monospaced alignment so officers can scan rows quickly.
-    // If the result exceeds Discord's 4096-character description budget,
-    // we split across multiple followup messages.
+    // Output is sent as an embed with button-based pagination matching
+    // /invite info — single message that updates in place via Prev/Next
+    // buttons rather than spamming followups.
 
-    private const int InviteListDescriptionBudget = 3800; // headroom under 4096
+    // Embed description caps at 4096 chars and we wrap the table in a
+    // triple-backtick code block (~10 chars of overhead). 3800 leaves
+    // comfortable headroom for the markers plus a footer summary line
+    // (~250 chars) without bumping into the 6000-char total-embed cap.
+    private const int InviteListPageBudget = 3800;
+
+    // CustomId prefixes for the /invite list pagination buttons. Format
+    // is "invite-list:<filter>:<page>" for the Prev/Next buttons and
+    // "invite-list-label:<filter>:<page>:<totalPages>" for the disabled
+    // center "Page X / Y" button. Filter is encoded so button clicks
+    // rebuild against whatever filter the original /invite list was run
+    // with. Discord caps customId at 100 chars; "invite-list:inactive:99"
+    // is 23 chars so we have lots of headroom.
+    private const string ListButtonIdPrefix      = "invite-list:";
+    private const string ListLabelButtonIdPrefix = "invite-list-label:";
 
     private async Task HandleList(SocketSlashCommand command, SocketSlashCommandDataOption sub)
     {
@@ -606,6 +633,45 @@ public class InviteCommandHandler
             return;
         }
 
+        var result = await BuildListResponseAsync(guild, command.GuildId.Value, filter, page: 0);
+
+        if (result.ErrorMessage is not null)
+        {
+            await command.FollowupAsync(result.ErrorMessage, ephemeral: true);
+            return;
+        }
+
+        await command.FollowupAsync(
+            embed:      result.Embed,
+            components: result.Components,
+            ephemeral:  true);
+
+        _logger.LogInformation(
+            "{Caller} ran /invite list filter={Filter} — {Rows} rows across {Pages} page(s)",
+            command.User.Username, filter, result.RowCount, result.TotalPages);
+    }
+
+    /// <summary>
+    /// Builds the embed and pagination components for /invite list, given
+    /// a guild + filter + page (0-indexed). Same code path serves both the
+    /// initial slash command and every subsequent button click — keeps
+    /// the rendering logic in one place. Returns ErrorMessage non-null
+    /// when there's nothing to display (caller chooses how to surface it).
+    /// Mirrors BuildInfoResponseAsync.
+    /// </summary>
+    private async Task<ListResponse> BuildListResponseAsync(
+        SocketGuild? guild, ulong guildId, string filter, int page)
+    {
+        // Clamp page to non-negative. Higher bound is checked after we
+        // know how many pages of rendered output we end up with.
+        if (page < 0) page = 0;
+
+        if (guild is null)
+        {
+            return new ListResponse(null, new ComponentBuilder().Build(), 0, 0,
+                "Couldn't resolve the guild.");
+        }
+
         // ── Pull all the data in parallel ───────────────────────────
         IReadOnlyCollection<IInviteMetadata> liveInvites;
         IInviteMetadata? vanity = null;
@@ -616,8 +682,8 @@ public class InviteCommandHandler
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to fetch invites for /invite list");
-            await command.FollowupAsync("Couldn't fetch the invite list from Discord. Try again.", ephemeral: true);
-            return;
+            return new ListResponse(null, new ComponentBuilder().Build(), 0, 0,
+                "Couldn't fetch the invite list from Discord. Try again.");
         }
 
         // Filter out invites created by the Disboard bot. Disboard's /bump
@@ -643,7 +709,7 @@ public class InviteCommandHandler
         {
             var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
             sources = await db.InviteSources
-                .Where(s => s.GuildId == command.GuildId.Value)
+                .Where(s => s.GuildId == guildId)
                 .ToListAsync();
         }
 
@@ -732,8 +798,8 @@ public class InviteCommandHandler
 
         if (rows.Count == 0)
         {
-            await command.FollowupAsync("No invites found in this server.", ephemeral: true);
-            return;
+            return new ListResponse(null, new ComponentBuilder().Build(), 0, 0,
+                "No invites found in this server.");
         }
 
         // Apply the active/inactive filter. We capture the unfiltered total
@@ -757,8 +823,7 @@ public class InviteCommandHandler
                 "inactive" => $"No revoked invites yet. ({totalUnfiltered} active — try `filter:active` or `filter:all`.)",
                 _          => "No invites found in this server.",
             };
-            await command.FollowupAsync(emptyMsg, ephemeral: true);
-            return;
+            return new ListResponse(null, new ComponentBuilder().Build(), 0, 0, emptyMsg);
         }
 
         // ── Sort: uses desc → label asc → creation asc ──────────────
@@ -775,7 +840,7 @@ public class InviteCommandHandler
             return a.CreatedAt.CompareTo(b.CreatedAt);                          // creation asc
         });
 
-        // ── Render to a code-block table ────────────────────────────
+        // ── Render to code-block pages ──────────────────────────────
         // Compute column widths from the data so labels and codes don't
         // get truncated harder than needed. Cap label at 24 chars and
         // creator at 18 chars to keep the table from going extreme.
@@ -810,11 +875,11 @@ public class InviteCommandHandler
                 $"{FormatExpires(row).PadRight(expWidth)}  " +
                 $"{creatorTrunc}\n";
 
-            // If adding this line would push the page past Discord's
-            // description limit, close the current code block and start a
-            // new page. Each page must end with ``` and the next must
-            // open with ``` to keep the monospace formatting.
-            if (current.Length + line.Length + 4 > InviteListDescriptionBudget)
+            // If adding this line would push the page past the per-page
+            // budget, close the current code block and start a new page.
+            // Each page must end with ``` and the next must open with ```
+            // to keep the monospace formatting.
+            if (current.Length + line.Length + 4 > InviteListPageBudget)
             {
                 current.Append("```");
                 pages.Add(current);
@@ -826,49 +891,173 @@ public class InviteCommandHandler
         current.Append("```");
         pages.Add(current);
 
-        // ── Send pages ──────────────────────────────────────────────
+        // Clamp the requested page to the available range. Buttons disable
+        // themselves at the boundaries so this normally can't happen, but
+        // it's a cheap safeguard against a stale customId surviving a data
+        // change between clicks (e.g. an invite got revoked).
+        if (page >= pages.Count) page = pages.Count - 1;
+
+        // ── Build the embed ─────────────────────────────────────────
         // Summary line tailored to the filter so we don't show meaningless
         // sub-counts (e.g. "0 revoked" under filter:active is just noise).
         // When filtered, append "(filtered from N total)" so the user
         // knows there's more they're not seeing without expanding the filter.
+        // Lives in the footer so it stays visible across pages without
+        // eating the description budget.
         var summary = filter switch
         {
             "active" =>
-                $"**{rows.Count}** active invite(s) — " +
+                $"{rows.Count} active invite(s) — " +
                 $"{rows.Count(r => r.IsLabeled)} labeled, " +
                 $"{rows.Count(r => !r.IsLabeled)} unlabeled" +
-                (totalUnfiltered > rows.Count ? $" _(filtered from {totalUnfiltered} total)_" : ""),
+                (totalUnfiltered > rows.Count ? $" (filtered from {totalUnfiltered} total)" : ""),
             "inactive" =>
-                $"**{rows.Count}** revoked invite(s)" +
-                (totalUnfiltered > rows.Count ? $" _(filtered from {totalUnfiltered} total)_" : ""),
+                $"{rows.Count} revoked invite(s)" +
+                (totalUnfiltered > rows.Count ? $" (filtered from {totalUnfiltered} total)" : ""),
             _ =>
-                $"**{rows.Count}** total invite(s) — " +
+                $"{rows.Count} total invite(s) — " +
                 $"{rows.Count(r => r.IsLabeled && !r.IsRevoked)} labeled active, " +
                 $"{rows.Count(r => !r.IsLabeled)} unlabeled, " +
                 $"{rows.Count(r => r.IsRevoked)} revoked",
         };
 
-        if (pages.Count == 1)
+        var footerText = pages.Count > 1
+            ? $"Page {page + 1}/{pages.Count} · {summary}"
+            : summary;
+
+        var titleSuffix = filter switch
         {
-            await command.FollowupAsync($"{summary}\n{pages[0]}", ephemeral: true);
+            "active"   => "active",
+            "inactive" => "revoked",
+            _          => "all",
+        };
+
+        var embed = new EmbedBuilder()
+            .WithTitle($"Invites — {titleSuffix}")
+            .WithDescription(pages[page].ToString())
+            .WithFooter(footerText)
+            .WithColor(new Color(0x5865F2)) // Discord blurple
+            .Build();
+
+        // ── Build pagination buttons ────────────────────────────────
+        // Only attach buttons when there's more than one page. A single
+        // page shows the embed alone with no controls.
+        var components = pages.Count > 1
+            ? BuildListComponents(filter, page, pages.Count)
+            : new ComponentBuilder().Build();
+
+        return new ListResponse(
+            Embed:      embed,
+            Components: components,
+            RowCount:   rows.Count,
+            TotalPages: pages.Count,
+            ErrorMessage: null);
+    }
+
+    /// <summary>
+    /// Three-button row for /invite list pagination: ◀ Prev, "Page X / Y"
+    /// (disabled label), Next ▶. Boundary buttons disable themselves so a
+    /// click can't fall off the ends — Discord won't even send the event
+    /// for a disabled button. Mirrors BuildInfoComponents.
+    /// </summary>
+    private static MessageComponent BuildListComponents(string filter, int currentPage, int totalPages)
+    {
+        var prevId  = $"{ListButtonIdPrefix}{filter}:{currentPage - 1}";
+        var nextId  = $"{ListButtonIdPrefix}{filter}:{currentPage + 1}";
+        var labelId = $"{ListLabelButtonIdPrefix}{filter}:{currentPage}:{totalPages}";
+
+        return new ComponentBuilder()
+            .WithButton(
+                label:    "◀ Prev",
+                customId: prevId,
+                style:    ButtonStyle.Secondary,
+                disabled: currentPage <= 0)
+            .WithButton(
+                // 1-indexed for users — easier to read.
+                label:    $"Page {currentPage + 1} / {totalPages}",
+                customId: labelId,
+                style:    ButtonStyle.Secondary,
+                disabled: true)
+            .WithButton(
+                label:    "Next ▶",
+                customId: nextId,
+                style:    ButtonStyle.Secondary,
+                disabled: currentPage >= totalPages - 1)
+            .Build();
+    }
+
+    /// <summary>
+    /// Handles Prev/Next clicks on a /invite list response. Parses the
+    /// customId, rebuilds the embed for the requested page, and edits the
+    /// original ephemeral message in place. Mirrors HandleInfoButtonAsync.
+    /// </summary>
+    private async Task HandleListButtonAsync(SocketMessageComponent component, string customId)
+    {
+        // Acknowledge within Discord's 3-second window. After this we have
+        // up to 15 minutes to update the original message.
+        await component.DeferAsync(ephemeral: true);
+
+        // Format: "invite-list:<filter>:<page>" — split on the LAST colon
+        // so future filter values containing a colon would still parse.
+        // Filter values are bounded by HandleList's validation
+        // ("active"/"inactive"/"all"), but using lastIndexOf keeps this
+        // robust if that vocabulary ever grows.
+        var rest = customId.Substring(ListButtonIdPrefix.Length);
+        var lastColon = rest.LastIndexOf(':');
+        if (lastColon < 1 || lastColon == rest.Length - 1)
+        {
+            _logger.LogWarning("Malformed list pagination customId: {CustomId}", customId);
+            return;
         }
-        else
+        var filter = rest[..lastColon];
+        if (!int.TryParse(rest[(lastColon + 1)..], out var page) || page < 0)
         {
-            await command.FollowupAsync($"{summary}\n_(showing across {pages.Count} pages)_\n{pages[0]}", ephemeral: true);
-            for (int i = 1; i < pages.Count; i++)
-            {
-                await command.FollowupAsync($"_Page {i + 1}/{pages.Count}_\n{pages[i]}", ephemeral: true);
-            }
+            _logger.LogWarning("Malformed list page number in customId: {CustomId}", customId);
+            return;
         }
 
-        _logger.LogInformation(
-            "{Caller} ran /invite list filter={Filter} — {Total} rows ({Labeled} labeled, {Unlabeled} unlabeled, {Revoked} revoked, {Hidden} hidden by filter)",
-            command.User.Username, filter, rows.Count,
-            rows.Count(r => r.IsLabeled && !r.IsRevoked),
-            rows.Count(r => !r.IsLabeled),
-            rows.Count(r => r.IsRevoked),
-            totalUnfiltered - rows.Count);
+        if (component.GuildId is null)
+        {
+            // Edge: button was somehow clicked outside a guild context.
+            return;
+        }
+
+        var guild = (component.Channel as SocketGuildChannel)?.Guild;
+        var result = await BuildListResponseAsync(guild, component.GuildId.Value, filter, page);
+
+        if (result.ErrorMessage is not null)
+        {
+            // The underlying invites or sources changed between clicks
+            // (e.g. all invites were revoked). Replace the embed with the
+            // error text and strip the buttons so the user isn't staring
+            // at stale controls.
+            await component.ModifyOriginalResponseAsync(m =>
+            {
+                m.Content = result.ErrorMessage;
+                m.Embed = null;
+                m.Components = new ComponentBuilder().Build();
+            });
+            return;
+        }
+
+        await component.ModifyOriginalResponseAsync(m =>
+        {
+            m.Embed = result.Embed;
+            m.Components = result.Components;
+        });
     }
+
+    /// <summary>
+    /// Bundle returned by BuildListResponseAsync. Either Embed + Components
+    /// are populated and ErrorMessage is null, OR ErrorMessage is populated
+    /// and the embed/components are empty. Never both. Mirrors InfoResponse.
+    /// </summary>
+    private sealed record ListResponse(
+        Embed? Embed,
+        MessageComponent Components,
+        int RowCount,
+        int TotalPages,
+        string? ErrorMessage);
 
     private static DateTime? ComputeExpiresAt(IInviteMetadata invite)
     {
@@ -1007,18 +1196,38 @@ public class InviteCommandHandler
     }
 
     /// <summary>
-    /// Routes button-click events. Only acts on customIds with our
-    /// pagination prefix; everything else is ignored so other handlers'
-    /// buttons aren't disturbed. (Discord delivers ButtonExecuted to
-    /// every subscribed handler, regardless of which message owns the
-    /// button.)
+    /// Routes button-click events. Acts on customIds with either our
+    /// /invite info or /invite list pagination prefix; everything else is
+    /// ignored so other handlers' buttons aren't disturbed. (Discord
+    /// delivers ButtonExecuted to every subscribed handler, regardless of
+    /// which message owns the button.)
     /// </summary>
-    private async Task HandleButtonAsync(SocketMessageComponent component)
+    private Task HandleButtonAsync(SocketMessageComponent component)
     {
         var customId = component.Data.CustomId;
-        if (customId is null || !customId.StartsWith(InfoButtonIdPrefix, StringComparison.Ordinal))
-            return;
+        if (customId is null) return Task.CompletedTask;
 
+        // Dispatch off the gateway thread for the same reason as
+        // HandleCommandAsync — the page rebuild does multiple DB queries
+        // plus a Discord invite fetch, which can exceed the gateway's
+        // tolerance window. Return Task.CompletedTask immediately and
+        // let Task.Run carry the work. Two separate impl methods rather
+        // than a generic dispatcher to keep the error-message tags
+        // ("/invite info" vs "/invite list") accurate in the log.
+        if (customId.StartsWith(InfoButtonIdPrefix, StringComparison.Ordinal))
+        {
+            _ = Task.Run(() => HandleInfoButtonImplAsync(component, customId));
+        }
+        else if (customId.StartsWith(ListButtonIdPrefix, StringComparison.Ordinal))
+        {
+            _ = Task.Run(() => HandleListButtonImplAsync(component, customId));
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task HandleInfoButtonImplAsync(SocketMessageComponent component, string customId)
+    {
         try
         {
             await HandleInfoButtonAsync(component, customId);
@@ -1029,6 +1238,24 @@ public class InviteCommandHandler
             // Best-effort feedback — if the interaction was already deferred
             // and ModifyOriginalResponseAsync failed, this followup may also
             // fail; nothing we can do beyond logging at that point.
+            try
+            {
+                await component.FollowupAsync("Something went wrong loading that page. Try the command again.",
+                    ephemeral: true);
+            }
+            catch { /* swallowed */ }
+        }
+    }
+
+    private async Task HandleListButtonImplAsync(SocketMessageComponent component, string customId)
+    {
+        try
+        {
+            await HandleListButtonAsync(component, customId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error handling /invite list pagination button (customId={CustomId})", customId);
             try
             {
                 await component.FollowupAsync("Something went wrong loading that page. Try the command again.",
