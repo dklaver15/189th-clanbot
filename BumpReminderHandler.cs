@@ -23,9 +23,13 @@ namespace ClanGuardBot.Handlers;
 /// and the in-memory reminder is cancelled and re-scheduled.
 ///
 /// On bot restart, recovers state from the DB:
-///   - NextReminderAt in the future            -> schedule normally
-///   - NextReminderAt missed by &lt; grace window -> fire immediately
-///   - NextReminderAt missed by &gt; grace window -> reschedule to (now + delay)
+///   - Reminder already fired for the current bump cycle      -> skip; wait
+///     for the next observed bump (this is the deploy-restart case — without
+///     this guard, a push within the grace window re-fires the reminder, and
+///     a push beyond grace reschedules a phantom reminder 2.5h out)
+///   - NextReminderAt in the future                           -> schedule normally
+///   - NextReminderAt missed by &lt; grace window              -> fire immediately
+///   - NextReminderAt missed by &gt; grace window              -> reschedule to (now + delay)
 ///     (assume someone may have bumped during downtime; we'll observe the
 ///     next success or fire after another full window)
 /// </summary>
@@ -141,7 +145,8 @@ public class BumpReminderHandler : BackgroundService
             {
                 state.LastBumpAt = now;
                 state.NextReminderAt = nextReminderAt;
-                // Clear the previous-cycle marker so the next firing logs cleanly.
+                // Clear the previous-cycle marker so the next firing logs cleanly
+                // and so startup recovery can tell a fresh cycle from a fired one.
                 state.LastReminderSentAt = null;
             }
 
@@ -275,6 +280,20 @@ public class BumpReminderHandler : BackgroundService
             {
                 var guild = _client.GetGuild(state.GuildId);
                 if (guild is null) continue;
+
+                // If we already sent a reminder for the current bump cycle,
+                // don't schedule anything — wait for the next observed bump to
+                // start a fresh cycle. HandleBumpSuccessAsync clears
+                // LastReminderSentAt on each new bump, so this comparison
+                // reliably distinguishes "fired this cycle" from "fresh cycle".
+                if (state.LastReminderSentAt.HasValue
+                    && state.LastReminderSentAt.Value > state.LastBumpAt)
+                {
+                    _logger.LogInformation(
+                        "Bump reminder for guild {GuildId} already sent at {SentAt:u} for the current cycle (LastBumpAt={LastBumpAt:u}) — skipping until next bump",
+                        state.GuildId, state.LastReminderSentAt.Value, state.LastBumpAt);
+                    continue;
+                }
 
                 var timeUntilReminder = state.NextReminderAt - now;
 
