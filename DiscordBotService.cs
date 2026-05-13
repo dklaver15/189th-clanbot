@@ -420,6 +420,14 @@ public class DiscordBotService : IHostedService
                 // catalog source of truth.
                 InviteCommandHandler.BuildCommand(),
 
+                // /my-invites — top-level, user-facing view of /invite list
+                // filtered to invites the caller created. Open to everyone,
+                // ephemeral. Same active/inactive/all filter as /invite list.
+                // Handler lives on InviteCommandHandler (shares the row-build
+                // + render pipeline with /invite list). NOTE: also keep
+                // CommandsCommandHandler.BuildCatalog in sync when this changes.
+                InviteCommandHandler.BuildMyInvitesCommand(),
+
                 // /leads — Reddit recruitment lead funnel. Two subcommands
                 // (stats, recent) for officers (MAJ+) to monitor what the
                 // RedditLeadService has surfaced and the conversion rate

@@ -12,12 +12,13 @@ using System.Text;
 namespace ClanGuardBot.Handlers;
 
 /// <summary>
-/// Handles the full /invite command surface: create, assign (Phase 1),
-/// list, info, stats, revoke (Phase 2), edit-notes (Phase 3). All
+/// Handles the full /invite command surface (create, assign, list, info,
+/// stats, revoke, edit-notes) plus the top-level /my-invites command —
+/// effectively /invite list filtered to the caller's own invites. All
 /// responses are ephemeral so neither links nor labels leak to public
-/// channels. The /invite info command supports button-based pagination
-/// for invites with many attributed joins; pagination buttons stay
-/// clickable indefinitely (Discord doesn't expire button interactions).
+/// channels. The /invite info, /invite list, and /my-invites surfaces
+/// each support button-based pagination; pagination buttons stay clickable
+/// indefinitely (Discord doesn't expire button interactions).
 ///
 /// ── Permission model ──
 /// Per-subcommand, intentionally split:
@@ -105,7 +106,12 @@ public class InviteCommandHandler
 
     private Task HandleCommandAsync(SocketSlashCommand command)
     {
-        if (command.Data.Name is not "invite") return Task.CompletedTask;
+        // Two command surfaces live on this handler: /invite (group with
+        // subcommands) and /my-invites (top-level, user-filtered view of
+        // /invite list). Anything else is ignored so we don't disturb
+        // other handlers.
+        if (command.Data.Name is not ("invite" or "my-invites"))
+            return Task.CompletedTask;
 
         // Dispatch off the gateway thread. Subcommands like /invite list
         // call Discord's GetInvitesAsync which can take several hundred
@@ -119,9 +125,30 @@ public class InviteCommandHandler
 
     private async Task HandleCommandImplAsync(SocketSlashCommand command)
     {
-        // Subcommand routing. Discord slash-command groups deliver the
-        // subcommand as the first option; its own options live one level
-        // deeper. We unwrap that here and dispatch to the right handler.
+        // /my-invites is top-level (no subcommands) — short-circuit before
+        // the /invite subcommand router.
+        if (command.Data.Name == "my-invites")
+        {
+            try
+            {
+                await HandleMyInvites(command);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error handling /my-invites");
+                try
+                {
+                    await command.FollowupAsync("Something went wrong. Check the bot logs.", ephemeral: true);
+                }
+                catch { /* already responded */ }
+            }
+            return;
+        }
+
+        // Subcommand routing for /invite. Discord slash-command groups
+        // deliver the subcommand as the first option; its own options live
+        // one level deeper. We unwrap that here and dispatch to the right
+        // handler.
         var sub = command.Data.Options.FirstOrDefault();
         if (sub is null)
         {
@@ -604,6 +631,16 @@ public class InviteCommandHandler
     private const string ListButtonIdPrefix      = "invite-list:";
     private const string ListLabelButtonIdPrefix = "invite-list-label:";
 
+    // CustomId prefixes for /my-invites pagination. Separate from the
+    // /invite list prefixes so the button router can dispatch each to the
+    // right handler (the /my-invites handler additionally filters rows by
+    // the calling user's Discord ID). User ID itself is not encoded in
+    // the customId — Discord delivers button clicks on an ephemeral
+    // message only to the original invoker, so the click's component.User
+    // is always the right user to filter by.
+    private const string MyInvitesButtonIdPrefix      = "my-invites:";
+    private const string MyInvitesLabelButtonIdPrefix = "my-invites-label:";
+
     private async Task HandleList(SocketSlashCommand command, SocketSlashCommandDataOption sub)
     {
         await command.DeferAsync(ephemeral: true);
@@ -660,7 +697,8 @@ public class InviteCommandHandler
     /// Mirrors BuildInfoResponseAsync.
     /// </summary>
     private async Task<ListResponse> BuildListResponseAsync(
-        SocketGuild? guild, ulong guildId, string filter, int page)
+        SocketGuild? guild, ulong guildId, string filter, int page,
+        ulong? authorIdFilter = null)
     {
         // Clamp page to non-negative. Higher bound is checked after we
         // know how many pages of rendered output we end up with.
@@ -734,6 +772,17 @@ public class InviteCommandHandler
                 continue;
 
             sourcesByCode.TryGetValue(live.Code, out var src);
+
+            // When /my-invites is asking, drop rows whose creator isn't
+            // the caller. Prefer the source-row's stored CreatedByDiscordId
+            // (snapshotted at /invite create time, stable across username
+            // changes) and fall back to the live Inviter for unlabeled
+            // invites Discord still knows about. Vanity isn't reached here
+            // (Pass 2).
+            var authorId = src?.CreatedByDiscordId ?? live.Inviter?.Id;
+            if (authorIdFilter is ulong filterIdLive && authorId != filterIdLive)
+                continue;
+
             rows.Add(new InviteListRow(
                 Code:        live.Code,
                 Label:       src?.Label ?? "(unlabeled)",
@@ -747,8 +796,10 @@ public class InviteCommandHandler
                 CreatedBy:   ResolveCreatorDisplayName(src, live.Inviter)));
         }
 
-        // Pass 2: vanity (separate API; never appears in liveInvites)
-        if (vanity is not null)
+        // Pass 2: vanity (separate API; never appears in liveInvites).
+        // The vanity URL is server-owned — there's no user creator — so
+        // when filtering to a specific user it's never theirs to include.
+        if (vanity is not null && authorIdFilter is null)
         {
             sourcesByCode.TryGetValue(vanity.Code, out var vanitySrc);
             rows.Add(new InviteListRow(
@@ -782,6 +833,14 @@ public class InviteCommandHandler
             if (src.CreatedByDiscordId is ulong srcInviterId && _config.IsIgnoredInviter(srcInviterId))
                 continue;
 
+            // /my-invites filter: only include if the snapshot's creator
+            // matches the caller. Rows with no CreatedByDiscordId (very
+            // old InviteSources from before the field was captured) can't
+            // be attributed and are excluded from any user-filtered view.
+            if (authorIdFilter is ulong filterIdSrc &&
+                src.CreatedByDiscordId != filterIdSrc)
+                continue;
+
             rows.Add(new InviteListRow(
                 Code:        src.Code,
                 Label:       src.Label,
@@ -798,8 +857,10 @@ public class InviteCommandHandler
 
         if (rows.Count == 0)
         {
-            return new ListResponse(null, new ComponentBuilder().Build(), 0, 0,
-                "No invites found in this server.");
+            var noRowsMsg = authorIdFilter is null
+                ? "No invites found in this server."
+                : "You haven't created any invites in this server yet. Use `/invite create label:Foo` to make one.";
+            return new ListResponse(null, new ComponentBuilder().Build(), 0, 0, noRowsMsg);
         }
 
         // Apply the active/inactive filter. We capture the unfiltered total
@@ -817,12 +878,25 @@ public class InviteCommandHandler
 
         if (rows.Count == 0)
         {
-            var emptyMsg = filter switch
+            string emptyMsg;
+            if (authorIdFilter is null)
             {
-                "active"   => $"No active invites. ({totalUnfiltered} revoked — try `filter:inactive` or `filter:all`.)",
-                "inactive" => $"No revoked invites yet. ({totalUnfiltered} active — try `filter:active` or `filter:all`.)",
-                _          => "No invites found in this server.",
-            };
+                emptyMsg = filter switch
+                {
+                    "active"   => $"No active invites. ({totalUnfiltered} revoked — try `filter:inactive` or `filter:all`.)",
+                    "inactive" => $"No revoked invites yet. ({totalUnfiltered} active — try `filter:active` or `filter:all`.)",
+                    _          => "No invites found in this server.",
+                };
+            }
+            else
+            {
+                emptyMsg = filter switch
+                {
+                    "active"   => $"You haven't created any active invites. ({totalUnfiltered} of yours are revoked — try `filter:inactive` or `filter:all`.)",
+                    "inactive" => $"None of your invites are revoked. ({totalUnfiltered} of yours are still active — try `filter:active` or `filter:all`.)",
+                    _          => "You haven't created any invites in this server yet. Use `/invite create label:Foo` to make one.",
+                };
+            }
             return new ListResponse(null, new ComponentBuilder().Build(), 0, 0, emptyMsg);
         }
 
@@ -840,55 +914,86 @@ public class InviteCommandHandler
             return a.CreatedAt.CompareTo(b.CreatedAt);                          // creation asc
         });
 
-        // ── Render to code-block pages ──────────────────────────────
-        // Compute column widths from the data so labels and codes don't
-        // get truncated harder than needed. Cap label at 24 chars and
-        // creator at 18 chars to keep the table from going extreme.
-        const int LabelHardCap   = 24;
-        const int CreatorHardCap = 18;
-        int codeWidth    = Math.Max("CODE".Length,  rows.Max(r => r.Code.Length));
-        int labelWidth   = Math.Max("LABEL".Length, Math.Min(rows.Max(r => r.Label.Length), LabelHardCap));
-        int usesWidth    = Math.Max("USES".Length,  rows.Max(r => FormatUses(r).Length));
-        int expWidth     = Math.Max("EXPIRES".Length, rows.Max(r => FormatExpires(r).Length));
-        int creatorWidth = Math.Max("CREATED BY".Length, Math.Min(rows.Max(r => r.CreatedBy.Length), CreatorHardCap));
-
-        var header = $"{"CODE".PadRight(codeWidth)}  {"LABEL".PadRight(labelWidth)}  {"USES".PadRight(usesWidth)}  {"EXPIRES".PadRight(expWidth)}  CREATED BY";
-        var divider = new string('─', header.Length);
+        // ── Render to markdown bullet lines ─────────────────────────
+        // Each invite becomes a single line of mixed inline markdown rather
+        // than a column-aligned table. The earlier table format was
+        // monospace-aligned in a code block, which Discord faithfully
+        // preserves — but on narrow viewports (mobile, or desktop with
+        // member-list + channel-list both open) a code-block line that
+        // exceeds the available width hard-wraps mid-row, producing a
+        // visually broken table with phantom continuation rows. Markdown
+        // bullets wrap gracefully at any width because there's no column
+        // alignment to break.
+        //
+        // Per-row format:
+        //   • `code` [_(revoked)_] · **label** OR _(unlabeled)_ · N uses ·
+        //     [expires in Xd] · _creator_
+        //
+        // Notable conventions:
+        //   - "expires" segment omitted when the invite never expires
+        //     (the common case — reduces noise)
+        //   - revoked invites get a "_(revoked)_" marker after the code
+        //     so they're visually distinct in inactive/all listings
+        //   - labels are escaped so user-supplied markdown characters
+        //     (`*`, `_`, `` ` ``, etc.) render literally instead of
+        //     fighting the surrounding formatting
 
         var pages = new List<StringBuilder>();
         var current = new StringBuilder();
-        current.Append("```\n").Append(header).Append('\n').Append(divider).Append('\n');
 
         foreach (var row in rows)
         {
-            var labelTrunc = row.Label.Length > LabelHardCap
-                ? row.Label[..(LabelHardCap - 1)] + "…"
-                : row.Label;
-            var creatorTrunc = row.CreatedBy.Length > CreatorHardCap
-                ? row.CreatedBy[..(CreatorHardCap - 1)] + "…"
-                : row.CreatedBy;
+            var sb = new StringBuilder();
+            sb.Append("• `").Append(row.Code).Append('`');
 
-            var line =
-                $"{row.Code.PadRight(codeWidth)}  " +
-                $"{labelTrunc.PadRight(labelWidth)}  " +
-                $"{FormatUses(row).PadRight(usesWidth)}  " +
-                $"{FormatExpires(row).PadRight(expWidth)}  " +
-                $"{creatorTrunc}\n";
+            if (row.IsRevoked)
+                sb.Append(" _(revoked)_");
 
-            // If adding this line would push the page past the per-page
-            // budget, close the current code block and start a new page.
-            // Each page must end with ``` and the next must open with ```
-            // to keep the monospace formatting.
-            if (current.Length + line.Length + 4 > InviteListPageBudget)
+            sb.Append(" · ");
+
+            if (row.IsLabeled)
+                sb.Append("**").Append(EscapeMarkdown(row.Label)).Append("**");
+            else
+                sb.Append("_(unlabeled)_");
+
+            // Uses with proper singular/plural and an optional cap suffix.
+            // We keep "0 uses" rather than collapsing it to "—" — a fresh
+            // unused invite is a meaningful state, not missing data.
+            var useWord = row.Uses == 1 ? "use" : "uses";
+            sb.Append(" · ").Append(row.Uses);
+            if (row.MaxUses is int cap)
+                sb.Append('/').Append(cap);
+            sb.Append(' ').Append(useWord);
+
+            // Expires — only show when notable. "never" is the common case
+            // and gets omitted to keep rows scannable. Revoked invites
+            // suppress expires entirely since the invite is gone regardless.
+            if (!row.IsRevoked && row.ExpiresAt is DateTime exp)
             {
-                current.Append("```");
+                var delta = exp - DateTime.UtcNow;
+                string expText;
+                if (delta.TotalSeconds <= 0)    expText = "_expired_";
+                else if (delta.TotalDays  >= 1) expText = $"expires in {(int)delta.TotalDays}d";
+                else if (delta.TotalHours >= 1) expText = $"expires in {(int)delta.TotalHours}h";
+                else                            expText = $"expires in {(int)delta.TotalMinutes}m";
+                sb.Append(" · ").Append(expText);
+            }
+
+            sb.Append(" · _").Append(EscapeMarkdown(row.CreatedBy)).Append("_\n");
+
+            var line = sb.ToString();
+
+            // Page break when adding this line would exceed the embed
+            // description budget. Unlike the old code-block pagination,
+            // there's no per-page framing overhead — pages flow naturally
+            // since each is just a sequence of bullet lines.
+            if (current.Length + line.Length > InviteListPageBudget)
+            {
                 pages.Add(current);
                 current = new StringBuilder();
-                current.Append("```\n").Append(header).Append('\n').Append(divider).Append('\n');
             }
             current.Append(line);
         }
-        current.Append("```");
         pages.Add(current);
 
         // Clamp the requested page to the available range. Buttons disable
@@ -932,8 +1037,13 @@ public class InviteCommandHandler
             _          => "all",
         };
 
+        // "Your invites" vs "Invites" frames the embed for the user.
+        // The summary line in the footer is the same either way — the
+        // counts speak for themselves once the title sets context.
+        var titlePrefix = authorIdFilter is null ? "Invites" : "Your invites";
+
         var embed = new EmbedBuilder()
-            .WithTitle($"Invites — {titleSuffix}")
+            .WithTitle($"{titlePrefix} — {titleSuffix}")
             .WithDescription(pages[page].ToString())
             .WithFooter(footerText)
             .WithColor(new Color(0x5865F2)) // Discord blurple
@@ -941,9 +1051,16 @@ public class InviteCommandHandler
 
         // ── Build pagination buttons ────────────────────────────────
         // Only attach buttons when there's more than one page. A single
-        // page shows the embed alone with no controls.
+        // page shows the embed alone with no controls. CustomId prefix
+        // depends on which command this response is for — the dispatcher
+        // uses the prefix to route button clicks back to the right
+        // handler (and the right authorIdFilter at click time).
+        var (btnPrefix, lblPrefix) = authorIdFilter is null
+            ? (ListButtonIdPrefix,      ListLabelButtonIdPrefix)
+            : (MyInvitesButtonIdPrefix, MyInvitesLabelButtonIdPrefix);
+
         var components = pages.Count > 1
-            ? BuildListComponents(filter, page, pages.Count)
+            ? BuildListComponents(btnPrefix, lblPrefix, filter, page, pages.Count)
             : new ComponentBuilder().Build();
 
         return new ListResponse(
@@ -955,16 +1072,20 @@ public class InviteCommandHandler
     }
 
     /// <summary>
-    /// Three-button row for /invite list pagination: ◀ Prev, "Page X / Y"
-    /// (disabled label), Next ▶. Boundary buttons disable themselves so a
-    /// click can't fall off the ends — Discord won't even send the event
-    /// for a disabled button. Mirrors BuildInfoComponents.
+    /// Three-button row for /invite list and /my-invites pagination:
+    /// ◀ Prev, "Page X / Y" (disabled label), Next ▶. Boundary buttons
+    /// disable themselves so a click can't fall off the ends — Discord
+    /// won't even send the event for a disabled button. Prefix arguments
+    /// let the caller pick between the two command surfaces' customId
+    /// namespaces. Mirrors BuildInfoComponents.
     /// </summary>
-    private static MessageComponent BuildListComponents(string filter, int currentPage, int totalPages)
+    private static MessageComponent BuildListComponents(
+        string buttonIdPrefix, string labelIdPrefix,
+        string filter, int currentPage, int totalPages)
     {
-        var prevId  = $"{ListButtonIdPrefix}{filter}:{currentPage - 1}";
-        var nextId  = $"{ListButtonIdPrefix}{filter}:{currentPage + 1}";
-        var labelId = $"{ListLabelButtonIdPrefix}{filter}:{currentPage}:{totalPages}";
+        var prevId  = $"{buttonIdPrefix}{filter}:{currentPage - 1}";
+        var nextId  = $"{buttonIdPrefix}{filter}:{currentPage + 1}";
+        var labelId = $"{labelIdPrefix}{filter}:{currentPage}:{totalPages}";
 
         return new ComponentBuilder()
             .WithButton(
@@ -1047,6 +1168,125 @@ public class InviteCommandHandler
         });
     }
 
+    // ── /my-invites ─────────────────────────────────────────────────
+    //
+    // Top-level slash command that displays the exact same view as
+    // /invite list, but filtered to invites the caller created. Open to
+    // everyone (no rank gate) since users querying their own stuff isn't
+    // an information-disclosure concern. The same active/inactive/all
+    // filter applies. Ephemeral so nobody is broadcasting their roster
+    // of invite codes to a channel.
+    //
+    // All the heavy lifting (data fetch, row merge, render, pagination)
+    // lives in BuildListResponseAsync — we just pass the caller's user
+    // ID as authorIdFilter and let the existing pipeline filter rows
+    // accordingly. Button clicks route through HandleMyInvitesButtonAsync
+    // which re-runs BuildListResponseAsync with the same caller's ID
+    // (safe because ephemeral messages only deliver button events to
+    // their original invoker — no risk of a different user clicking).
+
+    private async Task HandleMyInvites(SocketSlashCommand command)
+    {
+        await command.DeferAsync(ephemeral: true);
+
+        if (command.GuildId is null)
+        {
+            await command.FollowupAsync("This command can only be used in a server.", ephemeral: true);
+            return;
+        }
+
+        var guild = (command.Channel as SocketGuildChannel)?.Guild;
+        if (guild is null)
+        {
+            await command.FollowupAsync("Couldn't resolve the guild.", ephemeral: true);
+            return;
+        }
+
+        // Filter parsing matches /invite list — same vocabulary, same
+        // default. Keeping the option shape identical means users only
+        // have to learn one mental model.
+        var filter = (command.Data.Options.FirstOrDefault(o => o.Name == "filter")?.Value as string)
+                         ?.Trim().ToLowerInvariant()
+                     ?? "active";
+        if (filter is not ("active" or "inactive" or "all"))
+        {
+            await command.FollowupAsync(
+                "`filter` must be `active`, `inactive`, or `all`.", ephemeral: true);
+            return;
+        }
+
+        var result = await BuildListResponseAsync(
+            guild, command.GuildId.Value, filter, page: 0,
+            authorIdFilter: command.User.Id);
+
+        if (result.ErrorMessage is not null)
+        {
+            await command.FollowupAsync(result.ErrorMessage, ephemeral: true);
+            return;
+        }
+
+        await command.FollowupAsync(
+            embed:      result.Embed,
+            components: result.Components,
+            ephemeral:  true);
+
+        _logger.LogInformation(
+            "{Caller} ran /my-invites filter={Filter} — {Rows} rows across {Pages} page(s)",
+            command.User.Username, filter, result.RowCount, result.TotalPages);
+    }
+
+    /// <summary>
+    /// Handles Prev/Next clicks on a /my-invites response. Mirrors
+    /// HandleListButtonAsync but uses the clicker's user ID as the
+    /// author filter — ephemeral messages only deliver button events
+    /// to their original invoker, so component.User.Id is always the
+    /// right user.
+    /// </summary>
+    private async Task HandleMyInvitesButtonAsync(SocketMessageComponent component, string customId)
+    {
+        await component.DeferAsync(ephemeral: true);
+
+        // Format: "my-invites:<filter>:<page>" — split on the LAST colon
+        // so future filter values containing a colon would still parse.
+        var rest = customId.Substring(MyInvitesButtonIdPrefix.Length);
+        var lastColon = rest.LastIndexOf(':');
+        if (lastColon < 1 || lastColon == rest.Length - 1)
+        {
+            _logger.LogWarning("Malformed my-invites pagination customId: {CustomId}", customId);
+            return;
+        }
+        var filter = rest[..lastColon];
+        if (!int.TryParse(rest[(lastColon + 1)..], out var page) || page < 0)
+        {
+            _logger.LogWarning("Malformed my-invites page number in customId: {CustomId}", customId);
+            return;
+        }
+
+        if (component.GuildId is null) return;
+
+        var guild = (component.Channel as SocketGuildChannel)?.Guild;
+        var result = await BuildListResponseAsync(
+            guild, component.GuildId.Value, filter, page,
+            authorIdFilter: component.User.Id);
+
+        if (result.ErrorMessage is not null)
+        {
+            await component.ModifyOriginalResponseAsync(m =>
+            {
+                m.Content = result.ErrorMessage;
+                m.Embed = null;
+                m.Components = new ComponentBuilder().Build();
+            });
+            return;
+        }
+
+        await component.ModifyOriginalResponseAsync(m =>
+        {
+            m.Embed = result.Embed;
+            m.Components = result.Components;
+        });
+    }
+
     /// <summary>
     /// Bundle returned by BuildListResponseAsync. Either Embed + Components
     /// are populated and ErrorMessage is null, OR ErrorMessage is populated
@@ -1065,28 +1305,29 @@ public class InviteCommandHandler
         return invite.CreatedAt.Value.UtcDateTime.AddSeconds(invite.MaxAge!.Value);
     }
 
-    private static string FormatUses(InviteListRow r) =>
-        r.MaxUses is int cap ? $"{r.Uses}/{cap}" : $"{r.Uses}";
-
-    private static string FormatExpires(InviteListRow r)
+    /// <summary>
+    /// Escape Discord markdown formatting characters so user-supplied
+    /// strings (invite labels, captured usernames) render as literal text
+    /// instead of fighting the surrounding markdown. Used by the
+    /// /invite list bullet renderer where labels are inside **bold** and
+    /// creator names are inside _italic_ — an unescaped `_` in a username
+    /// would prematurely terminate the italic span and visually corrupt
+    /// the rest of the line.
+    ///
+    /// Discord usernames are restricted to alphanumeric + `.` + `_` so in
+    /// practice only the underscore matters there; labels are free-form
+    /// and can contain anything. We escape the full set defensively.
+    /// </summary>
+    private static string EscapeMarkdown(string s)
     {
-        if (r.IsRevoked) return "—";
-        if (r.ExpiresAt is null) return "never";
-
-        var delta = r.ExpiresAt.Value - DateTime.UtcNow;
-        if (delta.TotalSeconds <= 0) return "expired";
-        if (delta.TotalDays    >= 1) return $"{(int)delta.TotalDays}d";
-        if (delta.TotalHours   >= 1) return $"{(int)delta.TotalHours}h";
-        return $"{(int)delta.TotalMinutes}m";
-    }
-
-    private static string FormatFlags(InviteListRow r)
-    {
-        var flags = new List<string>();
-        if (r.IsVanity)       flags.Add("[vanity]");
-        if (!r.IsLabeled)     flags.Add("[unlabeled]");
-        if (r.IsRevoked)      flags.Add("[revoked]");
-        return string.Join(" ", flags);
+        if (string.IsNullOrEmpty(s)) return s;
+        var sb = new StringBuilder(s.Length);
+        foreach (var c in s)
+        {
+            if (c is '*' or '_' or '`' or '~' or '\\' or '|' or '>') sb.Append('\\');
+            sb.Append(c);
+        }
+        return sb.ToString();
     }
 
     /// <summary>
@@ -1196,9 +1437,9 @@ public class InviteCommandHandler
     }
 
     /// <summary>
-    /// Routes button-click events. Acts on customIds with either our
-    /// /invite info or /invite list pagination prefix; everything else is
-    /// ignored so other handlers' buttons aren't disturbed. (Discord
+    /// Routes button-click events. Acts on customIds with the /invite info,
+    /// /invite list, or /my-invites pagination prefixes; everything else
+    /// is ignored so other handlers' buttons aren't disturbed. (Discord
     /// delivers ButtonExecuted to every subscribed handler, regardless of
     /// which message owns the button.)
     /// </summary>
@@ -1211,9 +1452,9 @@ public class InviteCommandHandler
         // HandleCommandAsync — the page rebuild does multiple DB queries
         // plus a Discord invite fetch, which can exceed the gateway's
         // tolerance window. Return Task.CompletedTask immediately and
-        // let Task.Run carry the work. Two separate impl methods rather
-        // than a generic dispatcher to keep the error-message tags
-        // ("/invite info" vs "/invite list") accurate in the log.
+        // let Task.Run carry the work. Separate impl methods rather than
+        // a generic dispatcher to keep the error-message tags accurate
+        // in the log.
         if (customId.StartsWith(InfoButtonIdPrefix, StringComparison.Ordinal))
         {
             _ = Task.Run(() => HandleInfoButtonImplAsync(component, customId));
@@ -1221,6 +1462,10 @@ public class InviteCommandHandler
         else if (customId.StartsWith(ListButtonIdPrefix, StringComparison.Ordinal))
         {
             _ = Task.Run(() => HandleListButtonImplAsync(component, customId));
+        }
+        else if (customId.StartsWith(MyInvitesButtonIdPrefix, StringComparison.Ordinal))
+        {
+            _ = Task.Run(() => HandleMyInvitesButtonImplAsync(component, customId));
         }
 
         return Task.CompletedTask;
@@ -1256,6 +1501,24 @@ public class InviteCommandHandler
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error handling /invite list pagination button (customId={CustomId})", customId);
+            try
+            {
+                await component.FollowupAsync("Something went wrong loading that page. Try the command again.",
+                    ephemeral: true);
+            }
+            catch { /* swallowed */ }
+        }
+    }
+
+    private async Task HandleMyInvitesButtonImplAsync(SocketMessageComponent component, string customId)
+    {
+        try
+        {
+            await HandleMyInvitesButtonAsync(component, customId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error handling /my-invites pagination button (customId={CustomId})", customId);
             try
             {
                 await component.FollowupAsync("Something went wrong loading that page. Try the command again.",
@@ -2151,6 +2414,31 @@ public class InviteCommandHandler
                 .AddOption("confirm", ApplicationCommandOptionType.Boolean,
                     "Set true to actually revoke. Without this, you'll see a preview.",
                     isRequired: false))
+            .Build();
+    }
+
+    /// <summary>
+    /// Builds the slash-command shape for /my-invites — a top-level command
+    /// that's effectively /invite list filtered to invites the caller
+    /// created. Open to everyone, no rank gate, ephemeral. Same `filter`
+    /// option as /invite list so users only learn one mental model. Lives
+    /// on this handler rather than in DiscordBotService so the option list
+    /// stays next to the code that consumes it; matches the BuildCommand
+    /// pattern above.
+    /// </summary>
+    public static SlashCommandProperties BuildMyInvitesCommand()
+    {
+        return new SlashCommandBuilder()
+            .WithName("my-invites")
+            .WithDescription("Show invites you created with use counts and attribution")
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("filter")
+                .WithDescription("Which of your invites to show. Default: active.")
+                .WithType(ApplicationCommandOptionType.String)
+                .WithRequired(false)
+                .AddChoice("Active only",   "active")
+                .AddChoice("Inactive only", "inactive")
+                .AddChoice("All",           "all"))
             .Build();
     }
 }

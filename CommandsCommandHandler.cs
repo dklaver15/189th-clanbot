@@ -590,6 +590,8 @@ public class CommandsCommandHandler
                 "Everyone", everyone),
             new("lookup", "Look up someone's gamertags from the roster",
                 "Everyone", everyone),
+            new("my-invites", "Show invites you created with use counts and attribution",
+                "Everyone", everyone),
             new("patrol", "Toggle your visibility on Patrol Watch embeds (off/on/info)",
                 "Everyone", everyone),
 
