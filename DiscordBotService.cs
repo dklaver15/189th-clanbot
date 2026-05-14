@@ -20,6 +20,7 @@ public class DiscordBotService : IHostedService
     private readonly ActivityTrackingHandler _activityHandler;
     private readonly GamertagCommandHandler _gamertagHandler;
     private readonly LookupCommandHandler _lookupHandler;
+    private readonly PromoEligibilityCommandHandler _promoEligibilityHandler;
     private readonly RankTrackingHandler _rankHandler;
     private readonly TicketReminderHandler _ticketReminderHandler;
     private readonly GuestReminderHandler _guestReminderHandler;
@@ -56,6 +57,7 @@ public class DiscordBotService : IHostedService
         ActivityTrackingHandler activityHandler,
         GamertagCommandHandler gamertagHandler,
         LookupCommandHandler lookupHandler,
+        PromoEligibilityCommandHandler promoEligibilityHandler,
         RankTrackingHandler rankHandler,
         TicketReminderHandler ticketReminderHandler,
         GuestReminderHandler guestReminderHandler,
@@ -91,6 +93,7 @@ public class DiscordBotService : IHostedService
         _activityHandler             = activityHandler;
         _gamertagHandler             = gamertagHandler;
         _lookupHandler               = lookupHandler;
+        _promoEligibilityHandler     = promoEligibilityHandler;
         _rankHandler                 = rankHandler;
         _ticketReminderHandler       = ticketReminderHandler;
         _guestReminderHandler        = guestReminderHandler;
@@ -131,6 +134,7 @@ public class DiscordBotService : IHostedService
         _activityHandler.Register(_client);
         _gamertagHandler.Register(_client);
         _lookupHandler.Register(_client);
+        _promoEligibilityHandler.Register(_client);
         _rankHandler.Register(_client);
         _ticketReminderHandler.Register(_client);
         _guestReminderHandler.Register(_client);
@@ -229,6 +233,13 @@ public class DiscordBotService : IHostedService
                     .WithDescription("Look up someone's gamertags from the roster")
                     .AddOption("user", ApplicationCommandOptionType.User,
                         "The clan member to look up", isRequired: true)
+                    .Build(),
+
+                new SlashCommandBuilder()
+                    .WithName("promo-eligibility")
+                    .WithDescription($"Check a member's auto-promotion eligibility ({_config.PromoEligibilityMinRank}+ only)")
+                    .AddOption("user", ApplicationCommandOptionType.User,
+                        "The clan member to check", isRequired: true)
                     .Build(),
 
                 new SlashCommandBuilder()

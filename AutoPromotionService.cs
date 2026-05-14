@@ -107,6 +107,23 @@ public class AutoPromotionService : BackgroundService
         new("SGM", "csm", DaysInRank: 49, MinMessages: 0,  MinVoiceHours: 0,   MinEvents: 4),
     };
 
+    /// <summary>
+    /// Returns the auto-promotion tier whose <c>FromRank</c> matches the given
+    /// rank name (case-insensitive), or null if the rank has no auto-promotion
+    /// path (terminal ranks: CSM and above, plus the SMA/officer ladder which
+    /// is intentionally manual).
+    ///
+    /// Read-only accessor to <see cref="DefaultTiers"/> — exists so the
+    /// /promo-eligibility command can compute eligibility against the exact
+    /// same thresholds the nightly job uses, without duplicating the table.
+    /// SyncWithHandlers: PromoEligibilityCommandHandler.HandleAsync.
+    /// </summary>
+    internal static AutoPromotionTier? GetTierForRank(string fromRank)
+    {
+        return DefaultTiers.FirstOrDefault(t =>
+            t.FromRank.Equals(fromRank, StringComparison.OrdinalIgnoreCase));
+    }
+
     public AutoPromotionService(
         IServiceProvider services,
         DiscordSocketClient client,
@@ -595,7 +612,14 @@ public class AutoPromotionService : BackgroundService
         return null;
     }
 
-    private record AutoPromotionTier(
+    /// <summary>
+    /// Tier record describing one rung of the auto-promotion ladder.
+    /// Bumped to <c>internal</c> (was private) so PromoEligibilityCommandHandler
+    /// can read tier thresholds for the same rank from the same source of truth
+    /// the nightly job uses. Stays inside this class — there is exactly one
+    /// auto-promotion ladder and it lives here.
+    /// </summary>
+    internal record AutoPromotionTier(
         string FromRank,
         string ToRank,
         int DaysInRank,

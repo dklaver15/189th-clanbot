@@ -205,6 +205,16 @@ public class BotConfig
     public string BriefingNowMinRank { get; set; } = "BG";
 
     /// <summary>
+    /// The minimum rank required to use the /promo-eligibility command, which
+    /// looks up a member's auto-promotion eligibility (current rank, time-in-rank,
+    /// activity counters, verdict). Designed for officers fielding "when is my
+    /// next promo?" questions from members. Defaults to "CPT" so any officer
+    /// can use it; admins bypass the check via Administrator permission.
+    /// Must exactly match one of the rank names in RankRoles (case-insensitive).
+    /// </summary>
+    public string PromoEligibilityMinRank { get; set; } = "CPT";
+
+    /// <summary>
     /// The minimum rank required to (a) relabel an existing tracked invite
     /// via /invite assign, and (b) revoke a tracked invite via /invite
     /// revoke (Phase 2). Both operations are sensitive enough to gate —

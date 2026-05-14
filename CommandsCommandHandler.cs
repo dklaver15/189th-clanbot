@@ -569,6 +569,7 @@ public class CommandsCommandHandler
         var compEventLbl     = $"{config.CompEventMinRank}+";
         var awolKickLbl      = $"{config.AwolKickMinRank}+";
         var briefingLbl      = $"{config.BriefingNowMinRank}+";
+        var promoEligLbl     = $"{config.PromoEligibilityMinRank}+";
         const string eventCreditLbl = "CPT+";   // SyncWithHandlers: EventCreditCommandHandler.MinRankFloor
         const string attendanceLbl  = "MAJ+";   // SyncWithHandlers: AttendanceCommandHandler.MinRankFloor
 
@@ -624,6 +625,8 @@ public class CommandsCommandHandler
                 eventCreditLbl, MinRank("CPT")),
             new("remove-event-credit", "Remove 1 manual event credit at member's current rank",
                 eventCreditLbl, MinRank("CPT")),
+            new("promo-eligibility", "Check a member's auto-promotion eligibility",
+                promoEligLbl, MinRank(config.PromoEligibilityMinRank)),
 
             new("attendance", "Show today's clan event attendance, grouped by event",
                 attendanceLbl, MinRank("MAJ")),
