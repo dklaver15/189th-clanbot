@@ -243,6 +243,7 @@ public sealed class OfficerApplicationSetupCommandHandler
             .AddField("Eligibility",
                 "• Rank of **SGT** or higher\n"
                 + "• In good standing (not currently AWOL)")
+            .AddField("\u200B", "\u200B")
             .AddField("What to Expect",
                 "Click the button below to open the application. You'll answer three short "
                 + "questions about where you want to contribute, ideas you'd bring, and how "
@@ -250,6 +251,7 @@ public sealed class OfficerApplicationSetupCommandHandler
                 + "Your application is reviewed by HQ alongside your service record — rank, "
                 + "tenure, event attendance, voice activity, and message activity are all "
                 + "considered. You don't need to list any of that yourself; we already have it.")
+            .AddField("\u200B", "\u200B")
             .AddField("After You Apply",
                 "HQ will review and reach out with a decision. If you're not selected, you're "
                 + "welcome to apply again in the future as you continue to contribute.")
