@@ -289,8 +289,8 @@ public sealed class OfficerApplicationModalHandler
                 message: posted);
 
             await thread.SendMessageAsync(
-                "💬 Use this thread to discuss the candidate. "
-                + "Cast your vote with the **Approve** / **Deny** buttons on the dossier above.",
+                "💬 Discuss the candidate here. "
+                + "HQ can approve or deny the application using the buttons on the dossier above.",
                 allowedMentions: AllowedMentions.None);
 
             _logger.LogInformation(
