@@ -16,8 +16,9 @@ namespace ClanGuardBot.Handlers;
 /// and if not, what specifically is gating them.
 ///
 /// Open to everyone — any member can answer their own "when's my next promo?"
-/// question without pinging an officer. The user parameter is required and
-/// accepts any guild member.
+/// question without pinging an officer. The user parameter is optional; when
+/// omitted, the command targets the caller. When supplied, it accepts any
+/// guild member.
 ///
 /// ── Source of truth ──
 /// All inputs to the verdict are computed from the same primitives the
@@ -106,10 +107,24 @@ public class PromoEligibilityCommandHandler
         }
 
         // ── Parse target user ──
+        // The `user` option is optional. When omitted, default to the caller
+        // so anyone can run `/promo-eligibility` with no args to check their
+        // own status. When supplied, the option must resolve to a guild user.
+        SocketGuildUser target;
         var userOption = command.Data.Options.FirstOrDefault(o => o.Name == "user");
-        if (userOption?.Value is not SocketGuildUser target)
+        if (userOption is null)
         {
-            await command.FollowupAsync("❌ You must select a clan member to look up.", ephemeral: true);
+            target = caller;
+        }
+        else if (userOption.Value is SocketGuildUser provided)
+        {
+            target = provided;
+        }
+        else
+        {
+            await command.FollowupAsync(
+                "❌ Could not resolve the selected user. Try picking them from the user list again.",
+                ephemeral: true);
             return;
         }
 

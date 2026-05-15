@@ -247,7 +247,7 @@ public class DiscordBotService : IHostedService
                     .WithName("promo-eligibility")
                     .WithDescription("Check a member's auto-promotion eligibility")
                     .AddOption("user", ApplicationCommandOptionType.User,
-                        "The clan member to check", isRequired: true)
+                        "The clan member to check (defaults to you)", isRequired: false)
                     .Build(),
 
                 new SlashCommandBuilder()
