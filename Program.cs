@@ -78,12 +78,12 @@ try
     // other command handlers.
     builder.Services.AddSingleton<LookupCommandHandler>();
 
-    // PromoEligibilityCommandHandler: /promo-eligibility slash command, open
-    // to all members. Returns a verdict on whether a named member is eligible
-    // for auto-promotion at the next nightly run. Computes from the same
-    // primitives AutoPromotionService uses so the verdict matches the
-    // production decision path. Register() is called from DiscordBotService
-    // alongside the other command handlers.
+    // PromoEligibilityCommandHandler: /promo-eligibility slash command, gated
+    // to PromoEligibilityMinRank+ (default CPT). Returns a verdict on whether
+    // a named member is eligible for auto-promotion at the next nightly run.
+    // Computes from the same primitives AutoPromotionService uses so the
+    // verdict matches the production decision path. Register() is called from
+    // DiscordBotService alongside the other command handlers.
     builder.Services.AddSingleton<PromoEligibilityCommandHandler>();
 
     // NOTE: RecruitCommandHandler was removed — recruits are now auto-logged by
@@ -137,9 +137,11 @@ try
 
     // OfficerApplicationDossierBuilder: pure(-ish) builder service that
     // assembles the dossier embed from ClanGuard data (rank, tenure, AWOL
-    // status, event attendance + voice + message windows, gamertags). Used
-    // by OfficerApplicationModalHandler on modal submit. Does not subscribe
-    // to Discord events.
+    // status, event attendance + voice + message windows). Also exposes
+    // BuildReviewedEmbedFromExisting for Phase 3's in-place embed flip on
+    // approve/deny. Used by OfficerApplicationModalHandler (initial post)
+    // and OfficerApplicationReviewHandler (review). Does not subscribe to
+    // Discord events.
     builder.Services.AddSingleton<OfficerApplicationDossierBuilder>();
 
     // OfficerApplicationModalHandler: owns the button-click → modal flow
@@ -149,6 +151,15 @@ try
     // rejection at both gates (button click + modal submit) since a member's
     // state can change between the two.
     builder.Services.AddSingleton<OfficerApplicationModalHandler>();
+
+    // OfficerApplicationReviewHandler: owns the HQ review pipeline.
+    // Approve/Deny buttons on dossier → confirmation prompt or denial-reason
+    // modal → DB update → in-place dossier embed flip (color + title + review
+    // field) → applicant DM. Phase 3 of the officer application system.
+    // Self-review blocked; HQ-only; race-protected against simultaneous
+    // reviewers; DM failures degrade gracefully without rolling back the
+    // database state.
+    builder.Services.AddSingleton<OfficerApplicationReviewHandler>();
 
     // KickAwolsCommandHandler: /kick-awols slash command for officers
     // (AwolKickMinRank+). Iterates over members with the AWOL role and removes

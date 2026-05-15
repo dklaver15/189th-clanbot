@@ -256,6 +256,7 @@ public sealed class OfficerApplicationModalHandler
         var posted = await hqChannel.SendMessageAsync(
             text: hqMention.Length > 0 ? $"{hqMention} new officer application submitted." : null,
             embed: dossierEmbed,
+            components: OfficerApplicationReviewHandler.BuildPendingButtons(application.Id),
             allowedMentions: _config.OfficerAppHqRoleId != 0
                 ? new AllowedMentions
                 {

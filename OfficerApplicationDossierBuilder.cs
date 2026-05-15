@@ -27,14 +27,17 @@ namespace ClanGuardBot.Handlers;
 ///     VoiceActivityHelper)
 ///   • EventAttendances       — windowed event-attendance counts
 ///                              (30 / 60 / 90 days)
-///   • GoogleSheetsService    — gamertag rosters (best-effort; failures
-///                              degrade the dossier gracefully)
 ///
 /// ── Pure(-ish) builder ──
 /// This class never sends a Discord message itself. The caller posts the
 /// returned <see cref="Embed"/> and is responsible for AllowedMentions, HQ
 /// channel routing, and persistence of the resulting message ID back onto
 /// the OfficerApplication row.
+///
+/// In Phase 3, this builder also exposes BuildReviewedEmbedFromExisting
+/// which the review handler uses to transform a pending-state dossier into
+/// its approved or denied form while preserving the original activity
+/// snapshot.
 /// </summary>
 public sealed class OfficerApplicationDossierBuilder
 {
@@ -43,20 +46,17 @@ public sealed class OfficerApplicationDossierBuilder
 
     private readonly IServiceProvider _services;
     private readonly PromotionService _promotion;
-    private readonly GoogleSheetsService _sheets;
     private readonly ILogger<OfficerApplicationDossierBuilder> _logger;
     private readonly BotConfig _config;
 
     public OfficerApplicationDossierBuilder(
         IServiceProvider services,
         PromotionService promotion,
-        GoogleSheetsService sheets,
         ILogger<OfficerApplicationDossierBuilder> logger,
         IOptions<BotConfig> config)
     {
         _services  = services;
         _promotion = promotion;
-        _sheets    = sheets;
         _logger    = logger;
         _config    = config.Value;
     }
@@ -92,19 +92,6 @@ public sealed class OfficerApplicationDossierBuilder
         var (vh7,  vh30,  vh60)    = await GetVoiceHoursAsync(guild.Id, member.Id, ct);
         var (ev30, ev60,  ev90)    = await GetEventAttendanceAsync(guild.Id, member.Id, ct);
         var lastVoice              = await GetLastVoiceSessionAsync(guild.Id, member.Id, ct);
-
-        // ── Gamertag (best-effort, never blocks the dossier) ────────
-        GamertagLookupResult? gamertags = null;
-        try
-        {
-            gamertags = await _sheets.LookupGamertagsAsync(member.Id, member.DisplayName);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex,
-                "Gamertag lookup failed for officer-app dossier (user {UserId}); continuing without",
-                member.Id);
-        }
 
         // ── Compose ─────────────────────────────────────────────────
         var builder = new EmbedBuilder()
@@ -157,11 +144,6 @@ public sealed class OfficerApplicationDossierBuilder
             builder.AddField("Last Voice Session",
                 $"<t:{new DateTimeOffset(lv, TimeSpan.Zero).ToUnixTimeSeconds()}:R>", inline: true);
         }
-
-        // Gamertags (only show platforms with data on file)
-        var gamertagLines = BuildGamertagLines(gamertags);
-        if (gamertagLines.Count > 0)
-            builder.AddField("🎮 Gamertags", string.Join("\n", gamertagLines));
 
         // Application answers
         builder.AddField("📝 Q1 — Where do you want to contribute?",
@@ -265,20 +247,58 @@ public sealed class OfficerApplicationDossierBuilder
         return lastJoin;
     }
 
-    private static List<string> BuildGamertagLines(GamertagLookupResult? gt)
+    /// <summary>
+    /// Transforms a pending-state dossier embed into its reviewed form
+    /// (approved or denied). Preserves all the original activity / identity
+    /// fields exactly as they were at submission so the audit trail reflects
+    /// the decision-making snapshot, then prepends a Review field showing
+    /// who reviewed it and when (plus the denial reason, if denied) and
+    /// flips the title + color to match.
+    ///
+    /// Called by OfficerApplicationReviewHandler.UpdateDossierAsync when the
+    /// original dossier message is still available. If the original message
+    /// was deleted, the review handler skips this path and posts a fallback
+    /// summary instead — see Phase 3 decision #8.
+    /// </summary>
+    public Embed BuildReviewedEmbedFromExisting(
+        IEmbed original,
+        OfficerApplication application,
+        SocketUser reviewer)
     {
-        var lines = new List<string>();
-        if (gt is null) return lines;
+        var builder = original.ToEmbedBuilder();
 
-        // Order matches the modal capture order — EA / Steam / PSN first,
-        // Xbox / Embark / Bungie second.
-        if (!string.IsNullOrWhiteSpace(gt.EA))     lines.Add($"**EA:** {gt.EA}");
-        if (!string.IsNullOrWhiteSpace(gt.Steam))  lines.Add($"**Steam:** {gt.Steam}");
-        if (!string.IsNullOrWhiteSpace(gt.PSN))    lines.Add($"**PSN:** {gt.PSN}");
-        if (!string.IsNullOrWhiteSpace(gt.Xbox))   lines.Add($"**Xbox:** {gt.Xbox}");
-        if (!string.IsNullOrWhiteSpace(gt.Embark)) lines.Add($"**Embark:** {gt.Embark}");
-        if (!string.IsNullOrWhiteSpace(gt.Bungie)) lines.Add($"**Bungie:** {gt.Bungie}");
-        return lines;
+        if (application.Status == OfficerApplicationStatus.Approved)
+        {
+            builder.WithTitle("✅ Officer Application — Approved")
+                   .WithColor(new Color(0x4A, 0xC9, 0x59));
+        }
+        else if (application.Status == OfficerApplicationStatus.Denied)
+        {
+            builder.WithTitle("❌ Officer Application — Denied")
+                   .WithColor(new Color(0xC9, 0x42, 0x42));
+        }
+
+        var reviewedAtUnix = application.ReviewedAt is { } reviewedAt
+            ? new DateTimeOffset(reviewedAt, TimeSpan.Zero).ToUnixTimeSeconds()
+            : DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+        var reviewValue = $"{reviewer.Mention} · <t:{reviewedAtUnix}:f>";
+        if (application.Status == OfficerApplicationStatus.Denied
+            && !string.IsNullOrWhiteSpace(application.ReviewNotes))
+        {
+            reviewValue += $"\n\n**Reason:**\n{application.ReviewNotes}";
+        }
+
+        // Insert the Review field at index 1 — right after Applicant — so
+        // reviewers and audit scrollers see the verdict before the rest of
+        // the dossier.
+        var insertIndex = Math.Min(1, builder.Fields.Count);
+        builder.Fields.Insert(insertIndex, new EmbedFieldBuilder()
+            .WithName("🔎 Review")
+            .WithValue(reviewValue)
+            .WithIsInline(false));
+
+        return builder.Build();
     }
 
     /// <summary>
