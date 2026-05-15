@@ -239,19 +239,20 @@ public sealed class OfficerApplicationSetupCommandHandler
             .WithDescription(
                 "The 189th is always looking for dedicated members to step up and help lead. "
                 + "If you're ready to take on more responsibility and shape the future of the clan, "
-                + "this is your path forward.")
+                + "this is your path forward."
+                + "\n\u200B")
             .AddField("Eligibility",
                 "• Rank of **SGT** or higher\n"
-                + "• In good standing (not currently AWOL)")
-            .AddField("\u200B", "\u200B")
+                + "• In good standing (not currently AWOL)"
+                + "\n\u200B")
             .AddField("What to Expect",
                 "Click the button below to open the application. You'll answer three short "
                 + "questions about where you want to contribute, ideas you'd bring, and how "
                 + "you'd handle a leadership situation. The form takes about 5 minutes.\n\n"
                 + "Your application is reviewed by HQ alongside your service record — rank, "
                 + "tenure, event attendance, voice activity, and message activity are all "
-                + "considered. You don't need to list any of that yourself; we already have it.")
-            .AddField("\u200B", "\u200B")
+                + "considered. You don't need to list any of that yourself; we already have it."
+                + "\n\u200B")
             .AddField("After You Apply",
                 "HQ will review and reach out with a decision. If you're not selected, you're "
                 + "welcome to apply again in the future as you continue to contribute.")
