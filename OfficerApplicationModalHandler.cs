@@ -274,12 +274,62 @@ public sealed class OfficerApplicationModalHandler
             "Officer application #{Id} dossier posted to channel {ChannelId} as message {MessageId}",
             application.Id, hqChannel.Id, posted.Id);
 
+        // ── Discussion thread (best-effort) ─────────────────────────
+        // Spawn a thread off the dossier message so HQ can deliberate
+        // without polluting the main channel. Thread inherits the HQ
+        // channel's permissions, so it stays HQ-only by construction.
+        // Failure (e.g. bot missing CreatePublicThreads perm) is logged
+        // but doesn't roll back the application — the dossier is already
+        // posted and the voting buttons are functional regardless.
+        try
+        {
+            var thread = await hqChannel.CreateThreadAsync(
+                name: BuildDiscussionThreadName(application),
+                autoArchiveDuration: ThreadArchiveDuration.OneWeek,
+                message: posted);
+
+            await thread.SendMessageAsync(
+                "💬 Use this thread to discuss the candidate. "
+                + "Cast your vote with the **Approve** / **Deny** buttons on the dossier above.",
+                allowedMentions: AllowedMentions.None);
+
+            _logger.LogInformation(
+                "Discussion thread created for app #{AppId}: thread {ThreadId}",
+                application.Id, thread.Id);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to create discussion thread for app #{AppId}; dossier still posted",
+                application.Id);
+        }
+
         // ── Confirm to applicant ────────────────────────────────────
         await modal.FollowupAsync(
             "✅ **Your application has been submitted.**\n"
             + "HQ will review and reach out with a decision. "
             + "Thanks for stepping up.",
             ephemeral: true);
+    }
+
+    /// <summary>
+    /// Discord caps thread names at 100 chars. The "App #N — " prefix is
+    /// usually 7-9 chars, leaving plenty of room for the display name with
+    /// truncation only in extreme cases.
+    /// </summary>
+    private static string BuildDiscussionThreadName(OfficerApplication application)
+    {
+        var prefix      = $"App #{application.Id} — ";
+        var displayName = string.IsNullOrWhiteSpace(application.DisplayName)
+            ? "Applicant"
+            : application.DisplayName;
+
+        const int maxLen = 100;
+        var remaining = maxLen - prefix.Length;
+        if (displayName.Length > remaining)
+            displayName = displayName[..(remaining - 1)] + "…";
+
+        return prefix + displayName;
     }
 
     // ─── Eligibility ──────────────────────────────────────────────────
