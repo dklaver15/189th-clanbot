@@ -119,7 +119,7 @@ public sealed class OfficerApplicationModalHandler
                 label: "Where do you want to contribute?",
                 customId: Q1Id,
                 style: TextInputStyle.Short,
-                placeholder: "recruiting, events, Discord/tooling, training, etc.",
+                placeholder: "Recruiting, events, Discord/tooling, training, etc.",
                 minLength: 3,
                 maxLength: 200,
                 required: true)
