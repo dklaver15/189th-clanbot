@@ -49,6 +49,7 @@ public class DiscordBotService : IHostedService
     private readonly RedditLeadButtonHandler _redditLeadButtonHandler;
     private readonly RedditLeadsCommandHandler _redditLeadsCommandHandler;
     private readonly PatrolWatchCommandHandler _patrolWatchCommandHandler;
+    private readonly OfficerApplicationSetupCommandHandler _officerAppSetupHandler;
     private readonly ILogger<DiscordBotService> _logger;
     private readonly BotConfig _config;
 
@@ -86,6 +87,7 @@ public class DiscordBotService : IHostedService
         RedditLeadButtonHandler redditLeadButtonHandler,
         RedditLeadsCommandHandler redditLeadsCommandHandler,
         PatrolWatchCommandHandler patrolWatchCommandHandler,
+        OfficerApplicationSetupCommandHandler officerAppSetupHandler,
         ILogger<DiscordBotService> logger,
         IOptions<BotConfig> config)
     {
@@ -122,6 +124,7 @@ public class DiscordBotService : IHostedService
         _redditLeadButtonHandler     = redditLeadButtonHandler;
         _redditLeadsCommandHandler   = redditLeadsCommandHandler;
         _patrolWatchCommandHandler   = patrolWatchCommandHandler;
+        _officerAppSetupHandler      = officerAppSetupHandler;
         _logger                      = logger;
         _config                      = config.Value;
     }
@@ -178,6 +181,7 @@ public class DiscordBotService : IHostedService
         _redditLeadButtonHandler.Register(_client);
         _redditLeadsCommandHandler.Register(_client);
         _patrolWatchCommandHandler.Register(_client);
+        _officerAppSetupHandler.Register(_client);
 
         await _client.LoginAsync(TokenType.Bot, _config.Token);
         await _client.StartAsync();
@@ -468,6 +472,14 @@ public class DiscordBotService : IHostedService
                 // CommandsCommandHandler.BuildCatalog in sync when changing
                 // /patrol.
                 PatrolWatchCommandHandler.BuildCommand(),
+
+                // /setup-officer-app — HQ-only command that posts (or re-posts
+                // with force:true) the persistent "Apply for Officer" button
+                // to the configured instructions channel. Phase 1 of the
+                // officer application system. Idempotent via
+                // BotState.OfficerAppButtonMessageId. NOTE: keep
+                // CommandsCommandHandler.BuildCatalog in sync when this changes.
+                OfficerApplicationSetupCommandHandler.BuildCommand(),
             };
 
             foreach (var guild in _client.Guilds)

@@ -376,6 +376,15 @@ public class BotState
     /// itself still completes.
     /// </summary>
     public DateTime? LastAutoPromotionCompletedUtc { get; set; }
+
+    /// <summary>
+    /// Discord message ID of the persistent "Apply for Officer" button message
+    /// in the configured instructions channel. Set by /setup-officer-app;
+    /// consulted on re-run for idempotency. Null until the button has been
+    /// posted for the first time. If the message is deleted manually, re-run
+    /// the slash command with force:true to repost.
+    /// </summary>
+    public ulong? OfficerAppButtonMessageId { get; set; }
 }
 
 /// <summary>

@@ -127,6 +127,14 @@ try
     // DiscordBotService alongside the other command handlers.
     builder.Services.AddSingleton<SquadCommandHandler>();
 
+    // OfficerApplicationSetupCommandHandler: /setup-officer-app slash command
+    // (HQ-only). Posts the persistent "Apply for Officer" button to the
+    // configured instructions channel. Idempotent — re-running without
+    // force:true reports the existing message via BotState.OfficerAppButtonMessageId.
+    // Phase 1 of the officer application system. Phase 2 adds the modal + dossier
+    // flow; Phase 3 adds approve/deny review buttons.
+    builder.Services.AddSingleton<OfficerApplicationSetupCommandHandler>();
+
     // KickAwolsCommandHandler: /kick-awols slash command for officers
     // (AwolKickMinRank+). Iterates over members with the AWOL role and removes
     // them from the server, with multiple safety guards (Reserve role, min rank,

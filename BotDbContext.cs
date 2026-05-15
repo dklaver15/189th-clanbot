@@ -27,6 +27,7 @@ public class BotDbContext : DbContext
     public DbSet<CommandUsage>        CommandUsages       => Set<CommandUsage>();
     public DbSet<PatrolWatchOptOut>   PatrolWatchOptOuts  => Set<PatrolWatchOptOut>();
     public DbSet<CalendarOutbox>      CalendarOutbox      => Set<CalendarOutbox>();
+    public DbSet<OfficerApplication>  OfficerApplications => Set<OfficerApplication>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -282,6 +283,20 @@ public class BotDbContext : DbContext
             // checks for an existing row before inserting, but the index is the
             // structural backstop.
             e.HasIndex(o => new { o.GuildId, o.UserId }).IsUnique();
+        });
+
+        // ── Officer Applications ──────────────────────────────────────
+        // One row per /apply modal submission. Written when a member submits
+        // the officer application modal (Phase 2); status flips on HQ review
+        // (Phase 3). Status is stored as int because SQLite has no native
+        // enum type — same pattern as CalendarOutboxOperation, RedditLead.Status,
+        // and ApolloEvent.Status. The (GuildId, UserId, Status) index drives
+        // the Phase 2 duplicate-rejection check ("does a Pending row already
+        // exist for this user?") without scanning the table.
+        modelBuilder.Entity<OfficerApplication>(e =>
+        {
+            e.Property(a => a.Status).HasConversion<int>();
+            e.HasIndex(a => new { a.GuildId, a.UserId, a.Status });
         });
     }
 }

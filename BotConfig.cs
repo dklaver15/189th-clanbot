@@ -356,6 +356,55 @@ public class BotConfig
     /// </summary>
     public int BumpReminderRestartGraceMinutes { get; set; } = 30;
 
+    // ─── Officer Application Settings ────────────────────────────────
+
+    /// <summary>
+    /// Discord channel ID of the member-facing instructions channel that hosts
+    /// the persistent "Apply for Officer" button. Posted to by
+    /// /setup-officer-app. Must be a channel everyone eligible to apply can
+    /// see — typically a read-only general announcements / info channel.
+    /// </summary>
+    public ulong OfficerAppInstructionsChannelId { get; set; } = default;
+
+    /// <summary>
+    /// Discord channel ID of the HQ-only channel that receives dossier embeds
+    /// when applications are submitted (Phase 2). The bot must have Send
+    /// Messages + Embed Links permission here, plus the ability to mention
+    /// the configured HQ role.
+    /// </summary>
+    public ulong OfficerAppHqChannelId { get; set; } = default;
+
+    /// <summary>
+    /// Discord role ID of the HQ role. Used (a) to gate the /setup-officer-app
+    /// slash command, and (b) to ping HQ when an application is submitted to
+    /// the dossier channel (Phase 2).
+    /// </summary>
+    public ulong OfficerAppHqRoleId { get; set; } = default;
+
+    /// <summary>
+    /// Minimum rank a member must hold to submit an officer application.
+    /// Must match an entry in RankRoles (case-insensitive). Members below
+    /// this rank will be shown an ephemeral "not eligible" message when they
+    /// press the apply button (Phase 2 enforces).
+    /// </summary>
+    public string OfficerAppMinimumRank { get; set; } = "SGT";
+
+    /// <summary>
+    /// Optional URL of a small thumbnail image (e.g. the 189th logo) shown in
+    /// the upper-right of the instructions embed. Must be a public HTTPS URL
+    /// Discord can fetch — the easiest source is to upload the image to any
+    /// Discord channel, right-click and "Copy Image Link" to get the
+    /// cdn.discordapp.com URL. Empty disables the thumbnail.
+    /// </summary>
+    public string OfficerAppInstructionsThumbnailUrl { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Optional URL of a large banner image shown at the bottom of the
+    /// instructions embed. Same hosting requirement as the thumbnail. Empty
+    /// disables the banner.
+    /// </summary>
+    public string OfficerAppInstructionsBannerImageUrl { get; set; } = string.Empty;
+
     // ─── Helpers ─────────────────────────────────────────────────────
 
     /// <summary>
