@@ -41,11 +41,15 @@ namespace ClanGuardBot.Handlers;
 ///
 /// ── Eligibility gates (enforced on every action) ──
 ///   1. Reviewer must hold the HQ role (or Administrator)
-///   2. Reviewer must NOT be the applicant — self-review is blocked
-///   3. Application must still be in Pending state — races where two
+///   2. Application must still be in Pending state — races where two
 ///      reviewers click simultaneously resolve to "already reviewed"
 ///      for the second clicker
-///   4. Application must still exist in the database
+///   3. Application must still exist in the database
+///
+/// Self-review IS permitted: an HQ member can approve their own application.
+/// Practically the minimum officer rank above SGT is 2ndLT and HQ wouldn't
+/// demote themselves to test, so the self-review block was removed to make
+/// end-to-end testing possible.
 ///
 /// ── DM delivery ──
 ///   DMs are best-effort. If the applicant has server DMs disabled
@@ -498,10 +502,6 @@ public sealed class OfficerApplicationReviewHandler
             return ($"⛔ This application was already **{statusWord}** by {reviewedBy}. "
                   + "Refresh the channel to see the updated dossier.", null);
         }
-
-        // Gate 3 — not self-review
-        if (application.UserId == user.Id)
-            return ("⛔ You cannot review your own application.", null);
 
         return (null, application);
     }
