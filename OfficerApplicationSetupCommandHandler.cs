@@ -22,16 +22,16 @@ namespace ClanGuardBot.Handlers;
 /// and posts a fresh one. Use the force flag when the embed copy changes
 /// or the previous message has been deleted by a moderator.
 ///
-/// ── Phase 1 scope ──
-/// This handler only POSTS the button. The button's click handler — which
-/// opens the application modal — lives in OfficerApplicationModalHandler
-/// (Phase 2). In Phase 1, clicking the button responds with an ephemeral
-/// "Coming soon" placeholder so the interaction doesn't fail.
+/// ── Handler split ──
+/// This handler ONLY posts the button — the button click and modal flow
+/// live on OfficerApplicationModalHandler. The CustomId
+/// "officer_app:open" is declared as a public const here so the modal
+/// handler can subscribe to it without circular dependencies, but only
+/// the modal handler subscribes to ButtonExecuted.
 /// </summary>
 public sealed class OfficerApplicationSetupCommandHandler
 {
-    public const string CommandName    = "setup-officer-app";
-    public const string ApplyButtonId  = "officer_app:open";
+    public const string CommandName = "setup-officer-app";
 
     private readonly IServiceProvider _services;
     private readonly ILogger<OfficerApplicationSetupCommandHandler> _logger;
@@ -59,7 +59,6 @@ public sealed class OfficerApplicationSetupCommandHandler
     public void Register(DiscordSocketClient client)
     {
         client.SlashCommandExecuted += OnSlashCommandAsync;
-        client.ButtonExecuted       += OnButtonExecutedAsync;
     }
 
     private async Task OnSlashCommandAsync(SocketSlashCommand command)
@@ -81,26 +80,6 @@ public sealed class OfficerApplicationSetupCommandHandler
                     await command.RespondAsync("Something went wrong. Check the bot logs.", ephemeral: true);
             }
             catch { /* swallow */ }
-        }
-    }
-
-    private async Task OnButtonExecutedAsync(SocketMessageComponent component)
-    {
-        if (component.Data.CustomId != ApplyButtonId) return;
-
-        // ── Phase 1 placeholder ──────────────────────────────────────
-        // The real modal-open flow lands in Phase 2. For now we respond
-        // ephemerally so Discord doesn't show "Interaction failed" to
-        // members who happen to press the button before Phase 2 ships.
-        try
-        {
-            await component.RespondAsync(
-                "🛠️ The officer application system is being set up — check back soon.",
-                ephemeral: true);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error responding to officer-app placeholder button");
         }
     }
 
@@ -269,6 +248,6 @@ public sealed class OfficerApplicationSetupCommandHandler
 
     private static MessageComponent BuildApplyButton() =>
         new ComponentBuilder()
-            .WithButton("Apply for Officer", ApplyButtonId, ButtonStyle.Primary, new Emoji("📋"))
+            .WithButton("Apply for Officer", OfficerApplicationModalHandler.OpenButtonId, ButtonStyle.Primary, new Emoji("📋"))
             .Build();
 }

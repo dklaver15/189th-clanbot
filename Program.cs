@@ -135,6 +135,21 @@ try
     // flow; Phase 3 adds approve/deny review buttons.
     builder.Services.AddSingleton<OfficerApplicationSetupCommandHandler>();
 
+    // OfficerApplicationDossierBuilder: pure(-ish) builder service that
+    // assembles the dossier embed from ClanGuard data (rank, tenure, AWOL
+    // status, event attendance + voice + message windows, gamertags). Used
+    // by OfficerApplicationModalHandler on modal submit. Does not subscribe
+    // to Discord events.
+    builder.Services.AddSingleton<OfficerApplicationDossierBuilder>();
+
+    // OfficerApplicationModalHandler: owns the button-click → modal flow
+    // and the modal-submit → dossier-post pipeline. Subscribes to both
+    // ButtonExecuted (officer_app:open) and ModalSubmitted (officer_app:submit).
+    // Enforces SGT+ eligibility, not-currently-AWOL, and duplicate-pending
+    // rejection at both gates (button click + modal submit) since a member's
+    // state can change between the two.
+    builder.Services.AddSingleton<OfficerApplicationModalHandler>();
+
     // KickAwolsCommandHandler: /kick-awols slash command for officers
     // (AwolKickMinRank+). Iterates over members with the AWOL role and removes
     // them from the server, with multiple safety guards (Reserve role, min rank,

@@ -50,6 +50,7 @@ public class DiscordBotService : IHostedService
     private readonly RedditLeadsCommandHandler _redditLeadsCommandHandler;
     private readonly PatrolWatchCommandHandler _patrolWatchCommandHandler;
     private readonly OfficerApplicationSetupCommandHandler _officerAppSetupHandler;
+    private readonly OfficerApplicationModalHandler _officerAppModalHandler;
     private readonly ILogger<DiscordBotService> _logger;
     private readonly BotConfig _config;
 
@@ -88,6 +89,7 @@ public class DiscordBotService : IHostedService
         RedditLeadsCommandHandler redditLeadsCommandHandler,
         PatrolWatchCommandHandler patrolWatchCommandHandler,
         OfficerApplicationSetupCommandHandler officerAppSetupHandler,
+        OfficerApplicationModalHandler officerAppModalHandler,
         ILogger<DiscordBotService> logger,
         IOptions<BotConfig> config)
     {
@@ -125,6 +127,7 @@ public class DiscordBotService : IHostedService
         _redditLeadsCommandHandler   = redditLeadsCommandHandler;
         _patrolWatchCommandHandler   = patrolWatchCommandHandler;
         _officerAppSetupHandler      = officerAppSetupHandler;
+        _officerAppModalHandler      = officerAppModalHandler;
         _logger                      = logger;
         _config                      = config.Value;
     }
@@ -182,6 +185,7 @@ public class DiscordBotService : IHostedService
         _redditLeadsCommandHandler.Register(_client);
         _patrolWatchCommandHandler.Register(_client);
         _officerAppSetupHandler.Register(_client);
+        _officerAppModalHandler.Register(_client);
 
         await _client.LoginAsync(TokenType.Bot, _config.Token);
         await _client.StartAsync();
