@@ -15,9 +15,9 @@ namespace ClanGuardBot.Handlers;
 /// the named member is eligible for auto-promotion at the next nightly run,
 /// and if not, what specifically is gating them.
 ///
-/// Rank-gated (PromoEligibilityMinRank+, default CPT) — designed for officers
-/// fielding "when is my next promotion?" questions from members. The user
-/// parameter is required and accepts any guild member.
+/// Open to everyone — any member can answer their own "when's my next promo?"
+/// question without pinging an officer. The user parameter is required and
+/// accepts any guild member.
 ///
 /// ── Source of truth ──
 /// All inputs to the verdict are computed from the same primitives the
@@ -97,13 +97,11 @@ public class PromoEligibilityCommandHandler
             return;
         }
 
-        // ── Permission check ──
-        var caller = command.User as SocketGuildUser;
-        if (caller is null || !InvokerHasPermission(caller))
+        // Open to everyone — no rank gate. We still want a guild-user handle
+        // for guild lookups and logging below.
+        if (command.User is not SocketGuildUser caller)
         {
-            await command.FollowupAsync(
-                $"❌ You need to be **{_config.PromoEligibilityMinRank}** or higher to use this command.",
-                ephemeral: true);
+            await command.FollowupAsync("This command can only be used in a server.", ephemeral: true);
             return;
         }
 
@@ -443,37 +441,5 @@ public class PromoEligibilityCommandHandler
             moment.Year, moment.Month, moment.Day, clamped, 0, 0, DateTimeKind.Utc);
         if (candidate <= moment) candidate = candidate.AddDays(1);
         return candidate;
-    }
-
-    /// <summary>
-    /// True if the invoker has Administrator OR a rank role at or above
-    /// PromoEligibilityMinRank. Same pattern as PromoteCommandHandler /
-    /// KickAwolsCommandHandler / etc. SyncWithHandlers: the catalog-table
-    /// MinRank closure in CommandsCommandHandler.
-    /// </summary>
-    private bool InvokerHasPermission(SocketGuildUser user)
-    {
-        if (user.GuildPermissions.Administrator) return true;
-
-        var rankRoles = _config.GetRankRolesList();
-        var minRank = _config.PromoEligibilityMinRank;
-        var minIdx = rankRoles.FindIndex(r =>
-            r.Equals(minRank, StringComparison.OrdinalIgnoreCase));
-
-        if (minIdx < 0)
-        {
-            _logger.LogWarning(
-                "PromoEligibilityMinRank '{Rank}' not found in RankRoles list. " +
-                "Permission check will deny everyone except Admins.",
-                minRank);
-            return false;
-        }
-
-        return user.Roles.Any(role =>
-        {
-            var idx = rankRoles.FindIndex(r =>
-                r.Equals(role.Name, StringComparison.OrdinalIgnoreCase));
-            return idx >= minIdx;
-        });
     }
 }

@@ -78,12 +78,12 @@ try
     // other command handlers.
     builder.Services.AddSingleton<LookupCommandHandler>();
 
-    // PromoEligibilityCommandHandler: /promo-eligibility slash command, gated
-    // to PromoEligibilityMinRank+ (default CPT). Returns a verdict on whether
-    // a named member is eligible for auto-promotion at the next nightly run.
-    // Computes from the same primitives AutoPromotionService uses so the
-    // verdict matches the production decision path. Register() is called from
-    // DiscordBotService alongside the other command handlers.
+    // PromoEligibilityCommandHandler: /promo-eligibility slash command, open
+    // to all members. Returns a verdict on whether a named member is eligible
+    // for auto-promotion at the next nightly run. Computes from the same
+    // primitives AutoPromotionService uses so the verdict matches the
+    // production decision path. Register() is called from DiscordBotService
+    // alongside the other command handlers.
     builder.Services.AddSingleton<PromoEligibilityCommandHandler>();
 
     // NOTE: RecruitCommandHandler was removed — recruits are now auto-logged by
