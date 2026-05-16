@@ -416,20 +416,13 @@ public class BotConfig
     public ulong GamertagSetupRoleId { get; set; } = default;
 
     /// <summary>
-    /// Optional URL of a small thumbnail image (e.g. the 189th logo) shown in
-    /// the upper-right of the instructions embed. Must be a public HTTPS URL
-    /// Discord can fetch — the easiest source is to upload the image to any
-    /// Discord channel, right-click and "Copy Image Link" to get the
-    /// cdn.discordapp.com URL. Empty disables the thumbnail.
+    /// Public URL of the master roster spreadsheet, shown at the bottom of the
+    /// gamertags instructions message so members can browse everyone's handles.
+    /// Typically a Google Sheets "Publish to web" link (the /d/e/2PACX-.../pubhtml
+    /// form) — Discord auto-unfurls it into a preview card. Leave empty to
+    /// suppress the roster section entirely; the rest of the message still posts.
     /// </summary>
-    public string GamertagInstructionsThumbnailUrl { get; set; } = string.Empty;
-
-    /// <summary>
-    /// Optional URL of a large banner image shown at the bottom of the
-    /// instructions embed. Same hosting requirement as the thumbnail. Empty
-    /// disables the banner.
-    /// </summary>
-    public string GamertagInstructionsBannerImageUrl { get; set; } = string.Empty;
+    public string GamertagRosterUrl { get; set; } = string.Empty;
 
     // ─── Helpers ─────────────────────────────────────────────────────
 

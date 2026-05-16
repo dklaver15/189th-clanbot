@@ -11,19 +11,25 @@ namespace ClanGuardBot.Handlers;
 
 /// <summary>
 /// /setup-gamertags — slash command that posts (or re-posts) the persistent
-/// "Enter Gamertags" button to the configured instructions channel. The
-/// button's CustomId is stable across restarts so Discord's interaction
-/// routing continues to work for messages posted in past runs.
+/// "Enter Gamertags" button + instructions to the configured instructions
+/// channel. The button's CustomId is stable across restarts so Discord's
+/// interaction routing continues to work for messages posted in past runs.
+///
+/// ── Message format ──
+/// Plain markdown (NOT an embed) so the layout matches the manual HQ post
+/// that lived in the channel before the button existed. Plain text also lets
+/// Discord auto-unfurl the roster URL into a Google Docs preview card —
+/// embeds suppress that.
 ///
 /// ── Idempotency ──
 /// The message ID of the posted button is stored on BotState. Re-running
 /// the command without `force:true` reports the existing message and does
 /// nothing. `force:true` deletes the previous message (if still present)
-/// and posts a fresh one. Use the force flag when the embed copy changes
-/// or the previous message has been deleted by a moderator.
+/// and posts a fresh one. Use the force flag when the copy changes or the
+/// previous message has been deleted by a moderator.
 ///
 /// ── Handler split ──
-/// This handler ONLY posts the button — the button click and modal flow
+/// This handler ONLY posts the message — the button click and modal flow
 /// live on GamertagCommandHandler. The CustomId "gamertags:open" is
 /// declared as a public const on that handler so this setup handler can
 /// reference it without circular dependencies, and only GamertagCommandHandler
@@ -169,12 +175,13 @@ public sealed class GamertagSetupCommandHandler
             }
         }
 
-        // ── Post the embed + button ──────────────────────────────────
-        var embed       = BuildInstructionsEmbed();
+        // ── Post the markdown message + button ───────────────────────
+        var messageText = BuildInstructionsMessage();
         var components  = BuildEnterButton();
 
         var posted = await instructionsChannel.SendMessageAsync(
-            embed: embed, components: components);
+            text: messageText,
+            components: components);
 
         state.GamertagButtonMessageId = posted.Id;
         await db.SaveChangesAsync();
@@ -217,35 +224,36 @@ public sealed class GamertagSetupCommandHandler
         return state;
     }
 
-    private Embed BuildInstructionsEmbed()
+    /// <summary>
+    /// Builds the plain-markdown instructions message that accompanies the
+    /// button. Format mirrors the original manual HQ post — header,
+    /// "How it Works" + "Managing Your Info" sections, and a roster link
+    /// section that Discord auto-unfurls into a Google Docs preview card.
+    ///
+    /// If GamertagRosterUrl is empty, the roster section is omitted entirely
+    /// — the rest of the message still posts cleanly.
+    /// </summary>
+    private string BuildInstructionsMessage()
     {
-        var builder = new EmbedBuilder()
-            .WithTitle("🎮 Submit Your Gamertags")
-            .WithColor(new Color(0xC9, 0xA2, 0x27)) // clan gold
-            .WithDescription(
-                "So the rest of the 189th can find you across platforms, drop your gamertags "
-                + "into the roster. Anything you don't have, just leave blank."
-                + "\n\u200B")
-            .AddField("What You'll Enter",
-                "**Page 1:** EA · Steam · PSN\n"
-                + "**Page 2:** Xbox · Embark · Bungie"
-                + "\n\u200B")
-            .AddField("How Long",
-                "About 30 seconds. Two short pages — submit page 1, then click "
-                + "**Continue to Page 2** to finish. Nothing saves until page 2 is submitted."
-                + "\n\u200B")
-            .AddField("Updating Later",
-                "Click the button again any time to update or correct your entries. "
-                + "We'll find your existing row and update it in place.")
-            .WithFooter("Press the button below to begin.");
+        var rosterSection = string.IsNullOrWhiteSpace(_config.GamertagRosterUrl)
+            ? ""
+            : $"\n\n---\n📁 **View the Master Roster here:**\n{_config.GamertagRosterUrl}";
 
-        if (!string.IsNullOrWhiteSpace(_config.GamertagInstructionsThumbnailUrl))
-            builder.WithThumbnailUrl(_config.GamertagInstructionsThumbnailUrl);
+        return $$"""
+            🎮 **How to Register Your Gamertags**
 
-        if (!string.IsNullOrWhiteSpace(_config.GamertagInstructionsBannerImageUrl))
-            builder.WithImageUrl(_config.GamertagInstructionsBannerImageUrl);
+            To keep the master roster updated, we use a bot button to track everyone's handles across different platforms.
 
-        return builder.Build();
+            **How it Works:**
+            - **Getting Started:** Click the **Enter Gamertags** button below.
+            - **Step 1:** A popup will appear for your **EA**, **Steam**, and **PSN** tags.
+            - **Step 2:** Click the **Continue** button to enter your **Xbox**, **Embark**, and **Bungie** tags.
+            - **Note:** If a field doesn't apply to you, just leave it blank!
+
+            **Managing Your Info:**
+            - **Confirmation:** You'll receive a message confirming everything you submitted once you're finished.
+            - **Updates:** If your tags ever change, just click the button again. It will automatically update your existing entry.{{rosterSection}}
+            """;
     }
 
     private static MessageComponent BuildEnterButton() =>
