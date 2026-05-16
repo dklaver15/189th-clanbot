@@ -72,6 +72,14 @@ try
 
     builder.Services.AddSingleton<GamertagCommandHandler>();
 
+    // GamertagSetupCommandHandler: /setup-gamertags slash command (HQ-gated
+    // via BotConfig.GamertagSetupRoleId or Administrator). Posts the
+    // persistent "Enter Gamertags" button to the configured instructions
+    // channel. Idempotent — re-running without force:true reports the
+    // existing message via BotState.GamertagButtonMessageId. Pairs with
+    // GamertagCommandHandler, which owns the button-click → modal flow.
+    builder.Services.AddSingleton<GamertagSetupCommandHandler>();
+
     // LookupCommandHandler: /lookup slash command. Takes a Discord user picker
     // and returns that user's gamertags from the roster sheet (ephemeral, open
     // to any member). Register() is called from DiscordBotService alongside the

@@ -395,6 +395,42 @@ public class BotConfig
     /// </summary>
     public string OfficerAppInstructionsBannerImageUrl { get; set; } = string.Empty;
 
+    // ─── Gamertag Button Settings ────────────────────────────────────
+
+    /// <summary>
+    /// Discord channel ID of the member-facing instructions channel that hosts
+    /// the persistent "Enter Gamertags" button. Posted to by
+    /// /setup-gamertags. Should be a channel everyone in the clan can see —
+    /// typically a welcome / info channel so new members find it during
+    /// onboarding.
+    /// </summary>
+    public ulong GamertagInstructionsChannelId { get; set; } = default;
+
+    /// <summary>
+    /// Discord role ID gating /setup-gamertags. Administrators always pass;
+    /// otherwise the invoker must hold this role. Leave at 0 to restrict the
+    /// command to Administrators only. Typically set to the HQ role (often the
+    /// same role as OfficerAppHqRoleId, but kept separate so the two setup
+    /// commands can be delegated independently if needed).
+    /// </summary>
+    public ulong GamertagSetupRoleId { get; set; } = default;
+
+    /// <summary>
+    /// Optional URL of a small thumbnail image (e.g. the 189th logo) shown in
+    /// the upper-right of the instructions embed. Must be a public HTTPS URL
+    /// Discord can fetch — the easiest source is to upload the image to any
+    /// Discord channel, right-click and "Copy Image Link" to get the
+    /// cdn.discordapp.com URL. Empty disables the thumbnail.
+    /// </summary>
+    public string GamertagInstructionsThumbnailUrl { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Optional URL of a large banner image shown at the bottom of the
+    /// instructions embed. Same hosting requirement as the thumbnail. Empty
+    /// disables the banner.
+    /// </summary>
+    public string GamertagInstructionsBannerImageUrl { get; set; } = string.Empty;
+
     // ─── Helpers ─────────────────────────────────────────────────────
 
     /// <summary>

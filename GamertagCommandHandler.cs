@@ -7,12 +7,38 @@ using System.Text.RegularExpressions;
 namespace ClanGuardBot.Handlers;
 
 /// <summary>
-/// Handles the /gamertags slash command using a two-step modal flow.
-/// Modal 1 (from slash command): EA, Steam, PSN
-/// Modal 2 (from button click): Xbox, Embark, Bungie
+/// Handles the gamertags flow as a button-driven two-step modal:
+///
+///   • "Enter Gamertags" button ("gamertags:open")  → Modal 1 (EA, Steam, PSN)
+///   • Modal 1 submit                                → ephemeral "Continue" button
+///   • "Continue to PAGE 2" button ("gamertags_continue") → Modal 2 (Xbox, Embark, Bungie)
+///   • Modal 2 submit                                → write to roster sheet
+///
+/// The persistent "Enter Gamertags" button is posted by
+/// GamertagSetupCommandHandler ("/setup-gamertags"). This handler owns
+/// the runtime flow only — neither registering nor advertising any slash
+/// command of its own. The button CustomId is exposed as a public const so
+/// the setup handler can reference it without a circular dependency.
+///
+/// ── Why two modals? ──
+/// Discord modals cap at 5 text inputs but we collect 6 gamertags. A two-page
+/// flow is the simplest workaround. Modal 2 must be opened from a fresh
+/// interaction (a button), not as a follow-up to Modal 1's submission —
+/// hence the intermediate ephemeral "Continue" button.
 /// </summary>
 public partial class GamertagCommandHandler
 {
+    /// <summary>
+    /// CustomId for the persistent "Enter Gamertags" button posted by
+    /// GamertagSetupCommandHandler. Stable across restarts so messages
+    /// posted in past runs continue to route correctly.
+    /// </summary>
+    public const string OpenButtonId = "gamertags:open";
+
+    private const string ContinueButtonId = "gamertags_continue";
+    private const string Modal1Id         = "gamertags_modal_1";
+    private const string Modal2Id         = "gamertags_modal_2";
+
     private readonly GoogleSheetsService _sheetsService;
     private readonly OnboardingReminderHandler _onboardingReminder;
     private readonly ILogger<GamertagCommandHandler> _logger;
@@ -36,39 +62,46 @@ public partial class GamertagCommandHandler
 
     public void Register(DiscordSocketClient client)
     {
-        client.SlashCommandExecuted += OnSlashCommandAsync;
         client.ModalSubmitted += OnModalSubmittedAsync;
         client.ButtonExecuted += OnButtonExecutedAsync;
     }
 
-    private async Task OnSlashCommandAsync(SocketSlashCommand command)
+    private async Task OnButtonExecutedAsync(SocketMessageComponent component)
     {
-        if (command.Data.Name != "gamertags") return;
+        switch (component.Data.CustomId)
+        {
+            case OpenButtonId:
+                await ShowModal1Async(component);
+                break;
+            case ContinueButtonId:
+                await ShowModal2Async(component);
+                break;
+        }
+    }
 
-        // Show the first modal (EA, Steam, PSN)
+    private static async Task ShowModal1Async(SocketMessageComponent component)
+    {
         var modal = new ModalBuilder()
             .WithTitle("Enter Gamertags (1/2)")
-            .WithCustomId("gamertags_modal_1")
+            .WithCustomId(Modal1Id)
             .AddTextInput("EA Gamertag", "ea_tag", TextInputStyle.Short, placeholder: "(leave blank if n/a)", required: false)
             .AddTextInput("Steam Gamertag", "steam_tag", TextInputStyle.Short, placeholder: "(leave blank if n/a)", required: false)
             .AddTextInput("PSN Gamertag", "psn_tag", TextInputStyle.Short, placeholder: "(leave blank if n/a)", required: false)
             .Build();
 
-        await command.RespondWithModalAsync(modal);
+        await component.RespondWithModalAsync(modal);
     }
 
-    private async Task OnButtonExecutedAsync(SocketMessageComponent component)
+    private static async Task ShowModal2Async(SocketMessageComponent component)
     {
-        if (component.Data.CustomId != "gamertags_continue") return;
-
-        // Show the second modal (Xbox, Embark, Bungie) — triggered from a button, which IS allowed
+        // Modal 2 (Xbox, Embark, Bungie) — triggered from a button, which IS allowed
         var modal2 = new ModalBuilder()
             .WithTitle("Enter Gamertags (2/2)")
-            .WithCustomId("gamertags_modal_2")
+            .WithCustomId(Modal2Id)
             .AddTextInput("Xbox Gamertag", "xbox_tag", TextInputStyle.Short, placeholder: "(leave blank if n/a)", required: false)
-            .AddTextInput("Embark Gamertag", "embark_tag", TextInputStyle.Short, 
+            .AddTextInput("Embark Gamertag", "embark_tag", TextInputStyle.Short,
                 placeholder: "e.g. Guardian#7028", required: false)
-            .AddTextInput("Bungie Gamertag", "bungie_tag", TextInputStyle.Short, 
+            .AddTextInput("Bungie Gamertag", "bungie_tag", TextInputStyle.Short,
                 placeholder: "e.g. Guardian#1234", required: false)
             .Build();
 
@@ -79,10 +112,10 @@ public partial class GamertagCommandHandler
     {
         switch (modal.Data.CustomId)
         {
-            case "gamertags_modal_1":
+            case Modal1Id:
                 await HandleModal1Async(modal);
                 break;
-            case "gamertags_modal_2":
+            case Modal2Id:
                 await HandleModal2Async(modal);
                 break;
         }
@@ -102,7 +135,7 @@ public partial class GamertagCommandHandler
 
         // Send an ephemeral message with a button to open Modal 2
         var button = new ComponentBuilder()
-            .WithButton("➡️ Continue to PAGE 2", "gamertags_continue", ButtonStyle.Primary)
+            .WithButton("➡️ Continue to PAGE 2", ContinueButtonId, ButtonStyle.Primary)
             .Build();
 
         // Trailing \u200B (zero-width space) forces Discord to render the blank line
@@ -133,7 +166,8 @@ public partial class GamertagCommandHandler
             if (!_pendingSubmissions.TryRemove(modal.User.Id, out var partial))
             {
                 await modal.FollowupAsync(
-                    "⚠️ Something went wrong — your first set of gamertags was lost. Please run `/gamertags` again.",
+                    "⚠️ Something went wrong — your first set of gamertags was lost. "
+                    + "Please click the **Enter Gamertags** button again to start over.",
                     ephemeral: true);
                 return;
             }
@@ -142,7 +176,7 @@ public partial class GamertagCommandHandler
             var xbox = components.GetValueOrDefault("xbox_tag", "");
             var embark = components.GetValueOrDefault("embark_tag", "");
             var bungie = components.GetValueOrDefault("bungie_tag", "");
-            
+
             // Validate Embark
             if (!string.IsNullOrWhiteSpace(embark) && !DiscriminatorPattern.IsMatch(embark))
             {

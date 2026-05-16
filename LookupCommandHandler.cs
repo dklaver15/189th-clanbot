@@ -47,7 +47,7 @@ public class LookupCommandHandler
             if (result is null)
             {
                 await command.FollowupAsync(
-                    $"❓ No gamertags found for **{displayName}**. They may not have run `/gamertags` yet.",
+                    $"❓ No gamertags found for **{displayName}**. They may not have submitted theirs yet.",
                     ephemeral: true);
                 return;
             }

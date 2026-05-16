@@ -385,6 +385,15 @@ public class BotState
     /// the slash command with force:true to repost.
     /// </summary>
     public ulong? OfficerAppButtonMessageId { get; set; }
+
+    /// <summary>
+    /// Discord message ID of the persistent "Enter Gamertags" button message
+    /// in the configured instructions channel. Set by /setup-gamertags;
+    /// consulted on re-run for idempotency. Null until the button has been
+    /// posted for the first time. If the message is deleted manually, re-run
+    /// the slash command with force:true to repost.
+    /// </summary>
+    public ulong? GamertagButtonMessageId { get; set; }
 }
 
 /// <summary>

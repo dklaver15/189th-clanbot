@@ -586,8 +586,6 @@ public class CommandsCommandHandler
                 "Everyone", everyone),
             new("command-catalog", "Show this list of available slash commands",
                 "Everyone", everyone),
-            new("gamertags", "Enter your gamertags (EA, Steam, PSN, Xbox, etc.)",
-                "Everyone", everyone),
             new("lookup", "Look up someone's gamertags from the roster",
                 "Everyone", everyone),
             new("my-invites", "Show invites you created with use counts and attribution",

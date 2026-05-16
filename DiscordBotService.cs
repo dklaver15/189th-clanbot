@@ -19,6 +19,7 @@ public class DiscordBotService : IHostedService
     private readonly DiscordSocketClient _client;
     private readonly ActivityTrackingHandler _activityHandler;
     private readonly GamertagCommandHandler _gamertagHandler;
+    private readonly GamertagSetupCommandHandler _gamertagSetupHandler;
     private readonly LookupCommandHandler _lookupHandler;
     private readonly PromoEligibilityCommandHandler _promoEligibilityHandler;
     private readonly RankTrackingHandler _rankHandler;
@@ -59,6 +60,7 @@ public class DiscordBotService : IHostedService
         DiscordSocketClient client,
         ActivityTrackingHandler activityHandler,
         GamertagCommandHandler gamertagHandler,
+        GamertagSetupCommandHandler gamertagSetupHandler,
         LookupCommandHandler lookupHandler,
         PromoEligibilityCommandHandler promoEligibilityHandler,
         RankTrackingHandler rankHandler,
@@ -98,6 +100,7 @@ public class DiscordBotService : IHostedService
         _client                      = client;
         _activityHandler             = activityHandler;
         _gamertagHandler             = gamertagHandler;
+        _gamertagSetupHandler        = gamertagSetupHandler;
         _lookupHandler               = lookupHandler;
         _promoEligibilityHandler     = promoEligibilityHandler;
         _rankHandler                 = rankHandler;
@@ -142,6 +145,7 @@ public class DiscordBotService : IHostedService
 
         _activityHandler.Register(_client);
         _gamertagHandler.Register(_client);
+        _gamertagSetupHandler.Register(_client);
         _lookupHandler.Register(_client);
         _promoEligibilityHandler.Register(_client);
         _rankHandler.Register(_client);
@@ -235,10 +239,12 @@ public class DiscordBotService : IHostedService
                         "The user to clear", isRequired: true)
                     .Build(),
 
-                new SlashCommandBuilder()
-                    .WithName("gamertags")
-                    .WithDescription("Enter your gamertags for EA, Steam, PSN, Xbox, Embark, and Bungie")
-                    .Build(),
+                // /setup-gamertags — posts (or re-posts with force:true) the
+                // persistent "Enter Gamertags" button to the configured
+                // instructions channel. Replaced the old member-facing
+                // /gamertags slash command — members now hit the button
+                // instead. HQ-gated via BotConfig.GamertagSetupRoleId.
+                GamertagSetupCommandHandler.BuildCommand(),
 
                 new SlashCommandBuilder()
                     .WithName("lookup")
