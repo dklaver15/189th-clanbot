@@ -77,9 +77,10 @@ public sealed class SecurityAuditCommandHandler
     /// </summary>
     public static readonly (string Value, string Display)[] KnownFeatures =
     {
-        ("AccountAgeGate", "Account-Age Gate"),
-        // Future: InviteLinkFilter, AuditLogWatcher, NicknameImpersonation,
-        // WebhookAudit, TokenGrabberScanner.
+        ("AccountAgeGate",   "Account-Age Gate"),
+        ("InviteLinkFilter", "Invite Link Filter"),
+        // Future: AuditLogWatcher, NicknameImpersonation, WebhookAudit,
+        // TokenGrabberScanner.
     };
 
     private readonly IServiceProvider _services;

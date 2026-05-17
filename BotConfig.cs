@@ -490,6 +490,35 @@ public class BotConfig
     /// </summary>
     public ulong SecurityAlertsChannelId { get; set; } = 1407959078105514046;
 
+    // ─── Server protection: Invite-Link Filter ───────────────────────
+    /// <summary>
+    /// Operating mode for the invite-link filter on MessageReceived /
+    /// MessageUpdated. One of:
+    ///   "Off"        — feature disabled.
+    ///   "AlertOnly"  — post a security alert + write an audit row for any
+    ///                  external invite link posted by a non-exempt member,
+    ///                  but DO NOT delete the message or DM the poster.
+    ///                  Useful for tuning the exempt-rank floor before
+    ///                  flipping to Enforce.
+    ///   "Enforce"    — delete the message, best-effort DM the poster,
+    ///                  post the alert, write the audit row. Default.
+    /// Comparison is case-insensitive; an unrecognized value falls back to
+    /// AlertOnly with a warning log so a typo never silently enforces.
+    /// </summary>
+    public string InviteLinkFilterMode { get; set; } = "Enforce";
+
+    /// <summary>
+    /// Members holding any rank at or above this name (in the RankRoles
+    /// list) bypass the invite-link filter — they can legitimately share
+    /// invites to partnered servers, sister clans, or events without
+    /// being deleted. Default "MAJ" — field-grade officers and above.
+    /// Server Administrators are ALSO always exempt regardless of this
+    /// setting (matches every other rank-gated check in the codebase).
+    /// Empty / unknown rank name disables the rank exemption (Admins
+    /// still bypass).
+    /// </summary>
+    public string InviteLinkFilterExemptMinRank { get; set; } = "MAJ";
+
     // ─── Helpers ─────────────────────────────────────────────────────
 
     /// <summary>

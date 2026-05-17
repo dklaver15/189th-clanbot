@@ -84,6 +84,18 @@ try
     // DiscordBotService.
     builder.Services.AddSingleton<AccountAgeGateHandler>();
 
+    // InviteLinkFilterHandler: server-protection feature #2. Hooks
+    // MessageReceived + MessageUpdated, scans for Discord invite URLs, and
+    // either alerts or deletes-and-DMs depending on
+    // BotConfig.InviteLinkFilterMode (Off / AlertOnly / Enforce). Defaults
+    // to Enforce for everyone below BotConfig.InviteLinkFilterExemptMinRank
+    // (default MAJ); Administrators and exempt-rank members bypass. Reuses
+    // InviteCacheService to identify our own invite codes — every other
+    // code is treated as external. Posts to BotConfig.SecurityAlertsChannelId
+    // and writes one SecurityAuditRecord row per violation. Register() is
+    // called from DiscordBotService.
+    builder.Services.AddSingleton<InviteLinkFilterHandler>();
+
     // OnboardingReminderHandler: registered before GamertagCommandHandler because
     // the gamertag handler depends on it to notify when a Guest saves gamertags.
     builder.Services.AddSingleton<OnboardingReminderHandler>();
