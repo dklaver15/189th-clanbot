@@ -548,6 +548,33 @@ public class BotConfig
     /// </summary>
     public string AuditLogWatcherCriticalMention { get; set; } = "@here";
 
+    // ─── Server protection: Nickname Impersonation Check ─────────────
+    /// <summary>
+    /// Operating mode for the nickname-impersonation watcher. Fires on
+    /// <c>UserJoined</c> and <c>GuildMemberUpdated</c> (when the
+    /// display name changed) and compares the suspect's display name
+    /// against every CPT+ officer in the guild. One of:
+    ///   "Off"        — feature disabled.
+    ///   "AlertOnly"  — default. Post an alert + write an audit row
+    ///                  for every match. No automatic action.
+    /// Auto-revert mode (rename suspect back to plain username) is
+    /// deliberately not implemented for v1 — false positives on a
+    /// legitimate recruit sharing a last name with an officer would
+    /// be unfair, and we want eyeballs on the alert pattern first.
+    /// </summary>
+    public string NicknameImpersonationMode { get; set; } = "AlertOnly";
+
+    /// <summary>
+    /// Minimum rank a member must hold to be treated as a protected
+    /// officer for the impersonation check. Must match an entry in
+    /// <see cref="RankRoles"/> (case-insensitive). Default <c>CPT</c>
+    /// — below that, ranks are common enough that fuzzy matching
+    /// false-positives heavily, and the social authority gradient
+    /// drops off (a fake CPL is much less effective at running scams
+    /// than a fake MAJ).
+    /// </summary>
+    public string NicknameImpersonationMinRank { get; set; } = "CPT";
+
     // ─── Helpers ─────────────────────────────────────────────────────
 
     /// <summary>

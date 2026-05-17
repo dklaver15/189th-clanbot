@@ -109,6 +109,15 @@ try
     // permission in the guild.
     builder.Services.AddSingleton<AuditLogWatcherHandler>();
 
+    // NicknameImpersonationHandler: server-protection feature #4. Fires
+    // on UserJoined and GuildMemberUpdated (display-name changes only)
+    // and compares the suspect's display name against every CPT+
+    // officer using a normalize → strip-rank-prefix → exact/Levenshtein/
+    // substring match pipeline. Catches typos, Unicode lookalike
+    // attacks (Cyrillic/Greek/digit substitution), and "drop the rank
+    // prefix" attempts. Alert-only for v1.
+    builder.Services.AddSingleton<NicknameImpersonationHandler>();
+
     // OnboardingReminderHandler: registered before GamertagCommandHandler because
     // the gamertag handler depends on it to notify when a Guest saves gamertags.
     builder.Services.AddSingleton<OnboardingReminderHandler>();
