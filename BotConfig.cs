@@ -621,6 +621,48 @@ public class BotConfig
     public List<string> GetWebhookAuditAllowlist() =>
         WebhookAuditAllowlist.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
 
+    // ─── Server protection: Token-Grabber Link Scanner ───────────────
+    /// <summary>
+    /// Operating mode for the anti-token-grabber link scanner. Scans
+    /// every user-authored message (and edit) for URLs against
+    /// (officer blocklist + Sinking Yachts phishing feed + IP-URL
+    /// static pattern). One of:
+    ///   "Off"        — feature disabled (the phishing-feed refresh
+    ///                  service also skips fetching to save the API call).
+    ///   "AlertOnly"  — default. Post to #alerts and write an audit
+    ///                  row. Message is NOT deleted, no DM sent.
+    /// Enforce mode (auto-delete + DM the poster) is deliberately not
+    /// implemented for v1 — too easy for a brief false-positive on a
+    /// popular domain to nuke a legitimate officer's message with no
+    /// clear recourse. AlertOnly first builds trust in the signal.
+    /// </summary>
+    public string TokenGrabberScannerMode { get; set; } = "AlertOnly";
+
+    /// <summary>
+    /// Minimum rank for exemption from the scanner. Members at this
+    /// rank or above can post any URL without tripping the scanner.
+    /// Must match an entry in <see cref="RankRoles"/> (case-insensitive).
+    /// Default <c>BG</c> — general-grade leadership doesn't need
+    /// link policing, and false positives on them would be more
+    /// disruptive than missing the rare BG+ phish. Server
+    /// Administrators are always exempt regardless of this setting.
+    /// </summary>
+    public string TokenGrabberScannerExemptMinRank { get; set; } = "BG";
+
+    /// <summary>
+    /// Comma-separated officer-managed blocklist of phishing /
+    /// malicious domains. Matched alongside (and prioritized over) the
+    /// Sinking Yachts feed. Empty by default — populate as officers
+    /// confirm specific domains from real attempted attacks. Entries
+    /// match both the exact host and any subdomain (so
+    /// <c>bad-domain.com</c> in the blocklist matches
+    /// <c>evil.bad-domain.com</c> too).
+    /// </summary>
+    public string TokenGrabberScannerBlocklist { get; set; } = "";
+
+    public List<string> GetTokenGrabberScannerBlocklist() =>
+        TokenGrabberScannerBlocklist.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+
     // ─── Helpers ─────────────────────────────────────────────────────
 
     /// <summary>

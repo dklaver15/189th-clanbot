@@ -82,7 +82,7 @@ public sealed class SecurityAuditCommandHandler
         ("AuditLogWatcher",       "Audit Log Watcher"),
         ("NicknameImpersonation", "Nickname Impersonation"),
         ("WebhookAudit",          "Webhook Audit"),
-        // Future: TokenGrabberScanner.
+        ("TokenGrabberScanner",   "Token-Grabber Scanner"),
     };
 
     private readonly IServiceProvider _services;

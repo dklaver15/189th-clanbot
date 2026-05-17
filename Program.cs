@@ -132,6 +132,21 @@ try
     // grouped by channel with first-seen info from the snapshot table.
     builder.Services.AddSingleton<WebhookAuditCommandHandler>();
 
+    // PhishingDomainFeedService: BackgroundService that refreshes the
+    // Sinking Yachts phishing-domain feed every 6 hours and exposes
+    // it for O(1) lookup. Registered as singleton AND hosted so the
+    // scanner handler can inject it while the host runs the loop.
+    // AddHttpClient registers IHttpClientFactory which the service uses.
+    builder.Services.AddHttpClient();
+    builder.Services.AddSingleton<PhishingDomainFeedService>();
+    builder.Services.AddHostedService(sp =>
+        sp.GetRequiredService<PhishingDomainFeedService>());
+
+    // TokenGrabberScannerHandler: server-protection feature #6. Scans
+    // every message and edit for URLs against the phishing feed +
+    // officer blocklist + IP-address static pattern. AlertOnly for v1.
+    builder.Services.AddSingleton<TokenGrabberScannerHandler>();
+
     // OnboardingReminderHandler: registered before GamertagCommandHandler because
     // the gamertag handler depends on it to notify when a Guest saves gamertags.
     builder.Services.AddSingleton<OnboardingReminderHandler>();
