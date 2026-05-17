@@ -79,8 +79,8 @@ public sealed class SecurityAuditCommandHandler
     {
         ("AccountAgeGate",   "Account-Age Gate"),
         ("InviteLinkFilter", "Invite Link Filter"),
-        // Future: AuditLogWatcher, NicknameImpersonation, WebhookAudit,
-        // TokenGrabberScanner.
+        ("AuditLogWatcher",  "Audit Log Watcher"),
+        // Future: NicknameImpersonation, WebhookAudit, TokenGrabberScanner.
     };
 
     private readonly IServiceProvider _services;

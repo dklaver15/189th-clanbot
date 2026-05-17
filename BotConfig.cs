@@ -519,6 +519,35 @@ public class BotConfig
     /// </summary>
     public string InviteLinkFilterExemptMinRank { get; set; } = "MAJ";
 
+    // ─── Server protection: Audit Log Watcher ────────────────────────
+    /// <summary>
+    /// Operating mode for the audit-log watcher on Discord's
+    /// <c>AuditLogCreated</c> gateway event. One of:
+    ///   "Off"        — feature disabled.
+    ///   "AlertOnly"  — default. Post a security alert + write an audit
+    ///                  row for every watched action. No auto-response.
+    /// Auto-response modes (role strip / channel lock / kick) are
+    /// intentionally out of scope for v1; build trust in what the
+    /// watcher catches before flipping any switch that could lock out
+    /// an innocent officer on a false positive.
+    /// </summary>
+    public string AuditLogWatcherMode { get; set; } = "AlertOnly";
+
+    /// <summary>
+    /// Mention string prefixed to alerts for actions on the
+    /// <c>CriticalActions</c> list (channel deletes, bot adds, guild
+    /// settings changes). The alert embed posts unconditionally;
+    /// this controls whether the embed is also ping-prefixed to wake
+    /// someone up. Default <c>@here</c>. Set to empty string to
+    /// disable pinging entirely (alerts still post, just silently).
+    /// Note: only <c>@here</c> and <c>@everyone</c> are wired up for
+    /// the AllowedMentions flag today — a role mention like
+    /// <c>&lt;@&amp;ROLE_ID&gt;</c> in this field would post as plain text
+    /// without pinging unless we extend the handler to set
+    /// AllowedMentions.RoleIds.
+    /// </summary>
+    public string AuditLogWatcherCriticalMention { get; set; } = "@here";
+
     // ─── Helpers ─────────────────────────────────────────────────────
 
     /// <summary>

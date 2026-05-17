@@ -37,6 +37,7 @@ try
                        | GatewayIntents.GuildVoiceStates
                        | GatewayIntents.GuildInvites
                        | GatewayIntents.GuildPresences
+                       | GatewayIntents.GuildBans  // a.k.a. GuildModeration (Discord renamed it server-side; Discord.NET 3.17 keeps the old enum name). Required for AuditLogCreated.
                        | GatewayIntents.MessageContent,
         AlwaysDownloadUsers = true,
         LogLevel            = LogSeverity.Info,
@@ -95,6 +96,18 @@ try
     // and writes one SecurityAuditRecord row per violation. Register() is
     // called from DiscordBotService.
     builder.Services.AddSingleton<InviteLinkFilterHandler>();
+
+    // AuditLogWatcherHandler: server-protection feature #3. Hooks
+    // Discord's AuditLogCreated gateway event, filters to high-signal
+    // structural actions (channel deletes, bans, bot adds, role changes,
+    // server-settings updates, webhook creates), filters out the bot's
+    // own actions to keep the signal clean, and posts alerts to
+    // SecurityAlertsChannelId. Critical actions get a @here prefix per
+    // AuditLogWatcherCriticalMention. Alert-only for v1 — no
+    // auto-response. Requires GuildBans gateway intent (added above;
+    // a.k.a. GUILD_MODERATION on Discord's side) AND the View Audit Log
+    // permission in the guild.
+    builder.Services.AddSingleton<AuditLogWatcherHandler>();
 
     // OnboardingReminderHandler: registered before GamertagCommandHandler because
     // the gamertag handler depends on it to notify when a Guest saves gamertags.

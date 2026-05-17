@@ -26,6 +26,7 @@ public class DiscordBotService : IHostedService
     private readonly MemberLifecycleHandler _memberLifecycleHandler;
     private readonly AccountAgeGateHandler _accountAgeGateHandler;
     private readonly InviteLinkFilterHandler _inviteLinkFilterHandler;
+    private readonly AuditLogWatcherHandler _auditLogWatcherHandler;
     private readonly TicketReminderHandler _ticketReminderHandler;
     private readonly GuestReminderHandler _guestReminderHandler;
     private readonly OnboardingReminderHandler _onboardingReminderHandler;
@@ -71,6 +72,7 @@ public class DiscordBotService : IHostedService
         MemberLifecycleHandler memberLifecycleHandler,
         AccountAgeGateHandler accountAgeGateHandler,
         InviteLinkFilterHandler inviteLinkFilterHandler,
+        AuditLogWatcherHandler auditLogWatcherHandler,
         TicketReminderHandler ticketReminderHandler,
         GuestReminderHandler guestReminderHandler,
         OnboardingReminderHandler onboardingReminderHandler,
@@ -115,6 +117,7 @@ public class DiscordBotService : IHostedService
         _memberLifecycleHandler      = memberLifecycleHandler;
         _accountAgeGateHandler       = accountAgeGateHandler;
         _inviteLinkFilterHandler     = inviteLinkFilterHandler;
+        _auditLogWatcherHandler      = auditLogWatcherHandler;
         _ticketReminderHandler       = ticketReminderHandler;
         _guestReminderHandler        = guestReminderHandler;
         _onboardingReminderHandler   = onboardingReminderHandler;
@@ -164,6 +167,7 @@ public class DiscordBotService : IHostedService
         _memberLifecycleHandler.Register(_client);
         _accountAgeGateHandler.Register(_client);
         _inviteLinkFilterHandler.Register(_client);
+        _auditLogWatcherHandler.Register(_client);
         _ticketReminderHandler.Register(_client);
         _guestReminderHandler.Register(_client);
         _onboardingReminderHandler.Register(_client);
