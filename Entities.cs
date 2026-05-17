@@ -461,6 +461,15 @@ public class BotState
     public DateTime? LastAutoPromotionCompletedUtc { get; set; }
 
     /// <summary>
+    /// Timestamp of the last successfully-completed WebhookAuditService
+    /// scan. Null if no scan has ever completed (fresh DB or feature
+    /// freshly deployed). Used by the service to distinguish first-run
+    /// (silently populate WebhookSnapshots so existing webhooks don't
+    /// flood #alerts as "new") from subsequent runs (diff and alert).
+    /// </summary>
+    public DateTime? LastWebhookAuditScanCompletedUtc { get; set; }
+
+    /// <summary>
     /// Discord message ID of the persistent "Apply for Officer" button message
     /// in the configured instructions channel. Set by /setup-officer-app;
     /// consulted on re-run for idempotency. Null until the button has been

@@ -28,6 +28,7 @@ public class DiscordBotService : IHostedService
     private readonly InviteLinkFilterHandler _inviteLinkFilterHandler;
     private readonly AuditLogWatcherHandler _auditLogWatcherHandler;
     private readonly NicknameImpersonationHandler _nicknameImpersonationHandler;
+    private readonly WebhookAuditCommandHandler _webhookAuditCommandHandler;
     private readonly TicketReminderHandler _ticketReminderHandler;
     private readonly GuestReminderHandler _guestReminderHandler;
     private readonly OnboardingReminderHandler _onboardingReminderHandler;
@@ -75,6 +76,7 @@ public class DiscordBotService : IHostedService
         InviteLinkFilterHandler inviteLinkFilterHandler,
         AuditLogWatcherHandler auditLogWatcherHandler,
         NicknameImpersonationHandler nicknameImpersonationHandler,
+        WebhookAuditCommandHandler webhookAuditCommandHandler,
         TicketReminderHandler ticketReminderHandler,
         GuestReminderHandler guestReminderHandler,
         OnboardingReminderHandler onboardingReminderHandler,
@@ -121,6 +123,7 @@ public class DiscordBotService : IHostedService
         _inviteLinkFilterHandler     = inviteLinkFilterHandler;
         _auditLogWatcherHandler      = auditLogWatcherHandler;
         _nicknameImpersonationHandler = nicknameImpersonationHandler;
+        _webhookAuditCommandHandler   = webhookAuditCommandHandler;
         _ticketReminderHandler       = ticketReminderHandler;
         _guestReminderHandler        = guestReminderHandler;
         _onboardingReminderHandler   = onboardingReminderHandler;
@@ -172,6 +175,7 @@ public class DiscordBotService : IHostedService
         _inviteLinkFilterHandler.Register(_client);
         _auditLogWatcherHandler.Register(_client);
         _nicknameImpersonationHandler.Register(_client);
+        _webhookAuditCommandHandler.Register(_client);
         _ticketReminderHandler.Register(_client);
         _guestReminderHandler.Register(_client);
         _onboardingReminderHandler.Register(_client);
@@ -513,6 +517,13 @@ public class DiscordBotService : IHostedService
                 // NOTE: also keep CommandsCommandHandler.BuildCatalog in
                 // sync when changing /security-audit.
                 SecurityAuditCommandHandler.BuildCommand(),
+
+                // /webhook-audit — fresh-fetch + snapshot-reconciled inventory
+                // of every webhook in the server. BG+ gated; the surface is
+                // essentially a list of every backdoor into channels and
+                // belongs at the same sensitivity class as /security-audit.
+                // NOTE: keep CommandsCommandHandler.BuildCatalog in sync.
+                WebhookAuditCommandHandler.BuildCommand(),
 
                 // /patrol — Patrol Watch opt-out / info surface. Three
                 // subcommands (off, on, info). Open to all members; rendered

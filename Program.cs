@@ -118,6 +118,20 @@ try
     // prefix" attempts. Alert-only for v1.
     builder.Services.AddSingleton<NicknameImpersonationHandler>();
 
+    // WebhookAuditService: server-protection feature #5. Periodic
+    // (default every 6 hours) scan of every webhook in every guild,
+    // diffed against the WebhookSnapshots table. Alerts on new /
+    // deleted / changed webhooks unless they match the allowlist. The
+    // Audit Log Watcher catches WebhookCreated in real time; this is
+    // the catch-everything backstop and the persistence layer for
+    // /webhook-audit. Requires Manage Webhooks guild permission.
+    builder.Services.AddHostedService<WebhookAuditService>();
+
+    // WebhookAuditCommandHandler: read side of the same feature. BG+
+    // gated /webhook-audit slash command, lists all live webhooks
+    // grouped by channel with first-seen info from the snapshot table.
+    builder.Services.AddSingleton<WebhookAuditCommandHandler>();
+
     // OnboardingReminderHandler: registered before GamertagCommandHandler because
     // the gamertag handler depends on it to notify when a Guest saves gamertags.
     builder.Services.AddSingleton<OnboardingReminderHandler>();

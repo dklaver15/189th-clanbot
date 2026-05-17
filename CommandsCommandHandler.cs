@@ -634,6 +634,8 @@ public class CommandsCommandHandler
                 attendanceLbl, MinRank("MAJ")),   // SyncWithHandlers: UsageStatsCommandHandler.MinRankFloor
             new("security-audit", "Server-protection audit log (account-age gate and future security features)",
                 securityAuditLbl, MinRank("BG")),   // SyncWithHandlers: SecurityAuditCommandHandler.MinRankFloor
+            new("webhook-audit", "List every webhook in the server, grouped by channel (BG+ only)",
+                securityAuditLbl, MinRank("BG")),   // SyncWithHandlers: WebhookAuditCommandHandler.MinRankFloor
             new("clear-awol-list", $"Delete all messages in #{config.HqChannelName}",
                 awolKickLbl, MinRank(config.AwolKickMinRank)),
             new("kick-awols", "Kick all members currently flagged AWOL",

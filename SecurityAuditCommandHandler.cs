@@ -81,7 +81,8 @@ public sealed class SecurityAuditCommandHandler
         ("InviteLinkFilter",      "Invite Link Filter"),
         ("AuditLogWatcher",       "Audit Log Watcher"),
         ("NicknameImpersonation", "Nickname Impersonation"),
-        // Future: WebhookAudit, TokenGrabberScanner.
+        ("WebhookAudit",          "Webhook Audit"),
+        // Future: TokenGrabberScanner.
     };
 
     private readonly IServiceProvider _services;

@@ -575,6 +575,52 @@ public class BotConfig
     /// </summary>
     public string NicknameImpersonationMinRank { get; set; } = "CPT";
 
+    // ─── Server protection: Webhook Audit ────────────────────────────
+    /// <summary>
+    /// Operating mode for the webhook-audit periodic scan. One of:
+    ///   "Off"        — feature disabled (scan service still runs but
+    ///                  no work is done; the slash command also refuses).
+    ///   "AlertOnly"  — default. Every 6 hours, diff the live webhook
+    ///                  list against the stored snapshot and post alerts
+    ///                  for new / deleted / changed webhooks.
+    /// Auto-delete mode is intentionally not implemented for v1 — the
+    /// false-positive cost of nuking a legitimate just-installed
+    /// integration is high, and the audit-log watcher already catches
+    /// brand-new webhooks in real time.
+    /// </summary>
+    public string WebhookAuditMode { get; set; } = "AlertOnly";
+
+    /// <summary>
+    /// How often the periodic scan runs, in minutes. Default 360
+    /// (6 hours). The Audit Log Watcher (feature #3) is the real-time
+    /// line of defense; this is the "did we miss anything?" sweep, so
+    /// a low frequency keeps the API-call cost modest and is the right
+    /// posture even on bigger servers. Clamped to a minimum of 15
+    /// internally to prevent footgun.
+    /// </summary>
+    public int WebhookAuditScanIntervalMinutes { get; set; } = 360;
+
+    /// <summary>
+    /// Comma-separated allowlist for webhooks that should NOT trigger
+    /// new-webhook or change alerts. Each entry can be either:
+    ///   • A numeric application ID — matched against
+    ///     <see cref="Models.WebhookSnapshot.ApplicationId"/>. Most
+    ///     robust because Discord issues app IDs and they can't be
+    ///     spoofed by renaming.
+    ///   • A non-numeric string — matched case-insensitively against
+    ///     <see cref="Models.WebhookSnapshot.Name"/>. Easier to add
+    ///     ("Apollo"), but spoofable — an attacker can name their
+    ///     malicious webhook "Apollo" too. Prefer the app ID when you
+    ///     can look it up.
+    /// Empty by default; populate as legitimate integrations get added
+    /// to the server (the new-webhook alert tells you the app ID to
+    /// allowlist).
+    /// </summary>
+    public string WebhookAuditAllowlist { get; set; } = "";
+
+    public List<string> GetWebhookAuditAllowlist() =>
+        WebhookAuditAllowlist.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+
     // ─── Helpers ─────────────────────────────────────────────────────
 
     /// <summary>

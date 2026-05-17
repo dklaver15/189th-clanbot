@@ -10,6 +10,7 @@ public class BotDbContext : DbContext
     public DbSet<AwolRecord>          AwolRecords         => Set<AwolRecord>();
     public DbSet<AwolKickAuditRecord> AwolKickAudits      => Set<AwolKickAuditRecord>();
     public DbSet<SecurityAuditRecord> SecurityAuditRecords => Set<SecurityAuditRecord>();
+    public DbSet<WebhookSnapshot>     WebhookSnapshots    => Set<WebhookSnapshot>();
     public DbSet<MessageEvent>        MessageEvents       => Set<MessageEvent>();
     public DbSet<VoiceSession>        VoiceSessions       => Set<VoiceSession>();
     public DbSet<RankHistory>         RankHistories       => Set<RankHistory>();
@@ -79,6 +80,16 @@ public class BotDbContext : DbContext
             entity.HasIndex(e => new { e.GuildId, e.Feature, e.OccurredAt });
             entity.HasIndex(e => new { e.GuildId, e.UserId, e.OccurredAt })
                   .HasFilter("\"UserId\" IS NOT NULL");
+        });
+
+        modelBuilder.Entity<WebhookSnapshot>(entity =>
+        {
+            // (GuildId, WebhookId) unique — WebhookId is the diff key and is
+            // globally unique across Discord, but compound with GuildId makes
+            // queries clean and gives us multi-guild safety for free.
+            entity.HasIndex(e => new { e.GuildId, e.WebhookId }).IsUnique();
+            // Listing by channel is the /webhook-audit hot path.
+            entity.HasIndex(e => new { e.GuildId, e.ChannelId });
         });
 
         modelBuilder.Entity<MessageEvent>(e =>
