@@ -269,6 +269,15 @@ try
     // eligibility checks.
     builder.Services.AddHostedService<EventAttendanceSnapshotService>();
 
+    // MeetingAttendanceSnapshotService: mirror of EventAttendanceSnapshotService
+    // for meeting attendance. Snapshots time spent in BotConfig.MeetingVoiceChannelId
+    // (15-min threshold by default) against the same Apollo-derived CalendarEvents.
+    // Opt-in via config — when MeetingVoiceChannelId == 0, the service exits
+    // immediately on startup. Writes MeetingAttendance rows; those rows are
+    // folded into EventAttendanceHelper.CountEventsAttendedAsync so meetings
+    // "count as events" for promotion math.
+    builder.Services.AddHostedService<MeetingAttendanceSnapshotService>();
+
     // AutoPromotionService: nightly check that auto-promotes RCT → SGT based on
     // time-in-rank + activity thresholds (msgs/voice for RCT→CPL; event attendance
     // for CPL→SGT). Respects the AutoPromotionEnabled, AutoPromotionDryRun, and

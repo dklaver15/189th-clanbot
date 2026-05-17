@@ -35,9 +35,15 @@ namespace ClanGuardBot.Handlers;
 /// is for "what just happened," not "what's coming up."
 ///
 /// ── Data sources ──
-/// Pulls from BOTH CalendarEvents (to know which events happened in window)
-/// and EventAttendance (to know who got credit). Two-source approach lets
-/// us classify each event into one of four states:
+/// Pulls from THREE tables: CalendarEvents (to know which events happened
+/// in window), EventAttendance (to know who got events-VC credit), and
+/// MeetingAttendance (to know who got meetings-VC credit). Per clan rule
+/// "meeting attendance counts as event attendance" the two attendance
+/// streams are merged in-process and rendered uniformly per event — a
+/// member who qualified via either pipeline shows up the same way, and
+/// a member who somehow qualified via both is deduped to a single bullet
+/// (max minutes). Two-source-plus-meetings approach lets us classify each
+/// event into one of four states:
 ///   • Hasn't started — kept as defensive code only; the window filter
 ///     normally excludes future events so this state should not occur in
 ///     practice.
@@ -48,7 +54,9 @@ namespace ClanGuardBot.Handlers;
 ///
 /// Manual /add-event-credit rows (CalendarEventId == 0) are listed in their
 /// own bottom section, keyed by RecordedAt rather than EventStartUtc, since
-/// those rows fudge their event times to "now at insert time."
+/// those rows fudge their event times to "now at insert time." Manual rows
+/// only exist on the EventAttendance side — there is no parallel manual
+/// flow for meetings.
 ///
 /// ── User name rendering ──
 /// We can't fully trust Discord's &lt;@id&gt; mention resolution — it sometimes
@@ -223,11 +231,53 @@ public class AttendanceCommandHandler
         // the originating CalendarEvent was deleted (same-day Apollo cleanup).
         // Manual rows (CalendarEventId == 0) are included here but get
         // partitioned out below.
-        var windowAttendance = await db.EventAttendances
+        var windowEventAttendance = await db.EventAttendances
             .Where(a => a.GuildId == guildId
                      && a.EventStartUtc >= windowStart
                      && a.EventStartUtc <= now)
             .ToListAsync();
+
+        // Meeting attendance rows for the same window. Per the clan rule
+        // "meeting attendance counts as event attendance", these are merged
+        // into the same per-event listing rather than rendered separately.
+        // Promoted to EventAttendance shape so the rest of the embed builder
+        // (which keys off EventAttendance fields) doesn't need a parallel
+        // code path. The promotion is purely for in-memory display — nothing
+        // is written back. Manual-credit sentinel handling is unaffected:
+        // MeetingAttendance has no concept of CalendarEventId=0, so these
+        // rows never collide with the manual section below.
+        var windowMeetingAttendance = await db.MeetingAttendances
+            .Where(a => a.GuildId == guildId
+                     && a.EventStartUtc >= windowStart
+                     && a.EventStartUtc <= now)
+            .Select(m => new EventAttendance
+            {
+                GuildId         = m.GuildId,
+                UserId          = m.UserId,
+                CalendarEventId = m.CalendarEventId,
+                Username        = m.Username,
+                EventStartUtc   = m.EventStartUtc,
+                EventEndUtc     = m.EventEndUtc,
+                AttendedMinutes = m.AttendedMinutes,
+                RecordedAt      = m.RecordedAt
+            })
+            .ToListAsync();
+
+        // Combine, then dedupe by (CalendarEventId, UserId) keeping the
+        // higher AttendedMinutes. The rare collision case — a member who
+        // qualified in BOTH the events-VC pipeline AND the meetings-VC
+        // pipeline for the same Apollo event — would otherwise render as
+        // two bullet lines for the same person. Dedupe avoids that
+        // confusion. Max-minutes is a display choice (the minutes value
+        // isn't used for promotion math anywhere downstream of /attendance);
+        // it shows the larger of the two qualifying sessions so the
+        // officer reading the embed sees "this person's heaviest VC
+        // presence at this event."
+        var windowAttendance = windowEventAttendance
+            .Concat(windowMeetingAttendance)
+            .GroupBy(a => (a.CalendarEventId, a.UserId))
+            .Select(g => g.OrderByDescending(a => a.AttendedMinutes).First())
+            .ToList();
 
         // Manual /add-event-credit rows added during the window. Keyed by
         // RecordedAt rather than EventStartUtc — the manual flow stamps
@@ -236,7 +286,9 @@ public class AttendanceCommandHandler
         // Pulled separately because manual rows don't have meaningful
         // EventStartUtc boundaries and shouldn't be grouped with real-event
         // attendance. No upper bound needed: RecordedAt is always set to
-        // DateTime.UtcNow at insert and can't be in the future.
+        // DateTime.UtcNow at insert and can't be in the future. Sourced
+        // from EventAttendance only — manual-credit doesn't have a meeting
+        // counterpart by design.
         var windowManualCredits = await db.EventAttendances
             .Where(a => a.GuildId == guildId
                      && a.CalendarEventId == ManualAdjustmentCalendarEventId
@@ -247,8 +299,8 @@ public class AttendanceCommandHandler
         var embed = BuildEmbed(guild, now, windowStart, windowEvents, windowAttendance, windowManualCredits);
 
         _logger.LogInformation(
-            "/attendance invoked by {Caller}: {EventCount} event(s), {AttendanceCount} attendance row(s), {ManualCount} manual credit(s) in window",
-            caller.Username, windowEvents.Count, windowAttendance.Count, windowManualCredits.Count);
+            "/attendance invoked by {Caller}: {EventCount} event(s), {EventRowCount} event-attendance row(s), {MeetingRowCount} meeting-attendance row(s), {ManualCount} manual credit(s) in window",
+            caller.Username, windowEvents.Count, windowEventAttendance.Count, windowMeetingAttendance.Count, windowManualCredits.Count);
 
         await command.FollowupAsync(embed: embed, ephemeral: true);
     }
@@ -468,13 +520,20 @@ public class AttendanceCommandHandler
     ///                                   query filter normally excludes it)
     ///   StartUtc &lt;= now &lt; EndUtc    → "in progress"
     ///   EndUtc &lt;= now AND attendees → header + lines (chunked by caller)
-    ///   EndUtc &lt;= now AND no rows AND LastSnapshotAttemptUtc null → "pending"
-    ///   EndUtc &lt;= now AND no rows AND attempted                  → "0 qualifying"
+    ///   EndUtc &lt;= now AND no rows AND either snapshot column is null  → "pending"
+    ///   EndUtc &lt;= now AND no rows AND both snapshot columns stamped   → "0 qualifying"
     ///
-    /// We check for attendance rows BEFORE LastSnapshotAttemptUtc so a
-    /// freshly migrated DB (where LastSnapshotAttemptUtc may be null on
-    /// rows that DO already have attendance from before the column existed)
-    /// still renders correctly.
+    /// Both attempt columns participate in the pending/complete decision
+    /// because attendance now flows from two services (event-side and
+    /// meeting-side). If only one side has stamped its column, the other
+    /// is still pending and we don't want to declare the event "complete
+    /// with zero attendees" — that would mislabel an event where the
+    /// other pipeline is still ~5 minutes from running.
+    ///
+    /// We check for attendance rows BEFORE the snapshot columns so a
+    /// freshly migrated DB (where the attempt columns may be null on
+    /// rows that DO already have attendance from before the columns
+    /// existed) still renders correctly.
     /// </summary>
     private static (string Header, List<string>? AttendeeLines) BuildEventContent(
         SocketGuild guild,
@@ -502,13 +561,31 @@ public class AttendanceCommandHandler
             return (header, lines);
         }
 
-        if (!ev.LastSnapshotAttemptUtc.HasValue)
+        // Pending if EITHER side hasn't attempted a snapshot yet. The
+        // meeting-side service is feature-gated (MeetingVoiceChannelId == 0
+        // means no-op), so on a deploy where meetings are disabled
+        // LastMeetingSnapshotAttemptUtc will remain null forever and this
+        // would falsely report "pending" indefinitely. To stay correct in
+        // that case we treat the meeting column as "complete" if the event
+        // ended long enough ago that the meeting-side service would have
+        // had time to run if it were active.
+        var meetingProbablyDone = ev.LastMeetingSnapshotAttemptUtc.HasValue
+            || ev.EndUtc < now.AddMinutes(-30);
+
+        if (!ev.LastSnapshotAttemptUtc.HasValue || !meetingProbablyDone)
         {
             return ($"⏱️ _Event ended <t:{((DateTimeOffset)ev.EndUtc).ToUnixTimeSeconds()}:R>. Snapshot pending — runs every 5 minutes._", null);
         }
 
-        var attemptedAt = ev.LastSnapshotAttemptUtc.Value;
-        return ($"✅ _Snapshot complete — no qualifying attendees._\nLast attempt: <t:{((DateTimeOffset)attemptedAt).ToUnixTimeSeconds()}:R>", null);
+        // Pick the later of the two attempt timestamps as the "last
+        // attempt" surface so the embed reflects the most recent
+        // bookkeeping moment.
+        var lastAttempt = ev.LastSnapshotAttemptUtc.Value;
+        if (ev.LastMeetingSnapshotAttemptUtc is { } meetingAttempt && meetingAttempt > lastAttempt)
+        {
+            lastAttempt = meetingAttempt;
+        }
+        return ($"✅ _Snapshot complete — no qualifying attendees._\nLast attempt: <t:{((DateTimeOffset)lastAttempt).ToUnixTimeSeconds()}:R>", null);
     }
 
     /// <summary>

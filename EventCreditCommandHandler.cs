@@ -322,7 +322,10 @@ public class EventCreditCommandHandler
     /// Computes total events at the user's current rank — same math as
     /// EventAttendanceHelper.CountEventsAttendedAsync, but expressed inline
     /// because we already have the RankHistory row in hand and don't want
-    /// to look it up a second time.
+    /// to look it up a second time. Includes BOTH EventAttendance and
+    /// MeetingAttendance per the "attending a meeting counts as an event"
+    /// policy; must stay in lockstep with the helper or /add-event-credit
+    /// will report a stale total.
     /// </summary>
     private static async Task<int> ComputeTotalEventsAtRankAsync(
         BotDbContext db, RankHistory rh, DateTime now)
@@ -337,7 +340,13 @@ public class EventCreditCommandHandler
                            && ea.EventEndUtc >= effectiveSince
                            && ea.EventEndUtc <= now);
 
-        return rh.EventsAttendedAtRankBeforeBot + botTracked;
+        var meetings = await db.MeetingAttendances
+            .CountAsync(ma => ma.GuildId == rh.GuildId
+                           && ma.UserId == rh.UserId
+                           && ma.EventEndUtc >= effectiveSince
+                           && ma.EventEndUtc <= now);
+
+        return rh.EventsAttendedAtRankBeforeBot + botTracked + meetings;
     }
 
     /// <summary>

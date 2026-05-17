@@ -449,7 +449,13 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
         var notable = new List<NotableEvent>();
         foreach (var ev in events)
         {
+            // "Attended" here = qualified via either pipeline (events VC ≥30min
+            // OR meetings VC ≥15min). A given member could in theory be counted
+            // in both for the same event; in practice the two tables target
+            // disjoint VCs so double-counting is rare and never structural.
             var attendanceCount = await db.EventAttendances
+                .CountAsync(a => a.GuildId == guild.Id && a.CalendarEventId == ev.Id, ct);
+            attendanceCount += await db.MeetingAttendances
                 .CountAsync(a => a.GuildId == guild.Id && a.CalendarEventId == ev.Id, ct);
 
             notable.Add(new NotableEvent(
@@ -534,13 +540,27 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
         var rankRoles = _config.GetRankRolesList();
         var exemptRoles = _config.GetExemptRolesList();
 
-        // Events attended in the 7-day window — single GROUP BY
+        // Events attended in the 7-day window — single GROUP BY per table.
+        // EventAttendance and MeetingAttendance are merged client-side because
+        // the spotlight scores per-member and we need a unified count keyed by
+        // UserId regardless of which pipeline credited them.
         var since = DateTime.UtcNow.AddDays(-SpotlightWindowDays);
         var eventCounts = await db.EventAttendances
             .Where(a => a.GuildId == guild.Id && a.EventEndUtc >= since)
             .GroupBy(a => a.UserId)
             .Select(g => new { UserId = g.Key, Count = g.Count() })
             .ToDictionaryAsync(x => x.UserId, x => x.Count, ct);
+
+        var meetingCounts = await db.MeetingAttendances
+            .Where(a => a.GuildId == guild.Id && a.EventEndUtc >= since)
+            .GroupBy(a => a.UserId)
+            .Select(g => new { UserId = g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.UserId, x => x.Count, ct);
+
+        foreach (var (userId, count) in meetingCounts)
+        {
+            eventCounts[userId] = eventCounts.GetValueOrDefault(userId, 0) + count;
+        }
 
         MemberSpotlight? best = null;
         int bestScore = 0;
@@ -609,7 +629,12 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
             var totalAttendances = 0;
             foreach (var ev in countingEvents)
             {
+                // Same dual-pipeline merge as NotableEvents above — every
+                // qualifying attendance from either VC counts toward the
+                // "average attendance percent" headline number.
                 totalAttendances += await db.EventAttendances
+                    .CountAsync(a => a.GuildId == guild.Id && a.CalendarEventId == ev.Id, ct);
+                totalAttendances += await db.MeetingAttendances
                     .CountAsync(a => a.GuildId == guild.Id && a.CalendarEventId == ev.Id, ct);
             }
             var avgPerEvent = (double)totalAttendances / eventsHeld;

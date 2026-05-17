@@ -297,6 +297,36 @@ public class BotConfig
     /// </summary>
     public string AttendanceCountingSources { get; set; } = "Clan";
 
+    // ─── Meeting Attendance Settings ─────────────────────────────────
+
+    /// <summary>
+    /// Discord channel ID of the dedicated meetings voice channel. Voice
+    /// time in this VC during the buffered window of a clan-source Apollo
+    /// event counts as meeting attendance (which, in turn, counts as event
+    /// attendance for promotion math — see MeetingAttendanceSnapshotService
+    /// and EventAttendanceHelper).
+    ///
+    /// Unlike EventsCategoryId, this is a single channel — meetings happen
+    /// in one specific room rather than spreading across a category of
+    /// per-squad VCs. Leave at 0 to disable meeting attendance entirely;
+    /// MeetingAttendanceSnapshotService is a no-op when this is unset.
+    /// Immune to channel renames.
+    /// </summary>
+    public ulong MeetingVoiceChannelId { get; set; } = default;
+
+    /// <summary>
+    /// Minimum cumulative minutes a user must be in the meetings VC (during
+    /// the buffered Apollo-event window) to count as having attended that
+    /// meeting. Defaults to 15 — shorter than the 30-min event threshold
+    /// since meetings are typically shorter, more dialog-heavy, and easier
+    /// to fully attend than a full clan event.
+    ///
+    /// The buffer (AutoPromotionEventBufferMinutes) and snapshot cadence
+    /// (EventAttendanceSnapshotIntervalMinutes) are shared with event
+    /// attendance — meetings ride the same pipeline timing.
+    /// </summary>
+    public int AutoPromotionMinMeetingAttendanceMinutes { get; set; } = 15;
+
     // ─── Voice Activity Safeguards ───────────────────────────────────
 
     /// <summary>

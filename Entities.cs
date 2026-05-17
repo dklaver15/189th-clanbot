@@ -258,6 +258,24 @@ public class CalendarEvent
     /// retry policy.
     /// </summary>
     public DateTime? LastSnapshotAttemptUtc { get; set; }
+
+    /// <summary>
+    /// Parallel to LastSnapshotAttemptUtc, but owned by
+    /// MeetingAttendanceSnapshotService instead. Stamped on every
+    /// meeting-attendance snapshot attempt regardless of whether anyone
+    /// qualified.
+    ///
+    /// ── Why a separate column ──
+    /// The event-side snapshot service and the meeting-side snapshot service
+    /// process the same CalendarEvent rows but along different axes — events
+    /// match VCs under EventsCategoryId with a 30-minute threshold, meetings
+    /// match a single MeetingVoiceChannelId with a 15-minute threshold. The
+    /// "given up after N minutes of zero qualifiers" check needs to run
+    /// independently for each path so a quiet meeting can't reset the give-up
+    /// clock on the event-side check (or vice versa). Two columns; each
+    /// service stamps its own.
+    /// </summary>
+    public DateTime? LastMeetingSnapshotAttemptUtc { get; set; }
 }
 
 /// <summary>
@@ -333,6 +351,71 @@ public class EventAttendance
     public int AttendedMinutes { get; set; }
 
     /// <summary>When this attendance row was snapshotted by the background service.</summary>
+    public DateTime RecordedAt { get; set; }
+}
+
+/// <summary>
+/// Durable record of a member's attendance at a single clan meeting. One row
+/// per (guild, user, event) tuple with AttendedMinutes above the configured
+/// meeting threshold. Structurally identical to EventAttendance — meetings
+/// "count as events" for promotion purposes and EventAttendanceHelper sums
+/// across both tables — but kept in its own table for three reasons:
+///
+///   1. Independent snapshot bookkeeping. The unique index on
+///      (GuildId, UserId, CalendarEventId) on EventAttendance means a single
+///      member could not have BOTH an event-VC qualifying session and a
+///      meeting-VC qualifying session for the same Apollo post without a
+///      collision. Separate tables let the two paths run independently.
+///   2. Independent retry/give-up state. CalendarEvent.LastSnapshotAttemptUtc
+///      and CalendarEvent.LastMeetingSnapshotAttemptUtc are mirrors of each
+///      other so each snapshot service can give up on a given event without
+///      affecting the other. Routing meetings through their own table makes
+///      the "already snapshotted" check (any row referencing this event?)
+///      stay localized to meetings only.
+///   3. Auditability. "How many members attended the standup meeting on
+///      Tuesday?" is now a single-table query, not a join with a discriminator.
+///
+/// All other design choices match EventAttendance: denormalized event times
+/// so the row survives CalendarEvent deletion, snapshot-time Username for
+/// rendering when the user has left the guild, CalendarEventId kept for
+/// traceability but not a foreign key.
+///
+/// Manual /add-event-credit rows still write to EventAttendance with the
+/// sentinel CalendarEventId=0; there's no parallel manual flow for meetings.
+/// EventAttendanceHelper sums both tables, so a manual credit naturally
+/// counts toward the user's total regardless of which side recorded it.
+/// </summary>
+public class MeetingAttendance
+{
+    public int Id { get; set; }
+    public ulong GuildId { get; set; }
+    public ulong UserId { get; set; }
+
+    /// <summary>
+    /// Internal CalendarEvents.Id this meeting attendance was computed from.
+    /// Not a FK — the CalendarEvent row may be gone by the time you query
+    /// this. Kept for traceability / debugging only.
+    /// </summary>
+    public int CalendarEventId { get; set; }
+
+    /// <summary>Snapshot of the user's display name at the moment attendance was recorded. See EventAttendance.Username for the full rationale.</summary>
+    public string Username { get; set; } = string.Empty;
+
+    /// <summary>Denormalized copy of CalendarEvent.StartUtc at snapshot time.</summary>
+    public DateTime EventStartUtc { get; set; }
+
+    /// <summary>Denormalized copy of CalendarEvent.EndUtc at snapshot time.</summary>
+    public DateTime EventEndUtc { get; set; }
+
+    /// <summary>
+    /// Cumulative minutes the user spent in the meeting VC during the
+    /// buffered event window. Only rows meeting the configured meeting
+    /// threshold (AutoPromotionMinMeetingAttendanceMinutes, default 15) are
+    /// written; stored for auditing.
+    /// </summary>
+    public int AttendedMinutes { get; set; }
+
+    /// <summary>When this row was snapshotted by MeetingAttendanceSnapshotService.</summary>
     public DateTime RecordedAt { get; set; }
 }
 

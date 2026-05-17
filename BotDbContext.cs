@@ -18,6 +18,7 @@ public class BotDbContext : DbContext
     public DbSet<OnboardingReminder>  OnboardingReminders => Set<OnboardingReminder>();
     public DbSet<CalendarEvent>       CalendarEvents      => Set<CalendarEvent>();
     public DbSet<EventAttendance>     EventAttendances    => Set<EventAttendance>();
+    public DbSet<MeetingAttendance>   MeetingAttendances  => Set<MeetingAttendance>();
     public DbSet<BotState>            BotStates           => Set<BotState>();
     public DbSet<BumpState>           BumpStates          => Set<BumpState>();
     public DbSet<ApolloMessageLog>    ApolloMessageLogs   => Set<ApolloMessageLog>();
@@ -163,6 +164,24 @@ public class BotDbContext : DbContext
             e.HasIndex(a => new { a.GuildId, a.UserId, a.EventEndUtc });
 
             // Sweep query: "events that ended recently but haven't been snapshotted"
+            e.HasIndex(a => a.CalendarEventId);
+        });
+
+        // ── Meeting attendance ────────────────────────────────────────
+        // Mirror of EventAttendance for meeting-VC qualifying sessions.
+        // Same three indexes serve identical access patterns:
+        //   • Unique (GuildId, UserId, CalendarEventId) keeps the snapshot
+        //     service idempotent across restart + catch-up overlap.
+        //   • (GuildId, UserId, EventEndUtc) backs the helper's window count.
+        //   • CalendarEventId backs the sweep's "any row for this event yet?"
+        //     existence check.
+        // Tables are kept structurally separate so the event-side and the
+        // meeting-side snapshot pipelines can run independently against the
+        // same CalendarEvent rows without colliding on the unique constraint.
+        modelBuilder.Entity<MeetingAttendance>(e =>
+        {
+            e.HasIndex(a => new { a.GuildId, a.UserId, a.CalendarEventId }).IsUnique();
+            e.HasIndex(a => new { a.GuildId, a.UserId, a.EventEndUtc });
             e.HasIndex(a => a.CalendarEventId);
         });
 

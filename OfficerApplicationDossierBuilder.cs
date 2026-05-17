@@ -220,14 +220,28 @@ public sealed class OfficerApplicationDossierBuilder
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
         var now = DateTime.UtcNow;
-        var c30 = await db.EventAttendances.CountAsync(a =>
+
+        // Per clan policy "attending a meeting counts as an event", the
+        // dossier's 30/60/90 day windows include BOTH EventAttendance and
+        // MeetingAttendance rows. Kept as separate per-table counts and
+        // summed in-process rather than UNION'd in SQL because EF Core 8
+        // doesn't lower set operations across DbSets cleanly on SQLite, and
+        // these are tiny indexed counts — two queries each is fine.
+        var c30e = await db.EventAttendances.CountAsync(a =>
             a.GuildId == guildId && a.UserId == userId && a.EventEndUtc >= now.AddDays(-30), ct);
-        var c60 = await db.EventAttendances.CountAsync(a =>
+        var c60e = await db.EventAttendances.CountAsync(a =>
             a.GuildId == guildId && a.UserId == userId && a.EventEndUtc >= now.AddDays(-60), ct);
-        var c90 = await db.EventAttendances.CountAsync(a =>
+        var c90e = await db.EventAttendances.CountAsync(a =>
             a.GuildId == guildId && a.UserId == userId && a.EventEndUtc >= now.AddDays(-90), ct);
 
-        return (c30, c60, c90);
+        var c30m = await db.MeetingAttendances.CountAsync(a =>
+            a.GuildId == guildId && a.UserId == userId && a.EventEndUtc >= now.AddDays(-30), ct);
+        var c60m = await db.MeetingAttendances.CountAsync(a =>
+            a.GuildId == guildId && a.UserId == userId && a.EventEndUtc >= now.AddDays(-60), ct);
+        var c90m = await db.MeetingAttendances.CountAsync(a =>
+            a.GuildId == guildId && a.UserId == userId && a.EventEndUtc >= now.AddDays(-90), ct);
+
+        return (c30e + c30m, c60e + c60m, c90e + c90m);
     }
 
     private async Task<DateTime?> GetLastVoiceSessionAsync(
