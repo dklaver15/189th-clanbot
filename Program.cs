@@ -342,6 +342,18 @@ try
     // UsageStatsCommandHandler.BuildCommand() — keep all three in sync.
     builder.Services.AddSingleton<UsageStatsCommandHandler>();
 
+    // SecurityAuditCommandHandler: /security-audit slash command (MAJ+). Reads
+    // the SecurityAuditRecords table written by the server-protection feature
+    // set (account-age gate today; raid shield / impersonation check /
+    // webhook audit / token-grabber scanner planned). Filters on user,
+    // feature, days (window), and limit (row cap). Single command with
+    // optional filters rather than subcommands — every read shape is the
+    // same WHERE clause with different parameters. Catalog entry in
+    // CommandsCommandHandler.BuildCatalog and slash-command shape in
+    // DiscordBotService.OnReadyAsync via SecurityAuditCommandHandler.BuildCommand()
+    // — keep all three in sync.
+    builder.Services.AddSingleton<SecurityAuditCommandHandler>();
+
     // ── Reddit recruitment leads ─────────────────────────────────────
     // RedditLeadService: polling background service that watches the
     // configured subreddits for LFG/"looking for clan" posts, runs each

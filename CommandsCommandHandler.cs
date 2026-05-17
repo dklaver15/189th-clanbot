@@ -569,8 +569,9 @@ public class CommandsCommandHandler
         var compEventLbl     = $"{config.CompEventMinRank}+";
         var awolKickLbl      = $"{config.AwolKickMinRank}+";
         var briefingLbl      = $"{config.BriefingNowMinRank}+";
-        const string eventCreditLbl = "CPT+";   // SyncWithHandlers: EventCreditCommandHandler.MinRankFloor
-        const string attendanceLbl  = "MAJ+";   // SyncWithHandlers: AttendanceCommandHandler.MinRankFloor
+        const string eventCreditLbl   = "CPT+";   // SyncWithHandlers: EventCreditCommandHandler.MinRankFloor
+        const string attendanceLbl    = "MAJ+";   // SyncWithHandlers: AttendanceCommandHandler.MinRankFloor
+        const string securityAuditLbl = "BG+";    // SyncWithHandlers: SecurityAuditCommandHandler.MinRankFloor
 
         // ── Catalog ──
         // Display order is alphabetical by command name (sorted at render
@@ -631,6 +632,8 @@ public class CommandsCommandHandler
                 attendanceLbl, MinRank("MAJ")),
             new("usage-stats", "Slash-command usage log (leaderboard, per-member history, drill-down)",
                 attendanceLbl, MinRank("MAJ")),   // SyncWithHandlers: UsageStatsCommandHandler.MinRankFloor
+            new("security-audit", "Server-protection audit log (account-age gate and future security features)",
+                securityAuditLbl, MinRank("BG")),   // SyncWithHandlers: SecurityAuditCommandHandler.MinRankFloor
             new("clear-awol-list", $"Delete all messages in #{config.HqChannelName}",
                 awolKickLbl, MinRank(config.AwolKickMinRank)),
             new("kick-awols", "Kick all members currently flagged AWOL",

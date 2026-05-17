@@ -47,6 +47,7 @@ public class DiscordBotService : IHostedService
     private readonly CommandsCommandHandler _commandsHandler;
     private readonly CommandUsageTrackingHandler _commandUsageHandler;
     private readonly UsageStatsCommandHandler _usageStatsHandler;
+    private readonly SecurityAuditCommandHandler _securityAuditHandler;
     private readonly InviteAttributionService _inviteAttributionService;
     private readonly InviteCommandHandler _inviteCommandHandler;
     private readonly RedditLeadButtonHandler _redditLeadButtonHandler;
@@ -90,6 +91,7 @@ public class DiscordBotService : IHostedService
         CommandsCommandHandler commandsHandler,
         CommandUsageTrackingHandler commandUsageHandler,
         UsageStatsCommandHandler usageStatsHandler,
+        SecurityAuditCommandHandler securityAuditHandler,
         InviteAttributionService inviteAttributionService,
         InviteCommandHandler inviteCommandHandler,
         RedditLeadButtonHandler redditLeadButtonHandler,
@@ -132,6 +134,7 @@ public class DiscordBotService : IHostedService
         _commandsHandler             = commandsHandler;
         _commandUsageHandler         = commandUsageHandler;
         _usageStatsHandler           = usageStatsHandler;
+        _securityAuditHandler        = securityAuditHandler;
         _inviteAttributionService    = inviteAttributionService;
         _inviteCommandHandler        = inviteCommandHandler;
         _redditLeadButtonHandler     = redditLeadButtonHandler;
@@ -194,6 +197,7 @@ public class DiscordBotService : IHostedService
         _commandsHandler.Register(_client);
         _commandUsageHandler.Register(_client);
         _usageStatsHandler.Register(_client);
+        _securityAuditHandler.Register(_client);
         _inviteAttributionService.Register(_client);
         _inviteCommandHandler.Register(_client);
         _redditLeadButtonHandler.Register(_client);
@@ -485,6 +489,18 @@ public class DiscordBotService : IHostedService
                 // CommandsCommandHandler.BuildCatalog in sync when changing
                 // /usage-stats.
                 UsageStatsCommandHandler.BuildCommand(),
+
+                // /security-audit — read side of the SecurityAuditRecords
+                // table written by the server-protection feature set
+                // (account-age gate today; raid shield / impersonation /
+                // webhook audit / token-grabber scanner planned). Single
+                // command with optional filters (user, feature, days,
+                // limit) rather than subcommands — every read shape is
+                // the same WHERE clause with different parameters. MAJ+
+                // gated. The slash-command shape lives on the handler.
+                // NOTE: also keep CommandsCommandHandler.BuildCatalog in
+                // sync when changing /security-audit.
+                SecurityAuditCommandHandler.BuildCommand(),
 
                 // /patrol — Patrol Watch opt-out / info surface. Three
                 // subcommands (off, on, info). Open to all members; rendered
