@@ -140,6 +140,22 @@ public sealed class WebhookAuditCommandHandler
             .ToListAsync();
         var snapshotById = snapshots.ToDictionary(s => s.WebhookId);
 
+        // ── Resolve creator user IDs via REST ─────────────────────────
+        // Webhook objects from GetWebhooksAsync include creator metadata,
+        // but Discord renders <@id> mentions as clickable links only when
+        // the user is currently in the guild. Creators who have since
+        // left show up as raw mention text — useless for forensics. We
+        // pre-resolve each unique creator ID with Rest.GetUserAsync,
+        // which returns the user object regardless of guild membership.
+        // This gives us a fresh Username we can render alongside the
+        // mention so leadership always sees a name, even for accounts
+        // that left months ago.
+        //
+        // Batched once per unique creator ID rather than per-webhook to
+        // keep API calls minimal — for our server size that's typically
+        // single-digit lookups.
+        var resolvedCreators = await ResolveCreatorsAsync(live);
+
         // ── Render ────────────────────────────────────────────────────
         if (live.Count == 0)
         {
@@ -173,7 +189,7 @@ public sealed class WebhookAuditCommandHandler
 
             foreach (var w in group.OrderBy(x => x.Name))
             {
-                var line = BuildWebhookLine(w, snapshotById, allowlist);
+                var line = BuildWebhookLine(w, snapshotById, resolvedCreators, allowlist);
                 description.AppendLine(line);
             }
             description.AppendLine();
@@ -202,6 +218,7 @@ public sealed class WebhookAuditCommandHandler
     private static string BuildWebhookLine(
         Discord.Rest.RestWebhook w,
         Dictionary<ulong, WebhookSnapshot> snapshotById,
+        Dictionary<ulong, IUser> resolvedCreators,
         List<string> allowlist)
     {
         var parts = new List<string> { $"• `{w.Name}`" };
@@ -212,11 +229,44 @@ public sealed class WebhookAuditCommandHandler
         else
             parts.Add("user-created");
 
-        // Creator if known
+        // Creator: prefer REST-resolved username (works for users who
+        // have left the guild), fall back to whatever the webhook
+        // object carried, fall back to "(unknown)" as last resort.
+        // We render BOTH the bold username AND the <@id> mention so
+        // leadership sees a readable name regardless of whether
+        // Discord's client can resolve the mention to a clickable
+        // link — when the creator has left the guild the mention
+        // shows as raw text but the username next to it answers
+        // "who?".
         if (w.Creator is not null)
-            parts.Add($"by <@{w.Creator.Id}>");
+        {
+            string username;
+            if (resolvedCreators.TryGetValue(w.Creator.Id, out var resolved))
+                username = resolved.Username;
+            else if (!string.IsNullOrWhiteSpace(w.Creator.Username))
+                username = w.Creator.Username;
+            else
+                username = "(unknown)";
 
-        // First-seen from snapshot (if we have it)
+            parts.Add($"by **{username}** (<@{w.Creator.Id}>)");
+        }
+
+        // Discord creation timestamp — pulled from the webhook's
+        // snowflake ID (the high bits of every Discord snowflake encode
+        // creation time). Always available, no extra API call. This is
+        // the AUTHORITATIVE age of the webhook regardless of when our
+        // bot started scanning — a pre-existing webhook will read
+        // "created 2 years ago" even if its First-Seen is recent
+        // because the bot only started watching last week.
+        var createdUnix = w.CreatedAt.ToUnixTimeSeconds();
+        parts.Add($"created <t:{createdUnix}:R>");
+
+        // First-seen from snapshot (if we have it). Distinct from the
+        // creation timestamp above: this is when OUR scan first saw
+        // the webhook. For a webhook created before the bot was
+        // deployed, First-Seen will read much more recently than
+        // CreatedAt — the gap between the two answers "has this
+        // existed since before we started watching?"
         if (snapshotById.TryGetValue(w.Id, out var snap))
         {
             var unix = new DateTimeOffset(snap.FirstSeenUtc).ToUnixTimeSeconds();
@@ -262,6 +312,57 @@ public sealed class WebhookAuditCommandHandler
             }
         }
         return false;
+    }
+
+    /// <summary>
+    /// Looks up the current username for every unique creator user ID
+    /// across the live webhook list via <c>DiscordSocketClient.Rest.
+    /// GetUserAsync</c>. Returns a map keyed by user ID; users that
+    /// fail to resolve (deleted accounts, network errors) are simply
+    /// omitted — callers fall back to the embedded webhook creator
+    /// data when the map doesn't contain a given ID.
+    ///
+    /// Batched at the (unique-IDs across all webhooks) level rather
+    /// than per-webhook so a server with 20 webhooks all created by
+    /// the same person costs one API call, not twenty. Each lookup is
+    /// awaited sequentially — the call is fast and the typical count
+    /// is small, so the simplicity wins over parallelism. If a server
+    /// ever grows past dozens of distinct creators we can revisit
+    /// with Task.WhenAll.
+    /// </summary>
+    private async Task<Dictionary<ulong, IUser>> ResolveCreatorsAsync(
+        IReadOnlyCollection<Discord.Rest.RestWebhook> live)
+    {
+        var map = new Dictionary<ulong, IUser>();
+
+        var creatorIds = live
+            .Where(w => w.Creator is not null)
+            .Select(w => w.Creator!.Id)
+            .Distinct()
+            .ToList();
+
+        foreach (var id in creatorIds)
+        {
+            try
+            {
+                var user = await _client.Rest.GetUserAsync(id);
+                if (user is not null)
+                    map[id] = user;
+            }
+            catch (Exception ex)
+            {
+                // Single-user failure shouldn't fail the whole command.
+                // Log and continue; the caller falls back to the
+                // embedded webhook creator data for any IDs missing
+                // from the map.
+                _logger.LogWarning(ex,
+                    "WebhookAuditCommandHandler: REST lookup failed for creator user {Id} — " +
+                    "embedded webhook creator data will be used as fallback",
+                    id);
+            }
+        }
+
+        return map;
     }
 
     /// <summary>Same role-list-index pattern as SecurityAuditCommandHandler.HasMinRankFloor.</summary>
