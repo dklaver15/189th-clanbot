@@ -73,6 +73,17 @@ try
     // honest. Register() is called from DiscordBotService.
     builder.Services.AddSingleton<MemberLifecycleHandler>();
 
+    // AccountAgeGateHandler: server-protection feature #1. Hooks UserJoined,
+    // computes account age from user.CreatedAt, and either alerts or kicks
+    // depending on BotConfig.AccountAgeGateMode (Off / AlertOnly / Kick).
+    // Defaults to Off — flipping the switch is an explicit opt-in. Posts to
+    // BotConfig.SecurityAlertsChannelId (falls back to HqChannelName lookup
+    // when unset). Coexists cleanly with InviteAttributionService — both
+    // subscribe to UserJoined independently and the kick path does not
+    // invalidate invite-use attribution. Register() is called from
+    // DiscordBotService.
+    builder.Services.AddSingleton<AccountAgeGateHandler>();
+
     // OnboardingReminderHandler: registered before GamertagCommandHandler because
     // the gamertag handler depends on it to notify when a Guest saves gamertags.
     builder.Services.AddSingleton<OnboardingReminderHandler>();

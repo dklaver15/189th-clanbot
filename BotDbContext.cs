@@ -9,6 +9,7 @@ public class BotDbContext : DbContext
     public DbSet<UserActivity>        UserActivities      => Set<UserActivity>();
     public DbSet<AwolRecord>          AwolRecords         => Set<AwolRecord>();
     public DbSet<AwolKickAuditRecord> AwolKickAudits      => Set<AwolKickAuditRecord>();
+    public DbSet<SecurityAuditRecord> SecurityAuditRecords => Set<SecurityAuditRecord>();
     public DbSet<MessageEvent>        MessageEvents       => Set<MessageEvent>();
     public DbSet<VoiceSession>        VoiceSessions       => Set<VoiceSession>();
     public DbSet<RankHistory>         RankHistories       => Set<RankHistory>();
@@ -56,6 +57,27 @@ public class BotDbContext : DbContext
 
             // Per-invoker audit: "what kick runs has this officer initiated?"
             entity.HasIndex(e => new { e.InvokerId, e.ProcessedAt });
+        });
+
+        // ── Server-protection audit log ──────────────────────────────
+        // Append-only audit row per action taken by the server-protection
+        // feature set (account-age gate today; raid shield / impersonation
+        // check / webhook audit / token-grabber scanner planned). Three
+        // indexes cover the expected read patterns:
+        //   • (GuildId, OccurredAt) — "what happened recently?" timeline scan.
+        //   • (GuildId, Feature, OccurredAt) — "what did AccountAgeGate
+        //     do this week?" per-feature drill-down.
+        //   • (GuildId, UserId, OccurredAt) — "has this user tripped any
+        //     security feature before?" per-user history. Filtered index
+        //     skips the non-user rows (UserId IS NULL) so the index
+        //     stays small as webhook / channel-scoped features start
+        //     writing rows.
+        modelBuilder.Entity<SecurityAuditRecord>(entity =>
+        {
+            entity.HasIndex(e => new { e.GuildId, e.OccurredAt });
+            entity.HasIndex(e => new { e.GuildId, e.Feature, e.OccurredAt });
+            entity.HasIndex(e => new { e.GuildId, e.UserId, e.OccurredAt })
+                  .HasFilter("\"UserId\" IS NOT NULL");
         });
 
         modelBuilder.Entity<MessageEvent>(e =>

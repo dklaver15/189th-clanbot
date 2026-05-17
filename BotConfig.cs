@@ -424,6 +424,42 @@ public class BotConfig
     /// </summary>
     public string GamertagRosterUrl { get; set; } = string.Empty;
 
+    // ─── Server protection: Account-Age Gate ─────────────────────────
+    /// <summary>
+    /// Operating mode for the account-age gate on UserJoined. One of:
+    ///   "Off"        — feature disabled.
+    ///   "AlertOnly"  — post a security alert for any joiner whose account
+    ///                  is younger than AccountAgeGateMinDays, but DO NOT
+    ///                  kick. Default — non-destructive, observation-friendly.
+    ///   "Kick"       — DM the joiner, kick them, post the alert with the
+    ///                  kick outcome.
+    /// Comparison is case-insensitive; an unrecognized value falls back to
+    /// AlertOnly with a warning log so a typo never silently enforces.
+    /// </summary>
+    public string AccountAgeGateMode { get; set; } = "AlertOnly";
+
+    /// <summary>
+    /// Minimum Discord account age (in days) required to remain in the
+    /// server when the gate is active. Joiners with younger accounts trip
+    /// the gate according to AccountAgeGateMode. Default 3 — tight enough
+    /// to filter throwaway raid alts that get spun up minutes before a
+    /// brigade, loose enough that legitimate new Discord users aren't
+    /// blocked. Negative values are clamped to 0 (which effectively
+    /// disables the age check while leaving the mode scaffolding in place).
+    /// </summary>
+    public int AccountAgeGateMinDays { get; set; } = 3;
+
+    /// <summary>
+    /// Channel ID where server-protection alerts (account-age gate, future
+    /// raid-shield / impersonation / webhook-audit features) are posted.
+    /// Default is the 189th's existing #alerts channel that the rest of
+    /// the bot fleet posts to. When set to 0 the bot falls back to a
+    /// name-based lookup against HqChannelName, so a fresh deploy still
+    /// gets alerts somewhere visible. Prefer an explicit ID — name
+    /// lookups silently break if the channel is renamed.
+    /// </summary>
+    public ulong SecurityAlertsChannelId { get; set; } = 1407959078105514046;
+
     // ─── Helpers ─────────────────────────────────────────────────────
 
     /// <summary>
