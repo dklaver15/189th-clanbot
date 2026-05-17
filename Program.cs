@@ -65,6 +65,14 @@ try
     builder.Services.AddSingleton<SlashCommandHandler>();
     builder.Services.AddSingleton<RankTrackingHandler>();
 
+    // MemberLifecycleHandler: hooks UserLeft to clear RankHistory rows for
+    // departing members. Prevents stale AssignedAt timestamps from prior
+    // memberships influencing auto-promotion when a former member rejoins.
+    // PromotionService.GetRankInfoAsync has a read-side defense for the same
+    // case (compares JoinedAt to AssignedAt) — this handler keeps the DB
+    // honest. Register() is called from DiscordBotService.
+    builder.Services.AddSingleton<MemberLifecycleHandler>();
+
     // OnboardingReminderHandler: registered before GamertagCommandHandler because
     // the gamertag handler depends on it to notify when a Guest saves gamertags.
     builder.Services.AddSingleton<OnboardingReminderHandler>();

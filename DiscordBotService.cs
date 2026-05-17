@@ -23,6 +23,7 @@ public class DiscordBotService : IHostedService
     private readonly LookupCommandHandler _lookupHandler;
     private readonly PromoEligibilityCommandHandler _promoEligibilityHandler;
     private readonly RankTrackingHandler _rankHandler;
+    private readonly MemberLifecycleHandler _memberLifecycleHandler;
     private readonly TicketReminderHandler _ticketReminderHandler;
     private readonly GuestReminderHandler _guestReminderHandler;
     private readonly OnboardingReminderHandler _onboardingReminderHandler;
@@ -64,6 +65,7 @@ public class DiscordBotService : IHostedService
         LookupCommandHandler lookupHandler,
         PromoEligibilityCommandHandler promoEligibilityHandler,
         RankTrackingHandler rankHandler,
+        MemberLifecycleHandler memberLifecycleHandler,
         TicketReminderHandler ticketReminderHandler,
         GuestReminderHandler guestReminderHandler,
         OnboardingReminderHandler onboardingReminderHandler,
@@ -104,6 +106,7 @@ public class DiscordBotService : IHostedService
         _lookupHandler               = lookupHandler;
         _promoEligibilityHandler     = promoEligibilityHandler;
         _rankHandler                 = rankHandler;
+        _memberLifecycleHandler      = memberLifecycleHandler;
         _ticketReminderHandler       = ticketReminderHandler;
         _guestReminderHandler        = guestReminderHandler;
         _onboardingReminderHandler   = onboardingReminderHandler;
@@ -149,6 +152,7 @@ public class DiscordBotService : IHostedService
         _lookupHandler.Register(_client);
         _promoEligibilityHandler.Register(_client);
         _rankHandler.Register(_client);
+        _memberLifecycleHandler.Register(_client);
         _ticketReminderHandler.Register(_client);
         _guestReminderHandler.Register(_client);
         _onboardingReminderHandler.Register(_client);

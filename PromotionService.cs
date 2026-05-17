@@ -727,6 +727,24 @@ public class PromotionService
     /// Falls back to guild-join date with an empty seed when no RankHistory
     /// row exists. Use this from callers that need to compute events-at-rank
     /// (AutoPromotionService, RosterExportService).
+    ///
+    /// ── Leave/rejoin defense ──
+    /// RankHistory rows are not deleted when a member leaves the guild (only
+    /// cleaned up if the leave handler ran while the bot was online — and
+    /// historically there was no such handler at all). When a former member
+    /// rejoins and is re-assigned their old rank, the stale RankHistory row
+    /// still carries the AssignedAt timestamp from their previous tenure,
+    /// which would let them clear time-in-rank thresholds based on a
+    /// membership that no longer exists. Their old MessageEvents would also
+    /// count toward activity, since the message-count query filters by
+    /// `Timestamp >= AssignedAt` and old messages are never purged per-user.
+    ///
+    /// Discord's SocketGuildUser.JoinedAt always reflects the MOST RECENT
+    /// guild-join. If JoinedAt is later than the recorded AssignedAt, the
+    /// RankHistory row predates the current membership and must be treated
+    /// as fresh: use JoinedAt as the effective rank-start and discard any
+    /// seed credit (seed is rank-and-tenure-specific, it does not survive
+    /// a leave).
     /// </summary>
     public async Task<RankInfo> GetRankInfoAsync(
         ulong guildId, SocketGuildUser member, CancellationToken ct = default)
@@ -737,8 +755,28 @@ public class PromotionService
         var record = await db.RankHistories
             .FirstOrDefaultAsync(r => r.GuildId == guildId && r.UserId == member.Id, ct);
 
+        var joinedAt = member.JoinedAt?.UtcDateTime;
+
         if (record is not null)
         {
+            // If the user rejoined the guild AFTER the recorded rank was
+            // assigned, the row is leftover state from a prior membership.
+            // The bot should treat this as a fresh tenure — using JoinedAt
+            // as the effective AssignedAt and dropping seed credit.
+            if (joinedAt.HasValue && joinedAt.Value > record.AssignedAt)
+            {
+                _logger.LogInformation(
+                    "RankHistory for {User} ({UserId}) predates current membership " +
+                    "(record.AssignedAt={Assigned:o}, member.JoinedAt={Joined:o}). " +
+                    "Treating as fresh rank tenure for promotion math; seed credit dropped.",
+                    member.Username, member.Id, record.AssignedAt, joinedAt.Value);
+
+                return new RankInfo(
+                    AssignedAt: joinedAt.Value,
+                    SeedAppliedAt: null,
+                    SeedEvents: 0);
+            }
+
             return new RankInfo(
                 AssignedAt: record.AssignedAt,
                 SeedAppliedAt: record.SeedAppliedAt,
@@ -748,7 +786,7 @@ public class PromotionService
         // No record yet — fall back to guild-join date with no seed. Matters
         // for users who predate RankTrackingHandler but still have a rank role.
         return new RankInfo(
-            AssignedAt: member.JoinedAt?.UtcDateTime,
+            AssignedAt: joinedAt,
             SeedAppliedAt: null,
             SeedEvents: 0);
     }
