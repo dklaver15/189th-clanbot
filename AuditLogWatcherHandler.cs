@@ -301,24 +301,63 @@ public sealed class AuditLogWatcherHandler
             //      WriteAuditAsync and PostAlertAsync.
             var resolvedData = await ResolveDataAsync(entry, guild);
 
-            // ── Noise filter: bot-driven voice channel deletes ────────────
+            // ── Noise filter: bot-driven channel deletes ──────────────────
             // MEE6's temp-voice feature and similar JoinToCreate-style bots
             // generate a ChannelDeleted event every time a temporary voice
             // lobby empties out. These have no security relevance and would
             // otherwise flood the alerts channel with @here pings. See
             // BotConfig.AuditLogWatcherIgnoreBotVoiceChannelDeletes for the
-            // exact rule (actor is a bot AND deleted channel was Voice).
+            // exact rule.
+            //
+            // Two paths depending on whether the typed payload resolved:
+            //
+            //   1. Typed path — resolvedData is ChannelDeleteAuditLogData.
+            //      We can read ChannelType exactly. Suppress only for
+            //      Voice; alert on bots deleting text/category/forum/etc.
+            //      (rare, worth a look).
+            //
+            //   2. Untyped fallback — typed cast failed even after the
+            //      REST upgrade in ResolveDataAsync. Discord.NET's
+            //      SocketAuditLogEntry doesn't expose TargetId in 3.17,
+            //      so we have no way to look up the deleted channel's
+            //      type independently. In practice, when a bot-actor
+            //      ChannelDeleted arrives with broken payload, it's
+            //      virtually always temp-VC tear-down — the threat
+            //      model this watcher exists for (compromised officer
+            //      accounts) is human-actor, and malicious bots are
+            //      already caught at BotAdded when they're installed.
+            //      Suppress rather than ping @here on every untyped
+            //      bot-driven ChannelDeleted.
+            //
+            // The untyped fallback was the failure mode that caused a
+            // MEE6 temp-VC delete to fire @here on 2026-05-18.
             if (_config.AuditLogWatcherIgnoreBotVoiceChannelDeletes
                 && entry.Action == ActionType.ChannelDeleted
-                && entry.User?.IsBot == true
-                && resolvedData is ChannelDeleteAuditLogData chData
-                && chData.ChannelType == ChannelType.Voice)
+                && entry.User?.IsBot == true)
             {
-                _logger.LogDebug(
-                    "Audit log watcher: suppressing bot-driven voice channel delete " +
-                    "(actor {ActorId}, channel `#{ChannelName}` {ChannelId})",
-                    entry.User.Id, chData.ChannelName, chData.ChannelId);
-                return;
+                if (resolvedData is ChannelDeleteAuditLogData chData)
+                {
+                    if (chData.ChannelType == ChannelType.Voice)
+                    {
+                        _logger.LogDebug(
+                            "Audit log watcher: suppressing bot-driven voice channel delete " +
+                            "(actor {ActorId}, channel `#{ChannelName}` {ChannelId}, " +
+                            "resolution: typed)",
+                            entry.User.Id, chData.ChannelName, chData.ChannelId);
+                        return;
+                    }
+                    // Typed + non-voice falls through to alert — unusual
+                    // for a bot, worth surfacing.
+                }
+                else
+                {
+                    _logger.LogDebug(
+                        "Audit log watcher: suppressing bot-driven channel delete with " +
+                        "unresolvable typed payload (actor {ActorId}, " +
+                        "resolution: untyped-fallback)",
+                        entry.User.Id);
+                    return;
+                }
             }
 
             var isCritical = CriticalActions.Contains(entry.Action);
