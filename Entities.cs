@@ -486,6 +486,40 @@ public class BotState
     /// the slash command with force:true to repost.
     /// </summary>
     public ulong? GamertagButtonMessageId { get; set; }
+
+    /// <summary>
+    /// Timestamp of the last successfully-completed RosterExportService run.
+    /// Null if no run has ever completed. Stamped by RosterExportService when
+    /// the nightly export commits its Sheet write + DB updates. Surfaced on
+    /// /health so officers can confirm the export is alive without opening
+    /// the Google Sheet.
+    /// </summary>
+    public DateTime? LastRosterExportCompletedUtc { get; set; }
+
+    /// <summary>
+    /// Timestamp of the last successfully-completed SqliteBackupService cycle
+    /// (including dry-run cycles, which prove the snapshot + gzip path works
+    /// even when the Drive upload is skipped). Null on a fresh DB or a
+    /// service that's never completed a cycle. Surviving a failed cycle
+    /// preserves the previous good value so /health can flag "✅ 3 days ago"
+    /// alongside the ⚠️ error on the next field.
+    /// </summary>
+    public DateTime? LastSqliteBackupCompletedUtc { get; set; }
+
+    /// <summary>
+    /// Compressed size in bytes of the most recent successful backup.
+    /// Surfaced on /health. Null when no backup has ever completed.
+    /// </summary>
+    public long? LastSqliteBackupSizeBytes { get; set; }
+
+    /// <summary>
+    /// Last failure message from SqliteBackupService, truncated to 800 chars.
+    /// Cleared on a successful cycle. Surfaced on /health so an off-hours
+    /// failure is visible without log access. Combined with the unchanged
+    /// LastSqliteBackupCompletedUtc, this gives "last good run" + "what went
+    /// wrong since" at a glance.
+    /// </summary>
+    public string? LastSqliteBackupError { get; set; }
 }
 
 /// <summary>

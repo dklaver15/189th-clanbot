@@ -277,6 +277,30 @@ public class RosterExportService : BackgroundService
             await _sheetsService.WriteRosterAsync(guild.Name, rows);
 
             _logger.LogInformation("Roster export complete for {Guild}: {Count} members", guild.Name, rows.Count);
+
+            // Stamp BotState so /health can report the last successful export
+            // without round-tripping to Sheets. SyncWithHandlers:
+            // AutoPromotionService.GetOrCreateBotStateAsync — same singleton pattern.
+            // Done in a fresh scope so the export's scoped DbContext (which has
+            // held tracking state across hundreds of members) doesn't get reused
+            // for what should be a single-row write.
+            try
+            {
+                using var stateScope = _services.CreateScope();
+                var stateDb = stateScope.ServiceProvider.GetRequiredService<BotDbContext>();
+                var state = await stateDb.BotStates.FirstOrDefaultAsync(ct);
+                if (state is null)
+                {
+                    state = new BotState();
+                    stateDb.BotStates.Add(state);
+                }
+                state.LastRosterExportCompletedUtc = DateTime.UtcNow;
+                await stateDb.SaveChangesAsync(ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to stamp BotState.LastRosterExportCompletedUtc");
+            }
         }
     }
 

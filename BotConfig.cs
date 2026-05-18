@@ -663,6 +663,59 @@ public class BotConfig
     public List<string> GetTokenGrabberScannerBlocklist() =>
         TokenGrabberScannerBlocklist.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
 
+    // ─── SQLite Backup Settings ──────────────────────────────────────
+    /// <summary>
+    /// Master switch for SqliteBackupService. When false, the service exits
+    /// immediately on startup — no snapshots, no Drive calls.
+    /// </summary>
+    public bool BackupEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Hour of day (UTC, 0-23) for the nightly backup cycle. Default 5 — sits
+    /// between AutoPromotionRunHourUtc (3) and RosterExportHourUtc (6) so the
+    /// three scheduled jobs aren't competing for the same window. 1am ET.
+    /// </summary>
+    public int BackupHourUtc { get; set; } = 5;
+
+    /// <summary>
+    /// Google Drive folder ID for backup uploads. Required when BackupEnabled
+    /// is true AND BackupDryRun is false; the service refuses to start
+    /// otherwise (better to fail loudly than silently produce local-only
+    /// backups that never leave the droplet).
+    ///
+    /// SETUP (one-time):
+    ///   1. Create a folder in Google Drive — Shared Drive recommended over
+    ///      My Drive because service accounts have no personal quota; storage
+    ///      will count against whichever drive owns the folder.
+    ///   2. Share the folder with the service account email used by
+    ///      GoogleCredentialsPath. Editor permission.
+    ///   3. Copy the folder ID from the URL: drive.google.com/drive/folders/{THIS_PART}
+    ///   4. Paste here.
+    ///
+    /// The folder will contain files named clanguard-backup-YYYY-MM-DDTHH-MM-SSZ.db.gz —
+    /// one per successful cycle, pruned to BackupRetentionDays.
+    /// </summary>
+    public string BackupDriveFolderId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Days of backup history to retain on Drive. Older files are deleted at
+    /// the end of each successful cycle. Default 14 — enough buffer to notice
+    /// a problem and roll back, not so much that storage grows without bound.
+    /// Set to 0 to disable retention pruning entirely (files accumulate
+    /// forever).
+    /// </summary>
+    public int BackupRetentionDays { get; set; } = 14;
+
+    /// <summary>
+    /// When true, the service runs the VACUUM INTO + gzip step locally but
+    /// skips the Drive upload and retention prune. Useful for verifying the
+    /// SQLite snapshot path works on a fresh deploy before pointing it at a
+    /// real Drive folder. Recommended for first-run validation: set
+    /// BackupDryRun=true, watch a cycle complete, check the logs for the
+    /// snapshot size, flip to false.
+    /// </summary>
+    public bool BackupDryRun { get; set; } = false;
+
     // ─── Helpers ─────────────────────────────────────────────────────
 
     /// <summary>

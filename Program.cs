@@ -352,6 +352,19 @@ try
     builder.Services.AddSingleton<RosterExportService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<RosterExportService>());
 
+    // SqliteBackupService: nightly VACUUM INTO → gzip → Google Drive upload of
+    // the SQLite DB. Stamps BotState.LastSqliteBackup* on completion. Surfaced
+    // on /health. Requires BackupEnabled=true, BackupDriveFolderId set, and the
+    // service account from GoogleCredentialsPath shared as Editor on the
+    // target folder. See SqliteBackupService class comment for the full setup.
+    builder.Services.AddSingleton<GoogleDriveBackupClient>();
+    builder.Services.AddHostedService<SqliteBackupService>();
+
+    // HealthCommandHandler: /health diagnostic. Officer+ gated. Reads from
+    // BotState + BotDbContext only — no external API calls, so /health works
+    // even when Drive / Sheets / Calendar are degraded.
+    builder.Services.AddSingleton<HealthCommandHandler>();
+
     // ── AI / Weekly Briefing ─────────────────────────────────────────
     // WeeklyOfficerBriefingService: scheduled background service that posts a
     // weekly officer briefing to the HQ channel using Claude Sonnet 4.6.

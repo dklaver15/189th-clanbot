@@ -603,6 +603,8 @@ public class CommandsCommandHandler
                 "Officer+", officer),
             new("cleanup-calendar-dupes", "Reconcile calendar/GCal duplicate entries",
                 "Officer+", officer),
+            new("health", "Bot health diagnostic — uptime, DB stats, scheduled jobs, queues",
+                "Officer+", officer),   // SyncWithHandlers: HealthCommandHandler.HasElevatedPermissions
             new("roster-export", "Trigger a roster export to Google Sheets",
                 "Officer+", officer),
             new("setnick", "Change a member's nickname",

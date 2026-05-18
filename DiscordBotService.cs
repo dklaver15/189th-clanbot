@@ -50,6 +50,7 @@ public class DiscordBotService : IHostedService
     private readonly CleanupCalendarDupesCommandHandler _cleanupCalendarDupesHandler;
     private readonly CalendarCommandHandler _calendarHandler;
     private readonly CommandsCommandHandler _commandsHandler;
+    private readonly HealthCommandHandler _healthHandler;
     private readonly CommandUsageTrackingHandler _commandUsageHandler;
     private readonly UsageStatsCommandHandler _usageStatsHandler;
     private readonly SecurityAuditCommandHandler _securityAuditHandler;
@@ -99,6 +100,7 @@ public class DiscordBotService : IHostedService
         CleanupCalendarDupesCommandHandler cleanupCalendarDupesHandler,
         CalendarCommandHandler calendarHandler,
         CommandsCommandHandler commandsHandler,
+        HealthCommandHandler healthHandler,
         CommandUsageTrackingHandler commandUsageHandler,
         UsageStatsCommandHandler usageStatsHandler,
         SecurityAuditCommandHandler securityAuditHandler,
@@ -147,6 +149,7 @@ public class DiscordBotService : IHostedService
         _cleanupCalendarDupesHandler = cleanupCalendarDupesHandler;
         _calendarHandler             = calendarHandler;
         _commandsHandler             = commandsHandler;
+        _healthHandler               = healthHandler;
         _commandUsageHandler         = commandUsageHandler;
         _usageStatsHandler           = usageStatsHandler;
         _securityAuditHandler        = securityAuditHandler;
@@ -215,6 +218,7 @@ public class DiscordBotService : IHostedService
         _cleanupCalendarDupesHandler.Register(_client);
         _calendarHandler.Register(_client);
         _commandsHandler.Register(_client);
+        _healthHandler.Register(_client);
         _commandUsageHandler.Register(_client);
         _usageStatsHandler.Register(_client);
         _securityAuditHandler.Register(_client);
@@ -545,6 +549,12 @@ public class DiscordBotService : IHostedService
                 // BotState.OfficerAppButtonMessageId. NOTE: keep
                 // CommandsCommandHandler.BuildCatalog in sync when this changes.
                 OfficerApplicationSetupCommandHandler.BuildCommand(),
+
+                // /health — Officer+ diagnostic for uptime / DB / scheduled jobs / queues.
+                // All data is read locally so the command works even when Drive / Sheets /
+                // Calendar are degraded. NOTE: keep CommandsCommandHandler.BuildCatalog in
+                // sync when changing /health.
+                HealthCommandHandler.BuildCommand(),
             };
 
             foreach (var guild in _client.Guilds)
