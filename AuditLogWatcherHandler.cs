@@ -616,10 +616,17 @@ public sealed class AuditLogWatcherHandler
     /// <c>*AuditLogData</c> class. Discord.NET's gateway <c>AuditLogCreated</c>
     /// event will sometimes deliver an entry with <c>Data == null</c> even
     /// for actions whose typed class is well-defined (e.g.
-    /// <see cref="ChannelDeleteAuditLogData"/>). The REST audit-log endpoint
-    /// parses the same entry with materially better reliability, so when
-    /// the gateway data is missing we re-fetch the most recent entries
-    /// filtered by action type and try to find this entry by id.
+    /// <see cref="ChannelDeleteAuditLogData"/>). It will ALSO sometimes
+    /// deliver a non-null <c>Data</c> that's an untyped <c>IAuditLogData</c>
+    /// shape — present in memory but not castable to the typed class our
+    /// switch in <see cref="DescribeTarget"/> expects. Concretely observed
+    /// for <see cref="ActionType.Ban"/>: the typed branch never matches,
+    /// the switch falls through to <c>default</c>, and the alert renders
+    /// the Target field as just the action name ("Ban") with no banned-
+    /// user identity at all. The REST audit-log endpoint parses the same
+    /// entry with materially better reliability, so for actions where we
+    /// know we need a specific typed shape, we re-fetch via REST when
+    /// the gateway payload either is missing or is the wrong shape.
     ///
     /// Returns whatever <see cref="IAuditLogData"/> we end up with —
     /// possibly still null if the REST call fails or the entry has rolled
@@ -629,7 +636,12 @@ public sealed class AuditLogWatcherHandler
     /// </summary>
     private async Task<IAuditLogData?> ResolveDataAsync(SocketAuditLogEntry entry, SocketGuild guild)
     {
-        if (entry.Data is not null)
+        // Skip REST when gateway already gave us a payload of the typed
+        // shape DescribeTarget will match for this action. NeedsTypedUpgrade
+        // is the single place that lists action → expected typed class
+        // pairs; extend it there if a new action surfaces the same
+        // "untyped payload" symptom.
+        if (entry.Data is not null && !NeedsTypedUpgrade(entry.Action, entry.Data))
             return entry.Data;
 
         try
@@ -659,6 +671,32 @@ public sealed class AuditLogWatcherHandler
 
         return null;
     }
+
+    /// <summary>
+    /// True when the gateway-delivered <paramref name="data"/> does not
+    /// match the typed <c>*AuditLogData</c> class that
+    /// <see cref="DescribeTarget"/> needs in order to render a useful
+    /// target field for this <paramref name="action"/>. Used by
+    /// <see cref="ResolveDataAsync"/> to decide when a REST upgrade is
+    /// worth the round trip.
+    ///
+    /// Only actions whose <c>DescribeTarget</c> branch reads typed
+    /// properties off the data appear here. Actions that intentionally
+    /// don't have a typed case (e.g. <see cref="ActionType.WebhookCreated"/>
+    /// — see the comment in <c>DescribeTarget</c>) are omitted so we
+    /// don't pay for an unnecessary REST round trip on every event.
+    /// </summary>
+    private static bool NeedsTypedUpgrade(ActionType action, IAuditLogData data) => action switch
+    {
+        ActionType.ChannelDeleted => data is not ChannelDeleteAuditLogData,
+        ActionType.Ban            => data is not BanAuditLogData,
+        ActionType.BotAdded       => data is not BotAddAuditLogData,
+        ActionType.RoleCreated    => data is not RoleCreateAuditLogData,
+        ActionType.RoleUpdated    => data is not RoleUpdateAuditLogData,
+        ActionType.RoleDeleted    => data is not RoleDeleteAuditLogData,
+        ActionType.GuildUpdated   => data is not GuildUpdateAuditLogData,
+        _                         => false,
+    };
 
     /// <summary>
     /// Channel resolution: ID first, then HqChannelName fallback. Same
