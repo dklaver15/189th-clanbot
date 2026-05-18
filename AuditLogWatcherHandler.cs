@@ -292,16 +292,45 @@ public sealed class AuditLogWatcherHandler
                 entry.User?.Username ?? "(unknown)",
                 guild.Name);
 
+            // ── Resolve typed data (gateway → REST fallback) ──────────────
+            // Done here, before write + post, so:
+            //   1. The downstream noise-filter below has the typed data
+            //      it needs to check ChannelType.
+            //   2. We pay at most one REST upgrade per entry on the slow
+            //      path (gateway null), instead of one each in
+            //      WriteAuditAsync and PostAlertAsync.
+            var resolvedData = await ResolveDataAsync(entry, guild);
+
+            // ── Noise filter: bot-driven voice channel deletes ────────────
+            // MEE6's temp-voice feature and similar JoinToCreate-style bots
+            // generate a ChannelDeleted event every time a temporary voice
+            // lobby empties out. These have no security relevance and would
+            // otherwise flood the alerts channel with @here pings. See
+            // BotConfig.AuditLogWatcherIgnoreBotVoiceChannelDeletes for the
+            // exact rule (actor is a bot AND deleted channel was Voice).
+            if (_config.AuditLogWatcherIgnoreBotVoiceChannelDeletes
+                && entry.Action == ActionType.ChannelDeleted
+                && entry.User?.IsBot == true
+                && resolvedData is ChannelDeleteAuditLogData chData
+                && chData.ChannelType == ChannelType.Voice)
+            {
+                _logger.LogDebug(
+                    "Audit log watcher: suppressing bot-driven voice channel delete " +
+                    "(actor {ActorId}, channel `#{ChannelName}` {ChannelId})",
+                    entry.User.Id, chData.ChannelName, chData.ChannelId);
+                return;
+            }
+
             var isCritical = CriticalActions.Contains(entry.Action);
 
             // ── Write durable audit row first ─────────────────────────────
             // DB is the durable record; the embed is the live notification.
             // Same ordering as AccountAgeGateHandler so a Discord-side
             // failure on the post doesn't drop the row.
-            await WriteAuditAsync(entry, guild, isCritical);
+            await WriteAuditAsync(entry, guild, isCritical, resolvedData);
 
             // ── Post alert embed (with optional ping for critical) ────────
-            await PostAlertAsync(entry, guild, isCritical);
+            await PostAlertAsync(entry, guild, isCritical, resolvedData);
         }
         catch (Exception ex)
         {
@@ -318,19 +347,17 @@ public sealed class AuditLogWatcherHandler
     /// ("what did this officer do recently?"). Target info lives in
     /// Details.
     /// </summary>
-    private async Task WriteAuditAsync(SocketAuditLogEntry entry, SocketGuild guild, bool isCritical)
+    private async Task WriteAuditAsync(
+        SocketAuditLogEntry entry,
+        SocketGuild guild,
+        bool isCritical,
+        IAuditLogData? resolvedData)
     {
         try
         {
             using var scope = _services.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
-            // Upgrade entry.Data via REST if the gateway delivered it null.
-            // PostAlertAsync will do the same; both pay a single REST call
-            // on the slow path. We accept the duplicate fetch — they're
-            // independent failure domains (DB write vs Discord post) and
-            // we don't want one to depend on the other's success.
-            var resolvedData = await ResolveDataAsync(entry, guild);
             var (targetDesc, _) = DescribeTarget(entry, resolvedData);
 
             // Resolve actor as a guild member for DisplayName; fall back
@@ -382,7 +409,11 @@ public sealed class AuditLogWatcherHandler
     /// in message content with the Everyone allowed-mention flag set so
     /// the ping actually fires.
     /// </summary>
-    private async Task PostAlertAsync(SocketAuditLogEntry entry, SocketGuild guild, bool isCritical)
+    private async Task PostAlertAsync(
+        SocketAuditLogEntry entry,
+        SocketGuild guild,
+        bool isCritical,
+        IAuditLogData? resolvedData)
     {
         var channel = ResolveSecurityAlertsChannel(guild);
         if (channel is null)
@@ -394,7 +425,6 @@ public sealed class AuditLogWatcherHandler
             return;
         }
 
-        var resolvedData = await ResolveDataAsync(entry, guild);
         var (targetDesc, targetMention) = DescribeTarget(entry, resolvedData);
 
         // Actor display: prefer guild nickname for context ("Officer.Bob"

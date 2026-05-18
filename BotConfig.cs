@@ -548,6 +548,29 @@ public class BotConfig
     /// </summary>
     public string AuditLogWatcherCriticalMention { get; set; } = "@here";
 
+    /// <summary>
+    /// When <c>true</c> (the default) the watcher suppresses
+    /// <see cref="Discord.ActionType.ChannelDeleted"/> alerts when both:
+    ///   • the actor is a bot account
+    ///     (<see cref="Discord.IUser.IsBot"/>), AND
+    ///   • the deleted channel was a voice channel
+    ///     (<see cref="Discord.ChannelType.Voice"/>).
+    ///
+    /// This filters out the routine churn from temporary-voice-channel
+    /// bots (MEE6's temp voice, JoinToCreate, etc.) that create a
+    /// channel on lobby join and tear it down on empty. Without this
+    /// filter the security-alerts channel gets flooded with @here
+    /// pings for activity that has no security relevance.
+    ///
+    /// Humans deleting voice channels still alert (officers are not
+    /// bots). Bots deleting non-voice channels (text, category, forum,
+    /// stage) still alert — that's rare and worth a look. ClanGuard's
+    /// own actions are already filtered upstream by the
+    /// <c>entry.User.Id == _client.CurrentUser.Id</c> check, so this
+    /// flag only affects third-party bots.
+    /// </summary>
+    public bool AuditLogWatcherIgnoreBotVoiceChannelDeletes { get; set; } = true;
+
     // ─── Server protection: Nickname Impersonation Check ─────────────
     /// <summary>
     /// Operating mode for the nickname-impersonation watcher. Fires on
