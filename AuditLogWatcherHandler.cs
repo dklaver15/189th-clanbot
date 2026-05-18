@@ -6,6 +6,7 @@ using Discord.WebSocket;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using System.Collections.Concurrent;
 
 namespace ClanGuardBot.Handlers;
 
@@ -138,6 +139,43 @@ public sealed class AuditLogWatcherHandler
     private readonly ILogger<AuditLogWatcherHandler> _logger;
     private readonly BotConfig _config;
 
+    /// <summary>
+    /// Shadow cache of channel id → display name, populated as channels
+    /// become known to the bot and maintained across renames.
+    ///
+    /// ── Why this exists ──
+    /// Discord.NET's gateway <c>AuditLogCreated</c> event delivers a
+    /// <see cref="SocketAuditLogEntry"/> whose <c>Data</c> property does
+    /// not always resolve to the typed <c>*AuditLogData</c> class — for
+    /// <see cref="ActionType.ChannelDeleted"/> in particular, we've
+    /// observed <c>entry.Data</c> arriving as <c>null</c> or an
+    /// untyped shape, which makes the <c>ChannelDeleteAuditLogData</c>
+    /// case in <see cref="DescribeTarget"/> never match. The result is
+    /// a Target field that reads "ChannelDeleted" (the action name)
+    /// with no channel identification at all.
+    ///
+    /// Even when <c>entry.Data</c> does resolve, we still can't ask the
+    /// guild for the channel name after deletion — by the time the
+    /// audit log fires, the channel is already gone from
+    /// <see cref="SocketGuild.Channels"/>.
+    ///
+    /// ── How it's populated ──
+    ///   • Bulk on <see cref="DiscordSocketClient.GuildAvailable"/> for
+    ///     each guild the bot joins / resumes against.
+    ///   • Incrementally on <see cref="DiscordSocketClient.ChannelCreated"/>.
+    ///   • Updated in place on <see cref="DiscordSocketClient.ChannelUpdated"/>
+    ///     so renames don't leave stale names behind.
+    ///
+    /// We deliberately do NOT remove entries on
+    /// <see cref="DiscordSocketClient.ChannelDestroyed"/> — the whole
+    /// point is to remember the name AFTER the channel is gone. Discord
+    /// snowflakes are never reused, so a permanently-growing dictionary
+    /// keyed by channel id is safe; for a single-guild clan bot the
+    /// lifetime entry count stays in the low hundreds and the memory
+    /// cost is negligible.
+    /// </summary>
+    private readonly ConcurrentDictionary<ulong, string> _channelNames = new();
+
     public AuditLogWatcherHandler(
         IServiceProvider services,
         DiscordSocketClient client,
@@ -153,6 +191,52 @@ public sealed class AuditLogWatcherHandler
     public void Register(DiscordSocketClient client)
     {
         client.AuditLogCreated += OnAuditLogCreated;
+
+        // Channel-name cache wiring. See _channelNames XML doc for rationale.
+        client.GuildAvailable  += OnGuildAvailableAsync;
+        client.ChannelCreated  += OnChannelCreatedAsync;
+        client.ChannelUpdated  += OnChannelUpdatedAsync;
+    }
+
+    // ── Channel-name cache maintenance ────────────────────────────────────
+
+    private Task OnGuildAvailableAsync(SocketGuild guild)
+    {
+        try
+        {
+            // guild.Channels is the full set of guild channels (text, voice,
+            // category, forum, stage, announcement). Threads are not in this
+            // collection — they're a separate concern (ThreadDeleted is a
+            // distinct ActionType we don't currently watch). Bulk-prime the
+            // cache here so a channel deletion that happens shortly after a
+            // restart still resolves to a name.
+            foreach (var ch in guild.Channels)
+            {
+                if (!string.IsNullOrWhiteSpace(ch.Name))
+                    _channelNames[ch.Id] = ch.Name;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Audit log watcher: failed to prime channel-name cache for guild {GuildId}",
+                guild.Id);
+        }
+        return Task.CompletedTask;
+    }
+
+    private Task OnChannelCreatedAsync(SocketChannel channel)
+    {
+        if (channel is SocketGuildChannel gc && !string.IsNullOrWhiteSpace(gc.Name))
+            _channelNames[gc.Id] = gc.Name;
+        return Task.CompletedTask;
+    }
+
+    private Task OnChannelUpdatedAsync(SocketChannel _, SocketChannel after)
+    {
+        if (after is SocketGuildChannel gc && !string.IsNullOrWhiteSpace(gc.Name))
+            _channelNames[gc.Id] = gc.Name;
+        return Task.CompletedTask;
     }
 
     private Task OnAuditLogCreated(SocketAuditLogEntry entry, SocketGuild guild)
@@ -241,7 +325,13 @@ public sealed class AuditLogWatcherHandler
             using var scope = _services.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
-            var (targetDesc, _) = DescribeTarget(entry);
+            // Upgrade entry.Data via REST if the gateway delivered it null.
+            // PostAlertAsync will do the same; both pay a single REST call
+            // on the slow path. We accept the duplicate fetch — they're
+            // independent failure domains (DB write vs Discord post) and
+            // we don't want one to depend on the other's success.
+            var resolvedData = await ResolveDataAsync(entry, guild);
+            var (targetDesc, _) = DescribeTarget(entry, resolvedData);
 
             // Resolve actor as a guild member for DisplayName; fall back
             // to bare username if they've already left or aren't cached.
@@ -304,7 +394,8 @@ public sealed class AuditLogWatcherHandler
             return;
         }
 
-        var (targetDesc, targetMention) = DescribeTarget(entry);
+        var resolvedData = await ResolveDataAsync(entry, guild);
+        var (targetDesc, targetMention) = DescribeTarget(entry, resolvedData);
 
         // Actor display: prefer guild nickname for context ("Officer.Bob"
         // rather than just "bob"), fall back to username, "(unknown)"
@@ -392,17 +483,33 @@ public sealed class AuditLogWatcherHandler
     /// The "mentionable" string is a Discord mention like &lt;#123&gt; or &lt;@456&gt;
     /// when the target has one. Falls back to a plain description for
     /// types without a mention form (e.g. roles, webhooks).
+    ///
+    /// Takes the data payload as a separate parameter rather than reading
+    /// it off the entry so callers can pass a REST-upgraded payload (see
+    /// <see cref="ResolveDataAsync"/>) when the gateway-side
+    /// <c>entry.Data</c> failed to materialize.
     /// </summary>
-    private static (string description, string? mention) DescribeTarget(SocketAuditLogEntry entry)
+    private (string description, string? mention) DescribeTarget(
+        SocketAuditLogEntry entry,
+        IAuditLogData? data)
     {
         // Each ActionType has a corresponding *AuditLogData class in
         // Discord.NET. We pattern-match on the live shapes we care about.
         // Unhandled data types fall through to the default — the alert
         // still posts, just with less specific target info.
-        switch (entry.Data)
+        switch (data)
         {
             case ChannelDeleteAuditLogData ch:
-                return ($"Channel `#{ch.ChannelName}` ({ch.ChannelId})", null);
+                // Defense in depth: ChannelName on the data payload has
+                // been observed to come through null/empty on gateway-side
+                // audit entries even when the typed class itself resolves.
+                // Fall back to the shadow cache before giving up on a name.
+                var resolvedName = !string.IsNullOrWhiteSpace(ch.ChannelName)
+                    ? ch.ChannelName
+                    : (_channelNames.TryGetValue(ch.ChannelId, out var cached) ? cached : null);
+                return resolvedName is null
+                    ? ($"Channel `{ch.ChannelId}` (name unavailable)", null)
+                    : ($"Channel `#{resolvedName}` ({ch.ChannelId})", null);
 
             case BanAuditLogData ban:
                 var u = ban.Target;
@@ -462,8 +569,65 @@ public sealed class AuditLogWatcherHandler
                 return ("Guild settings", null);
 
             default:
+                // entry.Data didn't resolve to a typed *AuditLogData class
+                // (a known intermittent gateway-side behavior for some
+                // actions — ChannelDeleted in particular). Caller is
+                // expected to have already attempted a REST upgrade via
+                // ResolveDataAsync before falling through to this default;
+                // by the time we're here we have nothing left to salvage,
+                // so we just surface the action name and let the Audit
+                // Entry ID field carry the link back to Discord's own log.
                 return ($"{entry.Action}", null);
         }
+    }
+
+    /// <summary>
+    /// Attempts to upgrade <c>entry.Data</c> to its proper typed
+    /// <c>*AuditLogData</c> class. Discord.NET's gateway <c>AuditLogCreated</c>
+    /// event will sometimes deliver an entry with <c>Data == null</c> even
+    /// for actions whose typed class is well-defined (e.g.
+    /// <see cref="ChannelDeleteAuditLogData"/>). The REST audit-log endpoint
+    /// parses the same entry with materially better reliability, so when
+    /// the gateway data is missing we re-fetch the most recent entries
+    /// filtered by action type and try to find this entry by id.
+    ///
+    /// Returns whatever <see cref="IAuditLogData"/> we end up with —
+    /// possibly still null if the REST call fails or the entry has rolled
+    /// off the recent-entries window. Callers must handle null in their
+    /// switch (the <c>default</c> case in <see cref="DescribeTarget"/>
+    /// already does).
+    /// </summary>
+    private async Task<IAuditLogData?> ResolveDataAsync(SocketAuditLogEntry entry, SocketGuild guild)
+    {
+        if (entry.Data is not null)
+            return entry.Data;
+
+        try
+        {
+            // limit:10 is a balance between "wide enough to catch the entry
+            // even if a burst of other actions of the same type fired
+            // between gateway delivery and our REST fetch" and "narrow
+            // enough that we don't pay for an extra page". For the threat
+            // model this watcher exists for (compromised officer doing
+            // structural damage) we'd expect at most a handful of same-
+            // type actions in flight at once.
+            await foreach (var page in guild.GetAuditLogsAsync(limit: 10, actionType: entry.Action))
+            {
+                foreach (var rest in page)
+                {
+                    if (rest.Id == entry.Id)
+                        return rest.Data;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex,
+                "Audit log watcher: REST fallback fetch failed for entry {EntryId} action {Action}",
+                entry.Id, entry.Action);
+        }
+
+        return null;
     }
 
     /// <summary>
