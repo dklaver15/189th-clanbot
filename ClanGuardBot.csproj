@@ -49,8 +49,10 @@
       • Anything in bin/ or obj/ (build output)
       • SDK-generated *.g.cs, *.Designer.cs, AssemblyInfo.cs
 
-    Line count uses `wc -l` semantics (count of '\n' bytes) so the number
-    matches what `find . -name "*.cs" -exec cat {} + | wc -l` would report.
+    Line count is **non-blank** lines: every line that contains at least
+    one non-whitespace character. Uses File.ReadAllLines so each file's
+    line boundaries are computed independently (no spillover from a
+    missing trailing newline into the next file).
   -->
   <UsingTask
           TaskName="CountSourceLines"
@@ -75,9 +77,15 @@
             var path = item.GetMetadata("FullPath");
             if (!File.Exists(path)) continue;
             files++;
-            var bytes = File.ReadAllBytes(path);
-            for (int i = 0; i < bytes.Length; i++)
-                if (bytes[i] == 0x0A) lines++;
+            // Non-blank lines only: skip lines that are empty or whitespace-only.
+            // ReadAllLines transparently handles \n and \r\n endings.
+            foreach (var line in File.ReadAllLines(path))
+            {
+                for (int i = 0; i < line.Length; i++)
+                {
+                    if (!char.IsWhiteSpace(line[i])) { lines++; break; }
+                }
+            }
         }
         FileCount = files;
         LineCount = lines;
@@ -92,7 +100,7 @@
         sb.AppendLine("{");
         sb.AppendLine("    /// <summary>Number of hand-written .cs files compiled into the bot</summary>");
         sb.AppendLine("    public const int SourceFileCount = " + files + ";");
-        sb.AppendLine("    /// <summary>Total newline-terminated lines across those files (wc -l semantics)</summary>");
+        sb.AppendLine("    /// <summary>Non-blank lines across those files (lines with at least one non-whitespace char)</summary>");
         sb.AppendLine("    public const int SourceLineCount = " + lines + ";");
         sb.AppendLine("}");
 
