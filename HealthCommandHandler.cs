@@ -29,6 +29,8 @@ namespace ClanGuardBot.Handlers;
 /// • Operational queues — AWOL records pending notification, pending officer
 ///   applications, upcoming calendar events
 /// • Security — SecurityAuditRecords written in the last 24h, grouped by feature
+/// • Footer — version, runtime, and codebase size (hand-written .cs file
+///   count + line count, baked in at build time via BuildInfo.g.cs)
 ///
 /// ── Why every datum is local ──
 /// /health must always be cheap. Every field reads from a column or table
@@ -201,7 +203,8 @@ public class HealthCommandHandler
                                                   && (now - outboxOldest.Value) > TimeSpan.FromHours(24),
                                 state?.LastSqliteBackupError))
             .WithTimestamp(now)
-            .WithFooter($"v{_assemblyVersion} · {_runtimeVersion}");
+            .WithFooter($"v{_assemblyVersion} · {_runtimeVersion} · " +
+                        $"{BuildInfo.SourceFileCount} files · {BuildInfo.SourceLineCount:N0} LOC");
 
         // Process
         embed.AddField("⏱️ Uptime",
