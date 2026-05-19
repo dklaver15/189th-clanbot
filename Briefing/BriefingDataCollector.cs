@@ -219,6 +219,36 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
                 topLine.AverageAttendancePercent - priorTopLine.AverageAttendancePercent, 1),
             NewRecruitsDelta: topLine.NewRecruits - priorTopLine.NewRecruits);
 
+        // ── Anomaly detection ──
+        // Pre-computes factual signals (events drop, attendance swing, recruit
+        // surge/drought, single-day join clustering) that the briefing prompt
+        // is instructed to surface in the Notable section. Deterministic +
+        // single-pass; see BriefingAnomalyDetector for rationale.
+        //
+        // The joins-by-day input is the only new query — bounded to a week's
+        // worth of InviteJoin rows (dozens at most), so we pull timestamps
+        // and bucket in memory instead of GROUP BY-ing in EF (avoids relying
+        // on EF Core's SQLite date-translation, which can be brittle).
+        var joinsByDay = await SafeAsync(async () =>
+        {
+            var timestamps = await db.InviteJoins
+                .Where(j => j.GuildId == guild.Id
+                         && j.JoinedAt >= weekStart
+                         && j.JoinedAt < weekEnd)
+                .Select(j => j.JoinedAt)
+                .ToListAsync(ct);
+            return (IReadOnlyDictionary<DateTime, int>)timestamps
+                .GroupBy(t => t.Date)
+                .ToDictionary(g => g.Key, g => g.Count());
+        }, "joins-by-day", new Dictionary<DateTime, int>());
+
+        var anomalies = BriefingAnomalyDetector.Detect(
+            deltas,
+            eventsHeldThisWeek: topLine.EventsHeld,
+            averageAttendancePercentThisWeek: topLine.AverageAttendancePercent,
+            newRecruitsThisWeek: topLine.NewRecruits,
+            joinsByDay: joinsByDay);
+
         var context = new BriefingContext
         {
             WeekStart = weekStart,
@@ -236,7 +266,7 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
             RecruitmentSources = recruitmentSources,
             TopReferrers = topReferrers,
             RedditLeads = redditLeads,
-            Anomalies = []
+            Anomalies = anomalies
         };
 
         _logger.LogInformation(
@@ -244,12 +274,14 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
             "{Risk} risk-watch, {Sources} sources, {Referrers} referrers, " +
             "{Leads} recruit leads (stale claimed: {Stale}), " +
             "spotlight={Spot}, {Members} active members, " +
-            "WoW: events Δ{EventsDelta}, attendance Δ{AttendanceDelta}pp, recruits Δ{RecruitsDelta}",
+            "WoW: events Δ{EventsDelta}, attendance Δ{AttendanceDelta}pp, recruits Δ{RecruitsDelta}, " +
+            "{Anomalies} anomalies",
             awolRisks.Count, promotionCandidates.Count, notableEvents.Count,
             riskWatch.Count, recruitmentSources.Count, topReferrers.Count,
             redditLeads?.TotalSurfaced ?? 0, redditLeads?.StaleClaimedAllTime ?? 0,
             spotlight?.Gamertag ?? "—", topLine.ActiveMemberCount,
-            deltas.EventsHeldDelta, deltas.AverageAttendancePercentDelta, deltas.NewRecruitsDelta);
+            deltas.EventsHeldDelta, deltas.AverageAttendancePercentDelta, deltas.NewRecruitsDelta,
+            anomalies.Count);
 
         return context;
     }

@@ -219,6 +219,9 @@ public class SqliteBackupService : BackgroundService
         var timestamp     = started.ToString("yyyy-MM-ddTHH-mm-ssZ");
         var remoteName    = $"clanguard-backup-{timestamp}{CompressedExt}";
         var compressedPath = Path.Combine(workDir, remoteName);
+        // Declared here (not inside try/) so the finally block can clean it
+        // up. Stays null until the encrypt step actually runs.
+        string? encryptedPath = null;
 
         try
         {
@@ -235,6 +238,43 @@ public class SqliteBackupService : BackgroundService
                 compressedBytes,
                 snapshotBytes == 0 ? 0 : (100.0 * compressedBytes / snapshotBytes));
 
+            // ── 2b. Encrypt (if a passphrase is configured) ──
+            // We encrypt AFTER gzip because encrypted bytes are uniformly random
+            // and don't compress. If we ever flip the order the file size will
+            // ~triple.
+            //
+            // No passphrase set → upload unencrypted with a loud warning. The
+            // warning is the deliberate trade-off for not blocking deploys: if
+            // we hard-failed here, the first deploy after pulling this change
+            // would brick backups until the env var was set. The /health embed
+            // already shows backup status; the log line tells you exactly what
+            // happened.
+            var uploadPath = compressedPath;
+            var uploadName = remoteName;
+            var encrypted = false;
+            if (!string.IsNullOrWhiteSpace(_config.BackupEncryptionPassphrase))
+            {
+                encryptedPath = compressedPath + ".enc";
+                var encryptedName = remoteName + ".enc";
+                await SqliteBackupCrypto.EncryptFileAsync(
+                    compressedPath, encryptedPath, _config.BackupEncryptionPassphrase, ct);
+                var encryptedBytes = new FileInfo(encryptedPath).Length;
+                _logger.LogInformation(
+                    "Encrypted snapshot: {Bytes} bytes (+{Overhead} bytes over gzip)",
+                    encryptedBytes, encryptedBytes - compressedBytes);
+                uploadPath = encryptedPath;
+                uploadName = encryptedName;
+                encrypted = true;
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "BackupEncryptionPassphrase is not set — backup will be uploaded UNENCRYPTED. " +
+                    "Set BotConfig__BackupEncryptionPassphrase (or CLANGUARD_BACKUP_PASSPHRASE in docker-compose) " +
+                    "to enable AES-256-GCM encryption.");
+            }
+            var uploadBytes = new FileInfo(uploadPath).Length;
+
             // ── 3. Upload (unless dry-run) ──
             string? driveFileId = null;
             if (_config.BackupDryRun)
@@ -243,7 +283,7 @@ public class SqliteBackupService : BackgroundService
             }
             else
             {
-                driveFileId = await _drive.UploadAsync(compressedPath, remoteName, ct);
+                driveFileId = await _drive.UploadAsync(uploadPath, uploadName, ct);
             }
 
             // ── 4. Retention prune (success-only, and only when not dry-run) ──
@@ -253,12 +293,16 @@ public class SqliteBackupService : BackgroundService
             }
 
             // ── 5. Stamp BotState ──
-            await StampSuccessAsync(compressedBytes, ct);
+            // Record the actual uploaded byte count (with encryption overhead
+            // if applicable) so /health shows what's on the wire / on Drive,
+            // not the pre-encryption size.
+            await StampSuccessAsync(uploadBytes, ct);
 
             _logger.LogInformation(
-                "SQLite backup complete in {Elapsed:F1}s (driveFileId={Id}, dryRun={DryRun})",
+                "SQLite backup complete in {Elapsed:F1}s (driveFileId={Id}, encrypted={Encrypted}, dryRun={DryRun})",
                 (DateTime.UtcNow - started).TotalSeconds,
                 driveFileId ?? "—",
+                encrypted,
                 _config.BackupDryRun);
         }
         catch (Exception ex)
@@ -271,6 +315,7 @@ public class SqliteBackupService : BackgroundService
         {
             TryDelete(snapshotPath);
             TryDelete(compressedPath);
+            if (encryptedPath is not null) TryDelete(encryptedPath);
         }
     }
 

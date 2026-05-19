@@ -48,7 +48,12 @@ internal static class BriefingPrompts
         5. ### ⚠️ Risk Watch — members trending toward AWOL but not yet flagged. One bullet each:
            **gamertag** (rank): X/Y msgs, Z/W hours over Nd window. Skip the section if empty.
         6. ### 📋 Notable — events that happened, anomalies, anything else worth a glance.
-           Lead with the biggest-attendance event.
+           If `anomalies` is non-empty, lead the section with one bullet per anomaly — these are
+           pre-computed factual signals (events drops, attendance swings, recruit surges/droughts,
+           single-day join clustering). Surface each as-is or paraphrase to weave in context from
+           the rest of the snapshot (e.g. an attendance drop alongside an AWOL spike reads
+           differently than an attendance drop alone). Then list the biggest-attendance events
+           below. If `anomalies` is empty, just lead with the biggest-attendance event.
         7. ### 📨 Recruitment Sources — joins this week, broken down by labeled invite. One bullet
            per `recruitment_sources` entry: **label** — N joins. After the labels, if `top_referrers`
            is non-empty, add a short line: "Top referrers: **gamertag** (N), **gamertag** (N)." A

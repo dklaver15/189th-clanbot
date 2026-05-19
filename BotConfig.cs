@@ -739,6 +739,34 @@ public class BotConfig
     /// </summary>
     public bool BackupDryRun { get; set; } = false;
 
+    /// <summary>
+    /// Passphrase used to derive the AES-256-GCM key for backup encryption.
+    /// When non-empty, every uploaded backup is encrypted with AES-256-GCM
+    /// (PBKDF2-SHA256 key derivation, per-file random salt + nonce, format
+    /// documented in <see cref="Services.SqliteBackupCrypto"/>) and the
+    /// remote filename gets a ".enc" suffix.
+    ///
+    /// When empty (the default), backups upload unencrypted with a warning
+    /// log line per cycle. Default-empty so first-time deployers of this
+    /// change don't lose backups before they've set the passphrase.
+    ///
+    /// ── How to set ──
+    /// In production this should flow from the host environment, not the
+    /// committed appsettings.json. docker-compose maps:
+    ///   BotConfig__BackupEncryptionPassphrase=${CLANGUARD_BACKUP_PASSPHRASE}
+    /// Add CLANGUARD_BACKUP_PASSPHRASE=... to the droplet's .env file.
+    ///
+    /// ── Operational warning ──
+    /// If you change or lose this passphrase you cannot decrypt prior
+    /// backups. Store it in a password manager BEFORE setting it. Rotating
+    /// to a new passphrase mid-stream means old backups stay readable with
+    /// the old one and new backups with the new one — there is no
+    /// re-encryption sweep, by design (re-encryption on rotation would
+    /// require holding both passphrases at once and is rarely worth the
+    /// complexity for a 14-day retention window).
+    /// </summary>
+    public string BackupEncryptionPassphrase { get; set; } = string.Empty;
+
     // ─── Helpers ─────────────────────────────────────────────────────
 
     /// <summary>
