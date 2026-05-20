@@ -18,13 +18,16 @@ missing, **stop and recover that access first** — the runbook will fail
 partway through otherwise.
 
 - [ ] **Proton Pass vault** containing:
-  - `DISCORD_BOT_TOKEN`
-  - `ANTHROPIC_API_KEY`
-  - `CLANGUARD_BACKUP_PASSPHRASE`
-  - `CLANGUARD_HEARTBEAT_URL`
+    - `DISCORD_BOT_TOKEN`
+    - `ANTHROPIC_API_KEY`
+    - `CLANGUARD_BACKUP_PASSPHRASE`
+    - `CLANGUARD_HEARTBEAT_URL`
 - [ ] **GitHub account** with admin access to `dklaver15/189th-clanbot`
-  (needed to update the `DROPLET_HOST` secret)
+  (needed to trigger a manual deploy from the Actions tab)
 - [ ] **DigitalOcean account** with billing in good standing
+- [ ] **Reserved IP `159.89.243.21`** currently assigned to the bot
+  droplet — recovery moves it to the new droplet. Verify in DO Cloud →
+  Networking → Reserved IPs.
 - [ ] **Google account** with access to the Drive folder containing the
   `clanguard-backup-*.db.gz.enc` files
 - [ ] **Mac laptop** with Python 3 installed (`python3 --version` should
@@ -48,8 +51,9 @@ next scheduled cycle, or extend `BackupHourUtc` temporarily.
 3. Authentication: add your SSH public key.
 4. Hostname: `ubuntu-clanbot-nyc3-recovery` (rename to drop the suffix
    later once verified).
-5. Click **Create Droplet**. Note the IPv4 address — you'll need it
-   several times.
+5. Click **Create Droplet**. Note the auto-assigned IPv4 address —
+   you'll use it for SSH and `scp` during Phases B–E. The Reserved IP
+   (`159.89.243.21`) stays attached to the dead droplet until Phase F.
 6. **Enable weekly backups** on the new droplet (Backups tab) so you don't
    recreate the original gap.
 
@@ -185,24 +189,35 @@ rm /tmp/clanguard.db  # don't leave a copy lying around
 ls -lh "$MOUNT/clanguard.db"
 ```
 
-### Phase F — Repoint deploys to the new droplet
+### Phase F — Reassign the Reserved IP and trigger a deploy
 
-In GitHub → repo settings → **Secrets and variables** → **Actions**:
+`DROPLET_HOST` in GitHub Actions points at the Reserved IP
+(`159.89.243.21`), so the only thing standing between you and a working
+deploy is moving that IP to the new droplet.
 
-- Update **`DROPLET_HOST`** to the new droplet's IPv4 address.
-- Leave `DROPLET_SSH_KEY`, `GH_PAT`, `GOOGLE_CREDENTIALS_BASE64`,
-  `ANTHROPIC_API_KEY` unchanged.
+1. **DO Cloud → Networking → Reserved IPs**
+2. Find `159.89.243.21` → click the **⋯** menu → **Reassign Reserved IP**
+3. Select the new droplet → confirm
+4. Reassignment is instant. Verify from your Mac:
+   ```bash
+   ssh root@159.89.243.21 hostname
+   ```
+   Should print the new droplet's hostname (e.g. `ubuntu-clanbot-nyc3-recovery`).
+   If it still prints the dead droplet's hostname, the DO dashboard
+   hasn't finished propagating — wait 30 seconds and retry.
 
-Then trigger a deploy. Easiest path:
+Then trigger a deploy:
 
 - GitHub → **Actions** → **Deploy to Droplet** → **Run workflow** →
   branch `main` → **Run workflow**.
 
 Watch it green. The deploy will:
-1. SSH into the new droplet
-2. `git fetch && git reset --hard` (this is a no-op since you just
-   cloned, but harmless)
-3. Recreate `google-credentials.json` from the secret
+1. SSH into the new droplet (via the Reserved IP, which now points
+   there)
+2. `git fetch && git reset --hard` (a no-op since you just cloned,
+   but harmless)
+3. Recreate `google-credentials.json` from the `GOOGLE_CREDENTIALS_BASE64`
+   secret
 4. `docker compose build --no-cache`
 5. `docker compose up -d --force-recreate`
 
@@ -269,18 +284,22 @@ Once verified, in this order:
 
 Suggestions that would shorten future recovery, in rough order of value:
 
-- **Reserved IP** — DO's Reserved IPs let you keep the same public IP
-  across droplets. Assigning one to the bot droplet now means
-  `DROPLET_HOST` in GitHub Actions never has to change during recovery,
-  eliminating Phase F. Costs $0 while attached to a running droplet.
 - **Back up the `.env` as a single Proton Pass note** — rather than
   four separate entries, store the full `.env` file contents as one
   encrypted note. Reduces "did I forget a variable?" risk during
   recovery.
-- **Schedule a quarterly fire drill** — actually run this runbook
-  against a throwaway droplet once a quarter. A runbook you've never
-  tested is a runbook that doesn't work. Tier 2 (warm standby) is the
-  natural next investment if you find yourself wanting faster RTO.
+- **Automated backup integrity check** — extend `SqliteBackupService`
+  to decrypt + `gunzip` + `PRAGMA integrity_check` the previous day's
+  backup as part of its cycle, stamping a `BotState.LastBackupVerifiedUtc`
+  column. Surface it on `/health`. Turns "I should test the runbook
+  quarterly" into "the bot proves its backups are restorable every
+  night." Probably 100 lines of code.
+- **Schedule a quarterly fire drill** — even with the integrity check
+  above, the full Phases A–F procedure has steps that aren't covered
+  (droplet provisioning, secret restoration, volume pre-population).
+  Run the whole runbook against a throwaway droplet with a dev bot
+  token once a quarter. Tier 2 (warm standby) is the natural next
+  investment if you find yourself wanting faster RTO.
 
 ---
 
@@ -291,6 +310,7 @@ For quick lookup when the runbook says "the path":
 | Thing                          | Location                                                  |
 |--------------------------------|-----------------------------------------------------------|
 | Bot deploy root                | `/opt/clanguard` (on droplet)                             |
+| Reserved IP (long-term address)| `159.89.243.21` — set as `DROPLET_HOST` in GH Actions     |
 | Bot's `.env`                   | `/opt/clanguard/.env` (on droplet, mode 0600)             |
 | Bot's `docker-compose.yml`     | `/opt/clanguard/docker-compose.yml` (on droplet)          |
 | SQLite DB (inside container)   | `/app/data/clanguard.db`                                  |
