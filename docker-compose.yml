@@ -10,6 +10,7 @@ services:
       - BotConfig__Token=${DISCORD_BOT_TOKEN}
       - Claude__ApiKey=${ANTHROPIC_API_KEY}
       - BotConfig__BackupEncryptionPassphrase=${CLANGUARD_BACKUP_PASSPHRASE}
+      - BotConfig__HeartbeatPingUrl=${CLANGUARD_HEARTBEAT_URL}
       # Override any config values via environment variables:
       # - BotConfig__HqChannelName=headquarters
       # - BotConfig__MinMessages=10

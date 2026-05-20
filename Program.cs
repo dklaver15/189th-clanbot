@@ -360,6 +360,15 @@ try
     builder.Services.AddSingleton<GoogleDriveBackupClient>();
     builder.Services.AddHostedService<SqliteBackupService>();
 
+    // HeartbeatService: outbound liveness ping to a configured URL (e.g.
+    // Healthchecks.io) every HeartbeatIntervalSeconds. Only pings while the
+    // Discord gateway is connected, so a process that's alive but offline
+    // from Discord's perspective will trip the monitor's grace window.
+    // Configured via BotConfig__HeartbeatPingUrl (set in docker-compose from
+    // CLANGUARD_HEARTBEAT_URL on the droplet's .env). See HeartbeatService
+    // class comment for the full design rationale.
+    builder.Services.AddHostedService<HeartbeatService>();
+
     // HealthCommandHandler: /health diagnostic. Officer+ gated. Reads from
     // BotState + BotDbContext only — no external API calls, so /health works
     // even when Drive / Sheets / Calendar are degraded.

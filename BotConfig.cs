@@ -767,6 +767,38 @@ public class BotConfig
     /// </summary>
     public string BackupEncryptionPassphrase { get; set; } = string.Empty;
 
+    // ─── Heartbeat Settings ──────────────────────────────────────────
+    /// <summary>
+    /// Master switch for HeartbeatService. When false, the service exits
+    /// immediately on startup — no outbound pings.
+    /// </summary>
+    public bool HeartbeatEnabled { get; set; } = true;
+
+    /// <summary>
+    /// URL to ping on each heartbeat cycle. Typically a Healthchecks.io
+    /// ping URL like https://hc-ping.com/{uuid}. When empty, the service
+    /// logs a warning and exits — same fail-loud-not-silent pattern as
+    /// SqliteBackupService when BackupDriveFolderId is unset.
+    ///
+    /// ── How to set ──
+    /// The URL is effectively a secret (anyone with it can mark the check
+    /// as healthy), so flow it through the host environment, not the
+    /// committed appsettings.json. docker-compose maps:
+    ///   BotConfig__HeartbeatPingUrl=${CLANGUARD_HEARTBEAT_URL}
+    /// Add CLANGUARD_HEARTBEAT_URL=https://hc-ping.com/... to the droplet's .env file.
+    /// </summary>
+    public string HeartbeatPingUrl { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Interval between heartbeat pings, in seconds. Default 60. Should be
+    /// well under the Healthchecks.io check period so a single transient
+    /// network blip between bot and HC.io doesn't trigger an alert — with
+    /// 60s pings and a 1-minute period / 10-minute grace, the system
+    /// tolerates ~10 missed pings before alerting. Floored to 10s in
+    /// HeartbeatService to prevent accidental tight loops.
+    /// </summary>
+    public int HeartbeatIntervalSeconds { get; set; } = 60;
+
     // ─── Helpers ─────────────────────────────────────────────────────
 
     /// <summary>
