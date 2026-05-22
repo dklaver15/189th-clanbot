@@ -13,7 +13,10 @@ using System.IO.Compression;
 namespace ClanGuardBot.Services;
 
 /// <summary>
-/// Nightly off-droplet backup of the SQLite database to Google Drive.
+/// Nightly off-droplet backup of the SQLite database. The destination is
+/// abstracted behind <see cref="IBackupStorageClient"/> — the concrete
+/// implementation (Cloudflare R2, Google Drive, …) is chosen at DI
+/// registration time from BotConfig.BackupStorageProvider.
 ///
 /// ── Why this exists ──
 /// clanguard.db on a single DigitalOcean droplet is one hardware failure (or
@@ -51,7 +54,7 @@ namespace ClanGuardBot.Services;
 /// burn a backup slot on a system that may still be unhealthy.
 ///
 /// ── Retention ──
-/// Each cycle lists every file in the Drive folder, sorts by created time,
+/// Each cycle lists every file at the remote location, sorts by created time,
 /// and deletes anything older than BackupRetentionDays (default 14). Pruning
 /// only runs after a successful upload — never on a failed cycle, so a
 /// broken upload doesn't progressively cannibalise the historical record.
@@ -62,14 +65,14 @@ namespace ClanGuardBot.Services;
 ///   • Log full exception
 ///   • Sleep until the next scheduled cycle (no aggressive retry — a failed
 ///     daily backup is annoying, not catastrophic, and aggressive retry on
-///     auth failures would hammer Drive)
+///     auth failures would hammer the storage provider)
 /// On success: clear LastSqliteBackupError, stamp LastSqliteBackupCompletedUtc
 /// and LastSqliteBackupSizeBytes.
 ///
 /// ── Dry-run mode ──
 /// When BotConfig.BackupDryRun=true, the local snapshot + gzip is still
 /// produced (useful for verifying the SQLite copy itself works), but the
-/// Drive upload + retention pruning are skipped. The cycle still stamps
+/// remote upload + retention pruning are skipped. The cycle still stamps
 /// LastSqliteBackupCompletedUtc so /health reports recent activity, with a
 /// "(dry-run)" suffix in the size value to make it obvious nothing was
 /// uploaded. The local file is then cleaned up.
@@ -90,20 +93,20 @@ public class SqliteBackupService : BackgroundService
 
     private readonly IServiceProvider _services;
     private readonly DiscordSocketClient _client;
-    private readonly GoogleDriveBackupClient _drive;
+    private readonly IBackupStorageClient _storage;
     private readonly ILogger<SqliteBackupService> _logger;
     private readonly BotConfig _config;
 
     public SqliteBackupService(
         IServiceProvider services,
         DiscordSocketClient client,
-        GoogleDriveBackupClient drive,
+        IBackupStorageClient storage,
         ILogger<SqliteBackupService> logger,
         IOptions<BotConfig> config)
     {
         _services = services;
         _client = client;
-        _drive = drive;
+        _storage = storage;
         _logger = logger;
         _config = config.Value;
     }
@@ -116,11 +119,13 @@ public class SqliteBackupService : BackgroundService
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(_config.BackupDriveFolderId) && !_config.BackupDryRun)
+        if (!_storage.IsConfigured && !_config.BackupDryRun)
         {
             _logger.LogWarning(
-                "SqliteBackupService: BackupEnabled=true but BackupDriveFolderId is unset and BackupDryRun is false. " +
-                "Service will exit. Set the folder ID or flip to dry-run.");
+                "SqliteBackupService: BackupEnabled=true but storage provider {Provider} is not fully " +
+                "configured and BackupDryRun is false. Service will exit. Set the missing config keys " +
+                "or flip to dry-run.",
+                _storage.ProviderName);
             return;
         }
 
@@ -134,8 +139,9 @@ public class SqliteBackupService : BackgroundService
         await Task.Delay(TimeSpan.FromSeconds(15), stoppingToken);
 
         _logger.LogInformation(
-            "SqliteBackupService started — will back up at {Hour:D2}:00 UTC daily (DryRun={DryRun}, Retention={Days}d)",
-            _config.BackupHourUtc, _config.BackupDryRun, _config.BackupRetentionDays);
+            "SqliteBackupService started — will back up at {Hour:D2}:00 UTC daily " +
+            "(Provider={Provider}, DryRun={DryRun}, Retention={Days}d)",
+            _config.BackupHourUtc, _storage.ProviderName, _config.BackupDryRun, _config.BackupRetentionDays);
 
         // Startup catch-up: if we're past today's hour but no backup yet today.
         await TryStartupCatchUpAsync(stoppingToken);
@@ -276,14 +282,14 @@ public class SqliteBackupService : BackgroundService
             var uploadBytes = new FileInfo(uploadPath).Length;
 
             // ── 3. Upload (unless dry-run) ──
-            string? driveFileId = null;
+            string? remoteId = null;
             if (_config.BackupDryRun)
             {
-                _logger.LogInformation("BackupDryRun=true; skipping Drive upload");
+                _logger.LogInformation("BackupDryRun=true; skipping remote upload");
             }
             else
             {
-                driveFileId = await _drive.UploadAsync(uploadPath, uploadName, ct);
+                remoteId = await _storage.UploadAsync(uploadPath, uploadName, ct);
             }
 
             // ── 4. Retention prune (success-only, and only when not dry-run) ──
@@ -294,14 +300,15 @@ public class SqliteBackupService : BackgroundService
 
             // ── 5. Stamp BotState ──
             // Record the actual uploaded byte count (with encryption overhead
-            // if applicable) so /health shows what's on the wire / on Drive,
-            // not the pre-encryption size.
+            // if applicable) so /health shows what's on the wire, not the
+            // pre-encryption size.
             await StampSuccessAsync(uploadBytes, ct);
 
             _logger.LogInformation(
-                "SQLite backup complete in {Elapsed:F1}s (driveFileId={Id}, encrypted={Encrypted}, dryRun={DryRun})",
+                "SQLite backup complete in {Elapsed:F1}s (provider={Provider}, remoteId={Id}, encrypted={Encrypted}, dryRun={DryRun})",
                 (DateTime.UtcNow - started).TotalSeconds,
-                driveFileId ?? "—",
+                _storage.ProviderName,
+                remoteId ?? "—",
                 encrypted,
                 _config.BackupDryRun);
         }
@@ -356,7 +363,7 @@ public class SqliteBackupService : BackgroundService
         IReadOnlyList<BackupFile> files;
         try
         {
-            files = await _drive.ListAsync(ct);
+            files = await _storage.ListAsync(ct);
         }
         catch (Exception ex)
         {
@@ -368,7 +375,7 @@ public class SqliteBackupService : BackgroundService
         if (stale.Count == 0)
         {
             _logger.LogInformation(
-                "Retention prune: {Total} backups in folder, none older than {Cutoff}",
+                "Retention prune: {Total} backups in remote location, none older than {Cutoff}",
                 files.Count, cutoff);
             return;
         }
@@ -381,7 +388,7 @@ public class SqliteBackupService : BackgroundService
         {
             try
             {
-                await _drive.DeleteAsync(file.Id, ct);
+                await _storage.DeleteAsync(file.Id, ct);
             }
             catch (Exception ex)
             {

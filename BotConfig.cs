@@ -735,22 +735,10 @@ public class BotConfig
     public int BackupHourUtc { get; set; } = 5;
 
     /// <summary>
-    /// Google Drive folder ID for backup uploads. Required when BackupEnabled
-    /// is true AND BackupDryRun is false; the service refuses to start
-    /// otherwise (better to fail loudly than silently produce local-only
-    /// backups that never leave the droplet).
+    /// LEGACY — only used when BackupStorageProvider=GoogleDrive, and only
+    /// works against a Workspace Shared Drive. Prefer R2 for new deploys.
     ///
-    /// SETUP (one-time):
-    ///   1. Create a folder in Google Drive — Shared Drive recommended over
-    ///      My Drive because service accounts have no personal quota; storage
-    ///      will count against whichever drive owns the folder.
-    ///   2. Share the folder with the service account email used by
-    ///      GoogleCredentialsPath. Editor permission.
-    ///   3. Copy the folder ID from the URL: drive.google.com/drive/folders/{THIS_PART}
-    ///   4. Paste here.
-    ///
-    /// The folder will contain files named clanguard-backup-YYYY-MM-DDTHH-MM-SSZ.db.gz —
-    /// one per successful cycle, pruned to BackupRetentionDays.
+    /// Google Drive folder ID for backup uploads. ... [keep existing comment]
     /// </summary>
     public string BackupDriveFolderId { get; set; } = string.Empty;
 
@@ -800,6 +788,22 @@ public class BotConfig
     /// complexity for a 14-day retention window).
     /// </summary>
     public string BackupEncryptionPassphrase { get; set; } = string.Empty;
+    
+    /// <summary>
+    /// Which off-droplet storage backend SqliteBackupService uploads to.
+    /// Default R2. Changing this requires a restart — read once at DI
+    /// registration. Setting to GoogleDrive falls back to the legacy
+    /// <see cref="Services.GoogleDriveBackupClient"/>, which only works
+    /// against a Workspace Shared Drive.
+    /// </summary>
+    public BackupStorageProvider BackupStorageProvider { get; set; } = BackupStorageProvider.R2;
+
+    /// <summary>
+    /// Cloudflare R2 settings. Required when BackupStorageProvider=R2 and
+    /// BackupDryRun=false. See <see cref="BackupR2Settings"/> for which
+    /// fields go in appsettings.json vs. .env.
+    /// </summary>
+    public BackupR2Settings BackupR2 { get; set; } = new();
 
     // ─── Heartbeat Settings ──────────────────────────────────────────
     /// <summary>

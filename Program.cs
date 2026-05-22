@@ -9,6 +9,7 @@ using Discord;
 using Discord.WebSocket;
 using Microsoft.EntityFrameworkCore;
 using Serilog;
+using Microsoft.Extensions.Options;
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Information()
@@ -362,12 +363,28 @@ try
     builder.Services.AddSingleton<RosterExportService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<RosterExportService>());
 
-    // SqliteBackupService: nightly VACUUM INTO → gzip → Google Drive upload of
+    // SqliteBackupService: nightly VACUUM INTO → gzip → encrypted upload of
     // the SQLite DB. Stamps BotState.LastSqliteBackup* on completion. Surfaced
-    // on /health. Requires BackupEnabled=true, BackupDriveFolderId set, and the
-    // service account from GoogleCredentialsPath shared as Editor on the
-    // target folder. See SqliteBackupService class comment for the full setup.
+    // on /health. Requires BackupEnabled=true and the configured storage
+    // provider to be reachable. See SqliteBackupService class comment for the
+    // full setup.
+    //
+    // Storage backend is selected at startup from BotConfig.BackupStorageProvider.
+    // Both implementations are registered so a config flip is enough to
+    // switch providers — no rebuild required.
     builder.Services.AddSingleton<GoogleDriveBackupClient>();
+    builder.Services.AddSingleton<R2BackupClient>();
+    builder.Services.AddSingleton<IBackupStorageClient>(sp =>
+    {
+        var cfg = sp.GetRequiredService<IOptions<BotConfig>>().Value;
+        return cfg.BackupStorageProvider switch
+        {
+            BackupStorageProvider.R2          => sp.GetRequiredService<R2BackupClient>(),
+            BackupStorageProvider.GoogleDrive => sp.GetRequiredService<GoogleDriveBackupClient>(),
+            _ => throw new InvalidOperationException(
+                $"Unknown BackupStorageProvider value: {cfg.BackupStorageProvider}"),
+        };
+    });
     builder.Services.AddHostedService<SqliteBackupService>();
 
     // HeartbeatService: outbound liveness ping to a configured URL (e.g.

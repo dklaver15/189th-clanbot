@@ -1,7 +1,7 @@
 # Disaster Recovery Runbook
 
 **What this is:** Step-by-step procedure for rebuilding ClanGuard Bot from
-the most recent encrypted Google Drive backup when the DigitalOcean droplet
+the most recent encrypted Cloudflare R2 backup when the DigitalOcean droplet
 is unrecoverable.
 
 **When to use:** Droplet is destroyed, corrupted, or compromised; DO snapshot
@@ -22,14 +22,17 @@ partway through otherwise.
     - `ANTHROPIC_API_KEY`
     - `CLANGUARD_BACKUP_PASSPHRASE`
     - `CLANGUARD_HEARTBEAT_URL`
+    - `CLANGUARD_R2_ACCESS_KEY_ID`
+    - `CLANGUARD_R2_SECRET_ACCESS_KEY`
 - [ ] **GitHub account** with admin access to `dklaver15/189th-clanbot`
   (needed to trigger a manual deploy from the Actions tab)
 - [ ] **DigitalOcean account** with billing in good standing
 - [ ] **Reserved IP `159.89.243.21`** currently assigned to the bot
   droplet — recovery moves it to the new droplet. Verify in DO Cloud →
   Networking → Reserved IPs.
-- [ ] **Google account** with access to the Drive folder containing the
-  `clanguard-backup-*.db.gz.enc` files
+- [ ] **Cloudflare account** with R2 read access to the `clanguard-backups`
+  bucket. If you've lost dashboard access entirely, the R2 access key +
+  secret in Proton Pass are enough to download via CLI (see Phase D).
 - [ ] **Mac laptop** with Python 3 installed (`python3 --version` should
   return ≥ 3.9)
 - [ ] **A working SSH keypair** you can add to the new droplet on creation
@@ -98,6 +101,8 @@ DISCORD_BOT_TOKEN=<from Proton Pass>
 ANTHROPIC_API_KEY=<from Proton Pass>
 CLANGUARD_BACKUP_PASSPHRASE=<from Proton Pass>
 CLANGUARD_HEARTBEAT_URL=<from Proton Pass>
+CLANGUARD_R2_ACCESS_KEY_ID=<from Proton Pass>
+CLANGUARD_R2_SECRET_ACCESS_KEY=<from Proton Pass>
 ```
 
 Save and lock it down:
@@ -108,13 +113,14 @@ chmod 600 .env
 
 > **Note:** `google-credentials.json` does NOT need to be restored manually
 > — the GitHub Actions deploy workflow recreates it from the
-> `GOOGLE_CREDENTIALS_BASE64` secret on every push.
+> `GOOGLE_CREDENTIALS_BASE64` secret on every push. (It's still required
+> for Sheets and Calendar even though backups now go to R2.)
 
-### Phase D — Decrypt the latest backup (on Mac laptop)
+### Phase D — Download and decrypt the latest backup (on Mac laptop)
 
-The encrypted backups in Google Drive can't be decrypted on the droplet
-without first installing the Python `cryptography` package. The faster
-path is to decrypt on your Mac and `scp` the result.
+The encrypted backups in R2 can't be decrypted on the droplet without
+first installing the Python `cryptography` package. The faster path is
+to decrypt on your Mac and `scp` the result.
 
 On your Mac, from a terminal:
 
@@ -130,12 +136,47 @@ source .venv/bin/activate
 pip install cryptography
 ```
 
-In your browser, open the Google Drive folder containing the backups
-(folder ID is in `appsettings.json` → `BackupDriveFolderId`). Sort by
-created time, download the most recent `clanguard-backup-*.db.gz.enc`
-into the `Tools` directory.
+**Download the most recent backup.** Two ways — pick whichever is faster
+for you in the moment:
 
-Decrypt it (passphrase via env var, not flag, to keep it out of shell
+**Option 1 — Cloudflare dashboard (browser).** Sign in to Cloudflare →
+**R2** → `clanguard-backups`. Sort by "Last modified" descending. Click
+the most recent `clanguard-backup-*.db.gz.enc` row → **Download**. Move
+the file into the `Tools` directory.
+
+**Option 2 — AWS CLI (terminal).** Useful if you've lost dashboard access
+or want to script the download. The R2 access key/secret in Proton Pass
+work against the S3 API:
+
+```bash
+# One-time setup of a named profile (or use env vars per-command)
+aws configure --profile clanguard-r2
+# AWS Access Key ID: <CLANGUARD_R2_ACCESS_KEY_ID from Proton Pass>
+# AWS Secret Access Key: <CLANGUARD_R2_SECRET_ACCESS_KEY from Proton Pass>
+# Default region name: auto
+# Default output format: json
+
+# Endpoint is in appsettings.json → BackupR2.AccountEndpoint
+ENDPOINT="https://f161644886fb569c5fef90f821f2b685.r2.cloudflarestorage.com"
+
+# List backups, newest last
+aws s3 ls s3://clanguard-backups/ \
+  --endpoint-url "$ENDPOINT" \
+  --profile clanguard-r2 \
+  | sort
+
+# Grab the most recent one
+LATEST=$(aws s3 ls s3://clanguard-backups/ \
+           --endpoint-url "$ENDPOINT" \
+           --profile clanguard-r2 \
+           | sort | tail -1 | awk '{print $4}')
+
+aws s3 cp "s3://clanguard-backups/$LATEST" "./$LATEST" \
+  --endpoint-url "$ENDPOINT" \
+  --profile clanguard-r2
+```
+
+Then decrypt (passphrase via env var, not flag, to keep it out of shell
 history):
 
 ```bash
@@ -241,7 +282,11 @@ docker ps | grep clanguard-bot
 docker logs clanguard-bot 2>&1 | grep -E "Logged in|HeartbeatService started"
 # Expected: both lines present
 
-# 3. The restored DB is actually being used (not a freshly created empty one)
+# 3. Backup service picked up R2 as the provider (and not the legacy Drive client)
+docker logs clanguard-bot 2>&1 | grep "SqliteBackupService started"
+# Expected: line contains "Provider=CloudflareR2"
+
+# 4. The restored DB is actually being used (not a freshly created empty one)
 docker exec clanguard-bot sqlite3 /app/data/clanguard.db \
   'SELECT COUNT(*) AS rank_history, (SELECT COUNT(*) FROM EventAttendances) AS event_attendances FROM RankHistory;'
 # Expected: numbers matching what you saw on the Mac during Phase D
@@ -257,6 +302,10 @@ Then in Discord:
 - [ ] Spot-check a few features: AWOL list, recent rank changes,
   attendance for the latest event. Numbers should match what they were
   before the disaster (within the up-to-24h backup window).
+- [ ] At the next scheduled backup window (05:00 UTC by default), confirm
+  a fresh `clanguard-backup-*.db.gz.enc` lands in the R2 bucket. This
+  proves the new droplet has working write access — important to verify
+  before destroying the old one.
 
 If anything fails verification, **do not destroy the old droplet yet**
 — investigate first.
@@ -272,9 +321,11 @@ Once verified, in this order:
 2. **Destroy** the old droplet (if it still exists).
 3. **Rotate every secret** that may have been exposed during the
    incident — at minimum the Discord token, since the old droplet's
-   `.env` could be readable by whoever caused the failure. Update
-   Proton Pass with each new value and the droplet's `.env`. Run
-   `docker compose up -d --force-recreate` on the droplet after.
+   `.env` could be readable by whoever caused the failure. The R2 API
+   token is also in that file; rotate it from the Cloudflare dashboard
+   (R2 → Manage R2 API Tokens → Roll) and update both Proton Pass and
+   the new droplet's `.env`. Update Proton Pass with each new value and
+   run `docker compose up -d --force-recreate` on the droplet after.
 4. **Update this runbook** with anything you learned that wasn't
    accurate. The next person to use it (or future-you) will thank you.
 
@@ -285,7 +336,7 @@ Once verified, in this order:
 Suggestions that would shorten future recovery, in rough order of value:
 
 - **Back up the `.env` as a single Proton Pass note** — rather than
-  four separate entries, store the full `.env` file contents as one
+  six separate entries, store the full `.env` file contents as one
   encrypted note. Reduces "did I forget a variable?" risk during
   recovery.
 - **Automated backup integrity check** — extend `SqliteBackupService`
@@ -300,6 +351,11 @@ Suggestions that would shorten future recovery, in rough order of value:
   Run the whole runbook against a throwaway droplet with a dev bot
   token once a quarter. Tier 2 (warm standby) is the natural next
   investment if you find yourself wanting faster RTO.
+- **R2 bucket versioning + lifecycle rule** — Cloudflare R2 supports
+  object versioning. Enabling it on `clanguard-backups` means an
+  accidental delete (or a bug in the retention prune) doesn't burn
+  the historical record. Pair with a lifecycle rule to expire old
+  versions after, say, 60 days so storage doesn't grow unbounded.
 
 ---
 
@@ -317,5 +373,7 @@ For quick lookup when the runbook says "the path":
 | SQLite DB (host)               | Named volume `clanguard_bot-data` — find with `docker volume inspect` |
 | Decrypt tool                   | `Tools/decrypt-backup.py` (in repo)                       |
 | Backup encryption format       | See `SqliteBackupCrypto.cs` class comment                 |
-| Drive folder for backups       | `appsettings.json` → `BackupDriveFolderId`                |
+| R2 bucket for backups          | `appsettings.json` → `BackupR2.Bucket`                    |
+| R2 account endpoint            | `appsettings.json` → `BackupR2.AccountEndpoint`           |
+| Storage provider selector      | `appsettings.json` → `BackupStorageProvider` (R2 or GoogleDrive) |
 | GH Actions deploy workflow     | `.github/workflows/deploy.yml`                            |
