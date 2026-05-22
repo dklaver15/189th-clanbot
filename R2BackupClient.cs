@@ -141,8 +141,8 @@ public class R2BackupClient : IBackupStorageClient
                     files.Add(new BackupFile(
                         Id:         obj.Key,
                         Name:       obj.Key,
-                        CreatedUtc: (obj.LastModified ?? DateTime.UtcNow).ToUniversalTime(),
-                        Size:       obj.Size ?? 0L));
+                        CreatedUtc: obj.LastModified.ToUniversalTime(),
+                        Size:       obj.Size));
                 }
             }
 
