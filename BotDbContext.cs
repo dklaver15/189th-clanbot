@@ -31,6 +31,7 @@ public class BotDbContext : DbContext
     public DbSet<PatrolWatchOptOut>   PatrolWatchOptOuts  => Set<PatrolWatchOptOut>();
     public DbSet<CalendarOutbox>      CalendarOutbox      => Set<CalendarOutbox>();
     public DbSet<OfficerApplication>  OfficerApplications => Set<OfficerApplication>();
+    public DbSet<DiscordStatusIncidentUpdate> DiscordStatusIncidentUpdates => Set<DiscordStatusIncidentUpdate>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -349,6 +350,21 @@ public class BotDbContext : DbContext
         {
             e.Property(a => a.Status).HasConversion<int>();
             e.HasIndex(a => new { a.GuildId, a.UserId, a.Status });
+        });
+
+        // ── Discord Status Monitor dedupe ─────────────────────────────
+        // One row per incident_update id emitted by discordstatus.com.
+        // UpdateId is the natural primary key (globally unique string
+        // assigned by Statuspage). IncidentId index supports the future
+        // "show all updates for incident X" lookup if /status ever
+        // needs it; not used by the post loop itself.
+        modelBuilder.Entity<DiscordStatusIncidentUpdate>(e =>
+        {
+            e.HasKey(x => x.UpdateId);
+            e.Property(x => x.UpdateId).HasMaxLength(64);
+            e.Property(x => x.IncidentId).HasMaxLength(64);
+            e.Property(x => x.Status).HasMaxLength(32);
+            e.HasIndex(x => x.IncidentId);
         });
     }
 }

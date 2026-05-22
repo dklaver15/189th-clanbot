@@ -376,6 +376,40 @@ public class BotConfig
     /// </summary>
     public int BumpReminderRestartGraceMinutes { get; set; } = 30;
 
+    // ─── Discord Status Monitor Settings ─────────────────────────────
+
+    /// <summary>
+    /// Master switch for the DiscordStatusMonitorService. When false the
+    /// service exits at startup and the polling loop never runs.
+    /// </summary>
+    public bool DiscordStatusMonitorEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Discord channel ID where Discord-status incident updates are
+    /// posted. The bot needs "Send Messages" plus "Mention Everyone"
+    /// in this channel for the @here ping to actually fire — without
+    /// Mention Everyone the message still sends, just without the ping.
+    /// </summary>
+    public ulong DiscordStatusChannelId { get; set; } = 1377427599415971891;
+
+    /// <summary>
+    /// How often (in minutes) to poll discordstatus.com. The Statuspage
+    /// JSON is cached aggressively at the CDN, so values below 2 don't
+    /// buy fresher data. Default 2.
+    /// </summary>
+    public int DiscordStatusPollIntervalMinutes { get; set; } = 2;
+
+    /// <summary>
+    /// Mention string prefixed to incident posts. Default <c>@here</c>.
+    /// Set to empty string to post silently (embed still goes out).
+    /// Only <c>@here</c> and <c>@everyone</c> are wired up to fire as
+    /// pings — a role mention like <c>&lt;@&amp;ROLE_ID&gt;</c> would post
+    /// as plain text without pinging unless the handler is extended to
+    /// set AllowedMentions.RoleIds. Same constraint as
+    /// <see cref="AuditLogWatcherCriticalMention"/>.
+    /// </summary>
+    public string DiscordStatusMention { get; set; } = "@here";
+
     // ─── Officer Application Settings ────────────────────────────────
 
     /// <summary>

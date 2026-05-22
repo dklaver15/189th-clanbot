@@ -277,6 +277,16 @@ try
     builder.Services.AddSingleton<BumpReminderHandler>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<BumpReminderHandler>());
 
+    // DiscordStatusMonitorService: polls discordstatus.com's Statuspage
+    // JSON API every couple of minutes and posts new incident updates
+    // (investigating / identified / monitoring / resolved) to the
+    // configured channel with an @here ping. First-run sync seeds the
+    // dedupe table without posting historical incidents. Shares
+    // IHttpClientFactory with PhishingDomainFeedService (AddHttpClient
+    // is already registered above). Mode-gated via
+    // BotConfig.DiscordStatusMonitorEnabled.
+    builder.Services.AddHostedService<DiscordStatusMonitorService>();
+
     // ApolloEventHandler: parses #events channel posts and syncs to Google Calendar.
     builder.Services.AddSingleton<ApolloEventHandler>();
 
