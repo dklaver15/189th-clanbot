@@ -2,4 +2,7 @@
 .env
 bin/
 obj/
-logs/
+logs/.DS_Store
+.idea/
+.claude/
+obj copy/
