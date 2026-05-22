@@ -520,6 +520,24 @@ public class BotState
     /// wrong since" at a glance.
     /// </summary>
     public string? LastSqliteBackupError { get; set; }
+
+    /// <summary>
+    /// Timestamp of the last successfully-completed DiscordStatusMonitorService
+    /// poll. Stamped on every successful fetch + dedupe pass, regardless of
+    /// whether the poll produced any new posts. Null until the first
+    /// successful poll completes. Surfaced on /health so officers can confirm
+    /// the monitor is alive even during long stretches when Discord has no
+    /// incidents to report.
+    /// </summary>
+    public DateTime? LastDiscordStatusPollCompletedUtc { get; set; }
+
+    /// <summary>
+    /// Last failure message from DiscordStatusMonitorService, truncated to
+    /// 800 chars. Cleared on a successful poll. Same shape as
+    /// LastSqliteBackupError — pairs with LastDiscordStatusPollCompletedUtc
+    /// to give "last good poll" + "what went wrong since" on /health.
+    /// </summary>
+    public string? LastDiscordStatusPollError { get; set; }
 }
 
 /// <summary>

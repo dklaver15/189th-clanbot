@@ -166,12 +166,14 @@ public sealed class DiscordStatusMonitorService : BackgroundService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "DiscordStatusMonitorService: fetch failed.");
+            await RecordPollErrorAsync($"Fetch failed: {ex.Message}", ct);
             return false;
         }
 
         if (response?.Incidents is null)
         {
             _logger.LogWarning("DiscordStatusMonitorService: empty response from Statuspage.");
+            await RecordPollErrorAsync("Empty response from Statuspage", ct);
             return false;
         }
 
@@ -246,6 +248,12 @@ public sealed class DiscordStatusMonitorService : BackgroundService
         if (newRows > 0)
             await db.SaveChangesAsync(ct);
 
+        // ── Stamp BotState liveness ───────────────────────────────────
+        // Done unconditionally on a successful poll, even when no new rows
+        // were added. Surfaced on /health so officers can confirm the
+        // monitor is alive during quiet stretches.
+        await StampPollSuccessAsync(db, ct);
+
         if (isFirstRun)
         {
             _logger.LogInformation(
@@ -261,6 +269,53 @@ public sealed class DiscordStatusMonitorService : BackgroundService
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Stamps a successful poll on the BotState row. Clears any previous
+    /// error so /health stops showing it once the next poll succeeds.
+    /// Idempotent — runs inside the same DbContext scope as the poll.
+    /// </summary>
+    private static async Task StampPollSuccessAsync(BotDbContext db, CancellationToken ct)
+    {
+        var state = await db.BotStates.FirstOrDefaultAsync(ct);
+        if (state is null)
+        {
+            state = new BotState();
+            db.BotStates.Add(state);
+        }
+        state.LastDiscordStatusPollCompletedUtc = DateTime.UtcNow;
+        state.LastDiscordStatusPollError = null;
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Stamps a failed poll. Preserves any prior
+    /// LastDiscordStatusPollCompletedUtc so /health can show "last good
+    /// poll: 12m ago · ⚠️ error". Uses a fresh scope so an EF or DB
+    /// error inside the main poll doesn't poison this write.
+    /// </summary>
+    private async Task RecordPollErrorAsync(string message, CancellationToken ct)
+    {
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+            var state = await db.BotStates.FirstOrDefaultAsync(ct);
+            if (state is null)
+            {
+                state = new BotState();
+                db.BotStates.Add(state);
+            }
+            state.LastDiscordStatusPollError =
+                message.Length > 800 ? message[..800] : message;
+            await db.SaveChangesAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "DiscordStatusMonitorService: failed to record poll error to BotState.");
+        }
     }
 
     private async Task PostUpdateAsync(

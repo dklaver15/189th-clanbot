@@ -26,6 +26,8 @@ namespace ClanGuardBot.Handlers;
 /// • Calendar outbox — pending count, oldest pending row age, most recent
 ///   LastError if any rows are still retrying
 /// • Apollo pipeline — last captured #events message, unprocessed log rows
+/// • Discord status monitor — last successful poll, dedupe-table counts
+///   (total tracked vs. actually live-posted), age of last live post
 /// • Operational queues — AWOL records pending notification, pending officer
 ///   applications, upcoming calendar events
 /// • Security — SecurityAuditRecords written in the last 24h, grouped by feature
@@ -178,6 +180,19 @@ public class HealthCommandHandler
         var apolloUnprocessed = await db.ApolloMessageLogs
             .CountAsync(l => l.ProcessedAt == null);
 
+        // ── Discord status monitor ──
+        // Liveness comes from BotState (stamped on every successful poll).
+        // Counts come from the dedupe table — total tracked vs. actually
+        // posted to the channel (Seeded = false means we sent a message).
+        var statusTotal  = await db.DiscordStatusIncidentUpdates.CountAsync();
+        var statusPosted = await db.DiscordStatusIncidentUpdates
+            .CountAsync(u => !u.Seeded);
+        var statusLastPostedAt = await db.DiscordStatusIncidentUpdates
+            .Where(u => !u.Seeded)
+            .OrderByDescending(u => u.PostedAt)
+            .Select(u => (DateTime?)u.PostedAt)
+            .FirstOrDefaultAsync();
+
         // ── Operational queues ──
         var pendingAwol = await db.AwolRecords
             .CountAsync(r => !r.NotificationSent);
@@ -255,6 +270,23 @@ public class HealthCommandHandler
         if (apolloUnprocessed > 0)
             apolloLine += $"\nUnprocessed log rows: **{apolloUnprocessed}**";
         embed.AddField("📨 Apollo pipeline", apolloLine, inline: false);
+
+        // Discord status monitor
+        // Three-line shape:
+        //   Last poll: 1m ago         ← liveness from BotState
+        //   Tracked: 162 · Posted: 0  ← dedupe-table counts
+        //   Last live post: …         ← only when statusPosted > 0
+        // If the last poll errored, the error tags onto the first line so
+        // it's visible without taking another row.
+        var statusLine = state?.LastDiscordStatusPollCompletedUtc.HasValue == true
+            ? $"Last poll: **{FormatDuration(now - state.LastDiscordStatusPollCompletedUtc.Value)}** ago"
+            : "No polls completed yet";
+        if (!string.IsNullOrEmpty(state?.LastDiscordStatusPollError))
+            statusLine += $" · ⚠️ `{Truncate(state.LastDiscordStatusPollError, 120)}`";
+        statusLine += $"\nTracked: **{statusTotal}** · Live-posted: **{statusPosted}**";
+        if (statusPosted > 0 && statusLastPostedAt.HasValue)
+            statusLine += $"\nLast live post: **{FormatDuration(now - statusLastPostedAt.Value)}** ago";
+        embed.AddField("📡 Discord status monitor", statusLine, inline: false);
 
         // Queues
         embed.AddField("📋 Queues",
