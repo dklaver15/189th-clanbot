@@ -611,6 +611,8 @@ public class CommandsCommandHandler
                 "Officer+", officerOrManageNicknames),
             new("squads", "Randomize everyone in the events VC into 4-man squads",
                 "Officer+", officer),
+            new("timeline", "Show a member's complete history — joins, ranks, AWOL, applications, events",
+                "Officer+", officer),   // SyncWithHandlers: TimelineCommandHandler.HasElevatedPermissions
 
             // Rank-gated tiers
             new("demote", "Demote a member to a lower rank",

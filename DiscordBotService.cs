@@ -51,6 +51,7 @@ public class DiscordBotService : IHostedService
     private readonly CalendarCommandHandler _calendarHandler;
     private readonly CommandsCommandHandler _commandsHandler;
     private readonly HealthCommandHandler _healthHandler;
+    private readonly TimelineCommandHandler _timelineHandler;
     private readonly CommandUsageTrackingHandler _commandUsageHandler;
     private readonly UsageStatsCommandHandler _usageStatsHandler;
     private readonly SecurityAuditCommandHandler _securityAuditHandler;
@@ -101,6 +102,7 @@ public class DiscordBotService : IHostedService
         CalendarCommandHandler calendarHandler,
         CommandsCommandHandler commandsHandler,
         HealthCommandHandler healthHandler,
+        TimelineCommandHandler timelineHandler,
         CommandUsageTrackingHandler commandUsageHandler,
         UsageStatsCommandHandler usageStatsHandler,
         SecurityAuditCommandHandler securityAuditHandler,
@@ -150,6 +152,7 @@ public class DiscordBotService : IHostedService
         _calendarHandler             = calendarHandler;
         _commandsHandler             = commandsHandler;
         _healthHandler               = healthHandler;
+        _timelineHandler             = timelineHandler;
         _commandUsageHandler         = commandUsageHandler;
         _usageStatsHandler           = usageStatsHandler;
         _securityAuditHandler        = securityAuditHandler;
@@ -219,6 +222,7 @@ public class DiscordBotService : IHostedService
         _calendarHandler.Register(_client);
         _commandsHandler.Register(_client);
         _healthHandler.Register(_client);
+        _timelineHandler.Register(_client);
         _commandUsageHandler.Register(_client);
         _usageStatsHandler.Register(_client);
         _securityAuditHandler.Register(_client);
@@ -555,6 +559,12 @@ public class DiscordBotService : IHostedService
                 // Calendar are degraded. NOTE: keep CommandsCommandHandler.BuildCatalog in
                 // sync when changing /health.
                 HealthCommandHandler.BuildCommand(),
+
+                // /timeline — Officer+ command rendering a single member's full
+                // history into one ephemeral embed. Pulls from many BotDbContext
+                // tables, no external API calls. NOTE: keep
+                // CommandsCommandHandler.BuildCatalog in sync when changing /timeline.
+                TimelineCommandHandler.BuildCommand(),
             };
 
             foreach (var guild in _client.Guilds)
