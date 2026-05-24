@@ -67,13 +67,18 @@ namespace ClanGuardBot.Handlers;
 /// the relevant context surfaces at the top.
 ///
 /// ── Truncation ──
-/// Entries are capped at MaxTimelineEntries (35) after the merge+sort
-/// step. With ~60 chars per entry plus a Discord timestamp tag, 35
-/// entries leaves comfortable headroom under the 4096-char description
-/// limit. When truncated, a "+ X earlier entries not shown" footer line
-/// indicates the cap was hit. A long-tenured member with deep history
-/// will see their most recent 35 events; for deeper drill-downs, use
-/// the per-feature commands (/security-audit, /attendance, /invite info).
+/// Two caps protect the description from overflowing Discord's 4096-char
+/// limit. First, MaxTimelineEntries (35) is the normal-case cap — a tidy
+/// list size. Second, DescriptionCharLimit minus a footer reserve is the
+/// defensive fence — even if every visible entry is unusually long (long
+/// rank names with escaped markdown, wide-character clan tags, etc.) we
+/// never produce a description that throws on BuildAsync. Both caps drop
+/// OLDEST entries first since we sort newest-first; a single
+/// "_+N earlier entries not shown_" footer reports the union without
+/// distinguishing which cap fired. A long-tenured member with deep
+/// history will see their most recent ~35 events; for deeper drill-downs,
+/// use the per-feature commands (/security-audit, /attendance,
+/// /invite info).
 ///
 /// ── Catalog entry ──
 /// Officer+ tier. NOTE: also keep CommandsCommandHandler.BuildCatalog
@@ -90,12 +95,32 @@ public class TimelineCommandHandler
     private const int SecurityRecordsLimit = 5;
 
     /// <summary>
-    /// Hard cap on chronological-list entries. Discord allows 4096 chars in
-    /// a description; budgeting ~60 chars per entry plus footer headroom
-    /// gives this cap. Cap is applied AFTER merge+sort so the most recent
-    /// entries always make it in.
+    /// Soft cap on chronological-list entries — applied first, before
+    /// the character-budget check below. 35 was chosen so that even at
+    /// an average ~60 chars per entry the description sits well under
+    /// Discord's 4096-char limit, leaving room for the rendered Discord
+    /// timestamp tokens, escaped markdown, and the truncation footer.
+    /// Cap is applied AFTER merge+sort so the most recent entries
+    /// always make it in.
     /// </summary>
     private const int MaxTimelineEntries = 35;
+
+    /// <summary>
+    /// Discord's hard limit on embed description character count. The
+    /// API throws on BuildAsync() if we exceed it, which would fall the
+    /// entire /timeline command into its outer catch. We treat this as
+    /// a fence, not a target — the loop in <see cref="BuildEmbedAsync"/>
+    /// bails before adding any line that would push past it.
+    /// </summary>
+    private const int DescriptionCharLimit = 4096;
+
+    /// <summary>
+    /// Chars reserved at the tail of the description for the
+    /// "_+N earlier entries not shown_" footer. Worst-case footer:
+    /// "\n\n_+999 earlier entries not shown_\n" ≈ 40 chars. Rounded up
+    /// to 60 for headroom in case the wording ever grows.
+    /// </summary>
+    private const int DescriptionFooterReserve = 60;
 
     /// <summary>
     /// Activity window for the activity-snapshot summary fields. Matches
@@ -482,29 +507,64 @@ public class TimelineCommandHandler
                 $"Attended event ({ev.AttendedMinutes} min)"));
         }
 
-        // ── Sort newest-first, cap entries ──────────────────────────────
+        // ── Sort newest-first ───────────────────────────────────────────
+        // Newest at the top so a viewer's eye lands on "what happened most
+        // recently" first — relevant for moderation context (was this
+        // person AWOL last week? are they newly promoted?).
         entries.Sort((a, b) => b.UtcTime.CompareTo(a.UtcTime));
         var totalEntryCount = entries.Count;
-        var truncated = totalEntryCount > MaxTimelineEntries;
-        if (truncated)
-        {
-            entries = entries.Take(MaxTimelineEntries).ToList();
-        }
 
-        // ── Render description body ─────────────────────────────────────
+        // ── Render description body with belt-and-suspenders limits ─────
+        // Two caps apply in series. The MaxTimelineEntries cap is the
+        // normal case — a clean number of entries so the embed reads as
+        // a digestible list, not a wall of text. The character-budget
+        // cap is the defensive fence — even if every visible entry is
+        // unusually long (long rank names with escaped markdown,
+        // wide-character clan tags, etc.), we never produce a
+        // description that overflows Discord's 4096-char limit and
+        // throws on BuildAsync.
+        //
+        // Both caps drop OLDEST entries first since we already sorted
+        // newest-first. The footer's count reflects the union of both
+        // truncation causes — the viewer just sees "+N earlier entries
+        // not shown" without needing to know which limit fired.
         var sb = new StringBuilder();
+        var renderedCount = 0;
         foreach (var entry in entries)
         {
-            sb.Append(DiscordTimestamp(entry.UtcTime, 'f'));
+            // Entry-count cap first (cheap check, normal case).
+            if (renderedCount >= MaxTimelineEntries) break;
+
+            // Character-budget cap: would appending this line push us
+            // past the safe ceiling? Compute the line length up-front so
+            // we can bail without partially committing to the
+            // StringBuilder. Two newline chars budgeted because
+            // AppendLine uses Environment.NewLine ("\r\n" on Windows,
+            // "\n" on Linux) — accounting for the worst case keeps the
+            // calculation portable across the Mac dev box and Linux
+            // Docker prod environment.
+            var timestamp = DiscordTimestamp(entry.UtcTime, 'f');
+            var lineLen = timestamp.Length
+                        + 1                              // space after timestamp
+                        + entry.Icon.Length
+                        + 1                              // space after icon
+                        + entry.Description.Length
+                        + 2;                             // trailing newline (worst case CRLF)
+            if (sb.Length + lineLen > DescriptionCharLimit - DescriptionFooterReserve) break;
+
+            sb.Append(timestamp);
             sb.Append(' ');
             sb.Append(entry.Icon);
             sb.Append(' ');
             sb.AppendLine(entry.Description);
+            renderedCount++;
         }
-        if (truncated)
+
+        var hiddenCount = totalEntryCount - renderedCount;
+        if (hiddenCount > 0)
         {
             sb.AppendLine();
-            sb.AppendLine($"_+{totalEntryCount - MaxTimelineEntries} earlier entries not shown_");
+            sb.AppendLine($"_+{hiddenCount} earlier entries not shown_");
         }
 
         // ── Construct the embed ─────────────────────────────────────────
