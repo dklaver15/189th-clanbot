@@ -187,14 +187,14 @@ public class MemberActivityChartRenderer
 
             // `Axes.Color(...)` above sets the axis frame line color and the
             // axis title color, but in ScottPlot 5 the tick label color is a
-            // separate property on each axis's TickLabelStyle. Without these
-            // explicit assignments the tick numbers/dates render in the
-            // default light-gray, which is hard to read against the dark
-            // embed background. Set them per axis to match the axis title
-            // color (white). Bottom = X axis (dates), Left = Y axis (counts).
+            // separate property on each axis's TickLabelStyle. The Left (Y)
+            // axis tick color is safe to set right here. The Bottom (X) axis
+            // gets its color set AFTER plot.Axes.DateTimeTicksBottom() below,
+            // because that call swaps in a brand-new DateTime axis object
+            // and discards whatever was on the original Bottom — any styling
+            // set before the swap is lost.
             var axisColor = ScottPlot.Color.FromHex(AxisColorHex);
-            plot.Axes.Bottom.TickLabelStyle.ForeColor = axisColor;
-            plot.Axes.Left.TickLabelStyle.ForeColor   = axisColor;
+            plot.Axes.Left.TickLabelStyle.ForeColor = axisColor;
 
             // Hide the boxy chart frame (top/right/bottom/left axis lines)
             // so the data area edge-blends into the embed. Cookbook ref:
@@ -210,24 +210,63 @@ public class MemberActivityChartRenderer
                 ScottPlot.Color.FromHex(GridColorHex).WithAlpha(0.10);
             plot.Grid.YAxisStyle.MajorLineStyle.Width = 1;
 
-            // Bars: one per day at OADate positions (1 unit per day on the
-            // DateTime axis), default width so adjacent days touch — gaps
-            // between bars would suggest missing data rather than zero
-            // activity. 75% alpha pulls them back from the foreground so the
-            // gold trend line and its area fill can carry the visual weight.
-            var barColor = ScottPlot.Color.FromHex(BarColorHex).WithAlpha(0.75);
-            var bars = new List<ScottPlot.Bar>(orderedDays.Count);
+            // Bars: rendered as PER-DAY gradient-filled scatter lines rather
+            // than flat ScottPlot.Bar shapes. The Bar plottable's FillHatch
+            // only supports Striped/Dots/Checker hatches in 5.1.x — the
+            // Hatches.Gradient class that the 5.0 cookbook documents was
+            // either moved or removed in the 5.1 refactor. The CURRENT
+            // gradient API in ScottPlot 5.1 lives on Scatter/ScatterLine
+            // and is driven by `AxisGradientDirection` + `ColorPositions`.
+            //
+            // ── How each bar is constructed ──
+            // For each day with non-zero activity, add a 2-point ScatterLine
+            // whose endpoints are (day - barHalfWidth, value) and
+            // (day + barHalfWidth, value) — i.e. a horizontal stroke at the
+            // top of the bar. Setting FillY=true fills the area between
+            // that stroke and y=0 (FillYValue's default), producing a
+            // rectangle that looks identical to a Bar plottable's body.
+            // The gradient is configured per-bar with ColorPositions at
+            // y=0 (saturated) and y=value (faded), so the bar's
+            // saturation drops smoothly from baseline to crown.
+            //
+            // ── Why per-bar plottables ──
+            // ColorPositions are anchored in Y-axis data space, not in
+            // fill-region space. A single shared gradient across all 90
+            // days would only look "LED-like" on bars whose top reaches
+            // the gradient's upper stop — shorter bars would just look
+            // saturated. Per-bar gradients scale naturally with each
+            // bar's height. 90 plottables is well within ScottPlot's
+            // performance comfort zone for static PNG renders.
+            //
+            // Cookbook ref: Scatter/ScatterFillGradient (the vertical
+            // variant of the recipe with ColorPositions at y-values).
+            var barBottomColor = ScottPlot.Color.FromHex(BarColorHex).WithAlpha(0.95);
+            var barTopColor    = ScottPlot.Color.FromHex(BarColorHex).WithAlpha(0.10);
+            const double barHalfWidth = 0.40;  // bars span 80% of a day → small gap between them
             for (var i = 0; i < orderedDays.Count; i++)
             {
-                bars.Add(new ScottPlot.Bar
-                {
-                    Position  = orderedDays[i].ToOADate(),
-                    Value     = counts[i],
-                    FillColor = barColor,
-                    LineColor = barColor,  // no border outline against dark bg
-                });
+                var value = counts[i];
+                if (value <= 0) continue;  // nothing to draw for zero-activity days
+
+                var dayOA = orderedDays[i].ToOADate();
+                var bar = plot.Add.ScatterLine(
+                    new[] { dayOA - barHalfWidth, dayOA + barHalfWidth },
+                    new[] { (double)value, (double)value });
+
+                // Hide the line stroke itself — only the gradient-filled
+                // area below it should be visible. (A wider visible line
+                // would draw a hard top edge that competes with the
+                // gradient's fade-to-faded look at the crown.)
+                bar.LineWidth = 0;
+
+                // Fill the area from the line down to y=0, then drive the
+                // fill color via a vertical gradient with two stops.
+                bar.FillY = true;
+                bar.FillYValue = 0;
+                bar.AxisGradientDirection = ScottPlot.AxisGradientDirection.Vertical;
+                bar.ColorPositions.Add(new(barBottomColor, 0));      // base: saturated
+                bar.ColorPositions.Add(new(barTopColor,    value));  // crown: faded
             }
-            plot.Add.Bars(bars);
 
             // Rolling-average overlay rendered in TWO passes to produce a
             // HUD-style glow effect — the sci-fi "this thing is emitting
@@ -261,11 +300,33 @@ public class MemberActivityChartRenderer
             rollingLine.FillY        = true;
             rollingLine.FillYColor   = lineColor.WithAlpha(0.18);
 
+            // "Today" anchor — subtle dashed vertical accent at the most
+            // recent day's x position. Pins the eye to "where are we right
+            // now" along the 90-day window, which matters because a viewer
+            // glancing at the chart needs to know whether the visible trend
+            // is ancient history or this week's reality. Rendered LAST so
+            // it draws over the bars and trend line; the dashed pattern
+            // keeps it readable without competing with the data, and the
+            // muted alpha prevents it from screaming for attention.
+            // Cookbook ref: AxisLines/AxisLineStyle — VerticalLine with
+            // Color / LineWidth / LinePattern.
+            var todayX = orderedDays[^1].ToOADate();
+            var todayLine = plot.Add.VerticalLine(todayX);
+            todayLine.Color       = lineColor.WithAlpha(0.55);
+            todayLine.LineWidth   = 1.5f;
+            todayLine.LinePattern = ScottPlot.LinePattern.Dashed;
+
             // DateTime axis + autoscale. No Y-axis label — the title above
             // already carries the "messages per day" meaning, and removing
             // the rotated left-side label gives the chart more horizontal
             // breathing room.
             plot.Axes.DateTimeTicksBottom();
+            // X-axis tick color must be applied AFTER DateTimeTicksBottom()
+            // because that call swaps in a fresh DateTime axis and discards
+            // any styling set on the old Bottom axis. Without this re-apply,
+            // the date labels render in the default light-gray and become
+            // hard to read against the deep-black background.
+            plot.Axes.Bottom.TickLabelStyle.ForeColor = axisColor;
             plot.Axes.Margins(bottom: 0);  // bars sit flush on the x-axis
             plot.Title($"Daily activity — {displayName} (last {WindowDays} days)");
 
