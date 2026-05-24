@@ -54,7 +54,7 @@ public class MemberActivityChartRenderer
     // namespace level.
     private const string FigureBgHex   = "#2b2d31";   // chart frame
     private const string DataBgHex     = "#1e1f22";   // plot area
-    private const string AxisColorHex  = "#b5bac1";   // axis labels & ticks
+    private const string AxisColorHex  = "#ffffff";   // axis labels & ticks (white for max legibility on dark bg)
     private const string GridColorHex  = "#404249";   // major gridlines
     private const string BarColorHex   = "#5865f2";   // Discord blurple
     private const string LineColorHex  = "#c9a647";   // 189th gold
@@ -166,20 +166,42 @@ public class MemberActivityChartRenderer
             // Fully-qualified ScottPlot namespace at every use site so the
             // ambient ScottPlot.Color type doesn't collide with
             // Discord.Color elsewhere in the project.
+            //
+            // Visual direction: "modern dashboard" — Discord-dark background,
+            // semi-transparent bars in the back, a glowing smooth trend line
+            // in front with a soft area fill, and a horizontal-only grid.
+            // Every styling change here is anchored to a specific ScottPlot 5
+            // cookbook recipe; see the search-history comments inline.
             var plot = new ScottPlot.Plot();
 
-            // Themed background, axis, and grid colors.
+            // Themed backgrounds. The figure background is the embed-matching
+            // dark, with a slightly darker plot-area inset so the data
+            // visually "sits inside" the chart frame even after we hide it.
             plot.FigureBackground.Color = ScottPlot.Color.FromHex(FigureBgHex);
             plot.DataBackground.Color   = ScottPlot.Color.FromHex(DataBgHex);
             plot.Axes.Color(ScottPlot.Color.FromHex(AxisColorHex));
-            plot.Grid.MajorLineColor    = ScottPlot.Color.FromHex(GridColorHex);
 
-            // Bars: one per day. Position is the day's OADate (1 unit per
-            // day on the ScottPlot DateTime axis), so the default bar width
-            // of 1 unit makes adjacent days touch. That's the right look
-            // for a daily-activity bar chart — gaps between bars would
-            // suggest missing data rather than zero activity.
-            var barColor = ScottPlot.Color.FromHex(BarColorHex);
+            // Hide the boxy chart frame (top/right/bottom/left axis lines)
+            // so the data area edge-blends into the embed. Cookbook ref:
+            // Styling/CustomBorders — `myPlot.Axes.Frame(false);`
+            plot.Axes.Frame(false);
+
+            // Horizontal-only grid lines — modern dashboard style. Vertical
+            // grid lines are removed by setting their major-line width to 0;
+            // horizontal lines remain on a low-alpha gray so they read as
+            // gentle guides, not clutter. Cookbook ref: CustomizingGrids
+            // and Styling/Grid recipes.
+            plot.Grid.XAxisStyle.MajorLineStyle.Width = 0;
+            plot.Grid.YAxisStyle.MajorLineStyle.Color =
+                ScottPlot.Color.FromHex(GridColorHex).WithAlpha(0.55);
+            plot.Grid.YAxisStyle.MajorLineStyle.Width = 1;
+
+            // Bars: one per day at OADate positions (1 unit per day on the
+            // DateTime axis), default width so adjacent days touch — gaps
+            // between bars would suggest missing data rather than zero
+            // activity. 75% alpha pulls them back from the foreground so the
+            // gold trend line and its area fill can carry the visual weight.
+            var barColor = ScottPlot.Color.FromHex(BarColorHex).WithAlpha(0.75);
             var bars = new List<ScottPlot.Bar>(orderedDays.Count);
             for (var i = 0; i < orderedDays.Count; i++)
             {
@@ -193,17 +215,29 @@ public class MemberActivityChartRenderer
             }
             plot.Add.Bars(bars);
 
-            // Rolling-average line. ScatterLine() is the documented v5
-            // idiom for "line with no markers" — it returns the same
-            // Scatter plottable but with MarkerSize already set to 0,
-            // saving the explicit set and avoiding the v4→v5 enum
-            // rename ambiguity around marker styles.
+            // Rolling-average overlay: smoothed curve with a soft area fill
+            // beneath, the "Spotify Wrapped" / StatBot look that anchors the
+            // eye on the trend rather than the noisy day-to-day bars.
+            //
+            //   • PathStrategy = QuadHalfPoint → eased smoothing that never
+            //     overshoots vertically (important here — a spline could dip
+            //     the line below zero in sparse-activity stretches, which
+            //     makes no semantic sense for a message-count metric).
+            //     Cookbook ref: Scatter/ScatterQuadHalfPath.
+            //
+            //   • FillY + FillYColor → fills the region between the line and
+            //     y=0 with a low-alpha gold gradient. Cookbook ref:
+            //     Scatter/ScatterFill (`sp.FillY = true;
+            //     sp.FillYColor = sp.Color.WithAlpha(.2);`).
             var lineXs = orderedDays.Select(d => d.ToOADate()).ToArray();
             var lineColor = ScottPlot.Color.FromHex(LineColorHex);
             var rollingLine = plot.Add.ScatterLine(lineXs, rolling);
-            rollingLine.Color      = lineColor;
-            rollingLine.LineWidth  = 2.5f;
-            rollingLine.LegendText = $"{RollingWindowDays}-day average";
+            rollingLine.Color        = lineColor;
+            rollingLine.LineWidth    = 3.5f;
+            rollingLine.PathStrategy = new ScottPlot.PathStrategies.QuadHalfPoint();
+            rollingLine.FillY        = true;
+            rollingLine.FillYColor   = lineColor.WithAlpha(0.22);
+            rollingLine.LegendText   = $"{RollingWindowDays}-day average";
 
             // DateTime axis + autoscale.
             plot.Axes.DateTimeTicksBottom();
