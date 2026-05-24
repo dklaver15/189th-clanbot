@@ -47,17 +47,20 @@ public class MemberActivityChartRenderer
     private readonly BotConfig _config;
     private readonly ILogger<MemberActivityChartRenderer> _logger;
 
-    // ── Discord-themed palette ──────────────────────────────────────────
-    // Matches the bot's Discord client's dark-mode palette so the chart
-    // sits naturally inside an embed. Hex strings parsed at use site to
-    // avoid the ScottPlot.Color/Discord.Color name collision at the
-    // namespace level.
-    private const string FigureBgHex   = "#2b2d31";   // chart frame
-    private const string DataBgHex     = "#1e1f22";   // plot area
-    private const string AxisColorHex  = "#ffffff";   // axis labels & ticks (white for max legibility on dark bg)
-    private const string GridColorHex  = "#404249";   // major gridlines
-    private const string BarColorHex   = "#5865f2";   // Discord blurple
-    private const string LineColorHex  = "#c9a647";   // 189th gold
+    // ── Sci-fi-HUD palette ──────────────────────────────────────────────
+    // The previous theme had FigureBg slightly lighter than DataBg, which
+    // produced a visible inset rectangle around the data even after the
+    // frame line was hidden — the eye reads two-tone backgrounds as a box.
+    // Here both the figure and data backgrounds use the same deep
+    // near-black so the chart edge-blends seamlessly into the Discord
+    // embed. The trend line picks up a brighter gold + a glow underlayer
+    // for the HUD feel. Hex values verified against Discord's dark-theme
+    // palette + 189th brand gold.
+    private const string BackgroundHex = "#0d1017";   // unified figure + data bg (deep console black)
+    private const string AxisColorHex  = "#ffffff";   // axis labels & ticks (white for max legibility)
+    private const string GridColorHex  = "#ffd86b";   // grid lines (gold-tinted, used at very low alpha)
+    private const string BarColorHex   = "#5865f2";   // Discord blurple (bars)
+    private const string LineColorHex  = "#ffd86b";   // brighter "command-deck" gold (was #c9a647)
 
     /// <summary>How many days of history the chart spans.</summary>
     private const int WindowDays = 90;
@@ -174,11 +177,12 @@ public class MemberActivityChartRenderer
             // cookbook recipe; see the search-history comments inline.
             var plot = new ScottPlot.Plot();
 
-            // Themed backgrounds. The figure background is the embed-matching
-            // dark, with a slightly darker plot-area inset so the data
-            // visually "sits inside" the chart frame even after we hide it.
-            plot.FigureBackground.Color = ScottPlot.Color.FromHex(FigureBgHex);
-            plot.DataBackground.Color   = ScottPlot.Color.FromHex(DataBgHex);
+            // Themed backgrounds. Both Figure and Data backgrounds use the
+            // SAME deep near-black so there's no two-tone inset rectangle
+            // around the data — the chart edge-blends seamlessly into the
+            // Discord embed.
+            plot.FigureBackground.Color = ScottPlot.Color.FromHex(BackgroundHex);
+            plot.DataBackground.Color   = ScottPlot.Color.FromHex(BackgroundHex);
             plot.Axes.Color(ScottPlot.Color.FromHex(AxisColorHex));
 
             // `Axes.Color(...)` above sets the axis frame line color and the
@@ -197,14 +201,13 @@ public class MemberActivityChartRenderer
             // Styling/CustomBorders — `myPlot.Axes.Frame(false);`
             plot.Axes.Frame(false);
 
-            // Horizontal-only grid lines — modern dashboard style. Vertical
-            // grid lines are removed by setting their major-line width to 0;
-            // horizontal lines remain on a low-alpha gray so they read as
-            // gentle guides, not clutter. Cookbook ref: CustomizingGrids
-            // and Styling/Grid recipes.
+            // Horizontal-only grid lines, gold-tinted at very low alpha so
+            // they read as faint HUD guides rather than structural elements.
+            // Vertical grid lines are removed entirely. Cookbook ref:
+            // CustomizingGrids and Styling/Grid recipes.
             plot.Grid.XAxisStyle.MajorLineStyle.Width = 0;
             plot.Grid.YAxisStyle.MajorLineStyle.Color =
-                ScottPlot.Color.FromHex(GridColorHex).WithAlpha(0.55);
+                ScottPlot.Color.FromHex(GridColorHex).WithAlpha(0.10);
             plot.Grid.YAxisStyle.MajorLineStyle.Width = 1;
 
             // Bars: one per day at OADate positions (1 unit per day on the
@@ -226,42 +229,52 @@ public class MemberActivityChartRenderer
             }
             plot.Add.Bars(bars);
 
-            // Rolling-average overlay: smoothed curve with a soft area fill
-            // beneath, the "Spotify Wrapped" / StatBot look that anchors the
-            // eye on the trend rather than the noisy day-to-day bars.
+            // Rolling-average overlay rendered in TWO passes to produce a
+            // HUD-style glow effect — the sci-fi "this thing is emitting
+            // light" look that flat lines can't achieve in a single stroke:
             //
-            //   • PathStrategy = QuadHalfPoint → eased smoothing that never
-            //     overshoots vertically (important here — a spline could dip
-            //     the line below zero in sparse-activity stretches, which
-            //     makes no semantic sense for a message-count metric).
-            //     Cookbook ref: Scatter/ScatterQuadHalfPath.
+            //   PASS 1 (glow underlayer): wide, very transparent line at
+            //     the same x,y data. The viewer reads this as the radiated
+            //     halo around the trend rather than a separate line.
             //
-            //   • FillY + FillYColor → fills the region between the line and
-            //     y=0 with a low-alpha gold gradient. Cookbook ref:
-            //     Scatter/ScatterFill (`sp.FillY = true;
-            //     sp.FillYColor = sp.Color.WithAlpha(.2);`).
+            //   PASS 2 (sharp line): the actual data line at full opacity
+            //     with the area fill beneath it. Rendered after the glow
+            //     so it sits on top in z-order.
+            //
+            // Both passes use the QuadHalfPoint path strategy so the
+            // smoothing is identical — otherwise the glow would peek out
+            // from behind the sharp line on curves where they diverged.
+            // Cookbook refs: Scatter/ScatterQuadHalfPath (smoothing) and
+            // Scatter/ScatterFill (FillY area fill on the sharp line).
             var lineXs = orderedDays.Select(d => d.ToOADate()).ToArray();
             var lineColor = ScottPlot.Color.FromHex(LineColorHex);
+
+            var trendGlow = plot.Add.ScatterLine(lineXs, rolling);
+            trendGlow.Color        = lineColor.WithAlpha(0.20);
+            trendGlow.LineWidth    = 11f;
+            trendGlow.PathStrategy = new ScottPlot.PathStrategies.QuadHalfPoint();
+
             var rollingLine = plot.Add.ScatterLine(lineXs, rolling);
             rollingLine.Color        = lineColor;
-            rollingLine.LineWidth    = 3.5f;
+            rollingLine.LineWidth    = 3f;
             rollingLine.PathStrategy = new ScottPlot.PathStrategies.QuadHalfPoint();
             rollingLine.FillY        = true;
-            rollingLine.FillYColor   = lineColor.WithAlpha(0.22);
-            rollingLine.LegendText   = $"{RollingWindowDays}-day average";
+            rollingLine.FillYColor   = lineColor.WithAlpha(0.18);
 
-            // DateTime axis + autoscale.
+            // DateTime axis + autoscale. No Y-axis label — the title above
+            // already carries the "messages per day" meaning, and removing
+            // the rotated left-side label gives the chart more horizontal
+            // breathing room.
             plot.Axes.DateTimeTicksBottom();
             plot.Axes.Margins(bottom: 0);  // bars sit flush on the x-axis
-            plot.YLabel("Messages per day");
             plot.Title($"Daily activity — {displayName} (last {WindowDays} days)");
 
-            // Default legend placement (upper-right). Style it to match
-            // the dark theme so it doesn't punch through as a white box.
-            plot.ShowLegend();
-            plot.Legend.BackgroundColor = ScottPlot.Color.FromHex(DataBgHex);
-            plot.Legend.FontColor       = ScottPlot.Color.FromHex(AxisColorHex);
-            plot.Legend.OutlineColor    = ScottPlot.Color.FromHex(GridColorHex);
+            // No legend either: there's only one labeled overlay (the trend
+            // line) and its color + position next to the bars makes its
+            // meaning self-evident. The legend was the last "boxy" UI
+            // element competing with the data; removing it gives the HUD
+            // aesthetic full canvas. (Default = legend hidden, so we just
+            // don't call ShowLegend.)
 
             // Render at 2× the embed display width for retina sharpness.
             // ScottPlot returns PNG-encoded bytes directly — no temp file
