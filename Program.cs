@@ -333,6 +333,13 @@ try
     // voice state). Prevents orphaned sessions from inflating activity totals.
     builder.Services.AddHostedService<VoiceSessionCleanupService>();
 
+    // RankChangeBackfillService: one-shot service that seeds the RankChange
+    // append-only log from existing RankHistory rows the first time the
+    // rank-history-chain feature deploys. After the initial seed, the query
+    // returns nothing and the service is a no-op. See its class comment for
+    // the idempotency-via-NOT-EXISTS design.
+    builder.Services.AddHostedService<RankChangeBackfillService>();
+
     // EventAttendanceSnapshotService: timer-driven (default 5 min) + startup
     // catch-up pass. Writes EventAttendance rows shortly after each clan event
     // ends. Calendar entries are preserved as historical record per the
@@ -400,6 +407,23 @@ try
     // BotState + BotDbContext only — no external API calls, so /health works
     // even when Drive / Sheets / Calendar are degraded.
     builder.Services.AddSingleton<HealthCommandHandler>();
+
+    // TimelineCommandHandler: /timeline slash command for officers (Officer+).
+    // Renders a single member's complete history — joins, invite attribution,
+    // rank assignment, officer applications, AWOL flags, AWOL kicks, security
+    // audit hits, recent events — into one ephemeral embed. Read-only;
+    // pulls from BotDbContext + DiscordSocketClient only, no external API
+    // calls. NOTE: also keep CommandsCommandHandler.BuildCatalog in sync
+    // when changing /timeline.
+    builder.Services.AddSingleton<TimelineCommandHandler>();
+
+    // MemberActivityChartRenderer: produces PNG byte arrays of per-member
+    // daily-activity charts for inline attachment to /timeline responses.
+    // Backed by ScottPlot + SkiaSharp (see ClanGuardBot.csproj for the
+    // package references and Dockerfile for the matching font/runtime
+    // packages). Returns null on any failure so /timeline degrades to
+    // text-only gracefully.
+    builder.Services.AddSingleton<MemberActivityChartRenderer>();
 
     // ── AI / Weekly Briefing ─────────────────────────────────────────
     // WeeklyOfficerBriefingService: scheduled background service that posts a

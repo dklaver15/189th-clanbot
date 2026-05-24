@@ -20,6 +20,20 @@
     <PackageReference Include="Serilog.Extensions.Hosting" Version="8.0.0" />
     <PackageReference Include="Serilog.Sinks.Console" Version="6.0.0" />
     <PackageReference Include="Serilog.Sinks.File" Version="6.0.0" />
+
+    <!--
+      Chart rendering for the /timeline command. ScottPlot 5 produces PNG
+      bytes directly via Plot.GetImageBytes(); we attach the result to
+      Discord embeds using FileAttachment + the attachment:// embed-image URL.
+
+      We do NOT need an explicit SkiaSharp.NativeAssets.Linux.NoDependencies
+      reference: ScottPlot 5.1.58 already takes a transitive dependency on
+      that package at >= 3.119.0, which ships the self-contained
+      libSkiaSharp.so binary needed for headless rendering on the Debian
+      aspnet:8.0 base image. The matching font / freetype system packages
+      are installed in the Dockerfile so SkiaSharp can locate a typeface.
+    -->
+    <PackageReference Include="ScottPlot" Version="5.1.58" />
   </ItemGroup>
 
   <!--

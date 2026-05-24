@@ -141,6 +141,18 @@ public class RankTrackingHandler
                 // User lost all rank roles — remove the record
                 if (rankRecord is not null)
                 {
+                    // Append the "Removed" entry to the rank-change log BEFORE
+                    // we remove the RankHistory row, so it can read the prior
+                    // rank name from the in-memory entity. Both writes flush
+                    // together via SaveChangesAsync below.
+                    RankChangeLogHelper.StageChange(
+                        db,
+                        guildId,
+                        userId,
+                        fromRank: rankRecord.RankName,
+                        toRank:   null,
+                        changedAt: DateTime.UtcNow);
+
                     db.RankHistories.Remove(rankRecord);
                     _logger.LogInformation(
                         "Rank removed: {Username} lost rank {OldRank} in {Guild}",
@@ -152,15 +164,27 @@ public class RankTrackingHandler
                 // First time seeing a rank for this user. Explicitly zero out
                 // the seed fields so it's obvious at a glance that a fresh rank
                 // record starts without any one-time spreadsheet credit applied.
+                var now = DateTime.UtcNow;
                 db.RankHistories.Add(new RankHistory
                 {
                     GuildId = guildId,
                     UserId = userId,
                     RankName = afterRank,
-                    AssignedAt = DateTime.UtcNow,
+                    AssignedAt = now,
                     EventsAttendedAtRankBeforeBot = 0,
                     SeedAppliedAt = null,
                 });
+                // "Initial" entry — FromRank=null marks "no prior rank in our
+                // records." Could be a brand-new member or a rejoin whose
+                // stale RankHistory row was pruned by MemberLifecycleHandler.
+                RankChangeLogHelper.StageChange(
+                    db,
+                    guildId,
+                    userId,
+                    fromRank: null,
+                    toRank:   afterRank,
+                    changedAt: now);
+
                 _logger.LogInformation(
                     "Rank assigned: {Username} → {NewRank} in {Guild}",
                     after.Username, afterRank, after.Guild.Name);
@@ -207,8 +231,20 @@ public class RankTrackingHandler
                     "Rank change: {Username} {OldRank} → {NewRank} in {Guild} (clearing seed)",
                     after.Username, rankRecord.RankName, afterRank, after.Guild.Name);
 
+                // Stage the rank-change log entry BEFORE we mutate rankRecord
+                // so the helper sees the prior name. Both writes flush together
+                // via the single SaveChangesAsync below.
+                var changedAt = DateTime.UtcNow;
+                RankChangeLogHelper.StageChange(
+                    db,
+                    guildId,
+                    userId,
+                    fromRank: rankRecord.RankName,
+                    toRank:   afterRank,
+                    changedAt: changedAt);
+
                 rankRecord.RankName = afterRank;
-                rankRecord.AssignedAt = DateTime.UtcNow;
+                rankRecord.AssignedAt = changedAt;
                 rankRecord.EventsAttendedAtRankBeforeBot = 0;
                 rankRecord.SeedAppliedAt = null;
             }

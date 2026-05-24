@@ -14,6 +14,7 @@ public class BotDbContext : DbContext
     public DbSet<MessageEvent>        MessageEvents       => Set<MessageEvent>();
     public DbSet<VoiceSession>        VoiceSessions       => Set<VoiceSession>();
     public DbSet<RankHistory>         RankHistories       => Set<RankHistory>();
+    public DbSet<RankChange>          RankChanges         => Set<RankChange>();
     public DbSet<TicketReminder>      TicketReminders     => Set<TicketReminder>();
     public DbSet<GuestReminder>       GuestReminders      => Set<GuestReminder>();
     public DbSet<OnboardingReminder>  OnboardingReminders => Set<OnboardingReminder>();
@@ -107,6 +108,19 @@ public class BotDbContext : DbContext
         modelBuilder.Entity<RankHistory>(e =>
         {
             e.HasIndex(r => new { r.GuildId, r.UserId }).IsUnique();
+        });
+
+        // Append-only rank-change log. Two read patterns:
+        //   • /timeline drill-down — every change for one (guild, user),
+        //     newest-first. Covered by (GuildId, UserId, ChangedAt).
+        //   • Future cross-member analytics — recent changes in a guild
+        //     (e.g. "everyone promoted this week"). Covered by
+        //     (GuildId, ChangedAt). Cheap to add now; carries no
+        //     marginal cost until something queries it.
+        modelBuilder.Entity<RankChange>(e =>
+        {
+            e.HasIndex(c => new { c.GuildId, c.UserId, c.ChangedAt });
+            e.HasIndex(c => new { c.GuildId, c.ChangedAt });
         });
 
         modelBuilder.Entity<TicketReminder>(e =>

@@ -6,3 +6,4 @@ logs/.DS_Store
 .idea/
 .claude/
 obj copy/
+logs/
