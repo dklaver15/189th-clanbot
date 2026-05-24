@@ -181,6 +181,17 @@ public class MemberActivityChartRenderer
             plot.DataBackground.Color   = ScottPlot.Color.FromHex(DataBgHex);
             plot.Axes.Color(ScottPlot.Color.FromHex(AxisColorHex));
 
+            // `Axes.Color(...)` above sets the axis frame line color and the
+            // axis title color, but in ScottPlot 5 the tick label color is a
+            // separate property on each axis's TickLabelStyle. Without these
+            // explicit assignments the tick numbers/dates render in the
+            // default light-gray, which is hard to read against the dark
+            // embed background. Set them per axis to match the axis title
+            // color (white). Bottom = X axis (dates), Left = Y axis (counts).
+            var axisColor = ScottPlot.Color.FromHex(AxisColorHex);
+            plot.Axes.Bottom.TickLabelStyle.ForeColor = axisColor;
+            plot.Axes.Left.TickLabelStyle.ForeColor   = axisColor;
+
             // Hide the boxy chart frame (top/right/bottom/left axis lines)
             // so the data area edge-blends into the embed. Cookbook ref:
             // Styling/CustomBorders — `myPlot.Axes.Frame(false);`
