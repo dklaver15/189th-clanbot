@@ -33,7 +33,8 @@
       aspnet:8.0 base image. The matching font / freetype system packages
       are installed in the Dockerfile so SkiaSharp can locate a typeface.
     -->
-    <PackageReference Include="ScottPlot" Version="5.1.58" />
+    <PackageReference Include="SkiaSharp" Version="3.119.0" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="3.119.0" />
   </ItemGroup>
 
   <!--
