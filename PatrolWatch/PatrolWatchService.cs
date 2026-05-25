@@ -19,10 +19,16 @@ namespace ClanGuardBot.PatrolWatch;
 /// roster changes.
 ///
 /// ── Architecture ──
-/// State lives in memory only, keyed on voice channel ID. Patrols don't
-/// need to survive a bot restart; on restart, any orphaned embed in Discord
-/// becomes stale and an officer can delete it. A v2 could startup-scan the
-/// LFG channel for orphans and clean them up.
+/// State lives in memory only, keyed on voice channel ID. On restart
+/// (e.g. code deploy on DigitalOcean) the in-memory dict starts empty, but
+/// any patrol embeds still in #lfg get reconciled by ReconcileOrphanEmbedsAsync
+/// on Ready — we parse the VC ID out of each orphan's description, rebuild
+/// PatrolState pointing at the existing message, and let the cold-start
+/// recompute edit it in place (or stand it down if the squad disbanded
+/// while we were offline). The reconciliation pass also deletes duplicate
+/// orphans for the same VC (left over from past restart cycles) and stale
+/// "Patrol stood down" embeds whose Task.Delay-based deletion didn't survive
+/// the restart.
 ///
 /// ── Event flow ──
 ///   UserVoiceStateUpdated / PresenceUpdated
@@ -134,23 +140,40 @@ public sealed class PatrolWatchService : IHostedService
     }
 
     /// <summary>
-    /// On Ready, sweep every voice channel in every guild and schedule a
-    /// recompute for the populated ones. This covers the cold-start gap:
-    /// without it, members already in voice when the bot booted would be
+    /// On Ready, reconcile any orphan embeds in #lfg with our in-memory state,
+    /// then sweep every voice channel in every guild and schedule a recompute
+    /// for the populated ones.
+    ///
+    /// ── Orphan reconciliation ──
+    /// In-memory state is wiped by a process restart (e.g. code deploy on
+    /// DigitalOcean), but the embeds we posted before the restart are still
+    /// in #lfg. Without reconciliation, the VC sweep below would see no
+    /// existing state for those VCs and post a *second* embed next to the
+    /// orphan. ReconcileOrphanEmbedsAsync reads recent #lfg messages,
+    /// rebuilds PatrolState for each orphan, and schedules recomputes —
+    /// which then edit the existing embed in place (or stand it down if the
+    /// squad disbanded while we were offline) instead of creating duplicates.
+    ///
+    /// ── Cold-start VC sweep ──
+    /// Without it, members already in voice when the bot booted would be
     /// invisible to the watcher until something fired an event (mic toggle,
     /// status change, anyone joining or leaving a VC).
     ///
     /// Ready fires once per gateway handshake. We don't subscribe to Connected
     /// for reconnects — Discord.Net replays state diffs as gateway events on
     /// reconnect, so the existing UserVoiceStateUpdated / PresenceUpdated
-    /// handlers cover that case without a second sweep.
+    /// handlers cover that case without a second sweep. The reconciliation
+    /// step is also re-entrant-safe: it skips VCs we already have state for,
+    /// so a gateway reconnect (process intact) won't clobber live patrols.
     ///
     /// Each ScheduleRecompute call is debounced by DebounceSeconds, so embeds
     /// land roughly 12s after Ready — fine for startup, and any events that
     /// fire during that window coalesce into the same recompute.
     /// </summary>
-    private Task OnReadyAsync()
+    private async Task OnReadyAsync()
     {
+        await ReconcileOrphanEmbedsAsync();
+
         var scanned   = 0;
         var populated = 0;
         var excluded  = 0;
@@ -178,8 +201,161 @@ public sealed class PatrolWatchService : IHostedService
         _logger.LogInformation(
             "PatrolWatch cold-start scan: {Scanned} VCs scanned, {Populated} populated, {Excluded} excluded, {Scheduled} recomputes scheduled",
             scanned, populated, excluded, scheduled);
+    }
 
-        return Task.CompletedTask;
+    /// <summary>
+    /// Scan the LFG channel for embeds we posted before a restart and reconcile
+    /// them with our (currently empty) in-memory state. Three things can happen
+    /// per embed found:
+    ///
+    ///  1. VC still exists and is manageable → register a PatrolState pointing
+    ///     at the orphan message. CurrentRoster + CurrentGame are intentionally
+    ///     left empty so the next recompute trips RosterChanged and edits the
+    ///     embed into sync with current voice/presence state — one edit, no
+    ///     duplicate. If the squad disbanded while we were offline, the
+    ///     recompute hits the stand-down branch instead.
+    ///
+    ///  2. We already have state for that VC (gateway-reconnect case where the
+    ///     process didn't die, OR a second orphan for the same VC from a
+    ///     previous restart cycle) → delete this message as a duplicate. This
+    ///     also retroactively cleans up duplicates accumulated from past
+    ///     restarts before this fix existed.
+    ///
+    ///  3. VC was deleted, isn't a voice channel anymore, or has been moved
+    ///     into an excluded category → no recompute will ever fire for it, so
+    ///     just delete the orphan directly.
+    ///
+    /// Also cleans up stale "Patrol stood down" embeds whose Task.Delay-based
+    /// deletion didn't survive the restart — they're guaranteed to be expired
+    /// at this point (the linger window is short and the bot was offline for
+    /// at least a process-restart's worth of time).
+    ///
+    /// One batch of 100 messages is enough for any realistically active #lfg
+    /// channel across a deploy window. We don't paginate — if a patrol's embed
+    /// is older than 100 messages of #lfg activity, an officer can delete the
+    /// orphan manually.
+    /// </summary>
+    private async Task ReconcileOrphanEmbedsAsync()
+    {
+        if (_options.LfgChannelId == 0) return;
+
+        foreach (var guild in _client.Guilds)
+        {
+            var lfgChannel = guild.GetTextChannel(_options.LfgChannelId);
+            if (lfgChannel == null) continue;
+
+            IEnumerable<IMessage> messages;
+            try
+            {
+                messages = await lfgChannel.GetMessagesAsync(100).FlattenAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "PatrolWatch orphan reconciliation: failed to read #{LfgChannel}; skipping",
+                    lfgChannel.Name);
+                continue;
+            }
+
+            var botUserId = _client.CurrentUser.Id;
+            var reconstructed  = 0;
+            var duplicates     = 0;
+            var unmanageable   = 0;
+            var staleStandDown = 0;
+
+            // GetMessagesAsync returns newest first. We treat the newest matching
+            // embed per VC as canonical and delete any older same-VC orphans.
+            foreach (var msg in messages)
+            {
+                if (msg.Author.Id != botUserId) continue;
+                if (msg.Embeds.Count == 0) continue;
+
+                var embed = msg.Embeds.First();
+                var title = embed.Title ?? string.Empty;
+
+                if (title.StartsWith("Patrol stood down", StringComparison.Ordinal))
+                {
+                    if (await TryDeleteAsync(lfgChannel, msg.Id, "stale stand-down"))
+                        staleStandDown++;
+                    continue;
+                }
+
+                if (!title.StartsWith("Squad on patrol", StringComparison.Ordinal)) continue;
+
+                var description = embed.Description ?? string.Empty;
+                var vcMatch = System.Text.RegularExpressions.Regex.Match(description, @"<#(\d+)>");
+                if (!vcMatch.Success) continue;
+                if (!ulong.TryParse(vcMatch.Groups[1].Value, out var vcId)) continue;
+
+                // Already tracking this VC → this message is a duplicate from a
+                // prior restart (or an older instance of the same patrol).
+                if (_activePatrols.ContainsKey(vcId))
+                {
+                    if (await TryDeleteAsync(lfgChannel, msg.Id, "duplicate orphan"))
+                        duplicates++;
+                    continue;
+                }
+
+                // If the VC isn't reachable as a manageable channel, the orphan
+                // can never be edited or stood down by the recompute path.
+                // Delete it directly.
+                if (_client.GetChannel(vcId) is not SocketVoiceChannel vc || IsExcluded(vc))
+                {
+                    if (await TryDeleteAsync(lfgChannel, msg.Id, "unmanageable VC"))
+                        unmanageable++;
+                    continue;
+                }
+
+                var startedAtUtc = embed.Timestamp?.UtcDateTime ?? msg.Timestamp.UtcDateTime;
+
+                _activePatrols[vcId] = new PatrolState
+                {
+                    VoiceChannelId = vcId,
+                    LfgChannelId   = lfgChannel.Id,
+                    MessageId      = msg.Id,
+                    StartedAtUtc   = startedAtUtc,
+                    // Intentional sentinels: empty roster + empty game guarantee
+                    // RosterChanged() returns true on the next recompute, which
+                    // edits the embed into sync with current state. Single edit,
+                    // no duplicate post.
+                    CurrentRoster  = new HashSet<ulong>(),
+                    CurrentGame    = string.Empty,
+                };
+                reconstructed++;
+
+                // Force a recompute even if the VC is empty right now — that's
+                // how an orphan whose squad disbanded during the bot's downtime
+                // gets stood down properly.
+                ScheduleRecompute(vc);
+            }
+
+            if (reconstructed > 0 || duplicates > 0 || unmanageable > 0 || staleStandDown > 0)
+            {
+                _logger.LogInformation(
+                    "PatrolWatch orphan reconciliation in #{LfgChannel}: {Reconstructed} reconstructed, {Duplicates} duplicate(s) deleted, {Unmanageable} unmanageable deleted, {StaleStandDown} stale stand-down(s) deleted",
+                    lfgChannel.Name, reconstructed, duplicates, unmanageable, staleStandDown);
+            }
+        }
+    }
+
+    private async Task<bool> TryDeleteAsync(SocketTextChannel channel, ulong messageId, string reason)
+    {
+        try
+        {
+            await channel.DeleteMessageAsync(messageId);
+            return true;
+        }
+        catch (Discord.Net.HttpException ex) when (ex.HttpCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return false; // Already gone, fine.
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "PatrolWatch orphan reconciliation: failed to delete {Reason} message {MessageId}",
+                reason, messageId);
+            return false;
+        }
     }
 
     // ── Debounce + recompute ────────────────────────────────────────
