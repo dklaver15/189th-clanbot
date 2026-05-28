@@ -52,6 +52,7 @@
     <Folder Include="Recorder\src\" />
     <Folder Include="RedditLeads\" />
     <Folder Include="Tools\" />
+    <Folder Include="Transcriber\" />
   </ItemGroup>
 
   <!--

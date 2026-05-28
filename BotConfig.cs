@@ -393,6 +393,36 @@ public class BotConfig
     /// </summary>
     public string MeetingRecorderSharedSecret { get; set; } = string.Empty;
 
+    // ─── Meeting Minutes / Transcription ─────────────────────────────
+
+    /// <summary>
+    /// Base URL of the faster-whisper transcriber sidecar (e.g.
+    /// "http://transcriber:8090" on the compose network). Empty disables the
+    /// whole minutes pipeline: MeetingMinutesService becomes a no-op and
+    /// recordings accumulate in the Transcribing state until it's configured.
+    /// </summary>
+    public string MeetingTranscriberBaseUrl { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Shared secret sent as the x-transcriber-secret header to the transcriber
+    /// sidecar. Must match the sidecar's TRANSCRIBER_SHARED_SECRET. Inject via
+    /// env (BotConfig__MeetingTranscriberSharedSecret) — never commit it.
+    /// </summary>
+    public string MeetingTranscriberSharedSecret { get; set; } = string.Empty;
+
+    /// <summary>
+    /// HTTP timeout (minutes) for a single /transcribe call. Transcribing an
+    /// hour of speech on CPU can take several minutes; this runs on a
+    /// background worker with no user waiting. Default 30.
+    /// </summary>
+    public int MeetingTranscriberTimeoutMinutes { get; set; } = 30;
+
+    /// <summary>
+    /// Channel ID where generated minutes are posted. 0 falls back to
+    /// MeetingRecordingAnnouncementChannelId, then to the meeting VC's text chat.
+    /// </summary>
+    public ulong MeetingMinutesChannelId { get; set; } = default;
+
     // ─── Voice Activity Safeguards ───────────────────────────────────
 
     /// <summary>

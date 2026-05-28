@@ -380,6 +380,14 @@ try
         builder.Services.AddSingleton<IMeetingRecorderController, HttpMeetingRecorderController>();
     builder.Services.AddHostedService<MeetingRecordingScheduler>();
 
+    // MeetingMinutesService: the back half of the pipeline. Picks up recordings
+    // the scheduler parked in Transcribing, runs them through the faster-whisper
+    // transcriber sidecar, asks Claude for minutes + action items, posts them,
+    // and prunes old audio to the keep-last-N window. Self-gates on
+    // BotConfig.MeetingTranscriberBaseUrl (no-op until the sidecar is configured).
+    builder.Services.AddSingleton<IMeetingTranscriber, HttpMeetingTranscriber>();
+    builder.Services.AddHostedService<MeetingMinutesService>();
+
     // AutoPromotionService: nightly check that auto-promotes RCT → SGT based on
     // time-in-rank + activity thresholds (msgs/voice for RCT→CPL; event attendance
     // for CPL→SGT). Respects the AutoPromotionEnabled, AutoPromotionDryRun, and

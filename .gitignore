@@ -9,3 +9,5 @@ obj copy/
 logs/
 Recorder/node_modules/
 Recorder/.env
+Transcriber/.env
+Transcriber/__pycache__/

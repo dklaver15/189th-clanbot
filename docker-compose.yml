@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   clanguard:
     build: .
@@ -7,35 +5,31 @@ services:
     restart: unless-stopped
     depends_on:
       - recorder
+      - transcriber
     environment:
       - DOTNET_ENVIRONMENT=Production
       - BotConfig__Token=${DISCORD_BOT_TOKEN}
       - Claude__ApiKey=${ANTHROPIC_API_KEY}
       - BotConfig__BackupEncryptionPassphrase=${CLANGUARD_BACKUP_PASSPHRASE}
       - BotConfig__HeartbeatPingUrl=${CLANGUARD_HEARTBEAT_URL}
-      # Cloudflare R2 credentials for the SQLite backup uploader. Keep the
-      # bucket name and account endpoint in appsettings.json (not secret);
-      # only the access key + secret flow through .env.
+      # Cloudflare R2 credentials for the SQLite backup uploader.
       - BotConfig__BackupR2__AccessKeyId=${CLANGUARD_R2_ACCESS_KEY_ID}
       - BotConfig__BackupR2__SecretAccessKey=${CLANGUARD_R2_SECRET_ACCESS_KEY}
-      # ── Meeting recording ──
-      # Setting MeetingRecorderBaseUrl activates the real HTTP recorder
-      # controller (vs the logging no-op). The bot reaches the sidecar by its
-      # compose service name on the shared network.
+      # -- Meeting recording (recorder sidecar) --
       - BotConfig__MeetingRecorderBaseUrl=http://recorder:8080
       - BotConfig__MeetingRecorderSharedSecret=${RECORDER_SHARED_SECRET}
-      # Flip this to true only once you're ready for the bot to actually join,
-      # announce, and record the matched meeting:
+      # -- Meeting minutes (transcriber sidecar + Claude) --
+      # Setting MeetingTranscriberBaseUrl activates MeetingMinutesService.
+      - BotConfig__MeetingTranscriberBaseUrl=http://transcriber:8090
+      - BotConfig__MeetingTranscriberSharedSecret=${TRANSCRIBER_SHARED_SECRET}
+      # Optional: dedicated channel for posted minutes (else announcement channel -> meeting VC):
+      # - BotConfig__MeetingMinutesChannelId=000000000000000000
+      # Flip on once you're ready for the bot to actually join/record/summarize:
       # - BotConfig__MeetingRecordingEnabled=true
-      # Override any config values via environment variables:
-      # - BotConfig__HqChannelName=headquarters
-      # - BotConfig__MinMessages=10
-      # - BotConfig__ExemptRoles=Admin,Moderator,Officer,Bot,VIP
     volumes:
       - bot-data:/app/data
       - bot-logs:/app/logs
-      # Shared recordings volume — same path as the recorder so the audioDir it
-      # returns is valid here too (read by the future transcription stage).
+      # Shared recordings volume -- same path in all three containers.
       - meeting-audio:/app/data/recordings
       - ./google-credentials.json:/app/google-credentials.json:ro
     logging:
@@ -49,16 +43,30 @@ services:
     container_name: clanguard-recorder
     restart: unless-stopped
     environment:
-      # SECOND Discord application's bot token — NOT the main ClanGuard token.
       - RECORDER_BOT_TOKEN=${RECORDER_BOT_TOKEN}
-      # Must match BotConfig__MeetingRecorderSharedSecret above.
       - RECORDER_SHARED_SECRET=${RECORDER_SHARED_SECRET}
       - RECORDER_PORT=8080
       - AUDIO_ROOT=/app/data/recordings
     volumes:
       - meeting-audio:/app/data/recordings
-    # No `ports:` — the control API is only reachable from other services on
-    # the compose network (i.e. from the clanguard container), never the host.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  transcriber:
+    build: ./Transcriber
+    container_name: clanguard-transcriber
+    restart: unless-stopped
+    environment:
+      - TRANSCRIBER_SHARED_SECRET=${TRANSCRIBER_SHARED_SECRET}
+      - TRANSCRIBER_PORT=8090
+      - WHISPER_MODEL=base.en
+      - WHISPER_DEVICE=cpu
+      - WHISPER_COMPUTE=int8
+    volumes:
+      - meeting-audio:/app/data/recordings
     logging:
       driver: "json-file"
       options:

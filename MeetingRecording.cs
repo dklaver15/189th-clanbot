@@ -78,8 +78,28 @@ public class MeetingRecording
     /// </summary>
     public string? AudioDirPath { get; set; }
 
-    /// <summary>Path to the merged, speaker-labelled transcript. Null until transcription completes.</summary>
+    /// <summary>Path to the merged, speaker-labelled transcript file. Null until transcription completes.</summary>
     public string? TranscriptPath { get; set; }
+
+    /// <summary>
+    /// The merged, speaker-labelled transcript text, stored in the DB so it
+    /// survives the keep-last-N audio prune (which deletes AudioDirPath, and
+    /// with it the on-disk transcript file). Null until transcription completes.
+    /// </summary>
+    public string? TranscriptText { get; set; }
+
+    /// <summary>
+    /// The final minutes markdown produced by Claude. Stored in the DB so
+    /// meeting history persists after the audio is pruned. Null until generated.
+    /// </summary>
+    public string? MinutesText { get; set; }
+
+    /// <summary>
+    /// JSON array of action items parsed from Claude's output
+    /// (e.g. [{"owner":"...","task":"...","next":"..."}]). Null until generated
+    /// or if none were extracted.
+    /// </summary>
+    public string? ActionItemsJson { get; set; }
 
     /// <summary>Message ID of the posted minutes, for idempotency / later edits. Null until posted.</summary>
     public ulong? MinutesMessageId { get; set; }
