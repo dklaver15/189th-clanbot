@@ -7,3 +7,5 @@ logs/.DS_Store
 .claude/
 obj copy/
 logs/
+Recorder/node_modules/
+Recorder/.env

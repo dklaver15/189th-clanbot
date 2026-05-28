@@ -5,6 +5,8 @@ services:
     build: .
     container_name: clanguard-bot
     restart: unless-stopped
+    depends_on:
+      - recorder
     environment:
       - DOTNET_ENVIRONMENT=Production
       - BotConfig__Token=${DISCORD_BOT_TOKEN}
@@ -16,6 +18,15 @@ services:
       # only the access key + secret flow through .env.
       - BotConfig__BackupR2__AccessKeyId=${CLANGUARD_R2_ACCESS_KEY_ID}
       - BotConfig__BackupR2__SecretAccessKey=${CLANGUARD_R2_SECRET_ACCESS_KEY}
+      # ── Meeting recording ──
+      # Setting MeetingRecorderBaseUrl activates the real HTTP recorder
+      # controller (vs the logging no-op). The bot reaches the sidecar by its
+      # compose service name on the shared network.
+      - BotConfig__MeetingRecorderBaseUrl=http://recorder:8080
+      - BotConfig__MeetingRecorderSharedSecret=${RECORDER_SHARED_SECRET}
+      # Flip this to true only once you're ready for the bot to actually join,
+      # announce, and record the matched meeting:
+      # - BotConfig__MeetingRecordingEnabled=true
       # Override any config values via environment variables:
       # - BotConfig__HqChannelName=headquarters
       # - BotConfig__MinMessages=10
@@ -23,7 +34,31 @@ services:
     volumes:
       - bot-data:/app/data
       - bot-logs:/app/logs
+      # Shared recordings volume — same path as the recorder so the audioDir it
+      # returns is valid here too (read by the future transcription stage).
+      - meeting-audio:/app/data/recordings
       - ./google-credentials.json:/app/google-credentials.json:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  recorder:
+    build: ./Recorder
+    container_name: clanguard-recorder
+    restart: unless-stopped
+    environment:
+      # SECOND Discord application's bot token — NOT the main ClanGuard token.
+      - RECORDER_BOT_TOKEN=${RECORDER_BOT_TOKEN}
+      # Must match BotConfig__MeetingRecorderSharedSecret above.
+      - RECORDER_SHARED_SECRET=${RECORDER_SHARED_SECRET}
+      - RECORDER_PORT=8080
+      - AUDIO_ROOT=/app/data/recordings
+    volumes:
+      - meeting-audio:/app/data/recordings
+    # No `ports:` — the control API is only reachable from other services on
+    # the compose network (i.e. from the clanguard container), never the host.
     logging:
       driver: "json-file"
       options:
@@ -33,3 +68,4 @@ services:
 volumes:
   bot-data:
   bot-logs:
+  meeting-audio:

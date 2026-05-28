@@ -377,6 +377,22 @@ public class BotConfig
     /// </summary>
     public ulong MeetingRecordingAnnouncementChannelId { get; set; } = default;
 
+    /// <summary>
+    /// Base URL of the @discordjs/voice recorder sidecar (e.g.
+    /// "http://recorder:8080" on the compose network). When empty, the
+    /// recorder is considered not deployed: Program.cs registers the no-op
+    /// LoggingMeetingRecorderController, the scheduler still runs, but no audio
+    /// is captured. Setting this activates the real HTTP recorder controller.
+    /// </summary>
+    public string MeetingRecorderBaseUrl { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Shared secret sent as the x-recorder-secret header on every call to the
+    /// recorder sidecar. Must match the sidecar's RECORDER_SHARED_SECRET.
+    /// Inject via env (BotConfig__MeetingRecorderSharedSecret) — never commit it.
+    /// </summary>
+    public string MeetingRecorderSharedSecret { get; set; } = string.Empty;
+
     // ─── Voice Activity Safeguards ───────────────────────────────────
 
     /// <summary>

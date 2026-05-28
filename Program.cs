@@ -367,7 +367,17 @@ try
     // The controller is the @discordjs/voice sidecar in production; until that
     // exists, LoggingMeetingRecorderController is a logging no-op so the
     // scheduler runs end-to-end against real CalendarEvent data.
-    builder.Services.AddSingleton<IMeetingRecorderController, LoggingMeetingRecorderController>();
+    // Recorder controller selection: use the HTTP sidecar when
+    // BotConfig.MeetingRecorderBaseUrl is set, otherwise the logging no-op.
+    // This lets the scheduler run before the sidecar exists, and lets you
+    // deploy the code first and activate recording later just by setting the
+    // base URL — no code change needed.
+    var recorderBaseUrl = builder.Configuration
+        .GetSection(BotConfig.Section)[nameof(BotConfig.MeetingRecorderBaseUrl)];
+    if (string.IsNullOrWhiteSpace(recorderBaseUrl))
+        builder.Services.AddSingleton<IMeetingRecorderController, LoggingMeetingRecorderController>();
+    else
+        builder.Services.AddSingleton<IMeetingRecorderController, HttpMeetingRecorderController>();
     builder.Services.AddHostedService<MeetingRecordingScheduler>();
 
     // AutoPromotionService: nightly check that auto-promotes RCT → SGT based on

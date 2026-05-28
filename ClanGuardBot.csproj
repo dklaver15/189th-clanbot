@@ -49,6 +49,7 @@
   </ItemGroup>
   <ItemGroup>
     <Folder Include="PatrolWatch\" />
+    <Folder Include="Recorder\src\" />
     <Folder Include="RedditLeads\" />
     <Folder Include="Tools\" />
   </ItemGroup>

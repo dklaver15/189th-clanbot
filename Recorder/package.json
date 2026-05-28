@@ -1,0 +1,23 @@
+{
+  "name": "clanguard-recorder",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Voice-recording sidecar for ClanGuard. Joins a meeting VC, captures per-speaker Opus tracks, and exposes a localhost HTTP control API the C# bot drives.",
+  "main": "src/index.mjs",
+  "scripts": {
+    "start": "node src/index.mjs",
+    "deps": "node -e \"import('@discordjs/voice').then(v=>console.log(v.generateDependencyReport()))\""
+  },
+  "dependencies": {
+    "@discordjs/voice": "^0.18.0",
+    "discord.js": "^14.16.3",
+    "express": "^4.21.2",
+    "libsodium-wrappers": "^0.7.15",
+    "opusscript": "^0.0.8",
+    "prism-media": "^1.3.5"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}
