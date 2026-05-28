@@ -12,6 +12,11 @@ namespace ClanGuardBot.Handlers;
 /// reviewing officer doesn't have to scroll through months of stale embeds.
 ///
 /// Implementation notes:
+///   • Pinned messages are PRESERVED — the channel's top-of-list instructions
+///     and bot-command reference are pinned, and clearing the channel should
+///     leave them intact. Protection keys off pin status, not position, so it
+///     survives reordering. (Discord's delete endpoints don't spare pinned
+///     messages on their own, so we filter them out explicitly.)
 ///   • Discord's bulk-delete endpoint only accepts messages younger than 14 days.
 ///     Anything older has to be deleted one at a time, which is slow and
 ///     rate-limit-sensitive — but on a channel that's only ever posted to by
@@ -91,7 +96,8 @@ public class ClearAwolListCommandHandler
         if (!confirm)
         {
             await cmd.FollowupAsync(
-                $"ℹ️ This will permanently delete **all messages** in `#{_config.HqChannelName}`. " +
+                $"ℹ️ This will permanently delete all messages in `#{_config.HqChannelName}` " +
+                "**except pinned messages** (the instructions stay). " +
                 "Pass `confirm:true` to proceed.",
                 ephemeral: true);
             return;
@@ -128,6 +134,7 @@ public class ClearAwolListCommandHandler
         var bulkDeleted = 0;
         var slowDeleted = 0;
         var failedSlow  = 0;
+        var skippedPinned = 0;
         // Use a 1-minute buffer below Discord's 14-day cutoff to avoid the
         // edge case where a message is 13d 23h 59m old at fetch time but
         // crosses the threshold by the time bulk delete is called.
@@ -159,11 +166,20 @@ public class ClearAwolListCommandHandler
 
             // Update cursor BEFORE we start deleting — we're iterating from
             // newest to oldest, so the next page is "before the oldest one
-            // we've seen so far."
+            // we've seen so far." Pinned messages still advance the cursor so
+            // we keep paging past them; we simply never delete them.
             cursor = batchList.Min(m => m.Id);
 
-            var recent = batchList.Where(m => m.Timestamp > bulkCutoff).ToList();
-            var old    = batchList.Where(m => m.Timestamp <= bulkCutoff).ToList();
+            // ── Protect pinned messages ──────────────────────────────────
+            // The top-of-channel instructions + bot-command reference are
+            // pinned. We key off pin status (not position) so the protection
+            // holds even if message ordering shifts. Note: Discord's bulk and
+            // individual delete endpoints WILL remove pinned messages, so we
+            // have to exclude them explicitly here.
+            skippedPinned += batchList.Count(m => m.IsPinned);
+
+            var recent = batchList.Where(m => !m.IsPinned && m.Timestamp > bulkCutoff).ToList();
+            var old    = batchList.Where(m => !m.IsPinned && m.Timestamp <= bulkCutoff).ToList();
 
             // ── Bulk-delete recent messages ──────────────────────────────
             if (recent.Count >= 2)
@@ -251,6 +267,9 @@ public class ClearAwolListCommandHandler
                       $"• Bulk-deleted (≤14d old): {bulkDeleted}\n" +
                       $"• Individually deleted (>14d old): {slowDeleted}";
 
+        if (skippedPinned > 0)
+            summary += $"\n• Kept (pinned): {skippedPinned}";
+
         if (failedSlow > 0)
             summary += $"\n• Failed: {failedSlow} (see bot logs for details)";
 
@@ -258,8 +277,8 @@ public class ClearAwolListCommandHandler
             summary += $"\n\n⚠️ Hit safety iteration cap. There may be more messages — run the command again to continue.";
 
         _logger.LogInformation(
-            "/clear-awol-list completed in #{Channel}: bulk={Bulk}, slow={Slow}, failed={Failed}, invoker={Invoker}",
-            channel.Name, bulkDeleted, slowDeleted, failedSlow, cmd.User.Username);
+            "/clear-awol-list completed in #{Channel}: bulk={Bulk}, slow={Slow}, failed={Failed}, keptPinned={Pinned}, invoker={Invoker}",
+            channel.Name, bulkDeleted, slowDeleted, failedSlow, skippedPinned, cmd.User.Username);
 
         await cmd.FollowupAsync(summary, ephemeral: true);
     }
