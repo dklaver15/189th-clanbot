@@ -327,6 +327,56 @@ public class BotConfig
     /// </summary>
     public int AutoPromotionMinMeetingAttendanceMinutes { get; set; } = 15;
 
+    // ─── Meeting Recording Settings ──────────────────────────────────
+
+    /// <summary>
+    /// Master switch for the meeting-recording pipeline. When false,
+    /// MeetingRecordingScheduler logs a one-line "disabled" notice and exits
+    /// without consuming any DB or Discord cycles. Independent of meeting
+    /// *attendance* (MeetingVoiceChannelId), which keeps working regardless —
+    /// recording is a separate, opt-in concern.
+    /// </summary>
+    public bool MeetingRecordingEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Regex (matched case-insensitively) against CalendarEvent.Title to
+    /// identify which meeting to record. A pattern rather than an exact title
+    /// lets the meeting drift — "189th Monthly Meeting" → "Monthly Meeting –
+    /// June" — without breaking the schedule. No day/time is ever hardcoded;
+    /// the time comes from the matched Apollo event, so reschedules are
+    /// followed automatically. Empty disables the feature.
+    /// </summary>
+    public string MeetingTitlePattern { get; set; } = "monthly meeting";
+
+    /// <summary>
+    /// Minutes before the meeting's StartUtc that the recorder joins the VC.
+    /// Default 5. The join time (StartUtc − this) is recomputed whenever the
+    /// event is rescheduled while still pre-recording.
+    /// </summary>
+    public int MeetingRecordingLeadMinutes { get; set; } = 5;
+
+    /// <summary>
+    /// MeetingRecordingScheduler poll cadence in minutes. Each poll re-reads
+    /// the matched event (catching reschedules/renames), reconciles
+    /// cancellations, and drives the recording state machine. Default 2.
+    /// </summary>
+    public int MeetingRecordingPollIntervalMinutes { get; set; } = 2;
+
+    /// <summary>
+    /// How many of the most recent meetings' *audio* recordings to retain.
+    /// Older audio is deleted by the retention sweep; the lightweight
+    /// transcript + minutes are kept regardless, so meeting history survives
+    /// past the audio. Default 3.
+    /// </summary>
+    public int MeetingRecordingRetainCount { get; set; } = 3;
+
+    /// <summary>
+    /// Channel ID for the recording-consent notice (and, later, the posted
+    /// minutes). 0 falls back to the meeting voice channel's own text chat
+    /// (voice channels are message channels in modern Discord).
+    /// </summary>
+    public ulong MeetingRecordingAnnouncementChannelId { get; set; } = default;
+
     // ─── Voice Activity Safeguards ───────────────────────────────────
 
     /// <summary>

@@ -33,6 +33,7 @@ public class BotDbContext : DbContext
     public DbSet<CalendarOutbox>      CalendarOutbox      => Set<CalendarOutbox>();
     public DbSet<OfficerApplication>  OfficerApplications => Set<OfficerApplication>();
     public DbSet<DiscordStatusIncidentUpdate> DiscordStatusIncidentUpdates => Set<DiscordStatusIncidentUpdate>();
+    public DbSet<MeetingRecording>    MeetingRecordings   => Set<MeetingRecording>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -209,6 +210,19 @@ public class BotDbContext : DbContext
             e.HasIndex(a => new { a.GuildId, a.UserId, a.CalendarEventId }).IsUnique();
             e.HasIndex(a => new { a.GuildId, a.UserId, a.EventEndUtc });
             e.HasIndex(a => a.CalendarEventId);
+        });
+
+        // ── Meeting recordings ────────────────────────────────────────
+        // One row per recorded meeting occurrence (keyed in practice by the
+        // Apollo DiscordMessageId). DiscordMessageId index backs the scheduler's
+        // per-occurrence upsert/de-dupe; State index backs the "find rows in
+        // state X to drive" sweeps. No unique constraint — the scheduler
+        // enforces single-active-row-per-message in code so it can distinguish
+        // active states from terminal ones (Posted/Pruned/Cancelled/Failed).
+        modelBuilder.Entity<MeetingRecording>(e =>
+        {
+            e.HasIndex(m => m.DiscordMessageId);
+            e.HasIndex(m => m.State);
         });
 
         // BotState is a singleton table — only one row, no indexes needed.

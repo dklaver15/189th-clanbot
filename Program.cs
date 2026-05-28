@@ -359,6 +359,17 @@ try
     // "count as events" for promotion math.
     builder.Services.AddHostedService<MeetingAttendanceSnapshotService>();
 
+    // MeetingRecordingScheduler: the scheduling "brain" for meeting recordings.
+    // Finds the next meeting by regex-matching CalendarEvent.Title
+    // (BotConfig.MeetingTitlePattern), follows reschedules/renames, posts the
+    // recording-consent notice, and drives the recorder via
+    // IMeetingRecorderController. Opt-in via BotConfig.MeetingRecordingEnabled.
+    // The controller is the @discordjs/voice sidecar in production; until that
+    // exists, LoggingMeetingRecorderController is a logging no-op so the
+    // scheduler runs end-to-end against real CalendarEvent data.
+    builder.Services.AddSingleton<IMeetingRecorderController, LoggingMeetingRecorderController>();
+    builder.Services.AddHostedService<MeetingRecordingScheduler>();
+
     // AutoPromotionService: nightly check that auto-promotes RCT → SGT based on
     // time-in-rank + activity thresholds (msgs/voice for RCT→CPL; event attendance
     // for CPL→SGT). Respects the AutoPromotionEnabled, AutoPromotionDryRun, and
