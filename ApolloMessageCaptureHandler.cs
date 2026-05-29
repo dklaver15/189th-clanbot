@@ -14,7 +14,8 @@ namespace ClanGuardBot.Handlers;
 /// <summary>
 /// Phase 1 of the Apollo sync rework: lossless capture.
 ///
-/// Subscribes to MessageReceived / MessageUpdated / MessageDeleted for the
+/// Subscribes to MessageReceived / MessageUpdated / MessageDeleted /
+/// MessagesBulkDeleted for the
 /// configured #events channel, filters to Apollo's bot, and writes a row to
 /// ApolloMessageLog. No parsing, no Google Calendar — pure observation.
 /// Runs in PARALLEL with ApolloEventHandler; the existing inline pipeline is
@@ -60,6 +61,7 @@ public class ApolloMessageCaptureHandler
         client.MessageReceived += OnMessageReceived;
         client.MessageUpdated  += OnMessageUpdated;
         client.MessageDeleted  += OnMessageDeleted;
+        client.MessagesBulkDeleted += OnMessagesBulkDeleted;
     }
 
     // ─── Event Handlers ──────────────────────────────────────────────
@@ -97,6 +99,37 @@ public class ApolloMessageCaptureHandler
         // we have prior revisions, write a tombstone. If not, ignore — almost
         // certainly a non-Apollo message we never cared about.
         _ = CaptureDeletionAsync(message.Id);
+        return Task.CompletedTask;
+    }
+
+    private Task OnMessagesBulkDeleted(
+        IReadOnlyCollection<Cacheable<IMessage, ulong>> messages,
+        Cacheable<IMessageChannel, ulong> channel)
+    {
+        // Apollo's /sort reorders the channel by BULK-deleting the old event
+        // messages and re-posting them in order. Discord delivers a multi-
+        // message delete as a single MESSAGE_DELETE_BULK gateway event
+        // (MessagesBulkDeleted), NOT as individual MessageDeleted events —
+        // so without handling it here, a full-channel sort's deletions are
+        // invisible: no tombstones get written, PendingCancelUntil never gets
+        // set, and the re-posts create duplicate CalendarEvents instead of
+        // re-binding. (A single-message sort uses an ordinary delete and is
+        // already covered by OnMessageDeleted.)
+        //
+        // Write a tombstone for each message exactly as the single-delete path
+        // does. CaptureDeletionAsync is idempotent and no-ops on message IDs we
+        // never captured, so it's safe even if Discord also delivers individual
+        // deletes for the same IDs.
+        //
+        // Channel filter: when EventsTextChannelId is configured, ignore bulk
+        // deletes elsewhere outright; otherwise fall back to the per-id
+        // known-message guard inside CaptureDeletionAsync.
+        if (_config.EventsTextChannelId != 0 && channel.Id != _config.EventsTextChannelId)
+            return Task.CompletedTask;
+
+        foreach (var message in messages)
+            _ = CaptureDeletionAsync(message.Id);
+
         return Task.CompletedTask;
     }
 

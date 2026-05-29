@@ -276,38 +276,52 @@ public class ApolloReconciliationService : BackgroundService
                     // while we were down. Match on the stored content hash;
                     // empty hashes (pre-migration rows) never match and fall
                     // through to the orphan delete, preserving old behaviour.
+                    //
+                    // Guard: only re-bind if no OTHER row already tracks that
+                    // live message. If one does — e.g. a re-post already created
+                    // its own CalendarEvent before this old message's deletion
+                    // was reconciled — then THIS row is the stale duplicate.
+                    // Delete it instead of re-binding, which would otherwise
+                    // collide on the unique DiscordMessageId index.
+                    var rebound = false;
                     if (!string.IsNullOrEmpty(row.ContentHash)
                         && liveByHash.TryGetValue(row.ContentHash, out var liveId)
-                        && liveId != row.DiscordMessageId)
+                        && liveId != row.DiscordMessageId
+                        && !await db.CalendarEvents.AnyAsync(c => c.DiscordMessageId == liveId, ct))
                     {
                         var oldId = row.DiscordMessageId;
                         row.DiscordMessageId = liveId;
                         await db.SaveChangesAsync(ct);
                         totalRebound++;
+                        rebound = true;
 
                         _logger.LogInformation(
                             "Apollo reconciliation: re-bound CalendarEvent Id={Id} '{Title}' from missing message {OldId} to live re-post {NewId} (likely /sort during downtime)",
                             row.Id, row.Title, oldId, liveId);
                     }
-                    else if (row.EndUtc > DateTime.UtcNow)
+
+                    if (!rebound)
                     {
-                        // Pre-event orphan: the event hadn't run yet and its
-                        // message is gone with no live re-post — a genuine
-                        // cancellation we missed while down. Remove it.
-                        await DeleteOrphanAsync(db, row);
-                        totalRemoved++;
-                    }
-                    else
-                    {
-                        // Post-event orphan: the message was removed after the
-                        // event ran (routine channel cleanup). Preserve the row
-                        // and its GCal entry as historical record — matches the
-                        // tombstone path's post-event policy. Deleting here would
-                        // silently erase calendar history on every restart.
-                        totalPreserved++;
-                        _logger.LogDebug(
-                            "Apollo reconciliation: preserving past orphan CalendarEvent Id={Id} '{Title}' (EndUtc {End:yyyy-MM-dd HH:mm} UTC) as historical record",
-                            row.Id, row.Title, row.EndUtc);
+                        if (row.EndUtc > DateTime.UtcNow)
+                        {
+                            // Pre-event orphan: the event hadn't run yet and its
+                            // message is gone with no rebindable re-post — a
+                            // genuine cancellation (or a stale sort duplicate).
+                            await DeleteOrphanAsync(db, row);
+                            totalRemoved++;
+                        }
+                        else
+                        {
+                            // Post-event orphan: message removed after the event
+                            // ran (routine channel cleanup). Preserve the row and
+                            // GCal entry as historical record — matches the
+                            // tombstone path. Deleting here would silently erase
+                            // calendar history on every restart.
+                            totalPreserved++;
+                            _logger.LogDebug(
+                                "Apollo reconciliation: preserving past orphan CalendarEvent Id={Id} '{Title}' (EndUtc {End:yyyy-MM-dd HH:mm} UTC) as historical record",
+                                row.Id, row.Title, row.EndUtc);
+                        }
                     }
                 }
 
