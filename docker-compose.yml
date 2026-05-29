@@ -23,7 +23,7 @@ services:
       - BotConfig__MeetingTranscriberBaseUrl=http://transcriber:8090
       - BotConfig__MeetingTranscriberSharedSecret=${TRANSCRIBER_SHARED_SECRET}
       # Optional: dedicated channel for posted minutes (else announcement channel -> meeting VC):
-      # - BotConfig__MeetingMinutesChannelId=000000000000000000
+      - BotConfig__MeetingMinutesChannelId=1509712699414679602
       # Flip on once you're ready for the bot to actually join/record/summarize:
       # - BotConfig__MeetingRecordingEnabled=true
     volumes:
