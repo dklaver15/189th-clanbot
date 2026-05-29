@@ -24,7 +24,7 @@ import {
   entersState,
   VoiceConnectionStatus,
 } from '@discordjs/voice';
-import prism from 'prism-media';
+import { OggOpusStream } from './ogg-opus.mjs';
 import express from 'express';
 import { pipeline } from 'node:stream';
 import fs from 'node:fs';
@@ -94,10 +94,7 @@ function captureUtterance(state, userId, guild) {
   const opusStream = state.receiver.subscribe(userId, {
     end: { behavior: EndBehaviorType.AfterSilence, duration: SILENCE_MS },
   });
-  const oggStream = new prism.opus.OggLogicalBitstream({
-    opusHead: new prism.opus.OpusHead({ channelCount: 2, sampleRate: 48000 }),
-    pageSizeControl: { maxPackets: 10 },
-  });
+  const oggStream = new OggOpusStream({ channelCount: 2, sampleRate: 48000 });
   const out = fs.createWriteStream(filePath);
 
   const done = new Promise((resolve) => {
@@ -205,7 +202,15 @@ async function startRecording({ meetingRecordingId, guildId, voiceChannelId, mee
   };
   current = state;
 
-  state.receiver.speaking.on('start', (userId) => captureUtterance(state, userId, guild));
+  state.receiver.speaking.on('start', (userId) => {
+    try {
+      captureUtterance(state, userId, guild);
+    } catch (e) {
+      // A capture failure for one utterance must never crash the whole recorder.
+      state.active.delete(userId);
+      log(`captureUtterance error for user ${userId}:`, e?.message ?? e);
+    }
+  });
 
   // If we lose the connection and can't recover quickly, finalize what we have.
   connection.on(VoiceConnectionStatus.Disconnected, async () => {
