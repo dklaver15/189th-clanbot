@@ -13,8 +13,12 @@ FROM node:22-bookworm-slim
 WORKDIR /app
 
 # Install deps first for better layer caching.
+# --include=optional is REQUIRED: @discordjs/voice's DAVE library (@snazzah/davey)
+# ships its native binding as a per-platform OPTIONAL dependency
+# (@snazzah/davey-linux-x64-gnu). npm can skip optional deps in production mode,
+# which leaves DAVE uninstalled and makes Discord reject voice with close 4017.
 COPY package.json package-lock.json* ./
-RUN npm install --omit=dev
+RUN npm install --omit=dev --include=optional
 
 COPY . .
 
