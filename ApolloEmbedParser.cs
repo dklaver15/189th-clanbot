@@ -124,9 +124,23 @@ public static partial class ApolloEmbedParser
 
             startUtc = distinct[0];
 
-            endUtc = distinct.Count >= 2 && distinct[^1] > startUtc.AddMinutes(15)
-                ? distinct[^1]
-                : startUtc.AddMinutes(ParseDurationMinutes(embed));
+            // Apollo posts start (full), end (time-only), and a countdown (relative)
+            // timestamp. The countdown shares the start's unix value, so a normal
+            // event yields exactly 2 distinct timestamps: the true start and the
+            // true end. When there are exactly 2, the second IS the end — trust it
+            // regardless of gap, so short events (e.g. a 2-minute test) aren't
+            // discarded into the 2-hour duration fallback.
+            //
+            // Only when there are 3+ distinct timestamps could one be a stray
+            // metadata value near the start; there we keep the 15-minute floor to
+            // avoid mistaking a near-start stray for the end (the original
+            // miscredit bug this guard was added for).
+            if (distinct.Count == 2)
+                endUtc = distinct[1];
+            else if (distinct.Count >= 3 && distinct[^1] > startUtc.AddMinutes(15))
+                endUtc = distinct[^1];
+            else
+                endUtc = startUtc.AddMinutes(ParseDurationMinutes(embed));
         }
         // ── Strategy 2: Apollo plain-text "Time" field ──
         // e.g. "Saturday, March 28, 2026 at 18:00 – 20:00 [Add to Google]"

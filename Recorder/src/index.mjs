@@ -146,30 +146,8 @@ async function startRecording({ meetingRecordingId, guildId, voiceChannelId, mee
     selfMute: true,  // the recorder never speaks
   });
 
-  // ── Handshake instrumentation (temporary) ─────────────────────────────────
-  // Logs voice-connection states AND the networking sub-states, so we can see
-  // exactly which media step stalls:
-  //   OpeningWs -> Identifying -> UdpHandshaking -> SelectingProtocol -> Ready
-  // A ws close code (e.g. 4006/4014/4015) or a stall at UdpHandshaking names the
-  // failure. Remove this block once the connection is confirmed healthy.
-  const NET_CODES = ['OpeningWs', 'Identifying', 'UdpHandshaking', 'SelectingProtocol', 'Ready', 'Resuming', 'Closed'];
-  const nm = (c) => NET_CODES[c] ?? `code${c}`;
-  function hookNetworking(net) {
-    if (!net || net.__hooked) return;
-    net.__hooked = true;
-    net.on('stateChange', (o, n) => {
-      if (o.code !== n.code) log(`[voice-net] ${nm(o.code)} -> ${nm(n.code)}`);
-    });
-    net.on('error', (e) => log(`[voice-net] error: ${e?.message ?? e}`));
-    net.on('close', (code) => log(`[voice-net] ws closed: code=${code}`));
-  }
-
-  connection.on('stateChange', (oldState, newState) => {
-    log(`[voice] ${oldState.status} -> ${newState.status}` +
-        (newState.reason !== undefined ? ` (reason=${newState.reason})` : '') +
-        (newState.closeCode !== undefined ? ` (closeCode=${newState.closeCode})` : ''));
-    hookNetworking(Reflect.get(newState, 'networking'));
-  });
+  // Log genuine connection errors; the verbose handshake tracing used during
+  // bring-up has been removed now that the connection path is healthy.
   connection.on('error', (err) => log(`[voice] connection error: ${err?.message ?? err}`));
 
   try {
