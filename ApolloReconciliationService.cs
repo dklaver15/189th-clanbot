@@ -195,6 +195,7 @@ public class ApolloReconciliationService : BackgroundService
         var totalChecked       = 0;
         var totalRemoved       = 0;
         var totalRebound       = 0;
+        var totalPreserved     = 0;
         var totalChannelMissing = 0;
         var totalFetchErrors   = 0;
 
@@ -288,10 +289,25 @@ public class ApolloReconciliationService : BackgroundService
                             "Apollo reconciliation: re-bound CalendarEvent Id={Id} '{Title}' from missing message {OldId} to live re-post {NewId} (likely /sort during downtime)",
                             row.Id, row.Title, oldId, liveId);
                     }
-                    else
+                    else if (row.EndUtc > DateTime.UtcNow)
                     {
+                        // Pre-event orphan: the event hadn't run yet and its
+                        // message is gone with no live re-post — a genuine
+                        // cancellation we missed while down. Remove it.
                         await DeleteOrphanAsync(db, row);
                         totalRemoved++;
+                    }
+                    else
+                    {
+                        // Post-event orphan: the message was removed after the
+                        // event ran (routine channel cleanup). Preserve the row
+                        // and its GCal entry as historical record — matches the
+                        // tombstone path's post-event policy. Deleting here would
+                        // silently erase calendar history on every restart.
+                        totalPreserved++;
+                        _logger.LogDebug(
+                            "Apollo reconciliation: preserving past orphan CalendarEvent Id={Id} '{Title}' (EndUtc {End:yyyy-MM-dd HH:mm} UTC) as historical record",
+                            row.Id, row.Title, row.EndUtc);
                     }
                 }
 
@@ -303,8 +319,8 @@ public class ApolloReconciliationService : BackgroundService
         }
 
         _logger.LogInformation(
-            "Apollo reconciliation complete: {Checked} checked, {Rebound} re-bound (re-posted), {Removed} orphan(s) removed, {ChannelMissing} skipped (channel missing), {FetchErrors} skipped (fetch errors)",
-            totalChecked, totalRebound, totalRemoved, totalChannelMissing, totalFetchErrors);
+            "Apollo reconciliation complete: {Checked} checked, {Rebound} re-bound (re-posted), {Removed} orphan(s) removed, {Preserved} past orphan(s) preserved, {ChannelMissing} skipped (channel missing), {FetchErrors} skipped (fetch errors)",
+            totalChecked, totalRebound, totalRemoved, totalPreserved, totalChannelMissing, totalFetchErrors);
     }
 
     /// <summary>

@@ -303,6 +303,14 @@ try
     // SELECT every 10 seconds against an empty table).
     builder.Services.AddHostedService<CalendarOutboxWorker>();
 
+    // Phase 4: one-shot startup reconciliation of CalendarEvents against the
+    // live #events channel — removes orphaned rows whose source Apollo message
+    // is gone, and (rebind-aware) re-binds events that were re-posted under a
+    // new ID while the bot was down (e.g. a /sort during downtime) instead of
+    // deleting them. Must be registered for offline-gap recovery to actually
+    // run; without this line it never executes.
+    builder.Services.AddHostedService<ApolloReconciliationService>();
+
     // /calendar: ephemeral day-grouped view of upcoming events from Google Calendar.
     builder.Services.AddSingleton<CalendarCommandHandler>();
 
