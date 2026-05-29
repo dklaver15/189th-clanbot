@@ -63,17 +63,20 @@ public class CleanupCalendarDupesCommandHandler
     private static readonly TimeSpan OrphanScanWindow = TimeSpan.FromDays(90);
 
     private readonly IServiceProvider _services;
+    private readonly DiscordSocketClient _client;
     private readonly GoogleCalendarService _calendarService;
     private readonly ILogger<CleanupCalendarDupesCommandHandler> _logger;
     private readonly BotConfig _config;
 
     public CleanupCalendarDupesCommandHandler(
         IServiceProvider services,
+        DiscordSocketClient client,
         GoogleCalendarService calendarService,
         ILogger<CleanupCalendarDupesCommandHandler> logger,
         IOptions<BotConfig> config)
     {
         _services        = services;
+        _client          = client;
         _calendarService = calendarService;
         _logger          = logger;
         _config          = config.Value;
@@ -165,16 +168,22 @@ public class CleanupCalendarDupesCommandHandler
         int DupeGroupsFound,
         int DbRowsRemoved,
         int GCalEventsDeletedFromDupes,
+        int ContentGroupsFound,
+        int ContentDbRowsRemoved,
+        int ContentGCalDeleted,
+        int ContentReboundHealed,
         int OrphansFound,
         int OrphansDeleted,
         List<string> Errors,
         List<string> DupeDetail,
+        List<string> ContentDetail,
         List<string> OrphanDetail);
 
     private async Task<CleanupReport> RunCleanupAsync(ulong guildId, bool dryRun)
     {
         var errors       = new List<string>();
         var dupeDetail   = new List<string>();
+        var contentDetail = new List<string>();
         var orphanDetail = new List<string>();
 
         using var scope = _services.CreateScope();
@@ -249,6 +258,117 @@ public class CleanupCalendarDupesCommandHandler
 
         if (!dryRun) await db.SaveChangesAsync();
 
+        // ── Pass 3: content duplicates (sort-induced) ─────────────────
+        //
+        // Apollo's /sort deletes every event message and re-posts it under a
+        // new ID. Before the rebind fix, each sort created a fresh CalendarEvent
+        // row + GCal entry while the prior copy lingered — so one logical event
+        // ends up with multiple rows that have DISTINCT DiscordMessageIds and
+        // DISTINCT GCal IDs. Pass 1 (groups by DiscordMessageId) can't see these,
+        // and Pass 2 (GCal-not-in-DB) can't either, because every copy has its
+        // own tracked row. This pass collapses them by content identity.
+        //
+        // Keeper = the copy bound to the message CURRENTLY live in #events
+        // (verified by scanning the channel), so the survivor is the row the
+        // running bot keeps in sync. We re-bind that survivor to the live
+        // message ID and HEAL its ContentHash from the live parse — both are
+        // essential, because these pre-fix rows have an empty ContentHash and
+        // would otherwise re-duplicate on the very next /sort. If no live
+        // message matches the content, we keep the newest row and leave the
+        // orphan question to the reconciler.
+        int contentGroups        = 0;
+        int contentDbRemoved     = 0;
+        int contentGCalDeleted   = 0;
+        int contentReboundHealed = 0;
+
+        var liveByContent = await BuildLiveContentMapAsync(guildId);
+
+        var clanFuture = await db.CalendarEvents
+            .Where(c => c.GuildId == guildId
+                     && c.Source == "Clan"
+                     && c.DiscordMessageId != 0
+                     && c.StartUtc > DateTime.UtcNow)
+            .ToListAsync();
+
+        var contentGroupsList = clanFuture
+            .GroupBy(c => ContentKey(c.Title, c.StartUtc, c.EndUtc))
+            .Where(g => g.Count() > 1)
+            .ToList();
+
+        foreach (var group in contentGroupsList)
+        {
+            contentGroups++;
+
+            var rows = group.OrderByDescending(c => c.DiscordMessageId).ToList();
+
+            ulong? liveMsgId = null;
+            string? liveHash = null;
+            CalendarEvent keeper;
+
+            if (liveByContent.TryGetValue(group.Key, out var live))
+            {
+                liveMsgId = live.MessageId;
+                liveHash  = live.Hash;
+                // Prefer the row already bound to the live message; otherwise
+                // keep the newest and re-bind it to the live message below.
+                keeper = rows.FirstOrDefault(r => r.DiscordMessageId == live.MessageId)
+                         ?? rows.First();
+            }
+            else
+            {
+                keeper = rows.First(); // no live message → keep newest, leave for reconciler
+            }
+
+            var losers = rows.Where(r => r.Id != keeper.Id).ToList();
+
+            contentDetail.Add(
+                $"• {keeper.Title} ({keeper.StartUtc:yyyy-MM-dd HH:mm}Z): keep Id={keeper.Id}" +
+                (liveMsgId is null ? " (no live msg)" : $" (live msg {liveMsgId})") +
+                $", drop {losers.Count}");
+
+            // Re-bind + heal the survivor so future sorts dedupe via ContentHash.
+            if (liveMsgId is not null)
+            {
+                if (!dryRun)
+                {
+                    keeper.DiscordMessageId = liveMsgId.Value;
+                    if (!string.IsNullOrEmpty(liveHash)) keeper.ContentHash = liveHash;
+                }
+                contentReboundHealed++;
+            }
+
+            foreach (var row in losers)
+            {
+                if (!dryRun)
+                {
+                    if (!string.IsNullOrEmpty(row.CalendarEventId))
+                    {
+                        try
+                        {
+                            await _calendarService.DeleteEventAsync(row.CalendarEventId);
+                            contentGCalDeleted++;
+                        }
+                        catch (Exception ex)
+                        {
+                            errors.Add($"GCal delete failed for content-dupe {row.CalendarEventId}: {ex.Message}");
+                            _logger.LogWarning(ex,
+                                "Cleanup: GCal delete failed for content-dupe row Id={Id}", row.Id);
+                        }
+                    }
+
+                    db.CalendarEvents.Remove(row);
+                    contentDbRemoved++;
+                }
+                else
+                {
+                    contentDbRemoved++;
+                    if (!string.IsNullOrEmpty(row.CalendarEventId)) contentGCalDeleted++;
+                }
+            }
+        }
+
+        if (!dryRun) await db.SaveChangesAsync();
+
         // ── Pass 2: GCal orphans ──────────────────────────────────────
         //
         // List future clan-tagged GCal events, cross-reference against
@@ -305,10 +425,15 @@ public class CleanupCalendarDupesCommandHandler
             DupeGroupsFound:            dupeMessageIds.Count,
             DbRowsRemoved:              dbRowsRemoved,
             GCalEventsDeletedFromDupes: gcalDeletedFromDupes,
+            ContentGroupsFound:         contentGroups,
+            ContentDbRowsRemoved:       contentDbRemoved,
+            ContentGCalDeleted:         contentGCalDeleted,
+            ContentReboundHealed:       contentReboundHealed,
             OrphansFound:               orphans.Count,
             OrphansDeleted:             orphansDeleted,
             Errors:                     errors,
             DupeDetail:                 dupeDetail,
+            ContentDetail:              contentDetail,
             OrphanDetail:               orphanDetail);
     }
 
@@ -332,6 +457,21 @@ public class CleanupCalendarDupesCommandHandler
                 sb.AppendLine(line);
             if (r.DupeDetail.Count > 10)
                 sb.AppendLine($"... and {r.DupeDetail.Count - 10} more");
+        }
+
+        sb.AppendLine();
+        sb.AppendLine("**Pass 3 — Content duplicates (sort-induced)**");
+        sb.AppendLine($"Groups found: **{r.ContentGroupsFound}**");
+        sb.AppendLine($"DB rows {(dryRun ? "would be " : "")}removed: **{r.ContentDbRowsRemoved}**");
+        sb.AppendLine($"GCal events {(dryRun ? "would be " : "")}deleted: **{r.ContentGCalDeleted}**");
+        sb.AppendLine($"Survivors {(dryRun ? "would be " : "")}re-bound/healed: **{r.ContentReboundHealed}**");
+        if (r.ContentDetail.Count > 0)
+        {
+            sb.AppendLine();
+            foreach (var line in r.ContentDetail.Take(10))
+                sb.AppendLine(line);
+            if (r.ContentDetail.Count > 10)
+                sb.AppendLine($"... and {r.ContentDetail.Count - 10} more");
         }
 
         sb.AppendLine();
@@ -370,6 +510,80 @@ public class CleanupCalendarDupesCommandHandler
             .WithFooter("ClanGuard Bot • /cleanup-calendar-dupes")
             .WithTimestamp(DateTimeOffset.UtcNow)
             .Build();
+    }
+
+    /// <summary>
+    /// Content identity key for grouping/matching duplicate rows. Kind-agnostic
+    /// fixed format so a stored CalendarEvent (DateTime may be Unspecified) and a
+    /// freshly-parsed live message (may be Utc) produce the same key for the same
+    /// wall-clock instant.
+    /// </summary>
+    private static string ContentKey(string title, DateTime start, DateTime end)
+        => $"{title}|{start:yyyy-MM-ddTHH:mm:ss}|{end:yyyy-MM-ddTHH:mm:ss}";
+
+    /// <summary>
+    /// Scans the live #events channel and maps each parseable Apollo event's
+    /// content key to (live message id, content hash). Used by Pass 3 to pick
+    /// the survivor bound to the message that's actually still in the channel,
+    /// and to heal that survivor's ContentHash. Best-effort: any failure yields
+    /// an empty map and keeper selection falls back to the newest row.
+    /// </summary>
+    private async Task<Dictionary<string, (ulong MessageId, string Hash)>> BuildLiveContentMapAsync(ulong guildId)
+    {
+        var map = new Dictionary<string, (ulong, string)>();
+
+        try
+        {
+            var guild = _client.GetGuild(guildId);
+            if (guild is null) return map;
+
+            var channel = ResolveEventsChannel(guild);
+            if (channel is null) return map;
+
+            var messages = await channel.GetMessagesAsync(200).FlattenAsync();
+
+            foreach (var message in messages)
+            {
+                if (!message.Author.IsBot) continue;
+                if (!message.Author.Username.Contains(
+                        _config.ApolloBotName, StringComparison.OrdinalIgnoreCase)) continue;
+
+                var embed = message.Embeds.FirstOrDefault();
+                if (embed is null) continue;
+
+                var parsed = ApolloEmbedParser.Parse(embed);
+                if (parsed is null) continue;
+
+                var key = ContentKey(parsed.Title, parsed.StartUtc, parsed.EndUtc);
+
+                // Newest live message wins if two live copies somehow coexist.
+                if (!map.TryGetValue(key, out var existing) || message.Id > existing.Item1)
+                    map[key] = (message.Id, ApolloContentHash.Compute(parsed));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Cleanup: failed to scan live channel for content dedupe; keeper selection falls back to newest row");
+        }
+
+        return map;
+    }
+
+    /// <summary>
+    /// Resolves the events text channel for a guild — id-first (rename-proof),
+    /// name fallback. Mirrors ApolloReconciliationService.ResolveEventsChannel.
+    /// </summary>
+    private SocketTextChannel? ResolveEventsChannel(SocketGuild guild)
+    {
+        if (_config.EventsTextChannelId != 0)
+        {
+            var byId = guild.GetTextChannel(_config.EventsTextChannelId);
+            if (byId is not null) return byId;
+        }
+
+        return guild.TextChannels.FirstOrDefault(c =>
+            c.Name.Equals(_config.EventsTextChannelName, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
