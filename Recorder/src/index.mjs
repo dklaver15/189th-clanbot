@@ -150,19 +150,28 @@ async function startRecording({ meetingRecordingId, guildId, voiceChannelId, mee
   });
 
   // ── Handshake instrumentation (temporary) ─────────────────────────────────
-  // Logs every voice-connection state transition plus the low-level networking
-  // debug stream, so we can see exactly where the handshake stalls:
-  //   stuck at Signalling  -> gateway/adapter not delivering the server update
-  //   stuck at Connecting  -> UDP IP discovery / voice websocket / encryption
-  // Remove this block once the connection is confirmed healthy.
+  // Logs voice-connection states AND the networking sub-states, so we can see
+  // exactly which media step stalls:
+  //   OpeningWs -> Identifying -> UdpHandshaking -> SelectingProtocol -> Ready
+  // A ws close code (e.g. 4006/4014/4015) or a stall at UdpHandshaking names the
+  // failure. Remove this block once the connection is confirmed healthy.
+  const NET_CODES = ['OpeningWs', 'Identifying', 'UdpHandshaking', 'SelectingProtocol', 'Ready', 'Resuming', 'Closed'];
+  const nm = (c) => NET_CODES[c] ?? `code${c}`;
+  function hookNetworking(net) {
+    if (!net || net.__hooked) return;
+    net.__hooked = true;
+    net.on('stateChange', (o, n) => {
+      if (o.code !== n.code) log(`[voice-net] ${nm(o.code)} -> ${nm(n.code)}`);
+    });
+    net.on('error', (e) => log(`[voice-net] error: ${e?.message ?? e}`));
+    net.on('close', (code) => log(`[voice-net] ws closed: code=${code}`));
+  }
+
   connection.on('stateChange', (oldState, newState) => {
     log(`[voice] ${oldState.status} -> ${newState.status}` +
-        (newState.reason !== undefined ? ` (reason=${newState.reason})` : ''));
-    const newNet = Reflect.get(newState, 'networking');
-    if (newNet && newNet !== Reflect.get(oldState, 'networking')) {
-      newNet.on('debug', (m) => log(`[voice-net] ${m}`));
-      newNet.on('error', (e) => log(`[voice-net] error: ${e?.message ?? e}`));
-    }
+        (newState.reason !== undefined ? ` (reason=${newState.reason})` : '') +
+        (newState.closeCode !== undefined ? ` (closeCode=${newState.closeCode})` : ''));
+    hookNetworking(Reflect.get(newState, 'networking'));
   });
   connection.on('error', (err) => log(`[voice] connection error: ${err?.message ?? err}`));
 
