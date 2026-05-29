@@ -95,6 +95,21 @@ public class ApolloMessageParserWorker : BackgroundService
                 _logger.LogError(ex, "ApolloMessageParserWorker batch failed; will retry on next tick");
             }
 
+            // Resolve any rebind grace windows that elapsed without a matching
+            // /sort re-post. New pipeline only — the old path never sets
+            // PendingCancelUntil, so this is a no-op (one indexed SELECT) then.
+            if (_config.UseNewApolloPipeline)
+            {
+                try
+                {
+                    await ResolveExpiredCancellationsAsync(stoppingToken);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "ApolloMessageParserWorker cancellation sweep failed; will retry on next tick");
+                }
+            }
+
             try { await Task.Delay(PollInterval, stoppingToken); }
             catch (OperationCanceledException) { break; }
         }
@@ -274,13 +289,25 @@ public class ApolloMessageParserWorker : BackgroundService
     // ─── New path (UseNewApolloPipeline=true): writes to CalendarEvent + outbox ─
 
     /// <summary>
-    /// Tombstone in the new path. Mirrors ApolloEventHandler.HandleMessageDeletedAsync:
-    ///   • Pre-event deletion (EndUtc &gt; now): real cancellation. Enqueue a Delete
-    ///     outbox row, then remove the CalendarEvent. Doing the enqueue before the
-    ///     remove (in the same SaveChanges) means the outbox always has the GCal
-    ///     event ID available even though CalendarEvent is gone.
-    ///   • Post-event deletion (EndUtc &lt;= now): channel cleanup policy. Leave both
-    ///     the CalendarEvent row and the GCal entry as historical record.
+    /// Tombstone in the new path.
+    ///
+    /// ── Why this no longer cancels immediately ──
+    /// Apollo's /sort deletes every event message and re-posts it under a new
+    /// ID to reorder the channel (Discord can't move existing messages). A
+    /// naive "deletion = cancellation" rule therefore fires a GCal delete on
+    /// every upcoming event each time someone sorts, followed by a fresh create
+    /// from the re-post — churning calendar IDs, re-firing reminders, and (for
+    /// already-ended events) leaving duplicate historical entries.
+    ///
+    /// Instead, we DEFER: mark the row with a rebind grace window and record
+    /// whether a genuine timeout should cancel (pre-event) or preserve
+    /// (post-event). If a re-post with a matching content hash lands within the
+    /// window, ProcessParsedNewPathAsync re-binds this row to the new message
+    /// and clears the flag — GCal is never touched. If the window elapses with
+    /// no re-post, ResolveExpiredCancellationsAsync applies the deferred action.
+    ///
+    /// The pre/post-EndUtc distinction is preserved exactly as before — it's
+    /// just evaluated at timeout instead of immediately.
     /// </summary>
     private async Task ProcessTombstoneNewPathAsync(BotDbContext db, ApolloMessageLog row)
     {
@@ -289,46 +316,26 @@ public class ApolloMessageParserWorker : BackgroundService
 
         if (calEvent is null) return;
 
-        if (calEvent.EndUtc <= DateTime.UtcNow)
+        var now = DateTime.UtcNow;
+
+        // Already holding this row (Discord re-delivered the delete, or a prior
+        // tick set the window). Don't extend it — that would let a stream of
+        // duplicate delete events push the cancellation off indefinitely.
+        if (calEvent.PendingCancelUntil is not null && calEvent.PendingCancelUntil > now)
         {
             _logger.LogDebug(
-                "Apollo message {MessageId} deleted after event end; preserving CalendarEvent '{Title}' as historical record",
-                row.DiscordMessageId, calEvent.Title);
+                "Apollo message {MessageId} delete re-observed while already holding for rebind; ignoring",
+                row.DiscordMessageId);
             return;
         }
 
-        // Pre-event deletion → real cancellation.
-        if (!string.IsNullOrEmpty(calEvent.CalendarEventId))
-        {
-            // GCal entry exists; queue its deletion. Stash the GoogleEventId in
-            // the payload because we're about to nuke the CalendarEvent row.
-            db.CalendarOutbox.Add(new CalendarOutbox
-            {
-                GuildId         = row.GuildId,
-                Operation       = CalendarOutboxOperation.Delete,
-                CalendarEventId = calEvent.Id,
-                PayloadJson     = JsonConvert.SerializeObject(new CalendarOutboxPayload
-                {
-                    Title         = calEvent.Title,
-                    StartUtc      = calEvent.StartUtc,
-                    EndUtc        = calEvent.EndUtc,
-                    Description   = calEvent.Description,
-                    Source        = calEvent.Source,
-                    GoogleEventId = calEvent.CalendarEventId,
-                }),
-                NextAttemptAt = DateTime.UtcNow,
-                CreatedAt     = DateTime.UtcNow,
-            });
-        }
-        // else: CalendarEvent existed but never made it to GCal (Create still
-        // pending in the outbox). Removing the row is sufficient; the pending
-        // Create will skip itself when it sees the row is gone.
-
-        db.CalendarEvents.Remove(calEvent);
+        calEvent.PendingCancelUntil    = now.AddSeconds(RebindGraceSeconds());
+        calEvent.DeleteOnCancelTimeout = calEvent.EndUtc > now; // pre-event → cancel; post-event → preserve
 
         _logger.LogInformation(
-            "Pre-event Apollo deletion: queued GCal delete for '{Title}' (messageId={MessageId}, EndUtc was {End:yyyy-MM-dd HH:mm} UTC)",
-            calEvent.Title, row.DiscordMessageId, calEvent.EndUtc);
+            "Apollo message {MessageId} ('{Title}') deleted; holding {Grace}s for a possible /sort re-post before {Action}",
+            row.DiscordMessageId, calEvent.Title, RebindGraceSeconds(),
+            calEvent.DeleteOnCancelTimeout ? "cancelling" : "preserving as historical record");
     }
 
     /// <summary>
@@ -348,6 +355,8 @@ public class ApolloMessageParserWorker : BackgroundService
         var existing = await db.CalendarEvents
             .FirstOrDefaultAsync(c => c.DiscordMessageId == row.DiscordMessageId);
 
+        var contentHash = ComputeContentHash(parsed);
+
         var payload = new CalendarOutboxPayload
         {
             Title         = parsed.Title,
@@ -361,6 +370,43 @@ public class ApolloMessageParserWorker : BackgroundService
 
         if (existing is null)
         {
+            // ── REBIND path ───────────────────────────────────────────────
+            // Before treating this as a brand-new event, check whether it's
+            // actually a /sort re-post of an event we just saw deleted: a
+            // CalendarEvent in the same guild, currently inside its rebind
+            // grace window, whose content hash matches exactly. If so, the
+            // "delete" and this "create" are the two halves of a sort — re-bind
+            // the existing row to the new message ID and clear the pending
+            // cancellation. Google Calendar is never touched; the event keeps
+            // its existing GCal entry, ID, and reminders.
+            //
+            // Scope is deliberately narrow: only rows in PendingCancelUntil
+            // state can match, so a genuine new event can never steal the
+            // identity of a live (non-pending) one even if the content is
+            // coincidentally identical.
+            var now = DateTime.UtcNow;
+            var rebindTarget = await db.CalendarEvents
+                .Where(c => c.GuildId == row.GuildId
+                         && c.PendingCancelUntil != null
+                         && c.PendingCancelUntil > now
+                         && c.ContentHash == contentHash)
+                .OrderBy(c => c.PendingCancelUntil)
+                .FirstOrDefaultAsync();
+
+            if (rebindTarget is not null)
+            {
+                var oldMessageId = rebindTarget.DiscordMessageId;
+                rebindTarget.DiscordMessageId      = row.DiscordMessageId;
+                rebindTarget.PendingCancelUntil     = null;
+                rebindTarget.DeleteOnCancelTimeout  = false;
+                rebindTarget.ContentHash            = contentHash; // unchanged, set for clarity
+
+                _logger.LogInformation(
+                    "Apollo /sort re-post detected: re-bound CalendarEvent '{Title}' from message {OldId} to {NewId}; no GCal change",
+                    rebindTarget.Title, oldMessageId, row.DiscordMessageId);
+                return;
+            }
+
             // CREATE path
             var calEvent = new CalendarEvent
             {
@@ -372,6 +418,7 @@ public class ApolloMessageParserWorker : BackgroundService
                 EndUtc           = parsed.EndUtc,
                 Description      = parsed.Description ?? "",
                 Source           = "Clan",
+                ContentHash      = contentHash,
                 CreatedAt        = DateTime.UtcNow,
             };
             db.CalendarEvents.Add(calEvent);
@@ -412,7 +459,8 @@ public class ApolloMessageParserWorker : BackgroundService
         existing.Title       = parsed.Title;
         existing.StartUtc    = parsed.StartUtc;
         existing.EndUtc      = parsed.EndUtc;
-        existing.Description = parsed.Description ?? "";
+        existing.Description  = parsed.Description ?? "";
+        existing.ContentHash  = contentHash;
 
         // If the original Create hasn't completed yet (no GoogleEventId), enqueue
         // another Create — the outbox worker's idempotency check on CalendarEventId
@@ -437,30 +485,96 @@ public class ApolloMessageParserWorker : BackgroundService
             row.DiscordMessageId, parsed.Title, parsed.StartUtc, parsed.EndUtc, op);
     }
 
+    // ─── Deferred-cancellation sweep ─────────────────────────────────────────
+
+    /// <summary>
+    /// Resolves CalendarEvents whose rebind grace window has elapsed without a
+    /// matching /sort re-post. This is where a deferred deletion finally acts:
+    ///   • DeleteOnCancelTimeout = true  → genuine pre-event cancellation. Queue
+    ///     the GCal delete (GoogleEventId travels in the payload, since the row
+    ///     is about to be removed) and delete the CalendarEvent row. Identical
+    ///     to the pre-fix tombstone behaviour, just deferred by the window.
+    ///   • DeleteOnCancelTimeout = false → post-event channel cleanup. Clear the
+    ///     flag and preserve the row + GCal entry as historical record.
+    /// </summary>
+    private async Task ResolveExpiredCancellationsAsync(CancellationToken ct)
+    {
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+        var now = DateTime.UtcNow;
+        var due = await db.CalendarEvents
+            .Where(c => c.PendingCancelUntil != null && c.PendingCancelUntil <= now)
+            .ToListAsync(ct);
+
+        if (due.Count == 0) return;
+
+        foreach (var calEvent in due)
+        {
+            if (ct.IsCancellationRequested) break;
+
+            if (!calEvent.DeleteOnCancelTimeout)
+            {
+                // Post-event cleanup: preserve, just stop holding.
+                calEvent.PendingCancelUntil = null;
+
+                _logger.LogInformation(
+                    "Apollo message for '{Title}' (messageId={MessageId}) removed after event end and not re-posted within grace; preserving as historical record",
+                    calEvent.Title, calEvent.DiscordMessageId);
+                continue;
+            }
+
+            // Pre-event cancellation, confirmed (no re-post arrived).
+            if (!string.IsNullOrEmpty(calEvent.CalendarEventId))
+            {
+                db.CalendarOutbox.Add(new CalendarOutbox
+                {
+                    GuildId         = calEvent.GuildId,
+                    Operation       = CalendarOutboxOperation.Delete,
+                    CalendarEventId = calEvent.Id,
+                    PayloadJson     = JsonConvert.SerializeObject(new CalendarOutboxPayload
+                    {
+                        Title         = calEvent.Title,
+                        StartUtc      = calEvent.StartUtc,
+                        EndUtc        = calEvent.EndUtc,
+                        Description   = calEvent.Description,
+                        Source        = calEvent.Source,
+                        GoogleEventId = calEvent.CalendarEventId,
+                    }),
+                    NextAttemptAt = now,
+                    CreatedAt     = now,
+                });
+            }
+            // else: never made it to GCal (Create still pending). Removing the
+            // row is enough; the pending Create skips itself when the row is gone.
+
+            db.CalendarEvents.Remove(calEvent);
+
+            _logger.LogInformation(
+                "Apollo deletion confirmed (no /sort re-post within grace): cancelling '{Title}' (messageId={MessageId}, EndUtc was {End:yyyy-MM-dd HH:mm} UTC); GCal delete queued",
+                calEvent.Title, calEvent.DiscordMessageId, calEvent.EndUtc);
+        }
+
+        await db.SaveChangesAsync(ct);
+    }
+
     // ─── Helpers ─────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// FNV-1a over the parser-relevant fields. Cheap and stable; we don't need
-    /// cryptographic strength, just "did anything actually change?"
+    /// Rebind grace window in seconds, from config, clamped to a sane floor.
+    /// Must exceed the poll interval so a delete and its re-post can't be split
+    /// across more cycles than the window covers.
+    /// </summary>
+    private int RebindGraceSeconds()
+    {
+        var configured = _config.ApolloSortRebindGraceSeconds;
+        return configured > 0 ? configured : 120;
+    }
+
+    /// <summary>
+    /// Content identity hash. Delegates to the shared <see cref="ApolloContentHash"/>
+    /// so the reconciler computes byte-identical values against live messages.
     /// </summary>
     private static string ComputeContentHash(ApolloEmbedParser.ParsedApolloEvent parsed)
-    {
-        const ulong fnvOffset = 14695981039346656037;
-        const ulong fnvPrime  = 1099511628211;
-
-        var input = string.Join("|",
-            parsed.Title,
-            parsed.StartUtc.Ticks,
-            parsed.EndUtc.Ticks,
-            parsed.Description ?? "",
-            parsed.OrganizerId?.ToString() ?? "");
-
-        ulong hash = fnvOffset;
-        foreach (var b in System.Text.Encoding.UTF8.GetBytes(input))
-        {
-            hash ^= b;
-            hash *= fnvPrime;
-        }
-        return hash.ToString("x16");
-    }
+        => ApolloContentHash.Compute(parsed);
 }

@@ -160,6 +160,17 @@ public class BotDbContext : DbContext
 
             // Look up all events for a guild by source (Clan vs CompDiv)
             e.HasIndex(c => new { c.GuildId, c.Source });
+
+            // Backs the parser worker's expiry sweep:
+            // "events whose rebind grace window has elapsed". Almost always
+            // empty, so this stays tiny and cheap to scan.
+            e.HasIndex(c => c.PendingCancelUntil)
+                .HasDatabaseName("IX_CalendarEvents_PendingCancelUntil");
+
+            // Backs the /sort rebind lookup (match a re-post to a pending-cancel
+            // event by content) and the reconciler's downtime rebind.
+            e.HasIndex(c => new { c.GuildId, c.ContentHash })
+                .HasDatabaseName("IX_CalendarEvents_GuildId_ContentHash");
         });
 
         modelBuilder.Entity<CalendarOutbox>(e =>

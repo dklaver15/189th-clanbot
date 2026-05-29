@@ -176,6 +176,24 @@ public class BotConfig
     public bool UseNewApolloPipeline { get; set; } = false;
 
     /// <summary>
+    /// Grace window, in seconds, that the Apollo pipeline waits after seeing an
+    /// event's message deleted before acting on it — to absorb Apollo's /sort,
+    /// which deletes every event message and immediately re-posts it under a
+    /// new ID (Discord can't reorder messages, so sorting = delete + repost).
+    ///
+    /// During this window, a re-post with a matching content hash re-binds the
+    /// existing CalendarEvent to the new message instead of cancel-then-recreate,
+    /// so Google Calendar is never touched by a sort. If no matching re-post
+    /// arrives within the window, the deletion is treated as genuine.
+    ///
+    /// Must comfortably exceed the parser worker's poll interval (15s) so a
+    /// delete and its re-post are never split across more cycles than the
+    /// window covers. Default 120s = 8 poll cycles of headroom. Values &lt;= 0
+    /// fall back to the default.
+    /// </summary>
+    public int ApolloSortRebindGraceSeconds { get; set; } = 120;
+
+    /// <summary>
     /// The minimum rank required to use the /comp-event command.
     /// Must exactly match one of the rank names in RankRoles (case-insensitive).
     /// </summary>

@@ -194,6 +194,7 @@ public class ApolloReconciliationService : BackgroundService
 
         var totalChecked       = 0;
         var totalRemoved       = 0;
+        var totalRebound       = 0;
         var totalChannelMissing = 0;
         var totalFetchErrors   = 0;
 
@@ -222,6 +223,14 @@ public class ApolloReconciliationService : BackgroundService
                 totalChannelMissing += byGuild.Count();
                 continue;
             }
+
+            // Build a content-hash → live-message-id map of what's currently in
+            // the channel. Lets us tell a genuinely-deleted event apart from one
+            // that was merely re-posted under a new ID (a /sort that happened
+            // while the bot was down, so we never saw the live delete+repost).
+            // Best-effort: on any failure we get an empty map and fall back to
+            // the pre-existing delete-orphan behaviour.
+            var liveByHash = await BuildLiveContentHashMapAsync(channel, ct);
 
             foreach (var row in byGuild)
             {
@@ -261,8 +270,29 @@ public class ApolloReconciliationService : BackgroundService
 
                 if (messageGone)
                 {
-                    await DeleteOrphanAsync(db, row);
-                    totalRemoved++;
+                    // Before deleting, check whether this event is simply alive
+                    // under a new message ID — i.e. it was re-posted (sorted)
+                    // while we were down. Match on the stored content hash;
+                    // empty hashes (pre-migration rows) never match and fall
+                    // through to the orphan delete, preserving old behaviour.
+                    if (!string.IsNullOrEmpty(row.ContentHash)
+                        && liveByHash.TryGetValue(row.ContentHash, out var liveId)
+                        && liveId != row.DiscordMessageId)
+                    {
+                        var oldId = row.DiscordMessageId;
+                        row.DiscordMessageId = liveId;
+                        await db.SaveChangesAsync(ct);
+                        totalRebound++;
+
+                        _logger.LogInformation(
+                            "Apollo reconciliation: re-bound CalendarEvent Id={Id} '{Title}' from missing message {OldId} to live re-post {NewId} (likely /sort during downtime)",
+                            row.Id, row.Title, oldId, liveId);
+                    }
+                    else
+                    {
+                        await DeleteOrphanAsync(db, row);
+                        totalRemoved++;
+                    }
                 }
 
                 // Brief spacing to avoid bursting the channel's fetch rate
@@ -273,8 +303,8 @@ public class ApolloReconciliationService : BackgroundService
         }
 
         _logger.LogInformation(
-            "Apollo reconciliation complete: {Checked} checked, {Removed} orphan(s) removed, {ChannelMissing} skipped (channel missing), {FetchErrors} skipped (fetch errors)",
-            totalChecked, totalRemoved, totalChannelMissing, totalFetchErrors);
+            "Apollo reconciliation complete: {Checked} checked, {Rebound} re-bound (re-posted), {Removed} orphan(s) removed, {ChannelMissing} skipped (channel missing), {FetchErrors} skipped (fetch errors)",
+            totalChecked, totalRebound, totalRemoved, totalChannelMissing, totalFetchErrors);
     }
 
     /// <summary>
@@ -306,6 +336,55 @@ public class ApolloReconciliationService : BackgroundService
         _logger.LogInformation(
             "Apollo reconciliation: removed orphan CalendarEvent Id={Id} '{Title}' (messageId={MessageId}, start={Start:yyyy-MM-dd HH:mm} UTC)",
             row.Id, row.Title, row.DiscordMessageId, row.StartUtc);
+    }
+
+    /// <summary>
+    /// Scans the current messages in the events channel and maps each parseable
+    /// Apollo event's content hash to its live message ID. Used to detect an
+    /// event that was re-posted (sorted) under a new ID while the bot was down,
+    /// so reconciliation re-binds it instead of deleting it as an orphan.
+    ///
+    /// Best-effort: any failure (rate limit, permissions, parse) yields an empty
+    /// or partial map, and the caller falls back to the orphan-delete path.
+    /// Bounded fetch (200 messages) comfortably covers Apollo's per-channel event
+    /// cap (10 free / 50 premium) plus headroom.
+    /// </summary>
+    private async Task<Dictionary<string, ulong>> BuildLiveContentHashMapAsync(
+        SocketTextChannel channel, CancellationToken ct)
+    {
+        var map = new Dictionary<string, ulong>();
+
+        try
+        {
+            var messages = await channel.GetMessagesAsync(200).FlattenAsync();
+
+            foreach (var message in messages)
+            {
+                if (ct.IsCancellationRequested) break;
+
+                if (!message.Author.IsBot) continue;
+                if (!message.Author.Username.Contains(
+                        _config.ApolloBotName, StringComparison.OrdinalIgnoreCase)) continue;
+
+                var embed = message.Embeds.FirstOrDefault();
+                if (embed is null) continue;
+
+                var parsed = ApolloEmbedParser.Parse(embed);
+                if (parsed is null) continue;
+
+                // First writer wins; in-channel content duplicates are
+                // vanishingly unlikely and don't affect correctness — we just
+                // re-bind to whichever live copy we saw first.
+                map.TryAdd(ApolloContentHash.Compute(parsed), message.Id);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Apollo reconciliation: failed to scan live channel for rebind matching; proceeding with orphan deletes only");
+        }
+
+        return map;
     }
 
     /// <summary>

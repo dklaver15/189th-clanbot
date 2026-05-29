@@ -276,6 +276,49 @@ public class CalendarEvent
     /// service stamps its own.
     /// </summary>
     public DateTime? LastMeetingSnapshotAttemptUtc { get; set; }
+
+    /// <summary>
+    /// FNV-1a hash of the parsed event fields (Title|Start|End|Description|
+    /// OrganizerId), computed by ApolloContentHash.Compute. Stored so we can
+    /// recognize when a "new" Apollo message is actually the same logical event
+    /// re-posted under a fresh message ID — which is exactly what Apollo's
+    /// /sort does (it deletes every event message and re-posts it in order,
+    /// since Discord can't reorder existing messages).
+    ///
+    /// Used by ApolloMessageParserWorker's rebind path and by
+    /// ApolloReconciliationService to match an orphaned row against a live
+    /// re-posted message. Empty string for rows created before this column
+    /// existed; those simply won't match a rebind until their next edit
+    /// re-stamps the hash, which is a no-op regression (they fall through to
+    /// the pre-existing behaviour).
+    /// </summary>
+    public string ContentHash { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Non-null while the source Apollo message has been observed deleted but
+    /// we're holding off on acting, in case the deletion is the first half of
+    /// a /sort (delete-then-repost). Set to "now + grace window" by the parser
+    /// worker's tombstone path. If a re-post with a matching ContentHash
+    /// arrives before this deadline, the row is re-bound to the new message and
+    /// this is cleared. If the deadline passes with no re-post, the expiry
+    /// sweep resolves it per DeleteOnCancelTimeout.
+    ///
+    /// Null in normal operation (no pending deletion).
+    /// </summary>
+    public DateTime? PendingCancelUntil { get; set; }
+
+    /// <summary>
+    /// Captured at tombstone time to record what should happen if
+    /// PendingCancelUntil elapses with no matching re-post:
+    ///   • true  → the event hadn't ended yet (EndUtc &gt; now at tombstone
+    ///             time): a real cancellation. The sweep queues the GCal delete
+    ///             and removes the row.
+    ///   • false → the event had already ended: routine channel cleanup. The
+    ///             sweep just clears PendingCancelUntil and preserves the row
+    ///             and its GCal entry as historical record.
+    /// Meaningless when PendingCancelUntil is null.
+    /// </summary>
+    public bool DeleteOnCancelTimeout { get; set; }
 }
 
 /// <summary>
