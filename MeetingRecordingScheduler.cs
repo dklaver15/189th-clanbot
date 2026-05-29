@@ -349,9 +349,20 @@ public class MeetingRecordingScheduler : BackgroundService
             "kept; older recordings are deleted automatically. If you'd rather not be recorded, please leave " +
             "the voice channel — staying in the channel indicates your consent to being recorded.";
 
-        await channel.SendMessageAsync(notice, options: new RequestOptions { CancelToken = ct });
-        _logger.LogInformation("Posted recording notice for '{Title}' to channel {ChannelId}.",
-            rec.MeetingTitle, channelId);
+        try
+        {
+            await channel.SendMessageAsync(notice, options: new RequestOptions { CancelToken = ct });
+            _logger.LogInformation("Posted recording notice for '{Title}' to channel {ChannelId}.",
+                rec.MeetingTitle, channelId);
+        }
+        catch (Exception ex)
+        {
+            // Best-effort: a failed notice must never block recording. Degrade to
+            // "recorded but unannounced" rather than failing the whole pipeline.
+            _logger.LogWarning(ex,
+                "Failed to post recording notice for '{Title}' to channel {ChannelId} — recording will proceed unannounced.",
+                rec.MeetingTitle, channelId);
+        }
     }
 
     private void Transition(MeetingRecording rec, MeetingRecordingState to, DateTime now)

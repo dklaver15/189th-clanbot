@@ -149,6 +149,23 @@ async function startRecording({ meetingRecordingId, guildId, voiceChannelId, mee
     selfMute: true,  // the recorder never speaks
   });
 
+  // ── Handshake instrumentation (temporary) ─────────────────────────────────
+  // Logs every voice-connection state transition plus the low-level networking
+  // debug stream, so we can see exactly where the handshake stalls:
+  //   stuck at Signalling  -> gateway/adapter not delivering the server update
+  //   stuck at Connecting  -> UDP IP discovery / voice websocket / encryption
+  // Remove this block once the connection is confirmed healthy.
+  connection.on('stateChange', (oldState, newState) => {
+    log(`[voice] ${oldState.status} -> ${newState.status}` +
+        (newState.reason !== undefined ? ` (reason=${newState.reason})` : ''));
+    const newNet = Reflect.get(newState, 'networking');
+    if (newNet && newNet !== Reflect.get(oldState, 'networking')) {
+      newNet.on('debug', (m) => log(`[voice-net] ${m}`));
+      newNet.on('error', (e) => log(`[voice-net] error: ${e?.message ?? e}`));
+    }
+  });
+  connection.on('error', (err) => log(`[voice] connection error: ${err?.message ?? err}`));
+
   try {
     await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
   } catch (e) {
