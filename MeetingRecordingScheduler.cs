@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
 using ClanGuardBot.Data;
 using ClanGuardBot.Models;
@@ -52,6 +53,12 @@ public class MeetingRecordingScheduler : BackgroundService
     private readonly BotConfig _config;
 
     private Regex? _titleRegex;
+
+    // Remembers the recording-notice message posted per recording, so it can be
+    // deleted when recording stops (keeps the channel clean). In-memory by design:
+    // a bot restart mid-meeting simply leaves that one notice in place — a
+    // cosmetic edge case, not worth a schema migration.
+    private readonly ConcurrentDictionary<int, (ulong ChannelId, ulong MessageId)> _noticeMessages = new();
 
     public MeetingRecordingScheduler(
         IServiceProvider services,
@@ -244,6 +251,7 @@ public class MeetingRecordingScheduler : BackgroundService
                 _logger.LogInformation(
                     "Meeting '{Title}' (msg {Msg}) was cancelled before recording — marking Cancelled.",
                     rec.MeetingTitle, rec.DiscordMessageId);
+                await DeleteAnnouncementAsync(rec, ct);
                 Transition(rec, MeetingRecordingState.Cancelled, now);
             }
         }
@@ -269,6 +277,7 @@ public class MeetingRecordingScheduler : BackgroundService
                 rec.ErrorMessage = "Recording window elapsed without a successful start.";
                 _logger.LogWarning("Recording for '{Title}' (#{Id}) missed its window — Failed.",
                     rec.MeetingTitle, rec.Id);
+                await DeleteAnnouncementAsync(rec, ct);
                 Transition(rec, MeetingRecordingState.Failed, now);
                 continue;
             }
@@ -311,6 +320,7 @@ public class MeetingRecordingScheduler : BackgroundService
                     var dir = await _recorder.StopRecordingAsync(rec.Id, ct);
                     rec.RecordingStoppedUtc = now;
                     rec.AudioDirPath = dir;
+                    await DeleteAnnouncementAsync(rec, ct);
                     // With the placeholder recorder dir is null, so the row simply
                     // waits in Transcribing until the STT worker exists — expected.
                     Transition(rec, MeetingRecordingState.Transcribing, now);
@@ -351,7 +361,8 @@ public class MeetingRecordingScheduler : BackgroundService
 
         try
         {
-            await channel.SendMessageAsync(notice, options: new RequestOptions { CancelToken = ct });
+            var sent = await channel.SendMessageAsync(notice, options: new RequestOptions { CancelToken = ct });
+            _noticeMessages[rec.Id] = (channelId, sent.Id);
             _logger.LogInformation("Posted recording notice for '{Title}' to channel {ChannelId}.",
                 rec.MeetingTitle, channelId);
         }
@@ -362,6 +373,27 @@ public class MeetingRecordingScheduler : BackgroundService
             _logger.LogWarning(ex,
                 "Failed to post recording notice for '{Title}' to channel {ChannelId} — recording will proceed unannounced.",
                 rec.MeetingTitle, channelId);
+        }
+    }
+
+    // Best-effort: remove the recording-notice message once recording ends, to
+    // keep the channel clean. Never throws — a failed delete just leaves the notice.
+    private async Task DeleteAnnouncementAsync(MeetingRecording rec, CancellationToken ct)
+    {
+        if (!_noticeMessages.TryRemove(rec.Id, out var notice)) return;
+        try
+        {
+            if (_client.GetChannel(notice.ChannelId) is IMessageChannel channel)
+            {
+                await channel.DeleteMessageAsync(notice.MessageId, new RequestOptions { CancelToken = ct });
+                _logger.LogDebug("Deleted recording notice for '{Title}' (#{Id}).", rec.MeetingTitle, rec.Id);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Could not delete recording notice for '{Title}' (#{Id}) — leaving it in place.",
+                rec.MeetingTitle, rec.Id);
         }
     }
 
