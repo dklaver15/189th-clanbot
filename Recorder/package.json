@@ -10,7 +10,7 @@
     "deps": "node -e \"import('@discordjs/voice').then(v=>console.log(v.generateDependencyReport()))\""
   },
   "dependencies": {
-    "@discordjs/voice": "^0.18.0",
+    "@discordjs/voice": "^0.19.2",
     "@noble/ciphers": "^1.0.0",
     "@snazzah/davey": "^0.1.6",
     "discord.js": "^14.16.3",
