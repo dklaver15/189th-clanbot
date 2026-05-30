@@ -219,7 +219,8 @@ public class HealthCommandHandler
                                 state?.LastSqliteBackupError))
             .WithTimestamp(now)
             .WithFooter($"v{_assemblyVersion} · {_runtimeVersion} · " +
-                        $"{BuildInfo.SourceFileCount} files · {BuildInfo.SourceLineCount:N0} LOC");
+                        $"{BuildInfo.SourceFileCount} files · {BuildInfo.SourceLineCount:N0} LOC" +
+                        (BuildInfo.CommitCount > 0 ? $" · {BuildInfo.CommitCount:N0} commits" : ""));
 
         // Process
         embed.AddField("⏱️ Uptime",
@@ -247,6 +248,10 @@ public class HealthCommandHandler
         sb.AppendLine($"Auto-promotion: {FormatLastRun(state?.LastAutoPromotionCompletedUtc, now)}");
         sb.AppendLine($"Webhook audit: {FormatLastRun(state?.LastWebhookAuditScanCompletedUtc, now)}");
         sb.AppendLine($"Roster export: {FormatLastRun(state?.LastRosterExportCompletedUtc, now)}");
+        // Weekly cadence, so an 8-day staleness window (one week + a day of
+        // grace) instead of the daily default — otherwise a perfectly healthy
+        // briefing would show ⚠️ for most of the week.
+        sb.AppendLine($"Weekly briefing: {FormatLastRun(state?.LastBriefingCompletedUtc, now, TimeSpan.FromDays(8))}");
         var backupLine = $"SQLite backup: {FormatLastRun(state?.LastSqliteBackupCompletedUtc, now)}";
         if (state?.LastSqliteBackupSizeBytes is long bytes && bytes > 0)
             backupLine += $" ({FormatBytes(bytes)})";
@@ -344,11 +349,11 @@ public class HealthCommandHandler
         return path.StartsWith(prefix, StringComparison.Ordinal) ? path[prefix.Length..] : path;
     }
 
-    private static string FormatLastRun(DateTime? lastRunUtc, DateTime now)
+    private static string FormatLastRun(DateTime? lastRunUtc, DateTime now, TimeSpan? staleAfter = null)
     {
         if (!lastRunUtc.HasValue) return "—  *never*";
         var ago = now - lastRunUtc.Value;
-        var icon = ago < TimeSpan.FromHours(36) ? "✅" : "⚠️";
+        var icon = ago < (staleAfter ?? TimeSpan.FromHours(36)) ? "✅" : "⚠️";
         return $"{icon} {FormatDuration(ago)} ago";
     }
 
