@@ -75,8 +75,14 @@ public sealed class ClaudeAiService(
             logger.LogError(
                 "Claude API error {Status}: {Body}",
                 response.StatusCode, error);
+            // Pass the status code through (not just in the message) so callers
+            // can distinguish transient failures (429/5xx) worth retrying from
+            // non-transient ones (401 invalid-api-key, other 4xx) that should
+            // fail fast. WeeklyOfficerBriefingService.IsTransient reads this.
             throw new HttpRequestException(
-                $"Claude API returned {(int)response.StatusCode} {response.StatusCode}: {error}");
+                $"Claude API returned {(int)response.StatusCode} {response.StatusCode}: {error}",
+                inner: null,
+                statusCode: response.StatusCode);
         }
 
         var payload = await response.Content.ReadFromJsonAsync<MessagesResponse>(JsonOptions, ct)

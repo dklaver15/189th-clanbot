@@ -504,6 +504,20 @@ public class BotState
     public DateTime? LastAutoPromotionCompletedUtc { get; set; }
 
     /// <summary>
+    /// Timestamp of the last successfully-completed weekly officer briefing
+    /// (scheduled run or startup catch-up). Null on a fresh DB or a service
+    /// that has never posted.
+    ///
+    /// "Successfully completed" means the generate + post (or dry-run log)
+    /// finished without throwing. A run that throws — a transient API error,
+    /// or an invalid API key (401) — leaves this unchanged, so the next
+    /// startup's catch-up recovers the missed week. Manual /briefing-now runs
+    /// deliberately do NOT stamp this: only the weekly scheduled slot counts,
+    /// so a mid-week test can't mask a genuinely-skipped Sunday.
+    /// </summary>
+    public DateTime? LastBriefingCompletedUtc { get; set; }
+
+    /// <summary>
     /// Timestamp of the last successfully-completed WebhookAuditService
     /// scan. Null if no scan has ever completed (fresh DB or feature
     /// freshly deployed). Used by the service to distinguish first-run
