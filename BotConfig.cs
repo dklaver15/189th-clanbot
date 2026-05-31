@@ -607,10 +607,11 @@ public class BotConfig
     /// Operating mode for the account-age gate on UserJoined. One of:
     ///   "Off"        — feature disabled.
     ///   "AlertOnly"  — post a security alert for any joiner whose account
-    ///                  is younger than AccountAgeGateMinDays, but DO NOT
-    ///                  kick. Default — non-destructive, observation-friendly.
-    ///   "Kick"       — DM the joiner, kick them, post the alert with the
-    ///                  kick outcome.
+    ///                  is younger than AccountAgeGateMinDays, but take no
+    ///                  action. Default — non-destructive, observation-friendly.
+    ///   "Ban"        — DM the joiner, ban them, post the alert with the
+    ///                  ban outcome. "Kick" is accepted as a legacy alias
+    ///                  for this mode (the action is a ban either way).
     /// Comparison is case-insensitive; an unrecognized value falls back to
     /// AlertOnly with a warning log so a typo never silently enforces.
     /// </summary>

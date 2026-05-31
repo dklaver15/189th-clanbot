@@ -16,7 +16,7 @@ namespace ClanGuardBot.Handlers;
 /// On every UserJoined gateway event, computes the new member's Discord
 /// account age (now − user.CreatedAt) and compares it against the configured
 /// minimum. Accounts younger than the threshold are surfaced to leadership
-/// and, depending on mode, kicked immediately.
+/// and, depending on mode, banned immediately.
 ///
 /// ── Why this exists ──
 /// Brand-new Discord accounts are the dominant signal for trolls, raid
@@ -32,8 +32,12 @@ namespace ClanGuardBot.Handlers;
 ///                  account under the threshold but DO NOT kick. Intended
 ///                  for the run-in period when leadership wants to watch
 ///                  what the rule WOULD catch before enforcing it.
-///   "Kick"       — Best-effort DM the joiner with a templated message,
-///                  then kick, then post the alert embed with the outcome.
+///   "Kick"/"Ban"  — Best-effort DM the joiner with a templated message,
+///                  then BAN, then post the alert embed with the outcome.
+///                  Both strings are accepted as the enforcement trigger:
+///                  "Ban" is the preferred name; "Kick" is retained as a
+///                  back-compat alias so existing deployments keep enforcing
+///                  without a config edit. (The action is a ban either way.)
 ///
 /// ── Why account age is the signal we trust ──
 /// Discord exposes the account creation timestamp on every user object
@@ -58,7 +62,7 @@ namespace ClanGuardBot.Handlers;
 /// All work is fire-and-forget from the gateway callback (same pattern as
 /// MemberLifecycleHandler). Internal exceptions are caught and logged;
 /// a Discord API hiccup must never bring down the gateway listener.
-/// HttpException 404 on kick is treated as "user already left" — the
+/// HttpException 404 on ban is treated as "user already left" — the
 /// outcome we wanted, not a failure.
 ///
 /// ── Out of scope (v1) ──
@@ -77,10 +81,11 @@ public sealed class AccountAgeGateHandler
 {
     // Mode string constants — single source of truth for the config values.
     // Comparisons against the configured mode are case-insensitive so a
-    // misconfigured "kick" / "ALERTONLY" still works.
+    // misconfigured "ban" / "ALERTONLY" still works.
     public const string ModeOff       = "Off";
     public const string ModeAlertOnly = "AlertOnly";
-    public const string ModeKick      = "Kick";
+    public const string ModeKick      = "Kick"; // Back-compat alias for ModeBan; still triggers enforcement.
+    public const string ModeBan       = "Ban";
 
     private readonly IServiceProvider _services;
     private readonly ILogger<AccountAgeGateHandler> _logger;
@@ -122,13 +127,16 @@ public sealed class AccountAgeGateHandler
 
             // Validate mode — fall back to AlertOnly and warn rather than
             // crash on a typo'd config. Erring toward observability over
-            // silent enforcement.
-            var enforce = string.Equals(mode, ModeKick, StringComparison.OrdinalIgnoreCase);
+            // silent enforcement. Both "Ban" and the legacy "Kick" alias
+            // trigger enforcement (the action is a ban in both cases).
+            var enforce =
+                string.Equals(mode, ModeBan, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(mode, ModeKick, StringComparison.OrdinalIgnoreCase);
             if (!enforce && !string.Equals(mode, ModeAlertOnly, StringComparison.OrdinalIgnoreCase))
             {
                 _logger.LogWarning(
                     "Unknown AccountAgeGateMode '{Mode}' — falling back to AlertOnly. " +
-                    "Valid values: Off, AlertOnly, Kick.",
+                    "Valid values: Off, AlertOnly, Ban (or legacy Kick).",
                     mode);
             }
 
@@ -158,19 +166,19 @@ public sealed class AccountAgeGateHandler
                 member.Username, member.Id, member.Guild.Name,
                 accountAge.TotalDays, minDays, mode);
 
-            // ── Kick path: DM + kick first, then post the embed with the result ──
-            // We post the alert embed AFTER attempting the kick so the embed
-            // can faithfully report whether the kick actually succeeded.
-            // AlertOnly mode skips DM + kick entirely.
+            // ── Ban path: DM + ban first, then post the embed with the result ──
+            // We post the alert embed AFTER attempting the ban so the embed
+            // can faithfully report whether the ban actually succeeded.
+            // AlertOnly mode skips DM + ban entirely.
             var outcome = AccountAgeGateOutcome.Alerted;
-            string? kickFailureReason = null;
+            string? banFailureReason = null;
 
             if (enforce)
             {
-                outcome = await TryKickAsync(member, accountAge, minDays);
-                if (outcome == AccountAgeGateOutcome.KickFailed)
+                outcome = await TryBanAsync(member, accountAge, minDays);
+                if (outcome == AccountAgeGateOutcome.BanFailed)
                 {
-                    kickFailureReason = "See bot logs for details.";
+                    banFailureReason = "See bot logs for details.";
                 }
             }
 
@@ -179,10 +187,10 @@ public sealed class AccountAgeGateHandler
             // (alerts channel deleted, permissions revoked) leaves us with a
             // queryable record. Wrapped in its own try/catch — a DB hiccup
             // must not stop the alert from posting.
-            await WriteAuditAsync(member, accountAge, minDays, outcome, kickFailureReason);
+            await WriteAuditAsync(member, accountAge, minDays, outcome, banFailureReason);
 
             // ── Post alert embed ──────────────────────────────────────────
-            await PostAlertAsync(member, accountAge, minDays, mode, outcome, kickFailureReason);
+            await PostAlertAsync(member, accountAge, minDays, mode, outcome, banFailureReason);
         }
         catch (Exception ex)
         {
@@ -195,21 +203,20 @@ public sealed class AccountAgeGateHandler
     }
 
     /// <summary>
-    /// Best-effort DM the joiner, then kick. Returns the outcome for embed
+    /// Best-effort DM the joiner, then ban. Returns the outcome for embed
     /// rendering. Does not throw — Discord errors are logged and surfaced
-    /// as KickFailed.
+    /// as BanFailed.
     /// </summary>
-    private async Task<AccountAgeGateOutcome> TryKickAsync(
+    private async Task<AccountAgeGateOutcome> TryBanAsync(
         SocketGuildUser member,
         TimeSpan accountAge,
         int minDays)
     {
         // ── Discord role-hierarchy guard ──────────────────────────────────
-        // Same precondition KickAwolsCommandHandler enforces: the bot must
-        // outrank the target or KickAsync throws. On UserJoined this should
-        // never trip (new joiners only have @everyone) but check anyway for
-        // the edge case where a "Sticky Roles"-style bot re-applies a role
-        // before our handler runs.
+        // The bot must outrank the target or BanAsync throws. On UserJoined
+        // this should never trip (new joiners only have @everyone) but check
+        // anyway for the edge case where a "Sticky Roles"-style bot re-applies
+        // a role before our handler runs.
         var botMember = member.Guild.CurrentUser;
         var botTopPos = botMember.Roles.Max(r => r.Position);
         var memberTopPos = member.Roles.Any() ? member.Roles.Max(r => r.Position) : 0;
@@ -217,24 +224,24 @@ public sealed class AccountAgeGateHandler
         if (memberTopPos >= botTopPos)
         {
             _logger.LogWarning(
-                "Account-age gate cannot kick {Username} ({UserId}) — member's top role " +
+                "Account-age gate cannot ban {Username} ({UserId}) — member's top role " +
                 "is at or above the bot's. Falling back to alert-only for this join.",
                 member.Username, member.Id);
-            return AccountAgeGateOutcome.KickSkippedHierarchy;
+            return AccountAgeGateOutcome.BanSkippedHierarchy;
         }
 
-        // ── Best-effort DM before the kick ────────────────────────────────
-        // Mirrors KickAwolsCommandHandler: try to give the user context,
-        // but don't let a closed DM block the kick itself.
+        // ── Best-effort DM before the ban ─────────────────────────────────
+        // Try to give the user context, but don't let a closed DM block the
+        // ban itself.
         try
         {
             var dm = await member.CreateDMChannelAsync();
             await dm.SendMessageAsync(
                 $"Hey — your Discord account is too new to join the **189th** right now " +
-                $"(we require accounts at least **{minDays}** days old as an anti-raid measure).\n\n" +
-                "This is automated and not personal. Once your account is older than the threshold, " +
-                "you're welcome to rejoin. If you believe this was a mistake, reach out to a member " +
-                "of leadership.");
+                $"(we require accounts at least **{minDays}** days old as an anti-raid measure), " +
+                "so you've been removed and banned from the server.\n\n" +
+                "This is automated and not personal. If you believe this was a mistake, reach out " +
+                "to a member of leadership and they can lift the ban.");
         }
         catch (OperationCanceledException)
         {
@@ -242,22 +249,30 @@ public sealed class AccountAgeGateHandler
         }
         catch
         {
-            // DMs disabled / blocked the bot — fine, continue with the kick.
+            // DMs disabled / blocked the bot — fine, continue with the ban.
         }
 
-        // ── Actually kick ─────────────────────────────────────────────────
+        // ── Actually ban ──────────────────────────────────────────────────
         var reason = $"Account-age gate: account {accountAge.TotalDays:F1} day(s) old, " +
                      $"threshold {minDays} day(s).";
         try
         {
-            await member.KickAsync(
+            // pruneDays = 0 — a join-time ban means the account has had no
+            // chance to post anything to delete. Bump it if you later want to
+            // scrub messages from accounts that slip through a gap.
+            // Using guild.AddBanAsync(IUser, ...) rather than member.BanAsync:
+            // it has a single unambiguous signature and bans by user object,
+            // so it still applies even if the member left in the interim.
+            await member.Guild.AddBanAsync(
+                member,
+                pruneDays: 0,
                 reason: reason,
                 options: new RequestOptions { AuditLogReason = reason });
 
             _logger.LogInformation(
-                "Kicked {Username} ({UserId}) by account-age gate: {Reason}",
+                "Banned {Username} ({UserId}) by account-age gate: {Reason}",
                 member.Username, member.Id, reason);
-            return AccountAgeGateOutcome.Kicked;
+            return AccountAgeGateOutcome.Banned;
         }
         catch (OperationCanceledException)
         {
@@ -265,26 +280,27 @@ public sealed class AccountAgeGateHandler
         }
         catch (HttpException ex) when (ex.HttpCode == System.Net.HttpStatusCode.NotFound)
         {
-            // 404 means the member left between UserJoined and our KickAsync —
-            // the outcome we wanted. Same classification as KickAwolsCommandHandler.
+            // A ban applies even to a user who already left, so a 404 here is
+            // unusual. Treat it the same as "user already gone" — the outcome
+            // we wanted — rather than a failure.
             _logger.LogInformation(
-                "Account-age gate: {Username} ({UserId}) already left before we could kick them.",
+                "Account-age gate: {Username} ({UserId}) already left before we could ban them.",
                 member.Username, member.Id);
             return AccountAgeGateOutcome.UserAlreadyLeft;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex,
-                "Account-age gate failed to kick {Username} ({UserId})",
+                "Account-age gate failed to ban {Username} ({UserId})",
                 member.Username, member.Id);
-            return AccountAgeGateOutcome.KickFailed;
+            return AccountAgeGateOutcome.BanFailed;
         }
     }
 
     /// <summary>
     /// Writes one SecurityAuditRecord row for the join + action taken. Wrapped
     /// in its own try/catch — a DB failure here is logged but never
-    /// propagated, so the alert post and the kick itself remain
+    /// propagated, so the alert post and the ban itself remain
     /// independent of database availability.
     /// </summary>
     private async Task WriteAuditAsync(
@@ -338,7 +354,7 @@ public sealed class AccountAgeGateHandler
         int minDays,
         string mode,
         AccountAgeGateOutcome outcome,
-        string? kickFailureReason)
+        string? banFailureReason)
     {
         var channel = ResolveSecurityAlertsChannel(member.Guild);
         if (channel is null)
@@ -352,11 +368,11 @@ public sealed class AccountAgeGateHandler
 
         var (color, title, statusLine) = outcome switch
         {
-            AccountAgeGateOutcome.Kicked                 => (Color.Red,        "🛡️ Account-Age Gate — Kicked",          "Member was kicked automatically."),
+            AccountAgeGateOutcome.Banned                 => (Color.Red,        "🛡️ Account-Age Gate — Banned",          "Member was banned automatically."),
             AccountAgeGateOutcome.Alerted                => (Color.Orange,     "🛡️ Account-Age Gate — Alert",           "Mode is **AlertOnly** — no action taken."),
-            AccountAgeGateOutcome.UserAlreadyLeft        => (Color.LightGrey,  "🛡️ Account-Age Gate — User Left",       "Member left before kick could be issued."),
-            AccountAgeGateOutcome.KickSkippedHierarchy   => (Color.Gold,       "🛡️ Account-Age Gate — Cannot Kick",     "Bot lacks role hierarchy to kick this member. Manual review required."),
-            AccountAgeGateOutcome.KickFailed             => (Color.DarkRed,    "🛡️ Account-Age Gate — Kick FAILED",     "Kick call failed. " + (kickFailureReason ?? "")),
+            AccountAgeGateOutcome.UserAlreadyLeft        => (Color.LightGrey,  "🛡️ Account-Age Gate — User Left",       "Member left before the ban could be issued."),
+            AccountAgeGateOutcome.BanSkippedHierarchy    => (Color.Gold,       "🛡️ Account-Age Gate — Cannot Ban",      "Bot lacks role hierarchy to ban this member. Manual review required."),
+            AccountAgeGateOutcome.BanFailed              => (Color.DarkRed,    "🛡️ Account-Age Gate — Ban FAILED",      "Ban call failed. " + (banFailureReason ?? "")),
             _                                            => (Color.DarkerGrey, "🛡️ Account-Age Gate",                    "Unknown outcome."),
         };
 
@@ -441,15 +457,15 @@ internal enum AccountAgeGateOutcome
     /// <summary>AlertOnly mode — no enforcement action taken.</summary>
     Alerted,
 
-    /// <summary>Kick mode — member was successfully removed.</summary>
-    Kicked,
+    /// <summary>Enforcement mode — member was successfully banned.</summary>
+    Banned,
 
-    /// <summary>Member left the guild before we could kick them.</summary>
+    /// <summary>Member left the guild before we could ban them.</summary>
     UserAlreadyLeft,
 
-    /// <summary>Bot lacks role hierarchy to kick this member.</summary>
-    KickSkippedHierarchy,
+    /// <summary>Bot lacks role hierarchy to ban this member.</summary>
+    BanSkippedHierarchy,
 
-    /// <summary>Kick call failed for an unexpected reason. See logs.</summary>
-    KickFailed,
+    /// <summary>Ban call failed for an unexpected reason. See logs.</summary>
+    BanFailed,
 }
