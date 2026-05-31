@@ -11,3 +11,8 @@ Recorder/node_modules/
 Recorder/.env
 Transcriber/.env
 Transcriber/__pycache__/
+# Local SQLite database (member data) — never commit
+clanguard.db
+*.db
+*.db-shm
+*.db-wal

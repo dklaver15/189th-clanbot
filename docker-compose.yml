@@ -15,6 +15,14 @@ services:
       # Cloudflare R2 credentials for the SQLite backup uploader.
       - BotConfig__BackupR2__AccessKeyId=${CLANGUARD_R2_ACCESS_KEY_ID}
       - BotConfig__BackupR2__SecretAccessKey=${CLANGUARD_R2_SECRET_ACCESS_KEY}
+      # -- Google resource IDs + R2 endpoint (moved out of appsettings.json) --
+      - BotConfig__GoogleSpreadsheetId=${CLANGUARD_GOOGLE_SPREADSHEET_ID}
+      - BotConfig__RosterSpreadsheetId=${CLANGUARD_ROSTER_SPREADSHEET_ID}
+      - BotConfig__RecruitSpreadsheetId=${CLANGUARD_RECRUIT_SPREADSHEET_ID}
+      - BotConfig__GoogleCalendarId=${CLANGUARD_GOOGLE_CALENDAR_ID}
+      - BotConfig__BackupDriveFolderId=${CLANGUARD_BACKUP_DRIVE_FOLDER_ID}
+      - BotConfig__BackupR2__AccountEndpoint=${CLANGUARD_R2_ACCOUNT_ENDPOINT}
+      - BotConfig__BackupR2__Bucket=${CLANGUARD_R2_BUCKET}
       # -- Meeting recording (recorder sidecar) --
       - BotConfig__MeetingRecorderBaseUrl=http://recorder:8080
       - BotConfig__MeetingRecorderSharedSecret=${RECORDER_SHARED_SECRET}
