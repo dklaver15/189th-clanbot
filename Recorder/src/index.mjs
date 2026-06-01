@@ -8,14 +8,36 @@
 // (scheduling, announcing, transcription, minutes, retention) stays in the
 // C# bot, which drives this process over a localhost HTTP API.
 //
-// Audio strategy: we re-containerize the raw Opus packets straight into Ogg
-// Opus files (no decode → no native opus dependency on the hot path), one
-// file per *utterance* per speaker. Discord only transmits while a user is
-// actually speaking, so each Ogg is a contiguous chunk of speech; we record
-// the start/end timestamps of every chunk in manifest.json so the downstream
-// transcription stage can interleave speakers into one chronological,
-// speaker-labelled transcript. Speaker labels come from the guild member's
-// display name (server nickname), resolved per user.
+// ── Audio strategy: ONE continuous track per speaker ─────────────────────────
+// Earlier this sidecar wrote one Ogg per *utterance* (Discord only transmits
+// while a user speaks). That gave perfect attribution but produced thousands
+// of tiny files for a long meeting — and the transcriber then had to invoke
+// Whisper once per file, which took 75+ minutes for a single monthly meeting.
+//
+// Now we keep ONE OggOpusStream open per speaker for the whole meeting. When a
+// speaker talks we append their Opus frames; when they go quiet we leave the
+// muxer open, and before their *next* utterance we inject exactly enough Opus
+// silence to re-align the track to real meeting wall-clock time. The result is
+// ~N continuous, time-aligned tracks (N = number of people who spoke) instead
+// of thousands of clips, so the transcriber runs Whisper ~N times. Per-segment
+// timestamps from each track are merged downstream into one chronological,
+// speaker-labelled transcript.
+//
+// ── Stop policy: stop when the VC empties, not on a fixed clock ──────────────
+// The bot used to tell us a fixed stop time derived from the calendar, so a
+// meeting that ran long got cut off. Now the recorder watches VC occupancy
+// (real members, bots excluded) and auto-stops once the channel has been below
+// the occupancy threshold continuously for VC_EMPTY_GRACE_MS — i.e. when the
+// meeting actually ends. A hard cap (HARD_CAP_MS past the expected stop, or an
+// absolute ceiling) guarantees a forgotten-open VC can't record forever.
+//
+// ── Idempotent stop / finalized-recording memory ─────────────────────────────
+// When we auto-stop (VC empty or hard cap), we finalize and remember the
+// result in `finalized` keyed by meetingRecordingId. If the bot's scheduled
+// /stop then arrives late, we return the SAME audioDir instead of "nothing
+// here" — this is the fix for the May-31 race where the recorder's own stop
+// beat the bot's and the meeting was wrongly marked Failed despite full audio
+// on disk.
 
 import { Client, GatewayIntentBits, Events } from 'discord.js';
 import {
@@ -26,7 +48,6 @@ import {
 } from '@discordjs/voice';
 import { OggOpusStream } from './ogg-opus.mjs';
 import express from 'express';
-import { pipeline } from 'node:stream';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -35,10 +56,24 @@ const TOKEN = process.env.RECORDER_BOT_TOKEN;
 const SHARED_SECRET = process.env.RECORDER_SHARED_SECRET ?? '';
 const PORT = Number(process.env.RECORDER_PORT ?? 8080);
 const AUDIO_ROOT = process.env.AUDIO_ROOT ?? '/app/data/recordings';
-// End an utterance after this many ms of silence from a speaker.
+// End an utterance (close the receiver subscription for it) after this many ms
+// of silence from a speaker. The track stays open; only the per-utterance
+// subscription ends, which is how we get clean per-utterance start/end times.
 const SILENCE_MS = Number(process.env.RECORDER_SILENCE_MS ?? 800);
-// Hard cap so a missed /stop never leaves the bot parked in a VC forever.
-const AUTO_STOP_GRACE_MS = Number(process.env.RECORDER_AUTO_STOP_GRACE_MS ?? 60_000);
+// Stop once the VC has been empty (no non-bot members) for this long.
+const VC_EMPTY_GRACE_MS = Number(process.env.RECORDER_VC_EMPTY_GRACE_MS ?? 120_000);
+// Treat "empty" as "at most this many non-bot members" (1 = just a straggler).
+// 0 means truly empty. Default 0: stop only when everyone has left.
+const VC_EMPTY_THRESHOLD = Number(process.env.RECORDER_VC_EMPTY_THRESHOLD ?? 0);
+// Hard safety cap: never record longer than this past the bot's expected stop.
+const HARD_CAP_GRACE_MS = Number(process.env.RECORDER_HARD_CAP_GRACE_MS ?? 3 * 60 * 60_000);
+// Absolute ceiling regardless of expected stop (defense against a bad/missing
+// expectedStopUtc): never record a single meeting longer than this.
+const ABSOLUTE_MAX_MS = Number(process.env.RECORDER_ABSOLUTE_MAX_MS ?? 6 * 60 * 60_000);
+// How often to evaluate VC occupancy for the empty-stop check.
+const OCCUPANCY_POLL_MS = Number(process.env.RECORDER_OCCUPANCY_POLL_MS ?? 15_000);
+// How many finalized recordings to remember for late idempotent /stop calls.
+const FINALIZED_MEMORY = Number(process.env.RECORDER_FINALIZED_MEMORY ?? 8);
 
 if (!TOKEN) {
   console.error('FATAL: RECORDER_BOT_TOKEN is not set.');
@@ -50,11 +85,23 @@ if (!SHARED_SECRET) {
 
 const log = (...a) => console.log(new Date().toISOString(), '[recorder]', ...a);
 
-// ── Single active recording state ──────────────────────────────────────────
+// ── State ────────────────────────────────────────────────────────────────
 // The clan runs one meeting VC, so one active recording at a time is enough.
 let current = null;
+// meetingRecordingId -> { audioDir, segmentCount, speakerCount, finalizedUtc }
+// so a late /stop after an auto-stop returns the real dir, not null.
+const finalized = new Map();
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function rememberFinalized(id, info) {
+  finalized.set(id, info);
+  // Bound the memory: drop the oldest entries beyond FINALIZED_MEMORY.
+  while (finalized.size > FINALIZED_MEMORY) {
+    const oldest = finalized.keys().next().value;
+    finalized.delete(oldest);
+  }
+}
 
 // ── Discord client ──────────────────────────────────────────────────────────
 const client = new Client({
@@ -81,53 +128,125 @@ async function resolveSpeaker(guild, userId) {
   }
 }
 
-// Capture one utterance from a speaker into its own Ogg Opus file.
-function captureUtterance(state, userId, guild) {
-  if (state.stopping || state.active.has(userId)) return;
-  state.active.add(userId);
+// Count non-bot members currently in the recorded VC.
+function countHumansInVc(state) {
+  try {
+    const guild = client.guilds.cache.get(state.guildId);
+    const channel = guild?.channels?.cache?.get(state.voiceChannelId);
+    if (!channel || !channel.members) return null; // unknown — don't act on it
+    let n = 0;
+    for (const m of channel.members.values()) {
+      if (!m.user?.bot) n++;
+    }
+    return n;
+  } catch {
+    return null;
+  }
+}
 
-  const seq = String(++state.seq).padStart(6, '0');
-  const file = `seg_${seq}_user${userId}.ogg`;
+// ── Per-speaker continuous track ────────────────────────────────────────────
+// Lazily create one OggOpusStream + file per speaker, kept open for the meeting.
+function trackFor(state, userId, guild) {
+  let tr = state.tracks.get(userId);
+  if (tr) return tr;
+
+  const file = `speaker_user${userId}.ogg`;
   const filePath = path.join(state.audioDir, file);
-  const startUtc = new Date().toISOString();
+  const out = fs.createWriteStream(filePath);
+  const ogg = new OggOpusStream({ channelCount: 2, sampleRate: 48000 });
+  ogg.on('error', (e) => log(`track ${file} ogg error:`, e?.message ?? e));
+  out.on('error', (e) => log(`track ${file} write error:`, e?.message ?? e));
+  ogg.pipe(out);
+
+  tr = {
+    userId,
+    file,
+    filePath,
+    ogg,
+    out,
+    // Real-meeting-time (ms since recording start) of the END of audio we've
+    // written so far, so we know how much silence to insert before the next
+    // utterance to stay aligned.
+    writtenUntilMs: 0,
+    firstUtteranceUtc: null,
+    lastUtteranceEndUtc: null,
+    segments: [], // {startUtc, endUtc, startOffsetMs} — for transcript timing
+    closed: false,
+  };
+  state.tracks.set(userId, tr);
+
+  // Resolve the speaker name once, lazily.
+  if (!state.participants[userId]) {
+    resolveSpeaker(guild, userId).then((s) => { state.participants[userId] = s; });
+  }
+  return tr;
+}
+
+// Capture one utterance into the speaker's continuous track.
+function captureUtterance(state, userId, guild) {
+  if (state.stopping) return;
+  if (state.activeSubs.has(userId)) return; // already subscribed for this speaker
+  state.activeSubs.add(userId);
+
+  const tr = trackFor(state, userId, guild);
+  const startUtc = new Date();
+  const startOffsetMs = startUtc.getTime() - state.startMs;
+
+  // Align the track: insert silence for the gap since we last wrote audio.
+  const gapMs = startOffsetMs - tr.writtenUntilMs;
+  if (gapMs > 0) {
+    try { tr.ogg.writeSilence(gapMs); } catch (e) { log('writeSilence error:', e?.message ?? e); }
+    tr.writtenUntilMs = startOffsetMs;
+  }
 
   const opusStream = state.receiver.subscribe(userId, {
     end: { behavior: EndBehaviorType.AfterSilence, duration: SILENCE_MS },
   });
-  const oggStream = new OggOpusStream({ channelCount: 2, sampleRate: 48000 });
-  const out = fs.createWriteStream(filePath);
+
+  let framesThisUtterance = 0;
+  const onData = (frame) => {
+    try {
+      tr.ogg.write(frame);
+      framesThisUtterance++;
+    } catch (e) {
+      log(`track write error for user ${userId}:`, e?.message ?? e);
+    }
+  };
+  opusStream.on('data', onData);
 
   const done = new Promise((resolve) => {
-    pipeline(opusStream, oggStream, out, (err) => {
-      state.active.delete(userId);
-      const endUtc = new Date().toISOString();
-      if (err && err.code !== 'ERR_STREAM_PREMATURE_CLOSE' && err.code !== 'ABORT_ERR') {
-        log(`segment ${file} pipeline error:`, err.message);
+    let finished = false;
+    const finish = () => {
+      if (finished) return;        // end + close can both fire — only count once
+      finished = true;
+      opusStream.off('data', onData);
+      state.activeSubs.delete(userId);
+      const endUtc = new Date();
+      // Each Discord frame is 20ms; advance our written-time marker.
+      tr.writtenUntilMs += framesThisUtterance * 20;
+      if (framesThisUtterance > 0) {
+        tr.firstUtteranceUtc ??= startUtc.toISOString();
+        tr.lastUtteranceEndUtc = endUtc.toISOString();
+        tr.segments.push({
+          startUtc: startUtc.toISOString(),
+          endUtc: endUtc.toISOString(),
+          startOffsetMs,
+        });
       }
-      // Drop empty/near-empty segments (a tiny Ogg header with no audio).
-      try {
-        if (fs.statSync(filePath).size < 256) {
-          fs.unlinkSync(filePath);
-          return resolve();
-        }
-      } catch {
-        return resolve();
-      }
-      const speaker = state.participants[userId] ?? { displayName: userId };
-      state.segments.push({ userId, displayName: speaker.displayName, file, startUtc, endUtc });
       resolve();
+    };
+    opusStream.once('end', finish);
+    opusStream.once('close', finish);
+    opusStream.once('error', (e) => {
+      if (e && e.code !== 'ERR_STREAM_PREMATURE_CLOSE' && e.code !== 'ABORT_ERR') {
+        log(`utterance stream error for user ${userId}:`, e.message);
+      }
+      finish();
     });
   });
 
   state.pending.add(done);
   done.finally(() => state.pending.delete(done));
-
-  // Resolve the speaker name once, lazily, alongside the first capture.
-  if (!state.participants[userId]) {
-    resolveSpeaker(guild, userId).then((s) => {
-      state.participants[userId] = s;
-    });
-  }
 }
 
 // ── Start / stop ──────────────────────────────────────────────────────────
@@ -146,8 +265,6 @@ async function startRecording({ meetingRecordingId, guildId, voiceChannelId, mee
     selfMute: true,  // the recorder never speaks
   });
 
-  // Log genuine connection errors; the verbose handshake tracing used during
-  // bring-up has been removed now that the connection path is healthy.
   connection.on('error', (err) => log(`[voice] connection error: ${err?.message ?? err}`));
 
   try {
@@ -157,8 +274,17 @@ async function startRecording({ meetingRecordingId, guildId, voiceChannelId, mee
     throw new Error(`Voice connection never became Ready: ${e.message}`);
   }
 
-  const audioDir = path.join(AUDIO_ROOT, `meeting_${meetingRecordingId}_${Date.now()}`);
+  const startUtc = new Date();
+  const audioDir = path.join(AUDIO_ROOT, `meeting_${meetingRecordingId}_${startUtc.getTime()}`);
   fs.mkdirSync(audioDir, { recursive: true });
+
+  // Compute the hard cap. expectedStopUtc is the bot's best guess (calendar end
+  // + buffer); we allow a generous grace past it, bounded by an absolute max.
+  const expMs = Date.parse(expectedStopUtc);
+  const hardCapMs = Math.min(
+    (Number.isFinite(expMs) ? expMs : startUtc.getTime() + 60 * 60_000) + HARD_CAP_GRACE_MS,
+    startUtc.getTime() + ABSOLUTE_MAX_MS,
+  );
 
   const state = {
     meetingRecordingId,
@@ -168,15 +294,19 @@ async function startRecording({ meetingRecordingId, guildId, voiceChannelId, mee
     connection,
     receiver: connection.receiver,
     audioDir,
-    segments: [],
+    tracks: new Map(),       // userId -> track
     participants: {},
-    active: new Set(),
+    activeSubs: new Set(),
     pending: new Set(),
-    seq: 0,
-    startUtc: new Date().toISOString(),
+    startUtc: startUtc.toISOString(),
+    startMs: startUtc.getTime(),
+    hardCapMs,
     stopping: false,
     stopPromise: null,
-    autoStop: null,
+    stopReason: null,
+    occupancyTimer: null,
+    emptySinceMs: null,      // when the VC first dropped to/below threshold
+    sawAnyone: false,        // don't stop-on-empty until at least one human showed up
   };
   current = state;
 
@@ -184,8 +314,7 @@ async function startRecording({ meetingRecordingId, guildId, voiceChannelId, mee
     try {
       captureUtterance(state, userId, guild);
     } catch (e) {
-      // A capture failure for one utterance must never crash the whole recorder.
-      state.active.delete(userId);
+      state.activeSubs.delete(userId);
       log(`captureUtterance error for user ${userId}:`, e?.message ?? e);
     }
   });
@@ -199,57 +328,149 @@ async function startRecording({ meetingRecordingId, guildId, voiceChannelId, mee
       ]);
     } catch {
       log('voice connection lost and did not recover — finalizing recording.');
-      stopRecording(meetingRecordingId).catch((e) => log('finalize-on-disconnect error:', e.message));
+      stopRecording(meetingRecordingId, 'disconnected').catch((e) =>
+        log('finalize-on-disconnect error:', e.message));
     }
   });
 
-  // Auto-stop safety net.
-  const stopAt = Date.parse(expectedStopUtc);
-  const ms = (Number.isFinite(stopAt) ? Math.max(0, stopAt - Date.now()) : 60 * 60_000) + AUTO_STOP_GRACE_MS;
-  state.autoStop = setTimeout(() => {
-    log(`auto-stop timer fired for meeting #${meetingRecordingId}.`);
-    stopRecording(meetingRecordingId).catch((e) => log('auto-stop error:', e.message));
-  }, ms);
+  // ── Occupancy-driven auto-stop + hard cap ──────────────────────────────────
+  state.occupancyTimer = setInterval(() => {
+    if (state.stopping) return;
+    const now = Date.now();
 
-  log(`recording meeting #${meetingRecordingId} ("${state.meetingTitle}") in VC ${state.voiceChannelId} → ${audioDir}`);
+    // Hard safety cap.
+    if (now >= state.hardCapMs) {
+      log(`hard cap reached for meeting #${meetingRecordingId} — stopping.`);
+      stopRecording(meetingRecordingId, 'hard-cap').catch((e) => log('hard-cap stop error:', e.message));
+      return;
+    }
+
+    const humans = countHumansInVc(state);
+    if (humans === null) return; // occupancy unknown this tick — skip
+    if (humans > VC_EMPTY_THRESHOLD) {
+      state.sawAnyone = true;
+      state.emptySinceMs = null;
+      return;
+    }
+    // At/below threshold. Only act on empties after we've seen real attendance,
+    // so we don't stop in the lead-time window before anyone joins.
+    if (!state.sawAnyone) return;
+    if (state.emptySinceMs === null) {
+      state.emptySinceMs = now;
+      log(`VC for meeting #${meetingRecordingId} dropped to ${humans} member(s); ` +
+          `will stop if it stays empty ${Math.round(VC_EMPTY_GRACE_MS / 1000)}s.`);
+      return;
+    }
+    if (now - state.emptySinceMs >= VC_EMPTY_GRACE_MS) {
+      log(`VC empty ${Math.round((now - state.emptySinceMs) / 1000)}s — stopping meeting #${meetingRecordingId}.`);
+      stopRecording(meetingRecordingId, 'vc-empty').catch((e) => log('vc-empty stop error:', e.message));
+    }
+  }, OCCUPANCY_POLL_MS);
+
+  log(`recording meeting #${meetingRecordingId} ("${state.meetingTitle}") in VC ${state.voiceChannelId} → ${audioDir} ` +
+      `(hard cap ${new Date(hardCapMs).toISOString()})`);
 }
 
-async function stopRecording(meetingRecordingId) {
+async function stopRecording(meetingRecordingId, reason = 'requested') {
   const state = current;
   if (!state || state.meetingRecordingId !== meetingRecordingId) {
-    log(`stop requested for #${meetingRecordingId} but no matching active recording.`);
+    // Not the active recording. If we already finalized it, return that dir so
+    // a late/duplicate /stop is idempotent (the May-31 race fix).
+    if (finalized.has(meetingRecordingId)) {
+      const info = finalized.get(meetingRecordingId);
+      log(`stop for #${meetingRecordingId} (${reason}): already finalized → ${info.audioDir}`);
+      return info.audioDir;
+    }
+    log(`stop requested for #${meetingRecordingId} (${reason}) but no matching active recording.`);
     return null;
   }
   if (state.stopping) return state.stopPromise;
 
   state.stopping = true;
+  state.stopReason = reason;
   state.stopPromise = (async () => {
-    clearTimeout(state.autoStop);
+    clearInterval(state.occupancyTimer);
     state.receiver.speaking.removeAllListeners('start');
 
     // Let in-flight utterances flush (bounded, so a stuck stream can't hang us).
     await Promise.race([Promise.allSettled([...state.pending]), delay(15_000)]);
 
-    state.segments.sort((a, b) => a.startUtc.localeCompare(b.startUtc));
+    // Close every speaker track (flush the Ogg EOS page and the file).
+    const closes = [];
+    const tracksMeta = [];
+    for (const tr of state.tracks.values()) {
+      tr.closed = true;
+      closes.push(new Promise((resolve) => {
+        tr.out.once('finish', resolve);
+        tr.out.once('error', resolve);
+        try { tr.ogg.end(); } catch { resolve(); }
+      }));
+      const speaker = state.participants[tr.userId] ?? { displayName: tr.userId };
+      tracksMeta.push({
+        userId: tr.userId,
+        displayName: speaker.displayName,
+        username: speaker.username,
+        file: tr.file,
+        firstUtteranceUtc: tr.firstUtteranceUtc,
+        lastUtteranceEndUtc: tr.lastUtteranceEndUtc,
+        segments: tr.segments,
+      });
+    }
+    await Promise.race([Promise.allSettled(closes), delay(15_000)]);
+
+    // Drop any track that never captured real audio (no utterances).
+    const liveTracks = tracksMeta.filter((t) => t.segments.length > 0);
+    for (const t of tracksMeta) {
+      if (t.segments.length === 0) {
+        try { fs.unlinkSync(path.join(state.audioDir, t.file)); } catch {}
+      }
+    }
+
+    // Flat list of every utterance across all speakers, for chronological
+    // transcript assembly downstream (mirrors the old per-segment manifest).
+    const segments = [];
+    for (const t of liveTracks) {
+      for (const s of t.segments) {
+        segments.push({
+          userId: t.userId,
+          displayName: t.displayName,
+          file: t.file,          // the speaker's continuous track
+          startUtc: s.startUtc,
+          endUtc: s.endUtc,
+          startOffsetMs: s.startOffsetMs, // ms from recording start to this utterance
+        });
+      }
+    }
+    segments.sort((a, b) => a.startUtc.localeCompare(b.startUtc));
+
+    const stoppedUtc = new Date().toISOString();
     const manifest = {
+      schemaVersion: 2,            // 2 = continuous per-speaker tracks
       meetingRecordingId: state.meetingRecordingId,
       guildId: state.guildId,
       voiceChannelId: state.voiceChannelId,
       meetingTitle: state.meetingTitle,
       recordingStartedUtc: state.startUtc,
-      recordingStoppedUtc: new Date().toISOString(),
+      recordingStoppedUtc: stoppedUtc,
+      stopReason: state.stopReason,
       participants: state.participants,
-      segments: state.segments,
+      tracks: liveTracks,          // one entry per speaker (continuous track)
+      segments,                    // every utterance, chronological (for timing)
     };
     fs.writeFileSync(path.join(state.audioDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
 
     try { state.connection.destroy(); } catch {}
 
     const audioDir = state.audioDir;
-    const count = state.segments.length;
+    const speakerCount = liveTracks.length;
+    const segmentCount = segments.length;
     current = null;
-    log(`stopped meeting #${meetingRecordingId}: ${count} segment(s) → ${audioDir}`);
-    return count > 0 ? audioDir : null;
+    rememberFinalized(meetingRecordingId, {
+      audioDir, segmentCount, speakerCount, finalizedUtc: stoppedUtc,
+    });
+    log(`stopped meeting #${meetingRecordingId} (${state.stopReason}): ` +
+        `${speakerCount} speaker track(s), ${segmentCount} utterance(s) → ${audioDir}`);
+    return speakerCount > 0 ? audioDir : null;
   })();
 
   return state.stopPromise;
@@ -267,7 +488,11 @@ function auth(req, res, next) {
 }
 
 app.get('/health', (req, res) =>
-  res.json({ ok: true, ready: client.isReady(), recording: current?.meetingRecordingId ?? null }),
+  res.json({
+    ok: true,
+    ready: client.isReady(),
+    recording: current?.meetingRecordingId ?? null,
+  }),
 );
 
 app.post('/record', auth, async (req, res) => {
@@ -283,7 +508,7 @@ app.post('/record', auth, async (req, res) => {
 
 app.post('/stop', auth, async (req, res) => {
   try {
-    const audioDir = await stopRecording(req.body?.meetingRecordingId);
+    const audioDir = await stopRecording(req.body?.meetingRecordingId, req.body?.reason ?? 'requested');
     res.json({ audioDir });
   } catch (e) {
     log('stop error:', e.message);
@@ -298,7 +523,7 @@ app.listen(PORT, () => log(`control API listening on :${PORT}, audio root ${AUDI
 for (const sig of ['SIGTERM', 'SIGINT']) {
   process.on(sig, async () => {
     log(`${sig} received — shutting down.`);
-    if (current) await stopRecording(current.meetingRecordingId).catch(() => {});
+    if (current) await stopRecording(current.meetingRecordingId, 'shutdown').catch(() => {});
     try { client.destroy(); } catch {}
     process.exit(0);
   });

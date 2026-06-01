@@ -12,9 +12,31 @@
 //         page, then the audio frames paged up. faster-whisper / ffmpeg read
 //         this directly.
 //
-// References: RFC 7845 (Ogg Opus), RFC 3533 (Ogg), Opus is 48 kHz.
+// ── Continuous-track support (added for per-speaker tracks) ──────────────────
+// The recorder now keeps ONE muxer open per speaker for the whole meeting,
+// rather than one per utterance. Between a speaker's utterances Discord sends
+// nothing, so to keep each track aligned to real meeting wall-clock time we
+// inject Opus "silence" frames to fill the gap (writeSilence). That alignment
+// is what lets the transcriber turn each track's per-segment timestamps back
+// into one chronological, speaker-labelled transcript. The silence frame used
+// is the canonical 3-byte Opus silence packet (TOC 0xF8 = SILK NB, 20ms, mono
+// + two zero length-bytes for the CELT/stereo padding), which every Opus
+// decoder renders as 20ms of quiet.
+//
+// References: RFC 7845 (Ogg Opus), RFC 3533 (Ogg), RFC 6716 (Opus). Opus runs
+// at 48 kHz; one Discord frame = 20 ms = 960 samples.
 
 import { Transform } from 'node:stream';
+
+// Samples per 20ms Opus frame at 48kHz.
+const SAMPLES_PER_FRAME = 960;
+const FRAME_MS = 20;
+
+// Canonical short Opus silence frame. TOC byte 0xF8 selects config 31
+// (CELT-only is 0x80+, SILK is low) — in practice the widely-used "Opus
+// silence" packet is 0xF8,0xFF,0xFE; decoders emit 20ms of silence for it.
+// We keep it tiny so silence padding costs almost nothing on disk.
+const OPUS_SILENCE_FRAME = Buffer.from([0xf8, 0xff, 0xfe]);
 
 // ── Ogg CRC (RFC 3533): poly 0x04C11DB7, no reflection, init 0, xorout 0 ─────
 const CRC_TABLE = (() => {
@@ -37,7 +59,7 @@ function oggCrc(buf) {
   return crc >>> 0;
 }
 
-// Build one Ogg page. segments: array of Buffers, each < 255*255 bytes of payload.
+// Build one Ogg page. packets: array of Buffers, each < 255*255 bytes of payload.
 function buildPage({ headerType, granulePosition, serial, sequence, packets }) {
   // Lacing: each packet is split into 255-byte segments; a value <255 ends a packet.
   const lacing = [];
@@ -99,7 +121,19 @@ function opusTags() {
   return b;
 }
 
-// A Transform that consumes raw Opus frames (Buffers) and emits Ogg/Opus bytes.
+/**
+ * A Transform that consumes raw Opus frames (Buffers) and emits Ogg/Opus bytes.
+ *
+ * Two ways to feed it:
+ *   - pipe a VoiceReceiver opus stream into it (each chunk = one 20ms frame), or
+ *   - call write(frame) / writeSilence(ms) directly for the continuous-track
+ *     path, where the recorder owns timing and injects silence between
+ *     utterances. (Both can be mixed; piping just calls _transform per chunk.)
+ *
+ * granuleAtMs(ms) lets the caller know the current track position in ms, so the
+ * recorder can compute exactly how much silence to insert to re-align a track
+ * to real meeting time before writing the next utterance's frames.
+ */
 export class OggOpusStream extends Transform {
   constructor({ channelCount = 2, sampleRate = 48000 } = {}) {
     super({ readableObjectMode: false, writableObjectMode: true });
@@ -109,6 +143,11 @@ export class OggOpusStream extends Transform {
     this._headerWritten = false;
     this._channelCount = channelCount;
     this._sampleRate = sampleRate;
+  }
+
+  /** Current track length in milliseconds (based on emitted 20ms frames). */
+  get positionMs() {
+    return (this._granule / this._sampleRate) * 1000;
   }
 
   _writeHeaders() {
@@ -131,18 +170,39 @@ export class OggOpusStream extends Transform {
     this._headerWritten = true;
   }
 
+  _emitFrame(frame) {
+    if (!this._headerWritten) this._writeHeaders();
+    // Each Opus frame is 20ms = 960 samples @ 48kHz.
+    this._granule += SAMPLES_PER_FRAME;
+    this.push(buildPage({
+      headerType: 0x00,
+      granulePosition: this._granule,
+      serial: this._serial,
+      sequence: this._seq++,
+      packets: [frame],
+    }));
+  }
+
+  /**
+   * Insert `ms` of Opus silence (rounded to whole 20ms frames). Used by the
+   * continuous-track recorder to keep a speaker's track aligned to real meeting
+   * time across the gaps when they aren't talking. Capped per call so a bug or
+   * a very long idle period can't try to allocate a runaway number of frames.
+   */
+  writeSilence(ms) {
+    if (!Number.isFinite(ms) || ms <= 0) return;
+    let frames = Math.round(ms / FRAME_MS);
+    // Safety cap: 6 hours of silence is far past any real meeting.
+    const MAX_FRAMES = (6 * 60 * 60 * 1000) / FRAME_MS;
+    if (frames > MAX_FRAMES) frames = MAX_FRAMES;
+    if (!this._headerWritten) this._writeHeaders();
+    for (let i = 0; i < frames; i++) this._emitFrame(OPUS_SILENCE_FRAME);
+  }
+
   _transform(frame, _enc, cb) {
     try {
-      if (!this._headerWritten) this._writeHeaders();
-      // Each Opus frame from Discord is 20ms = 960 samples @ 48kHz.
-      this._granule += 960;
-      this.push(buildPage({
-        headerType: 0x00,
-        granulePosition: this._granule,
-        serial: this._serial,
-        sequence: this._seq++,
-        packets: [frame],
-      }));
+      // VoiceReceiver emits Buffers; ignore non-buffer control chunks defensively.
+      if (Buffer.isBuffer(frame) && frame.length > 0) this._emitFrame(frame);
       cb();
     } catch (e) {
       cb(e);

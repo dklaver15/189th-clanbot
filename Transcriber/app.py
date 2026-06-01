@@ -1,20 +1,31 @@
 """
 ClanGuard transcription sidecar.
 
-Turns a recorded meeting (a directory of per-utterance Ogg Opus files + a
-manifest.json, produced by the recorder sidecar) into a single chronological,
-speaker-labelled transcript using faster-whisper — locally, so member audio
-never leaves the droplet and Anthropic stays the only external AI dependency.
+Turns a recorded meeting into a single chronological, speaker-labelled
+transcript using faster-whisper — locally, so member audio never leaves the
+droplet and Anthropic stays the only external AI dependency.
 
-Speaker attribution is free: the recorder already tagged every segment with the
-speaking member's Discord display name, so we just transcribe each segment's
-text and order by its recorded start time (no diarization needed).
+Speaker attribution is free: the recorder tags audio with the speaking member's
+Discord display name. There is no diarization.
+
+── Two manifest formats are supported ──────────────────────────────────────
+schemaVersion 2 (current): one CONTINUOUS Ogg track per speaker. We transcribe
+  each speaker's track ONCE (with word/segment timestamps) and tag every
+  resulting segment with that speaker. Because each track is silence-padded to
+  real meeting time by the recorder, a segment's in-file timestamp IS its
+  offset from recording start, so we can merge all speakers chronologically.
+  This is ~N Whisper invocations (N = speakers) instead of one per utterance —
+  the fix for hour-long meetings taking 75+ minutes.
+
+schemaVersion 1 (legacy / pre-rewrite recordings): one Ogg per UTTERANCE, with
+  a flat `segments` list. We transcribe each file and order by recorded start
+  time. Kept so older recordings (and any captured mid-migration) still work.
 
 Control API (called by the C# bot's MeetingMinutesService over the compose
 network; never exposed to the host):
-  GET  /health                      -> {ok, ready, model, busy}
-  POST /transcribe {audioDir}       -> {ok, segmentCount, speakerCount, transcript, segments}
-                                       also writes transcript.txt + transcript.json into audioDir
+  GET  /health                 -> {ok, ready, model, busy}
+  POST /transcribe {audioDir}  -> {ok, segmentCount, speakerCount, transcript, segments}
+                                  also writes transcript.txt + transcript.json into audioDir
 """
 
 import os
@@ -68,17 +79,6 @@ def fmt_offset(seconds):
     return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
-def transcribe_file(path):
-    """Transcribe one short audio segment to a single text string."""
-    segments, _info = model.transcribe(
-        path,
-        language=LANGUAGE,
-        beam_size=BEAM_SIZE,
-        vad_filter=True,  # drop non-speech so silence/keyboard noise isn't hallucinated
-    )
-    return " ".join(seg.text.strip() for seg in segments).strip()
-
-
 def authorized(req):
     return not SHARED_SECRET or req.headers.get("x-transcriber-secret") == SHARED_SECRET
 
@@ -86,6 +86,100 @@ def authorized(req):
 @app.get("/health")
 def health():
     return jsonify(ok=True, ready=True, model=MODEL_NAME, busy=_lock.locked())
+
+
+# ── schemaVersion 2: continuous per-speaker tracks ───────────────────────────
+def transcribe_tracks(audio_dir, manifest):
+    """
+    One Whisper call per speaker track. Each track is wall-clock aligned to the
+    recording start, so a segment's in-file `start` (seconds) is its offset from
+    recording start. Returns a flat, speaker-tagged result list (unsorted).
+    """
+    tracks = manifest.get("tracks", [])
+    participants = manifest.get("participants", {}) or {}
+    total = len(tracks)
+    log(f"transcribing {total} speaker track(s) from {audio_dir}")
+
+    results = []
+    speakers = set()
+    for idx, tr in enumerate(tracks, start=1):
+        fname = tr.get("file", "")
+        fpath = os.path.join(audio_dir, fname)
+        uid = str(tr.get("userId", ""))
+        name = (
+            tr.get("displayName")
+            or (participants.get(uid) or {}).get("displayName")
+            or uid
+            or "Unknown"
+        )
+        if not os.path.isfile(fpath):
+            log(f"  [{idx}/{total}] missing track file, skipping: {fname}")
+            continue
+
+        log(f"  [{idx}/{total}] transcribing {name}'s track ({fname})...")
+        segments, _info = model.transcribe(
+            fpath,
+            language=LANGUAGE,
+            beam_size=BEAM_SIZE,
+            vad_filter=True,  # skip the silence padding between utterances
+        )
+
+        n = 0
+        for seg in segments:
+            text = (seg.text or "").strip()
+            if not text:
+                continue
+            # seg.start is seconds from the start of THIS track == offset from
+            # recording start, because the track is silence-padded to real time.
+            results.append({
+                "offset": float(seg.start),
+                "displayName": name,
+                "text": text,
+            })
+            n += 1
+        if n:
+            speakers.add(name)
+        log(f"  [{idx}/{total}] {name}: {n} segment(s)")
+
+    return results, speakers
+
+
+# ── schemaVersion 1: legacy per-utterance files ──────────────────────────────
+def transcribe_file(path):
+    segments, _info = model.transcribe(
+        path,
+        language=LANGUAGE,
+        beam_size=BEAM_SIZE,
+        vad_filter=True,
+    )
+    return " ".join((seg.text or "").strip() for seg in segments).strip()
+
+
+def transcribe_segments(audio_dir, manifest):
+    """Legacy path: one file per utterance, ordered by recorded start time."""
+    rec_start = parse_iso(manifest.get("recordingStartedUtc"))
+    raw_segments = manifest.get("segments", [])
+    total = len(raw_segments)
+    log(f"transcribing {total} legacy utterance file(s) from {audio_dir}")
+
+    results = []
+    speakers = set()
+    for idx, seg in enumerate(raw_segments, start=1):
+        fpath = os.path.join(audio_dir, seg.get("file", ""))
+        if not os.path.isfile(fpath):
+            continue
+        text = transcribe_file(fpath)
+        if not text:
+            continue
+        seg_start = parse_iso(seg.get("startUtc"))
+        offset = (seg_start - rec_start).total_seconds() if (seg_start and rec_start) else None
+        name = seg.get("displayName") or seg.get("userId") or "Unknown"
+        speakers.add(name)
+        results.append({"offset": offset, "displayName": name, "text": text})
+        if idx % 250 == 0:
+            log(f"  ...{idx}/{total} utterances transcribed")
+
+    return results, speakers
 
 
 @app.post("/transcribe")
@@ -109,38 +203,20 @@ def transcribe():
         with open(manifest_path, "r", encoding="utf-8") as f:
             manifest = json.load(f)
 
-        rec_start = parse_iso(manifest.get("recordingStartedUtc"))
-        raw_segments = manifest.get("segments", [])
-        log(f"transcribing {len(raw_segments)} segment(s) from {audio_dir}")
+        # Choose path by schema. Default to continuous-track (v2) when `tracks`
+        # is present; fall back to legacy per-utterance otherwise.
+        schema = manifest.get("schemaVersion", 1)
+        if schema >= 2 or manifest.get("tracks"):
+            results, speakers = transcribe_tracks(audio_dir, manifest)
+        else:
+            results, speakers = transcribe_segments(audio_dir, manifest)
 
-        results = []
-        speakers = set()
-        for seg in raw_segments:
-            fpath = os.path.join(audio_dir, seg.get("file", ""))
-            if not os.path.isfile(fpath):
-                log(f"  missing segment file, skipping: {seg.get('file')}")
-                continue
-            text = transcribe_file(fpath)
-            if not text:
-                continue
-            seg_start = parse_iso(seg.get("startUtc"))
-            offset = (seg_start - rec_start).total_seconds() if (seg_start and rec_start) else None
-            name = seg.get("displayName") or seg.get("userId") or "Unknown"
-            speakers.add(name)
-            results.append({
-                "startUtc": seg.get("startUtc"),
-                "offset": offset,
-                "displayName": name,
-                "text": text,
-            })
-
-        # Chronological merge.
-        results.sort(key=lambda r: (r["startUtc"] or ""))
+        # Chronological merge by offset (seconds from recording start). Segments
+        # with an unknown offset sort to the front deterministically.
+        results.sort(key=lambda r: (r["offset"] is None, r["offset"] or 0.0))
         lines = [f"[{fmt_offset(r['offset'])}] {r['displayName']}: {r['text']}" for r in results]
         transcript = "\n".join(lines)
 
-        # Persist alongside the audio (the C# side also copies the text into the
-        # DB so it survives the keep-last-N audio prune).
         with open(os.path.join(audio_dir, "transcript.txt"), "w", encoding="utf-8") as f:
             f.write(transcript)
         with open(os.path.join(audio_dir, "transcript.json"), "w", encoding="utf-8") as f:
@@ -163,5 +239,4 @@ def transcribe():
 
 if __name__ == "__main__":
     log(f"control API listening on :{PORT}")
-    # threaded=False keeps a single worker so transcriptions never overlap.
     app.run(host="0.0.0.0", port=PORT, threaded=True)

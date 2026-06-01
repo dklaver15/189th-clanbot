@@ -429,11 +429,23 @@ public class BotConfig
     public string MeetingTranscriberSharedSecret { get; set; } = string.Empty;
 
     /// <summary>
-    /// HTTP timeout (minutes) for a single /transcribe call. Transcribing an
-    /// hour of speech on CPU can take several minutes; this runs on a
-    /// background worker with no user waiting. Default 30.
+    /// HTTP timeout (minutes) for a single /transcribe call. With per-speaker
+    /// continuous tracks an hour-long meeting transcribes in a few minutes, but
+    /// this runs on a background worker with no user waiting, so the default is
+    /// generous to absorb a very long meeting or a slower model. Default 90.
     /// </summary>
-    public int MeetingTranscriberTimeoutMinutes { get; set; } = 30;
+    public int MeetingTranscriberTimeoutMinutes { get; set; } = 90;
+
+    /// <summary>
+    /// Filesystem path where the recorder sidecar writes meeting audio
+    /// directories (meeting_{id}_*), as seen from the BOT container. This is the
+    /// shared meeting-audio volume mount — the same volume the recorder writes
+    /// to — so the scheduler can reconcile a finalized recording from its
+    /// manifest.json if the recorder lost its in-memory state (e.g. a restart),
+    /// instead of wrongly marking a meeting Failed when its audio is on disk.
+    /// Defaults to the standard compose mount. Empty disables disk reconciliation.
+    /// </summary>
+    public string MeetingRecordingsPath { get; set; } = "/app/data/recordings";
 
     /// <summary>
     /// Channel ID where generated minutes are posted. 0 falls back to
