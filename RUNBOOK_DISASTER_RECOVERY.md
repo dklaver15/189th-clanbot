@@ -157,7 +157,7 @@ aws configure --profile clanguard-r2
 # Default output format: json
 
 # Endpoint is in appsettings.json → BackupR2.AccountEndpoint
-ENDPOINT="https://f161644886fb569c5fef90f821f2b685.r2.cloudflarestorage.com"
+ENDPOINT="https://REDACTED.r2.cloudflarestorage.com"
 
 # List backups, newest last
 aws s3 ls s3://clanguard-backups/ \
