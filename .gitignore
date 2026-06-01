@@ -16,3 +16,5 @@ clanguard.db
 *.db
 *.db-shm
 *.db-wal
+Archive.zip
+*.zip
