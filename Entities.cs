@@ -595,6 +595,23 @@ public class BotState
     /// to give "last good poll" + "what went wrong since" on /health.
     /// </summary>
     public string? LastDiscordStatusPollError { get; set; }
+
+    /// <summary>
+    /// Discord message ID of the auto-posted honeypot warning embed in the
+    /// configured trap channel (BotConfig.HoneypotChannelId). Set the first
+    /// time the embed is posted on Ready; consulted on later boots so the bot
+    /// edits the existing message (refreshing the ban counter) instead of
+    /// posting a duplicate. Null until first posted, or if the message was
+    /// deleted (a fresh one is posted and this is updated).
+    /// </summary>
+    public ulong? HoneypotWarningMessageId { get; set; }
+
+    /// <summary>
+    /// Running total of accounts banned by the honeypot trap. Incremented on
+    /// each successful Enforce ban and rendered in the warning embed. AlertOnly
+    /// hits and exempt-member posts do not count.
+    /// </summary>
+    public int HoneypotBanCount { get; set; }
 }
 
 /// <summary>

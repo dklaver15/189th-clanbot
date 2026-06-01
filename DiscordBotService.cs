@@ -32,6 +32,7 @@ public class DiscordBotService : IHostedService
     private readonly NicknameImpersonationHandler _nicknameImpersonationHandler;
     private readonly WebhookAuditCommandHandler _webhookAuditCommandHandler;
     private readonly TokenGrabberScannerHandler _tokenGrabberScannerHandler;
+    private readonly HoneypotHandler _honeypotHandler;
     private readonly TicketReminderHandler _ticketReminderHandler;
     private readonly GuestReminderHandler _guestReminderHandler;
     private readonly OnboardingReminderHandler _onboardingReminderHandler;
@@ -85,6 +86,7 @@ public class DiscordBotService : IHostedService
         NicknameImpersonationHandler nicknameImpersonationHandler,
         WebhookAuditCommandHandler webhookAuditCommandHandler,
         TokenGrabberScannerHandler tokenGrabberScannerHandler,
+        HoneypotHandler honeypotHandler,
         TicketReminderHandler ticketReminderHandler,
         GuestReminderHandler guestReminderHandler,
         OnboardingReminderHandler onboardingReminderHandler,
@@ -137,6 +139,7 @@ public class DiscordBotService : IHostedService
         _nicknameImpersonationHandler = nicknameImpersonationHandler;
         _webhookAuditCommandHandler   = webhookAuditCommandHandler;
         _tokenGrabberScannerHandler   = tokenGrabberScannerHandler;
+        _honeypotHandler             = honeypotHandler;
         _ticketReminderHandler       = ticketReminderHandler;
         _guestReminderHandler        = guestReminderHandler;
         _onboardingReminderHandler   = onboardingReminderHandler;
@@ -194,6 +197,7 @@ public class DiscordBotService : IHostedService
         _nicknameImpersonationHandler.Register(_client);
         _webhookAuditCommandHandler.Register(_client);
         _tokenGrabberScannerHandler.Register(_client);
+        _honeypotHandler.Register(_client);
         _ticketReminderHandler.Register(_client);
         _guestReminderHandler.Register(_client);
         _onboardingReminderHandler.Register(_client);

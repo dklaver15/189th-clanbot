@@ -173,6 +173,14 @@ try
     // officer blocklist + IP-address static pattern. AlertOnly for v1.
     builder.Services.AddSingleton<TokenGrabberScannerHandler>();
 
+    // HoneypotHandler: server-protection feature #7. Subscribes to
+    // MessageReceived (rolling index + trap) and Ready (auto-posted warning
+    // embed). Behaviour gated by BotConfig.HoneypotMode (Off / AlertOnly /
+    // Enforce). On an Enforce hit it bans the account, purges its messages
+    // server-wide for the configured window, and bumps the embed's ban
+    // counter. Register() is called from DiscordBotService.
+    builder.Services.AddSingleton<HoneypotHandler>();
+
     // OnboardingReminderHandler: registered before GamertagCommandHandler because
     // the gamertag handler depends on it to notify when a Guest saves gamertags.
     builder.Services.AddSingleton<OnboardingReminderHandler>();

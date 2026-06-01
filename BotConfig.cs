@@ -872,6 +872,65 @@ public class BotConfig
     public List<string> GetTokenGrabberScannerBlocklist() =>
         TokenGrabberScannerBlocklist.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
 
+    // ─── Server protection: Honeypot trap channel ───────────────────
+    /// <summary>
+    /// Operating mode for the honeypot trap (feature #7). One of:
+    ///   "Off"        — disabled. No rolling index, no trap, the warning
+    ///                  embed is not posted.
+    ///   "AlertOnly"  — default. On a hit, post to #alerts + write an audit
+    ///                  row. The message is NOT deleted, the account is NOT
+    ///                  banned, the counter does not move. Run here first to
+    ///                  confirm a clean signal, then flip to Enforce.
+    ///   "Enforce"    — ban the account, delete its honeypot message AND every
+    ///                  message it posted server-wide in the last
+    ///                  HoneypotPurgeWindowMinutes, bump the counter, and
+    ///                  refresh the warning embed.
+    /// </summary>
+    public string HoneypotMode { get; set; } = "AlertOnly";
+
+    /// <summary>
+    /// The honeypot trap channel ID. Members must be able to see and send in
+    /// this channel for the trap to function (an auto-posted, pinned warning
+    /// embed deters humans). Manage Channel / Permissions / Webhooks / Create
+    /// Invite should NOT be allowed to @everyone here.
+    /// </summary>
+    public ulong HoneypotChannelId { get; set; } = 1511103621507322036;
+
+    /// <summary>
+    /// Minimum rank exempt from the trap (matches a RankRoles entry,
+    /// case-insensitive). Members at this rank or above can post in the trap
+    /// without being actioned — a safety net for officers testing it. Server
+    /// Administrators are always exempt. Default MAJ.
+    /// </summary>
+    public string HoneypotExemptMinRank { get; set; } = "MAJ";
+
+    /// <summary>
+    /// How far back the cross-channel purge reaches on an Enforce hit, in
+    /// minutes. Every message the banned account posted server-wide within the
+    /// window is deleted from an in-memory rolling index. Clamped to a minimum
+    /// of 1 internally.
+    /// </summary>
+    public int HoneypotPurgeWindowMinutes { get; set; } = 15;
+
+    /// <summary>
+    /// Whether the purge also clears the account's messages inside threads.
+    /// Default true.
+    /// </summary>
+    public bool HoneypotIncludeThreadsInPurge { get; set; } = true;
+
+    /// <summary>
+    /// Optional banner image URL shown in the warning embed (host your own
+    /// graphic in a Discord channel and paste its CDN URL here, the same way
+    /// the PatrolWatch game thumbnails are hosted). Empty = no banner image.
+    /// </summary>
+    public string HoneypotImageUrl { get; set; } = "";
+
+    /// <summary>
+    /// Optional thumbnail URL for the warning embed. Empty = fall back to the
+    /// guild icon (the 189th logo), so no setup is needed in the common case.
+    /// </summary>
+    public string HoneypotThumbnailUrl { get; set; } = "";
+
     // ─── SQLite Backup Settings ──────────────────────────────────────
     /// <summary>
     /// Master switch for SqliteBackupService. When false, the service exits
