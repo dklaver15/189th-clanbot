@@ -24,6 +24,8 @@ public class DiscordBotService : IHostedService
     private readonly PromoEligibilityCommandHandler _promoEligibilityHandler;
     private readonly RankTrackingHandler _rankHandler;
     private readonly MemberLifecycleHandler _memberLifecycleHandler;
+    private readonly DepartureCaptureHandler _departureCaptureHandler;
+    private readonly MemberRosterReconciler _memberRosterReconciler;
     private readonly AccountAgeGateHandler _accountAgeGateHandler;
     private readonly InviteLinkFilterHandler _inviteLinkFilterHandler;
     private readonly AuditLogWatcherHandler _auditLogWatcherHandler;
@@ -75,6 +77,8 @@ public class DiscordBotService : IHostedService
         PromoEligibilityCommandHandler promoEligibilityHandler,
         RankTrackingHandler rankHandler,
         MemberLifecycleHandler memberLifecycleHandler,
+        DepartureCaptureHandler departureCaptureHandler,
+        MemberRosterReconciler memberRosterReconciler,
         AccountAgeGateHandler accountAgeGateHandler,
         InviteLinkFilterHandler inviteLinkFilterHandler,
         AuditLogWatcherHandler auditLogWatcherHandler,
@@ -125,6 +129,8 @@ public class DiscordBotService : IHostedService
         _promoEligibilityHandler     = promoEligibilityHandler;
         _rankHandler                 = rankHandler;
         _memberLifecycleHandler      = memberLifecycleHandler;
+        _departureCaptureHandler     = departureCaptureHandler;
+        _memberRosterReconciler      = memberRosterReconciler;
         _accountAgeGateHandler       = accountAgeGateHandler;
         _inviteLinkFilterHandler     = inviteLinkFilterHandler;
         _auditLogWatcherHandler      = auditLogWatcherHandler;
@@ -180,6 +186,8 @@ public class DiscordBotService : IHostedService
         _promoEligibilityHandler.Register(_client);
         _rankHandler.Register(_client);
         _memberLifecycleHandler.Register(_client);
+        _departureCaptureHandler.Register(_client);
+        _memberRosterReconciler.Register(_client);
         _accountAgeGateHandler.Register(_client);
         _inviteLinkFilterHandler.Register(_client);
         _auditLogWatcherHandler.Register(_client);

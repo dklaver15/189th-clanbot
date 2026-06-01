@@ -75,6 +75,31 @@ try
     // honest. Register() is called from DiscordBotService.
     builder.Services.AddSingleton<MemberLifecycleHandler>();
 
+    // DepartureCaptureHandler: retention feature. Hooks UserLeft +
+    // AuditLogCreated to record one MemberDeparture row per departure and
+    // classify it (voluntary / officer kick / bot AWOL kick / account-age ban
+    // / manual ban). Singleton so DepartureClassificationWorker shares its
+    // in-memory correlation cache. Register() is called from DiscordBotService.
+    // Requires the GuildBans gateway intent (already enabled above for the
+    // audit-log watcher).
+    builder.Services.AddSingleton<DepartureCaptureHandler>();
+
+    // DepartureClassificationWorker: finalizes stale Pending departures to
+    // "Left" once the grace window elapses (no Kick/Ban audit entry observed
+    // ⇒ voluntary) and sweeps the correlation cache.
+    builder.Services.AddHostedService<DepartureClassificationWorker>();
+
+    // MemberRosterReconciler: self-healing for departures missed while the bot
+    // was offline (Discord never replays UserLeft). Persists the present-member
+    // roster (KnownMembers), hooks UserJoined to keep it fresh, and on startup
+    // + every RetentionRosterReconcileHours diffs it against the live guild,
+    // back-classifying any missing members via the REST audit log. Singleton +
+    // hosted (same pattern as the reminder handlers); Register() is called from
+    // DiscordBotService.
+    builder.Services.AddSingleton<MemberRosterReconciler>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<MemberRosterReconciler>());
+
+
     // AccountAgeGateHandler: server-protection feature #1. Hooks UserJoined,
     // computes account age from user.CreatedAt, and either alerts or kicks
     // depending on BotConfig.AccountAgeGateMode (Off / AlertOnly / Kick).

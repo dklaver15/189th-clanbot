@@ -28,7 +28,7 @@ internal static class BriefingPrompts
         ## Emoji discipline
         - One emoji at the start of each section header to make scanning easy. Use these exactly:
           🎖️ Spotlight, 🚨 AWOL Risks, 📈 Promotion Candidates, ⚠️ Risk Watch, 📋 Notable,
-          📨 Recruitment Sources, 📡 Recruit Leads, 🎯 Recommended focus.
+          📨 Recruitment Sources, 📡 Recruit Leads, 🔻 Retention, 🎯 Recommended focus.
         - Inline emojis sparingly — at most one or two per section, only when they add a status signal
           (e.g. ✅ for "ready and active", ❌ for "no activity data on file"). Never decorative.
         - Tone is military/operational, not party-store. No 🎉, 🔥, 💯, hearts, or sparkles.
@@ -68,9 +68,26 @@ internal static class BriefingPrompts
            contacted — officers may have lost the thread." If `skipped` is more than half of
            `total_surfaced`, flag as a matcher-tuning signal ("X of Y skipped — matcher may be
            too loose"). Skip the section entirely if `reddit_leads` is absent.
-        9. ### 🎯 Recommended officer focus this week — one line. Pick the single highest-leverage action
+        9. ### 🔻 Retention — member departures this week. Skip entirely if `retention` is absent.
+           Lead with the flow line: "N left this week (V voluntary, K kicked, B banned); net membership X."
+           Use `net_membership_change` WITH its sign — a negative number is the headline on a bad week.
+           If `median_tenure_days` is present, add tenure context and coverage: "median tenure 11d
+           (Y of N had known join dates)." Read the split that matters; don't just echo counts:
+           - If `guest_churn` dominates, that's onboarding leakage, not member loss — say so.
+           - If `engaged_churn` > 0 or `notable_departures` is non-empty, name them: losing a ranked or
+             long-tenure member is a different problem than shedding tire-kickers. List notable_departures
+             as bullets: **display_name** (rank, Nd tenure) — classification.
+           - `kicked_by_bot` is automated cleanup (AWOL + account-age gate), not voluntary attrition —
+             keep it distinct from `voluntary` when framing the week.
+           - If `churn_by_source` has a clear leader, flag the funnel ("3 of 5 departures joined via
+             Facebook — worth a look at that source").
+           - If `same_week_churn` is high relative to total, call it instant churn.
+           - If `reconciled_departures` > 0, add a one-clause caveat that those were detected after the
+             fact (bot was offline at the time), so their exact timing is approximate.
+        10. ### 🎯 Recommended officer focus this week — one line. Pick the single highest-leverage action
            based on the snapshot (e.g. "Re-engage the 3 risk-watch members before next AWOL sweep,"
-           or "Review the 4 SGT+ promotion candidates — auto-promo can't handle those tiers.").
+           "Review the 4 SGT+ promotion candidates — auto-promo can't handle those tiers," or on a
+           high-churn week "Net membership -4 — prioritize re-engaging the 2 ranked members who left.").
 
         ## Tips
         - Bullets stay under two lines each. If a member has notable context, weave it in; don't pad.

@@ -75,6 +75,14 @@ public sealed record BriefingContext
     /// </summary>
     public RedditLeadsSnapshot? RedditLeads { get; init; }
 
+    /// <summary>
+    /// Retention snapshot for the briefing week. Null when zero departures
+    /// occurred — the prompt treats null as "skip the section," matching the
+    /// Spotlight / RedditLeads convention. Sourced from the MemberDeparture
+    /// table via BriefingRetentionSection.
+    /// </summary>
+    public RetentionSnapshot? Retention { get; init; }
+
     /// <summary>Free-form short notes for things that don't fit the other buckets.</summary>
     public IReadOnlyList<string> Anomalies { get; init; } = [];
 }

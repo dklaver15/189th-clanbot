@@ -34,11 +34,27 @@ public class BotDbContext : DbContext
     public DbSet<OfficerApplication>  OfficerApplications => Set<OfficerApplication>();
     public DbSet<DiscordStatusIncidentUpdate> DiscordStatusIncidentUpdates => Set<DiscordStatusIncidentUpdate>();
     public DbSet<MeetingRecording>    MeetingRecordings   => Set<MeetingRecording>();
+    public DbSet<MemberDeparture>     MemberDepartures    => Set<MemberDeparture>();
+    public DbSet<KnownMember>         KnownMembers        => Set<KnownMember>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<MemberDeparture>(entity =>
+        {
+            entity.HasIndex(e => new { e.GuildId, e.DepartedAt });                   // weekly briefing query
+            entity.HasIndex(e => new { e.GuildId, e.UserId, e.DepartedAt });         // rejoin lookup + audit reconcile
+            entity.HasIndex(e => new { e.GuildId, e.Classification, e.DepartedAt }); // classification filters
+        });
+
+        modelBuilder.Entity<KnownMember>(entity =>
+        {
+            // One row per currently-present member; the roster reconciler diffs
+            // this against the live guild to detect departures missed offline.
+            entity.HasIndex(e => new { e.GuildId, e.UserId }).IsUnique();
+        });
+
         modelBuilder.Entity<UserActivity>(entity =>
         {
             entity.HasIndex(e => new { e.GuildId, e.UserId }).IsUnique();

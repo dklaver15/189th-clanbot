@@ -194,6 +194,31 @@ public class BotConfig
     public int ApolloSortRebindGraceSeconds { get; set; } = 120;
 
     /// <summary>
+    /// Seconds to wait after a UserLeft before finalizing a departure as
+    /// voluntary "Left". Long enough to absorb gateway reordering and
+    /// audit-log lag between UserLeft and the matching Kick/Ban
+    /// AuditLogCreated; short enough that the weekly briefing never waits on
+    /// it. Floored at 15s in code.
+    /// </summary>
+    public int RetentionClassificationGraceSeconds { get; set; } = 90;
+
+    /// <summary>
+    /// When false, the weekly briefing omits the Retention section. Capture,
+    /// classification, and offline-gap reconciliation keep running regardless,
+    /// so toggling this never creates a data gap — it only hides presentation
+    /// while the prompt is being tuned.
+    /// </summary>
+    public bool RetentionSectionEnabled { get; set; } = true;
+
+    /// <summary>
+    /// How often the MemberRosterReconciler diffs the persisted roster against
+    /// the live guild to catch departures missed while the bot was offline
+    /// (Discord does not replay UserLeft). Also runs once on startup. Floored
+    /// at 1 hour in code. Default 6 hours.
+    /// </summary>
+    public int RetentionRosterReconcileHours { get; set; } = 6;
+
+    /// <summary>
     /// The minimum rank required to use the /comp-event command.
     /// Must exactly match one of the rank names in RankRoles (case-insensitive).
     /// </summary>

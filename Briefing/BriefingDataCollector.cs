@@ -182,10 +182,23 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
             "recruit leads",
             null);
 
+        // ── Retention (member departures) ──
+        // Same external-helper + null-means-skip pattern. Gated on the feature
+        // flag so the section can be hidden while the prompt is tuned without
+        // affecting capture. NewRecruits isn't known until topLine resolves, so
+        // we pass 0 here and correct NetMembershipChange after the WhenAll.
+        var retentionTask = _config.RetentionSectionEnabled
+            ? SafeAsync<RetentionSnapshot?>(
+                () => BriefingRetentionSection.CollectAsync(
+                    db, guild.Id, weekStart, weekEnd, newRecruitsThisWeek: 0, ct),
+                "retention",
+                null)
+            : Task.FromResult<RetentionSnapshot?>(null);
+
         await Task.WhenAll(
             awolTask, promoTask, eventsTask, topLineTask,
             priorTopLineTask, spotlightTask, riskTask,
-            inviteTask, redditLeadsTask);
+            inviteTask, redditLeadsTask, retentionTask);
 
         var awolRisks = (await awolTask)
             .OrderByDescending(r => r.DaysSinceAwolAssigned)
@@ -212,6 +225,17 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
         var spotlight = await spotlightTask;
         var (recruitmentSources, topReferrers) = await inviteTask;
         var redditLeads = await redditLeadsTask;
+
+        // NetMembershipChange needs the week's NewRecruits, only known now that
+        // topLine has resolved. Correct the placeholder via a record `with`.
+        var retention = await retentionTask;
+        if (retention is not null)
+        {
+            retention = retention with
+            {
+                NetMembershipChange = topLine.NewRecruits - retention.TotalDepartures
+            };
+        }
 
         var deltas = new WeekOverWeekDeltas(
             EventsHeldDelta: topLine.EventsHeld - priorTopLine.EventsHeld,
@@ -266,6 +290,7 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
             RecruitmentSources = recruitmentSources,
             TopReferrers = topReferrers,
             RedditLeads = redditLeads,
+            Retention = retention,
             Anomalies = anomalies
         };
 
@@ -273,12 +298,14 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
             "Briefing context: {Awol} AWOL risks, {Promo} promo candidates, {Events} events, " +
             "{Risk} risk-watch, {Sources} sources, {Referrers} referrers, " +
             "{Leads} recruit leads (stale claimed: {Stale}), " +
+            "{Departures} departures (net {Net}), " +
             "spotlight={Spot}, {Members} active members, " +
             "WoW: events Δ{EventsDelta}, attendance Δ{AttendanceDelta}pp, recruits Δ{RecruitsDelta}, " +
             "{Anomalies} anomalies",
             awolRisks.Count, promotionCandidates.Count, notableEvents.Count,
             riskWatch.Count, recruitmentSources.Count, topReferrers.Count,
             redditLeads?.TotalSurfaced ?? 0, redditLeads?.StaleClaimedAllTime ?? 0,
+            retention?.TotalDepartures ?? 0, retention?.NetMembershipChange ?? 0,
             spotlight?.Gamertag ?? "—", topLine.ActiveMemberCount,
             deltas.EventsHeldDelta, deltas.AverageAttendancePercentDelta, deltas.NewRecruitsDelta,
             anomalies.Count);
