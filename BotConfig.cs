@@ -50,6 +50,25 @@ public class BotConfig
     /// <summary>Days after AWOL assignment before HQ is notified.</summary>
     public int AwolGraceDays { get; set; } = 2;
 
+    /// <summary>
+    /// Upper age bound for posting an AWOL notification. A pending record whose
+    /// AssignedAt is older than this is considered stale: Step 3 silently
+    /// resolves it (marks it sent, logs a warning) instead of posting it.
+    ///
+    /// This is a blast-radius guard. Step 3 otherwise posts ANY pending record
+    /// past the grace period, so any event that resets NotificationSent on
+    /// historical rows — a DB restore, a stray bulk UPDATE, a backup rollback —
+    /// would carpet-bomb the channel with weeks-old alerts. With this cap, such
+    /// stale rows are quietly closed instead. Set to 0 to disable the guard.
+    ///
+    /// Default 4 = 2× the default grace period, so a normal recent AWOL (which
+    /// posts within a day of crossing the grace cutoff) is never affected, while
+    /// anything materially older than the legitimate notify window is suppressed.
+    /// Keep this comfortably below NotificationGiveUpWindow (7d) so genuinely
+    /// stale records are caught by the age guard rather than the give-up path.
+    /// </summary>
+    public int AwolNotificationMaxAgeDays { get; set; } = 4;
+
     /// <summary>How often (in minutes) the background check runs.</summary>
     public int CheckIntervalMinutes { get; set; } = 180;
 

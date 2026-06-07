@@ -441,9 +441,33 @@ public class AwolCheckService : BackgroundService
         var roleGone  = 0;
         var userGone  = 0;
         var failed    = 0;
+        var stale     = 0;
 
         foreach (var record in pendingNotifications)
         {
+            // ── Stale-record guard (blast-radius protection) ──
+            // Step 3 will post ANY pending record past the grace cutoff with no
+            // upper bound, so anything that resets NotificationSent on historical
+            // rows (DB restore, stray bulk UPDATE, backup rollback) would
+            // otherwise broadcast weeks-old alerts to the channel all at once.
+            // If a record is materially older than the legitimate notify window,
+            // treat it as stale: resolve it silently and log a WARNING (not Info)
+            // so the anomaly is visible without spamming officers. A normal
+            // recent AWOL posts within ~1 day of the grace cutoff and is never
+            // caught here. Disabled when AwolNotificationMaxAgeDays <= 0.
+            if (_config.AwolNotificationMaxAgeDays > 0
+                && record.AssignedAt < DateTime.UtcNow.AddDays(-_config.AwolNotificationMaxAgeDays))
+            {
+                record.NotificationSent = true;
+                record.NotificationSentAt = DateTime.UtcNow;
+                stale++;
+                _logger.LogWarning(
+                    "AWOL notification suppressed (stale): {Username} ({UserId}) assigned {AssignedAt:yyyy-MM-dd HH:mm} UTC is older than the {MaxAge}d notify window. " +
+                    "Resolved without posting. If many fire at once, a flag reset (restore / bulk UPDATE) likely re-queued historical records.",
+                    record.Username, record.UserId, record.AssignedAt, _config.AwolNotificationMaxAgeDays);
+                continue;
+            }
+
             // ── Give-up check ──
             // If we've been trying for more than NotificationGiveUpWindow and
             // still haven't succeeded, mark the record resolved with a
@@ -565,8 +589,8 @@ public class AwolCheckService : BackgroundService
         if (pendingNotifications.Count > 0)
         {
             _logger.LogInformation(
-                "AWOL Step 3 summary for {Guild}: notified={Notified}, given up={GivenUp}, role gone={RoleGone}, user gone={UserGone}, failed={Failed} (out of {Total} pending)",
-                guild.Name, notified, givenUp, roleGone, userGone, failed, pendingNotifications.Count);
+                "AWOL Step 3 summary for {Guild}: notified={Notified}, given up={GivenUp}, stale suppressed={Stale}, role gone={RoleGone}, user gone={UserGone}, failed={Failed} (out of {Total} pending)",
+                guild.Name, notified, givenUp, stale, roleGone, userGone, failed, pendingNotifications.Count);
         }
     }
 
