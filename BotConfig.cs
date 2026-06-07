@@ -254,6 +254,59 @@ public class BotConfig
     /// </summary>
     public string CompEventMinRank { get; set; } = "CPT";
 
+    // ──────────────────────────────────────────────────────────────────────
+    //  In-house events (Apollo replacement)
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Minimum rank required to create events via /event, and to edit/cancel
+    /// any event. The organizer of an event may always edit/cancel their own
+    /// regardless of rank. Must match a rank name in RankRoles (case-insensitive).
+    /// </summary>
+    public string EventCommandMinRank { get; set; } = "CPT";
+
+    /// <summary>Master switch for the cosmetic RSVP buttons on event posts.</summary>
+    public bool EventRsvpEnabled { get; set; } = true;
+
+    /// <summary>Default event length when the creator doesn't specify an end/duration.</summary>
+    public double EventDefaultDurationHours { get; set; } = 2.0;
+
+    /// <summary>
+    /// IANA timezone used to interpret a creator's natural-language time input
+    /// when they have not set their own via /timezone. Display is always
+    /// per-viewer (Discord &lt;t:unix&gt; markdown); this only affects input parsing.
+    /// </summary>
+    public string EventDefaultTimeZone { get; set; } = "America/Chicago";
+
+    /// <summary>Master switch for event reminder pings.</summary>
+    public bool EventReminderEnabled { get; set; } = true;
+
+    /// <summary>
+    /// CSV of minutes-before-start at which a reminder fires (e.g. "60,15").
+    /// Add or remove values freely; the worker fires once per value per event
+    /// and records fired values on ClanEvent.RemindersSentCsv.
+    /// </summary>
+    public string EventReminderLeadMinutes { get; set; } = "60,15";
+
+    /// <summary>Channel reminders post to. 0 → fall back to EventsTextChannelId.</summary>
+    public ulong EventReminderChannelId { get; set; } = default;
+
+    /// <summary>
+    /// CSV of RSVP statuses whose members get @-mentioned in the reminder
+    /// (any of: Going, Maybe, Decline). Default pings only those who said Going.
+    /// The reminder still posts to the channel even when no one matches.
+    /// </summary>
+    public string EventReminderPingStatuses { get; set; } = "Going";
+
+    /// <summary>How far ahead the recurrence scheduler materializes occurrences.</summary>
+    public int EventRecurrenceHorizonDays { get; set; } = 14;
+
+    /// <summary>
+    /// Cap on how many occurrences the scheduler will create in a single pass,
+    /// guarding against a flood if the bot was offline for an extended period.
+    /// </summary>
+    public int EventRecurrenceMaxBackfill { get; set; } = 4;
+
     /// <summary>
     /// The minimum rank required to use the /promote and /demote commands.
     /// Must exactly match one of the rank names in RankRoles (case-insensitive).

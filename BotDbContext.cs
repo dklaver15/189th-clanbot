@@ -36,6 +36,11 @@ public class BotDbContext : DbContext
     public DbSet<MeetingRecording>    MeetingRecordings   => Set<MeetingRecording>();
     public DbSet<MemberDeparture>     MemberDepartures    => Set<MemberDeparture>();
     public DbSet<KnownMember>         KnownMembers        => Set<KnownMember>();
+    // ── In-house events ──
+    public DbSet<ClanEvent>           ClanEvents          => Set<ClanEvent>();
+    public DbSet<ClanEventSeries>     ClanEventSeries     => Set<ClanEventSeries>();
+    public DbSet<EventRsvp>           EventRsvps          => Set<EventRsvp>();
+    public DbSet<UserTimeZone>        UserTimeZones       => Set<UserTimeZone>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -420,6 +425,32 @@ public class BotDbContext : DbContext
             e.Property(x => x.IncidentId).HasMaxLength(64);
             e.Property(x => x.Status).HasMaxLength(32);
             e.HasIndex(x => x.IncidentId);
+        });
+
+        // ── In-house events ──
+        modelBuilder.Entity<ClanEvent>(entity =>
+        {
+            entity.HasIndex(e => new { e.GuildId, e.StartUtc });             // list + recurrence/reminder scans
+            entity.HasIndex(e => new { e.Status, e.StartUtc });              // reminder worker: Scheduled & future
+            entity.HasIndex(e => e.MessageId).IsUnique();                    // RSVP button → event lookup
+            entity.HasIndex(e => e.CalendarEventId);                         // map back to the hub row
+            entity.HasIndex(e => new { e.SeriesId, e.StartUtc }).IsUnique(); // recurrence idempotency (NULLs distinct)
+        });
+
+        modelBuilder.Entity<EventRsvp>(entity =>
+        {
+            entity.HasIndex(e => new { e.ClanEventId, e.UserId }).IsUnique(); // one RSVP per member per event
+            entity.HasIndex(e => e.ClanEventId);                             // embed render query
+        });
+
+        modelBuilder.Entity<ClanEventSeries>(entity =>
+        {
+            entity.HasIndex(e => new { e.GuildId, e.Active });
+        });
+
+        modelBuilder.Entity<UserTimeZone>(entity =>
+        {
+            entity.HasIndex(e => e.UserId).IsUnique();
         });
     }
 }
