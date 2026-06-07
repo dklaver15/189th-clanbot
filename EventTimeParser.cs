@@ -154,7 +154,7 @@ public sealed class EventTimeParser
         var nowLocal = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, tz);
         var nowUtc   = DateTime.UtcNow;
 
-        List<Recog.ModelResult> results;
+        List<ModelResult> results;
         try
         {
             // refTime anchors relative phrases ("tomorrow", "in 2 hours") to the
@@ -282,7 +282,7 @@ public sealed class EventTimeParser
 
         var startLocal = TimeZoneInfo.ConvertTimeFromUtc(startUtc, tz);
 
-        List<Recog.ModelResult> results;
+        List<ModelResult> results;
         try
         {
             results = Recog.DateTimeRecognizer.RecognizeDateTime(
@@ -365,7 +365,7 @@ public sealed class EventTimeParser
     /// entry is a list of string→string dictionaries (each a candidate
     /// resolution carrying "type"/"value" or "start"/"end").
     /// </summary>
-    private static IEnumerable<IDictionary<string, string>> EnumerateValues(Recog.ModelResult result)
+    private static IEnumerable<IDictionary<string, string>> EnumerateValues(ModelResult result)
     {
         if (result?.Resolution is null || !result.Resolution.TryGetValue("values", out var raw) || raw is null)
             yield break;
