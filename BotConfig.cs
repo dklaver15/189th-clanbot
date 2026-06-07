@@ -15,7 +15,18 @@ public class BotConfig
     /// <summary>Name of the role to assign to inactive users.</summary>
     public string AwolRoleName { get; set; } = "AWOL";
 
-    /// <summary>Name (or ID) of the HQ channel where AWOL notifications are posted.</summary>
+    /// <summary>
+    /// Discord channel ID of the HQ/AWOL channel where AWOL notifications are
+    /// posted. Takes precedence over HqChannelName when non-zero. Prefer this
+    /// over the name lookup — it is immune to channel renames (e.g. adding an
+    /// emoji to the channel name, which silently breaks the name match).
+    /// </summary>
+    public ulong HqChannelId { get; set; } = default;
+
+    /// <summary>
+    /// Name of the HQ channel where AWOL notifications are posted. Used only as
+    /// a fallback when HqChannelId is unset (0) or does not resolve in the guild.
+    /// </summary>
     public string HqChannelName { get; set; } = "hq";
 
     /// <summary>Rolling window in days for activity tracking.</summary>

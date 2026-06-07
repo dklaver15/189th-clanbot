@@ -195,13 +195,31 @@ public class AwolCheckService : BackgroundService
             return;
         }
 
-        var hqChannel = guild.TextChannels.FirstOrDefault(c =>
+        // Resolve the HQ/AWOL channel by ID first (rename-proof), falling back
+        // to a name lookup so a fresh install still works before an ID is set.
+        // The name lookup is brittle — adding an emoji to the channel name
+        // breaks the exact-match — which is exactly why ID takes precedence.
+        SocketTextChannel? hqChannel = null;
+        if (_config.HqChannelId != 0)
+        {
+            hqChannel = guild.GetTextChannel(_config.HqChannelId);
+            if (hqChannel is null)
+            {
+                _logger.LogWarning(
+                    "HqChannelId={ChannelId} did not resolve in guild {Guild}; " +
+                    "falling back to HqChannelName='{ChannelName}'.",
+                    _config.HqChannelId, guild.Name, _config.HqChannelName);
+            }
+        }
+
+        hqChannel ??= guild.TextChannels.FirstOrDefault(c =>
             c.Name.Equals(_config.HqChannelName, StringComparison.OrdinalIgnoreCase));
 
         if (hqChannel is null)
         {
-            _logger.LogWarning("HQ channel '{ChannelName}' not found in guild {Guild}. Skipping notifications.",
-                _config.HqChannelName, guild.Name);
+            _logger.LogWarning(
+                "HQ channel could not be resolved in guild {Guild} (HqChannelId={ChannelId}, HqChannelName='{ChannelName}'). Skipping notifications.",
+                guild.Name, _config.HqChannelId, _config.HqChannelName);
         }
 
         // GetExemptRolesList() appends ReserveRoleName, so Reserve members are
