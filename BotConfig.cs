@@ -265,6 +265,18 @@ public class BotConfig
     /// </summary>
     public string EventCommandMinRank { get; set; } = "CPT";
 
+    /// <summary>
+    /// Channel that ClanGuard-created event embeds are posted to. 0 falls back
+    /// to EventsTextChannelId. Kept separate from EventsTextChannelId on purpose:
+    /// that key is the channel the Apollo capture/backfill/reconciliation
+    /// pipeline watches, so the in-house event posts can target a different
+    /// channel without disturbing Apollo.
+    /// </summary>
+    public ulong EventPostChannelId { get; set; } = default;
+
+    /// <summary>Resolves the channel ClanGuard event posts go to (EventPostChannelId, else EventsTextChannelId).</summary>
+    public ulong GetEventPostChannelId() => EventPostChannelId != 0 ? EventPostChannelId : EventsTextChannelId;
+
     /// <summary>Master switch for the cosmetic RSVP buttons on event posts.</summary>
     public bool EventRsvpEnabled { get; set; } = true;
 

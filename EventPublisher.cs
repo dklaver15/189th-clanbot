@@ -78,7 +78,7 @@ public sealed class EventPublisher : IEventPublisher
                 TimeZoneId      = string.IsNullOrWhiteSpace(d.TimeZoneId) ? tz.Id : d.TimeZoneId,
                 FirstStartLocal = firstLocal,
                 DurationMinutes = durMinutes,
-                ChannelId       = _config.EventsTextChannelId,
+                ChannelId       = _config.GetEventPostChannelId(),
                 UntilUtc        = d.UntilUtc,
                 MaxOccurrences  = d.MaxOccurrences,
                 Active          = true,
@@ -128,10 +128,11 @@ public sealed class EventPublisher : IEventPublisher
             return;
         }
 
-        if (_client.GetChannel(_config.EventsTextChannelId) is not IMessageChannel channel)
+        var postChannelId = _config.GetEventPostChannelId();
+        if (_client.GetChannel(postChannelId) is not IMessageChannel channel)
         {
-            _logger.LogError("EventsTextChannelId {Channel} is not a reachable message channel; cannot post event '{Title}'",
-                _config.EventsTextChannelId, title);
+            _logger.LogError("Event post channel {Channel} is not a reachable message channel; cannot post event '{Title}'",
+                postChannelId, title);
             return;
         }
 

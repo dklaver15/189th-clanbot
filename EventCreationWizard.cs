@@ -413,7 +413,8 @@ public sealed class EventCreationWizard
             return;
         }
 
-        var channelMention = _config.EventsTextChannelId != 0 ? $"<#{_config.EventsTextChannelId}>" : "the events channel";
+        var postChannelId = _config.GetEventPostChannelId();
+        var channelMention = postChannelId != 0 ? $"<#{postChannelId}>" : "the events channel";
         await ClearButtons(c, $"✅ **Event created!** It's been posted to {channelMention}.");
     }
 
