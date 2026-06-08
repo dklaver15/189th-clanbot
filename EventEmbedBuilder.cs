@@ -24,6 +24,13 @@ public static class EventEmbedBuilder
 
     private static readonly Color Blurple = new(0x5865F2);
 
+    // Invisible Braille-blank (U+2800) run. Unlike normal spaces it has real
+    // width and isn't collapsed, so a line of these pushes the embed out to
+    // Discord's max width on desktop (a square banner image otherwise lets the
+    // embed shrink narrower than Apollo's wide flag). On mobile it wraps as
+    // harmless blank space. Bump/cut the count to taste.
+    private static readonly string WidthSpacer = new('\u2800', 40);
+
     public static Embed BuildEmbed(ClanEvent ev, IReadOnlyCollection<EventRsvp> rsvps, string? imageFileName = null)
     {
         var going   = rsvps.Where(r => r.Status == EventRsvpStatus.Going).ToList();
@@ -41,9 +48,10 @@ public static class EventEmbedBuilder
             eb.WithDescription(ev.Description);
 
         // Full-width blank line between the Ends/Organizer row and the RSVP
-        // rosters: adds visual separation and forces the three rosters onto a
-        // fresh row as clean side-by-side columns (Apollo-style).
-        eb.AddField("\u200b", "\u200b", inline: false);
+        // rosters: adds visual separation, forces the three rosters onto a fresh
+        // row as clean side-by-side columns, and (via WidthSpacer) widens the
+        // embed toward Discord's max on desktop.
+        eb.AddField("\u200b", WidthSpacer, inline: false);
 
         eb.AddField($"✅ Going ({going.Count})",        Names(going),   inline: true);
         eb.AddField($"❔ Maybe ({maybe.Count})",        Names(maybe),   inline: true);
