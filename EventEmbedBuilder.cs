@@ -26,10 +26,12 @@ public static class EventEmbedBuilder
 
     // Invisible Braille-blank (U+2800) run. Unlike normal spaces it has real
     // width and isn't collapsed, so a line of these pushes the embed out to
-    // Discord's max width on desktop (a square banner image otherwise lets the
-    // embed shrink narrower than Apollo's wide flag). On mobile it wraps as
-    // harmless blank space. Bump/cut the count to taste.
-    private static readonly string WidthSpacer = new('\u2800', 40);
+    // Discord's max width on desktop. This has to carry the full width now that
+    // banner images are downscaled (EventImage.Downscale) — a small/square image
+    // no longer widens the embed on its own. Desktop caps at its max and wraps
+    // the rest invisibly (no downside to overshooting); the only cost is a little
+    // extra blank height on mobile. Tune the count if needed.
+    private static readonly string WidthSpacer = new('\u2800', 140);
 
     public static Embed BuildEmbed(ClanEvent ev, IReadOnlyCollection<EventRsvp> rsvps, string? imageFileName = null)
     {
@@ -90,13 +92,13 @@ public static class EventEmbedBuilder
         if (rsvpEnabled)
         {
             cb.WithButton(null, ButtonId("going",   clanEventId), ButtonStyle.Secondary, emote: new Emoji("✅"), disabled: locked)
-              .WithButton(null, ButtonId("maybe",   clanEventId), ButtonStyle.Secondary, emote: new Emoji("❔"), disabled: locked)
+              .WithButton(null, ButtonId("maybe",   clanEventId), ButtonStyle.Secondary, emote: new Emoji("❓"), disabled: locked)
               .WithButton(null, ButtonId("decline", clanEventId), ButtonStyle.Secondary, emote: new Emoji("❌"), disabled: locked);
         }
 
         var mgmtRow = rsvpEnabled ? 1 : 0;
         cb.WithButton("Edit",     $"{MgmtPrefix}pedit:{clanEventId}",   ButtonStyle.Primary,   row: mgmtRow)
-          .WithButton("Set Host", $"{MgmtPrefix}sethost:{clanEventId}", ButtonStyle.Success,   row: mgmtRow)
+          .WithButton("Set Host", $"{MgmtPrefix}sethost:{clanEventId}", ButtonStyle.Secondary, row: mgmtRow)
           .WithButton("Cancel",   $"{MgmtPrefix}pcancel:{clanEventId}", ButtonStyle.Danger,    row: mgmtRow);
 
         return cb.Build();
