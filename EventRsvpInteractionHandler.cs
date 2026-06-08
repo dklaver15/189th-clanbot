@@ -28,6 +28,7 @@ public sealed class EventRsvpInteractionHandler
     private readonly IServiceProvider _services;
     private readonly ILogger<EventRsvpInteractionHandler> _logger;
     private readonly BotConfig _config;
+    private readonly DiscordSocketClient _client;
 
     // Striped locks: a fixed pool of gates indexed by event id. Serializes the
     // read-modify-render of a given event's embed without growing per-event
@@ -43,11 +44,13 @@ public sealed class EventRsvpInteractionHandler
     public EventRsvpInteractionHandler(
         IServiceProvider services,
         ILogger<EventRsvpInteractionHandler> logger,
-        IOptions<BotConfig> config)
+        IOptions<BotConfig> config,
+        DiscordSocketClient client)
     {
         _services = services;
         _logger   = logger;
         _config   = config.Value;
+        _client   = client;
     }
 
     public void Register(DiscordSocketClient client)
@@ -119,17 +122,47 @@ public sealed class EventRsvpInteractionHandler
                 });
             else
             {
-                existing.Status    = status.Value;
-                existing.UpdatedAt = DateTime.UtcNow;
+                // UpdatedAt is the waitlist's signup-order key, so only bump it on
+                // a real intent change. Going and Waitlisted are the same "wants to
+                // go" intent — re-clicking Going while waitlisted must NOT shove the
+                // member behind people who signed up after them.
+                var hadGoingIntent  = existing.Status is EventRsvpStatus.Going or EventRsvpStatus.Waitlisted;
+                var wantsGoing      = status.Value == EventRsvpStatus.Going;
+                var sameIntent      = existing.Status == status.Value || (wantsGoing && hadGoingIntent);
+
+                existing.Status = status.Value;
+                if (!sameIntent) existing.UpdatedAt = DateTime.UtcNow;
             }
             await db.SaveChangesAsync();
 
+            // Re-derive Going vs Waitlisted under the cap. This both demotes the
+            // just-clicked member if they joined a full event and promotes the
+            // oldest waitlister if this click freed a confirmed spot.
             var rsvps = await db.EventRsvps.Where(r => r.ClanEventId == clanEventId).ToListAsync();
+            var promoted = EventWaitlist.Rebalance(rsvps, ev.MaxParticipants);
+            if (promoted.Count > 0 || db.ChangeTracker.HasChanges())
+                await db.SaveChangesAsync();
+
             await component.UpdateAsync(m =>
             {
                 m.Embed      = EventEmbedBuilder.BuildEmbed(ev, rsvps, ev.ImageFileName);
                 m.Components = EventEmbedBuilder.BuildComponents(ev.Id, _config.EventRsvpEnabled, locked: false);
             });
+
+            // Courtesy DMs to anyone auto-promoted off the waitlist by this click.
+            foreach (var uid in promoted)
+                await EventWaitlist.NotifyPromotedAsync(_client, ev, uid);
+
+            // If the clicker asked to go but the cap was full, tell them quietly.
+            if (status.Value == EventRsvpStatus.Going)
+            {
+                var mine = rsvps.FirstOrDefault(r => r.UserId == component.User.Id);
+                if (mine?.Status == EventRsvpStatus.Waitlisted)
+                    await component.FollowupAsync(
+                        "🕓 This event is full, so you're on the **waitlist**. " +
+                        "You'll be moved to Going automatically — and DM'd — if a spot opens.",
+                        ephemeral: true);
+            }
         }
         catch (Exception ex)
         {

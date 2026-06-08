@@ -15,6 +15,7 @@ public enum WizardStep
     Duration,
     Description,
     Image,           // optional attachment step (or 'skip')
+    MaxParticipants, // optional cap step (number, or 'none' for unlimited)
     Recurrence,      // button step
     RecurrenceUntil,
     Confirm,         // button step
@@ -54,6 +55,10 @@ public sealed class EventDraft
 
     /// <summary>Recurrence bound: stop after this many occurrences.</summary>
     public int? MaxOccurrences { get; set; }
+
+    /// <summary>Optional Going cap; null = unlimited. For a series this becomes
+    /// the series-wide cap that every occurrence inherits.</summary>
+    public int? MaxParticipants { get; set; }
 }
 
 /// <summary>

@@ -32,4 +32,13 @@ public enum EventRsvpStatus
     Going = 1,
     Maybe = 2,
     Decline = 3,
+
+    /// <summary>
+    /// Wanted to go, but the event's <see cref="ClanEvent.MaxParticipants"/> cap
+    /// was already full when they clicked Going. Held in signup order (by
+    /// <see cref="EventRsvp.UpdatedAt"/>) and auto-promoted to Going when a
+    /// confirmed spot frees up. Stored as the int 4 — a new enum value needs no
+    /// schema migration since Status is persisted as an integer.
+    /// </summary>
+    Waitlisted = 4,
 }

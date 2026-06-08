@@ -69,6 +69,16 @@ public class ClanEvent
     /// </summary>
     public ulong? HostId { get; set; }
 
+    /// <summary>
+    /// Optional cap on confirmed "Going" RSVPs; null = unlimited. Going clicks
+    /// past the cap land on the waitlist (<see cref="EventRsvpStatus.Waitlisted"/>)
+    /// and are auto-promoted in signup order when a spot frees up. Editable after
+    /// creation via the Edit modal — lowering it demotes the most-recent confirmed
+    /// members, raising/clearing it promotes waitlisters (EventWaitlist.Rebalance).
+    /// For series occurrences this is stamped from the series-wide cap.
+    /// </summary>
+    public int? MaxParticipants { get; set; }
+
     public DateTime StartUtc { get; set; }
     public DateTime EndUtc { get; set; }
 

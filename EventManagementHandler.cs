@@ -779,11 +779,21 @@ public sealed class EventManagementHandler
         ev.StartUtc    = newStart;
         ev.EndUtc      = d.EndUtc;
         ev.Description = f.GetValueOrDefault("desc", "").Trim();
+        ev.MaxParticipants = ParseMaxField(f.GetValueOrDefault("max", ""));
         if (timeMoved) ev.RemindersSentCsv = string.Empty; // re-arm reminders for the new time
 
         await ApplyCalendarUpdateAsync(db, ev);
         await db.SaveChangesAsync();
+
+        // Re-derive Going vs Waitlist under the (possibly changed) cap — lowering
+        // it demotes the newest confirmed members; raising/clearing it promotes
+        // waitlisters — then re-render and DM anyone bumped up.
+        var rsvps = await db.EventRsvps.Where(r => r.ClanEventId == ev.Id).ToListAsync();
+        var promoted = EventWaitlist.Rebalance(rsvps, ev.MaxParticipants);
+        if (promoted.Count > 0 || db.ChangeTracker.HasChanges()) await db.SaveChangesAsync();
+
         await UpdatePostAsync(db, ev);
+        foreach (var uid in promoted) await EventWaitlist.NotifyPromotedAsync(_client, ev, uid);
 
         await modal.FollowupAsync($"✅ Updated **{ev.Title}**.", ephemeral: true);
     }
@@ -803,6 +813,7 @@ public sealed class EventManagementHandler
 
         series.Title       = title;
         series.Description = description;
+        series.MaxParticipants = ParseMaxField(f.GetValueOrDefault("max", ""));
 
         var now = DateTime.UtcNow;
         var futures = await db.ClanEvents
@@ -813,12 +824,26 @@ public sealed class EventManagementHandler
         {
             ev.Title       = title;
             ev.Description = description;
+            ev.MaxParticipants = series.MaxParticipants;
             await ApplyCalendarUpdateAsync(db, ev);
         }
         await db.SaveChangesAsync();
 
+        // Rebalance every future occurrence under the new series cap, then render.
+        var promotions = new List<(ClanEvent Ev, ulong UserId)>();
+        foreach (var ev in futures)
+        {
+            var rsvps = await db.EventRsvps.Where(r => r.ClanEventId == ev.Id).ToListAsync();
+            foreach (var uid in EventWaitlist.Rebalance(rsvps, ev.MaxParticipants))
+                promotions.Add((ev, uid));
+        }
+        if (db.ChangeTracker.HasChanges()) await db.SaveChangesAsync();
+
         foreach (var ev in futures)
             await UpdatePostAsync(db, ev);
+
+        foreach (var (ev, uid) in promotions)
+            await EventWaitlist.NotifyPromotedAsync(_client, ev, uid);
 
         await modal.FollowupAsync(
             $"✅ Updated the series **{title}** and {futures.Count} upcoming occurrence{(futures.Count == 1 ? "" : "s")}.",
@@ -961,6 +986,20 @@ public sealed class EventManagementHandler
         }
     }
 
+    /// <summary>
+    /// Parses the "Attendee limit" modal field. Blank, "0", "none" or any
+    /// non-positive/garbage value means unlimited (null); a positive integer is
+    /// the cap. Forgiving on purpose — the modal field is free text.
+    /// </summary>
+    private static int? ParseMaxField(string raw)
+    {
+        raw = raw.Trim();
+        if (raw.Length == 0) return null;
+        if (int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) && n > 0)
+            return n;
+        return null;
+    }
+
     private Modal BuildEditModal(string scope, int clanEventId, ClanEvent ev, bool withWhen, bool withDuration, TimeZoneInfo tz)
     {
         var mb = new ModalBuilder()
@@ -983,6 +1022,8 @@ public sealed class EventManagementHandler
 
         mb.AddTextInput("Description", "desc", TextInputStyle.Paragraph,
             value: string.IsNullOrEmpty(ev.Description) ? null : ev.Description, required: false);
+        mb.AddTextInput("Attendee limit (number, blank = no limit)", "max", TextInputStyle.Short,
+            value: ev.MaxParticipants?.ToString(CultureInfo.InvariantCulture), required: false, maxLength: 6);
         return mb.Build();
     }
 
@@ -994,6 +1035,8 @@ public sealed class EventManagementHandler
             .AddTextInput("Title", "title", TextInputStyle.Short, value: ev.Title, required: true, maxLength: 100)
             .AddTextInput("Description", "desc", TextInputStyle.Paragraph,
                 value: string.IsNullOrEmpty(ev.Description) ? null : ev.Description, required: false)
+            .AddTextInput("Attendee limit (number, blank = no limit)", "max", TextInputStyle.Short,
+                value: ev.MaxParticipants?.ToString(CultureInfo.InvariantCulture), required: false, maxLength: 6)
             .Build();
     }
 

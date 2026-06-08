@@ -35,9 +35,10 @@ public static class EventEmbedBuilder
 
     public static Embed BuildEmbed(ClanEvent ev, IReadOnlyCollection<EventRsvp> rsvps, string? imageFileName = null)
     {
-        var going   = rsvps.Where(r => r.Status == EventRsvpStatus.Going).ToList();
+        var going   = rsvps.Where(r => r.Status == EventRsvpStatus.Going).OrderBy(r => r.UpdatedAt).ToList();
         var maybe   = rsvps.Where(r => r.Status == EventRsvpStatus.Maybe).ToList();
         var decline = rsvps.Where(r => r.Status == EventRsvpStatus.Decline).ToList();
+        var waitlist = rsvps.Where(r => r.Status == EventRsvpStatus.Waitlisted).OrderBy(r => r.UpdatedAt).ToList();
 
         var eb = new EmbedBuilder()
             .WithTitle($"📅 {ev.Title}")
@@ -55,9 +56,18 @@ public static class EventEmbedBuilder
         // embed toward Discord's max on desktop.
         eb.AddField("\u200b", WidthSpacer, inline: false);
 
-        eb.AddField($"✅ Going ({going.Count})",        Names(going),   inline: true);
+        var goingLabel = ev.MaxParticipants is int cap
+            ? $"✅ Going ({going.Count}/{cap})"
+            : $"✅ Going ({going.Count})";
+        eb.AddField(goingLabel,                       Names(going),   inline: true);
         eb.AddField($"❔ Maybe ({maybe.Count})",        Names(maybe),   inline: true);
         eb.AddField($"❌ Declined ({decline.Count})", Names(decline), inline: true);
+
+        // Waitlist sits on its own full-width row below the trio, in signup
+        // order. Shown only when someone's actually waitlisted, so uncapped
+        // events stay uncluttered.
+        if (waitlist.Count > 0)
+            eb.AddField($"🕓 Waitlist ({waitlist.Count})", Names(waitlist), inline: false);
 
         // Footer: "Created by <name>" (the creator — officers often create on
         // someone else's behalf), plus a recurring/cancelled note. A footer is

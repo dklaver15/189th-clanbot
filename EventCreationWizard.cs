@@ -176,6 +176,7 @@ public sealed class EventCreationWizard
                 case WizardStep.Duration:        await HandleDurationAsync(s, text);       break;
                 case WizardStep.Description:     await HandleDescriptionAsync(s, text);    break;
                 case WizardStep.Image:           await HandleImageAsync(s, message, text);  break;
+                case WizardStep.MaxParticipants: await HandleMaxParticipantsAsync(s, text);  break;
                 case WizardStep.RecurrenceUntil: await HandleRecurrenceUntilAsync(s, text); break;
                 // Recurrence / Confirm are button steps — ignore stray text.
             }
@@ -301,8 +302,8 @@ public sealed class EventCreationWizard
         {
             s.Draft.ImageBytes    = null;
             s.Draft.ImageFileName = null;
-            s.Step = WizardStep.Recurrence;
-            await PromptRecurrenceAsync(s);
+            s.Step = WizardStep.MaxParticipants;
+            await PromptMaxParticipantsAsync(s);
             return;
         }
 
@@ -323,8 +324,8 @@ public sealed class EventCreationWizard
 
                 s.Draft.ImageFileName = res.FileName;
                 s.Draft.ImageBytes    = EventImage.Downscale(res.Bytes!, res.FileName);
-                s.Step = WizardStep.Recurrence;
-                await PromptRecurrenceAsync(s);
+                s.Step = WizardStep.MaxParticipants;
+                await PromptMaxParticipantsAsync(s);
                 return;
             }
 
@@ -365,6 +366,42 @@ public sealed class EventCreationWizard
         var imgName = EventImage.Sanitize(att.Filename);
         s.Draft.ImageFileName = imgName;
         s.Draft.ImageBytes    = EventImage.Downscale(bytes, imgName);
+        s.Step = WizardStep.MaxParticipants;
+        await PromptMaxParticipantsAsync(s);
+    }
+
+    private async Task PromptMaxParticipantsAsync(EventCreationSession s)
+    {
+        await s.Dm.SendMessageAsync(embed: Form(
+            "👥 Limit the number of attendees?",
+            "Type a **max number** of people who can be on the Going list — extra " +
+            "sign-ups go on a waitlist and move up automatically when a spot opens.\n\n" +
+            "Type `none` (or `0`) for no limit. You can change this anytime after the event is created."));
+    }
+
+    private async Task HandleMaxParticipantsAsync(EventCreationSession s, string text)
+    {
+        text = text.Trim();
+
+        if (text.Equals("none", StringComparison.OrdinalIgnoreCase)
+         || text.Equals("skip", StringComparison.OrdinalIgnoreCase)
+         || text.Equals("unlimited", StringComparison.OrdinalIgnoreCase)
+         || text == "0")
+        {
+            s.Draft.MaxParticipants = null;
+        }
+        else if (int.TryParse(text, out var n) && n > 0)
+        {
+            s.Draft.MaxParticipants = n;
+        }
+        else
+        {
+            await s.Dm.SendMessageAsync(embed: Form(
+                "👥 Need a number",
+                "Give me a whole number greater than 0 (e.g. `16`), or type `none` for no limit."));
+            return;
+        }
+
         s.Step = WizardStep.Recurrence;
         await PromptRecurrenceAsync(s);
     }
@@ -601,6 +638,8 @@ public sealed class EventCreationWizard
             .AddField("Ends", EventTimeParser.Stamp(d.EndUtc, 't'), inline: true)
             .AddField("Duration", FormatDuration(d.StartUtc, d.EndUtc), inline: true)
             .AddField("Repeats", DescribeRecurrence(d), inline: true);
+
+        embed.AddField("Attendee limit", d.MaxParticipants is int cap ? $"{cap} max (waitlist past that)" : "No limit", inline: true);
 
         if (!string.IsNullOrWhiteSpace(d.Description))
             embed.AddField("Description", d.Description);

@@ -113,7 +113,8 @@ public sealed class EventRecurrenceScheduler : BackgroundService
                 await _publisher.CreateOccurrenceAsync(
                     series.GuildId, series.Id,
                     series.Title, series.Description, series.OrganizerId, series.OrganizerName,
-                    startUtc, endUtc);
+                    startUtc, endUtc,
+                    maxParticipants: series.MaxParticipants);
             }
         }
     }

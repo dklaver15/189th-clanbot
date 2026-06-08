@@ -68,6 +68,13 @@ public class ClanEventSeries
     public int? MaxOccurrences { get; set; }
 
     /// <summary>
+    /// Series-wide cap on confirmed "Going" RSVPs; null = unlimited. Every
+    /// occurrence inherits this (stamped onto <see cref="ClanEvent.MaxParticipants"/>
+    /// at creation by the publisher and the recurrence scheduler).
+    /// </summary>
+    public int? MaxParticipants { get; set; }
+
+    /// <summary>
     /// False once the series is retired (e.g. a "whole series" cancel). The
     /// scheduler skips inactive series; cancelling the series also tombstones
     /// its future materialized occurrences and their GCal entries.

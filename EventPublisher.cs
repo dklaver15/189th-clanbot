@@ -49,7 +49,8 @@ public sealed class EventPublisher : IEventPublisher
     public Task PublishOneOffAsync(EventDraft d) =>
         CreateOccurrenceAsync(d.GuildId, seriesId: null,
             d.Title, d.Description, d.OrganizerId, d.OrganizerName, d.StartUtc, d.EndUtc,
-            attachImageBytes: d.ImageBytes, imageFileName: d.ImageFileName);
+            attachImageBytes: d.ImageBytes, imageFileName: d.ImageFileName,
+            maxParticipants: d.MaxParticipants);
 
     public async Task PublishSeriesAsync(EventDraft d)
     {
@@ -82,6 +83,7 @@ public sealed class EventPublisher : IEventPublisher
                 ChannelId       = _config.GetEventPostChannelId(),
                 UntilUtc        = d.UntilUtc,
                 MaxOccurrences  = d.MaxOccurrences,
+                MaxParticipants = d.MaxParticipants,
                 Active          = true,
                 CreatedAt       = DateTime.UtcNow,
                 ImageBytes      = d.ImageBytes,
@@ -105,7 +107,8 @@ public sealed class EventPublisher : IEventPublisher
         foreach (var (startUtc, endUtc) in occurrences)
             await CreateOccurrenceAsync(d.GuildId, series.Id,
                 d.Title, d.Description, d.OrganizerId, d.OrganizerName, startUtc, endUtc,
-                attachImageBytes: series.ImageBytes, imageFileName: series.ImageFileName);
+                attachImageBytes: series.ImageBytes, imageFileName: series.ImageFileName,
+                maxParticipants: series.MaxParticipants);
 
         _logger.LogInformation(
             "Created series {SeriesId} '{Title}' ({Freq}); materialized {Count} occurrence(s)",
@@ -121,7 +124,8 @@ public sealed class EventPublisher : IEventPublisher
         ulong guildId, int? seriesId,
         string title, string description, ulong organizerId, string organizerName,
         DateTime startUtc, DateTime endUtc,
-        byte[]? attachImageBytes = null, string? imageFileName = null)
+        byte[]? attachImageBytes = null, string? imageFileName = null,
+        int? maxParticipants = null)
     {
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
@@ -196,6 +200,7 @@ public sealed class EventPublisher : IEventPublisher
             CreatedAt        = DateTime.UtcNow,
             ImageFileName    = imageFileName,
             ImageBytes       = seriesId == null ? attachImageBytes : null,
+            MaxParticipants  = maxParticipants,
         };
         db.ClanEvents.Add(clanEvent);
 
