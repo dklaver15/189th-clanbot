@@ -266,7 +266,7 @@ public sealed class EventManagementHandler
     }
 
     private async Task SubmitSingleEditAsync(
-        SocketModal modal, int clanEventId, IDictionary<string, string> f, TimeZoneInfo tz, bool allowTimeChange)
+        SocketModal modal, int clanEventId, IReadOnlyDictionary<string, string> f, TimeZoneInfo tz, bool allowTimeChange)
     {
         var title = f.GetValueOrDefault("title", "").Trim();
         if (string.IsNullOrWhiteSpace(title)) { await modal.RespondAsync("Title can't be empty.", ephemeral: true); return; }
@@ -304,7 +304,7 @@ public sealed class EventManagementHandler
         await modal.RespondAsync($"✅ Updated **{ev.Title}**.", ephemeral: true);
     }
 
-    private async Task SubmitSeriesEditAsync(SocketModal modal, int seriesId, IDictionary<string, string> f)
+    private async Task SubmitSeriesEditAsync(SocketModal modal, int seriesId, IReadOnlyDictionary<string, string> f)
     {
         var title = f.GetValueOrDefault("title", "").Trim();
         if (string.IsNullOrWhiteSpace(title)) { await modal.RespondAsync("Title can't be empty.", ephemeral: true); return; }

@@ -85,4 +85,12 @@ public enum ClanEventStatus
 {
     Scheduled = 1,
     Cancelled = 2,
+
+    /// <summary>
+    /// Event has ended and its #events post was auto-deleted by
+    /// EventArchiveService. The CalendarEvent row and Google Calendar entry are
+    /// kept; only the Discord message is removed. The row remains so the
+    /// recurrence scheduler still treats the slot as filled.
+    /// </summary>
+    Archived = 3,
 }

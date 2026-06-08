@@ -308,6 +308,17 @@ public class BotConfig
     public int EventRecurrenceMaxBackfill { get; set; } = 4;
 
     /// <summary>
+    /// When true, a ClanGuard-created event's #events post is deleted
+    /// EventArchiveDelayMinutes after the event ends. The Google Calendar entry
+    /// and attendance records are kept — only the Discord message is removed.
+    /// Apollo events are never touched.
+    /// </summary>
+    public bool EventAutoArchiveEnabled { get; set; } = true;
+
+    /// <summary>Minutes after an event's end before its #events post is auto-deleted.</summary>
+    public int EventArchiveDelayMinutes { get; set; } = 60;
+
+    /// <summary>
     /// The minimum rank required to use the /promote and /demote commands.
     /// Must exactly match one of the rank names in RankRoles (case-insensitive).
     /// </summary>

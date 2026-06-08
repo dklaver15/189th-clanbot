@@ -381,6 +381,7 @@ try
     builder.Services.AddSingleton<EventRsvpInteractionHandler>();
     builder.Services.AddHostedService<EventReminderService>();
     builder.Services.AddHostedService<EventRecurrenceScheduler>();
+    builder.Services.AddHostedService<EventArchiveService>();
 
     // ── Hosted Services ──────────────────────────────────────────────
     builder.Services.AddHostedService<DiscordBotService>();
