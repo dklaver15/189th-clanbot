@@ -664,12 +664,53 @@ public sealed class EventManagementHandler
         await db.SaveChangesAsync();
         await UpdatePostAsync(db, ev);
 
+        // DM the new host so they know they're running it — but not when the
+        // setter picked themselves (they just did it) or when host == creator
+        // pattern isn't relevant here since this is an explicit change.
+        var note = string.Empty;
+        if (hostId != component.User.Id)
+            note = await NotifyHostAsync(ev, hostId, component.User);
+
         await component.UpdateAsync(m =>
         {
-            m.Content    = $"✅ Host set to <@{hostId}>.";
+            m.Content    = $"✅ Host set to <@{hostId}>.{note}";
             m.Components  = Empty();
             m.AllowedMentions = AllowedMentions.None; // confirm shouldn't ping the new host
         });
+    }
+
+    /// <summary>
+    /// DMs the newly-assigned host (best-effort). Returns a short note for the
+    /// confirmation if the DM couldn't be delivered (e.g. DMs disabled).
+    /// </summary>
+    private async Task<string> NotifyHostAsync(ClanEvent ev, ulong hostId, SocketUser setter)
+    {
+        try
+        {
+            var host = (_client.GetGuild(ev.GuildId)?.GetUser(hostId) as IUser) ?? _client.GetUser(hostId);
+            if (host is null) return " (couldn't notify them — they weren't found.)";
+
+            var setterName = (setter as SocketGuildUser)?.DisplayName ?? setter.GlobalName ?? setter.Username;
+            var jump = $"https://discord.com/channels/{ev.GuildId}/{ev.ChannelId}/{ev.MessageId}";
+
+            var embed = new EmbedBuilder()
+                .WithColor(new Color(0x5865F2))
+                .WithTitle("📣 You've been set as event host")
+                .WithDescription(
+                    $"{setterName} set you as the host of **{ev.Title}**.\n\n" +
+                    $"🕒 {EventTimeParser.Stamp(ev.StartUtc, 'F')} ({EventTimeParser.Stamp(ev.StartUtc, 'R')})\n\n" +
+                    $"[Jump to the event]({jump})")
+                .Build();
+
+            var dm = await host.CreateDMChannelAsync();
+            await dm.SendMessageAsync(embed: embed);
+            return string.Empty;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to DM new host {Host} for event {Id}", hostId, ev.Id);
+            return " (couldn't DM them — they may have DMs disabled.)";
+        }
     }
 
 
