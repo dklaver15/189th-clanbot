@@ -39,6 +39,7 @@ try
                        | GatewayIntents.GuildInvites
                        | GatewayIntents.GuildPresences
                        | GatewayIntents.GuildBans  // a.k.a. GuildModeration (Discord renamed it server-side; Discord.NET 3.17 keeps the old enum name). Required for AuditLogCreated.
+                       | GatewayIntents.DirectMessages  // required for the /event DM creation wizard to receive DM replies
                        | GatewayIntents.MessageContent,
         AlwaysDownloadUsers = true,
         LogLevel            = LogSeverity.Info,
@@ -362,6 +363,19 @@ try
 
     // CompEventCommandHandler: /comp-event slash command for CPT+ officers.
     builder.Services.AddSingleton<CompEventCommandHandler>();
+
+    // ── In-house events (Apollo replacement) ─────────────────────────────
+    //   • EventTimeParser — natural-language time → UTC (creator-tz aware).
+    //   • IEventPublisher — seam to the persistence/posting layer. Currently a
+    //     logging scaffold so the wizard can be exercised end-to-end; swap for
+    //     the real EventPublisher next slice (no wizard changes).
+    //   • EventCreationWizard — DM session state machine (self-registers
+    //     MessageReceived + ButtonExecuted).
+    //   • EventCommandHandler — /event + /timezone slash commands.
+    builder.Services.AddSingleton<EventTimeParser>();
+    builder.Services.AddSingleton<IEventPublisher, LoggingEventPublisher>();
+    builder.Services.AddSingleton<EventCreationWizard>();
+    builder.Services.AddSingleton<EventCommandHandler>();
 
     // ── Hosted Services ──────────────────────────────────────────────
     builder.Services.AddHostedService<DiscordBotService>();

@@ -1,0 +1,66 @@
+using ClanGuardBot.Models;
+using Discord;
+
+namespace ClanGuardBot.Handlers;
+
+/// <summary>
+/// Steps of the DM event-creation wizard. Text steps are driven by DM replies;
+/// Recurrence and Confirm are button-only.
+/// </summary>
+public enum WizardStep
+{
+    Timezone,        // only entered when the organizer has no saved UserTimeZone
+    Title,
+    When,
+    Duration,
+    Description,
+    Recurrence,      // button step
+    RecurrenceUntil,
+    Confirm,         // button step
+}
+
+/// <summary>
+/// The data collected by the wizard. Becomes the input to
+/// <see cref="ClanGuardBot.Services.IEventPublisher"/> on confirm. Times are
+/// UTC; the publisher derives the DST-safe local anchor for a series from
+/// <see cref="StartUtc"/> + <see cref="TimeZoneId"/>.
+/// </summary>
+public sealed class EventDraft
+{
+    public ulong GuildId { get; set; }
+    public ulong OrganizerId { get; set; }
+    public string OrganizerName { get; set; } = string.Empty;
+
+    /// <summary>Organizer's IANA zone — used to interpret their input and to anchor recurrence.</summary>
+    public string TimeZoneId { get; set; } = string.Empty;
+
+    public string Title { get; set; } = string.Empty;
+    public DateTime StartUtc { get; set; }
+    public DateTime EndUtc { get; set; }
+    public string Description { get; set; } = string.Empty;
+
+    /// <summary>Null = one-off event; otherwise a recurring series.</summary>
+    public ClanEventFrequency? Frequency { get; set; }
+
+    /// <summary>Recurrence bound: stop after this instant. Null with null MaxOccurrences = open-ended.</summary>
+    public DateTime? UntilUtc { get; set; }
+
+    /// <summary>Recurrence bound: stop after this many occurrences.</summary>
+    public int? MaxOccurrences { get; set; }
+}
+
+/// <summary>
+/// In-memory state for one organizer's active wizard session. Held in a
+/// ConcurrentDictionary keyed by organizer user id; expired on idle and removed
+/// on completion/cancel. A bot restart drops in-progress sessions, which is
+/// acceptable — the organizer simply re-runs /event.
+/// </summary>
+public sealed class EventCreationSession
+{
+    public WizardStep Step { get; set; }
+    public EventDraft Draft { get; set; } = new();
+    public IDMChannel Dm { get; set; } = null!;
+    public DateTime StartedAt { get; set; }
+    public DateTime LastActivityAt { get; set; }
+    public bool TimezoneKnown { get; set; }
+}

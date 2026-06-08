@@ -40,6 +40,8 @@ public class DiscordBotService : IHostedService
     private readonly ApolloEventHandler _apolloEventHandler;
     private readonly ApolloMessageCaptureHandler _apolloCaptureHandler;
     private readonly CompEventCommandHandler _compEventHandler;
+    private readonly EventCommandHandler _eventCommandHandler;
+    private readonly EventCreationWizard _eventWizard;
     private readonly PromoteCommandHandler _promoteHandler;
     private readonly DemoteCommandHandler _demoteHandler;
     private readonly SetNickCommandHandler _setNickHandler;
@@ -94,6 +96,8 @@ public class DiscordBotService : IHostedService
         ApolloEventHandler apolloEventHandler,
         ApolloMessageCaptureHandler apolloCaptureHandler,
         CompEventCommandHandler compEventHandler,
+        EventCommandHandler eventCommandHandler,
+        EventCreationWizard eventWizard,
         PromoteCommandHandler promoteHandler,
         DemoteCommandHandler demoteHandler,
         SetNickCommandHandler setNickHandler,
@@ -147,6 +151,8 @@ public class DiscordBotService : IHostedService
         _apolloEventHandler          = apolloEventHandler;
         _apolloCaptureHandler        = apolloCaptureHandler;
         _compEventHandler            = compEventHandler;
+        _eventCommandHandler         = eventCommandHandler;
+        _eventWizard                 = eventWizard;
         _promoteHandler              = promoteHandler;
         _demoteHandler               = demoteHandler;
         _setNickHandler              = setNickHandler;
@@ -220,6 +226,8 @@ public class DiscordBotService : IHostedService
 
         _apolloCaptureHandler.Register(_client);
         _compEventHandler.Register(_client);
+        _eventCommandHandler.Register(_client);
+        _eventWizard.Register(_client);
         _promoteHandler.Register(_client);
         _demoteHandler.Register(_client);
         _setNickHandler.Register(_client);
@@ -324,6 +332,12 @@ public class DiscordBotService : IHostedService
                     .WithName("comp-event")
                     .WithDescription($"Create a competitive division event on the clan calendar ({_config.CompEventMinRank}+ only)")
                     .Build(),
+
+                // In-house event creation (Apollo replacement). /event opens a
+                // DM wizard (gated by EventCommandMinRank); /timezone sets the
+                // zone used to read each member's event-time input.
+                EventCommandHandler.BuildEventCommand(_config.EventCommandMinRank),
+                EventCommandHandler.BuildTimezoneCommand(),
 
                 new SlashCommandBuilder()
                     .WithName("promote")
