@@ -45,11 +45,14 @@ jobs:
 
           ZERO="0000000000000000000000000000000000000000"
 
-          # --- Opt-out: [skip patchnotes] anywhere in the head commit message -
-          HEAD_MSG="$(git log -1 --pretty=%B "$AFTER")"
+          # --- Opt-out: [skip patchnotes] in the head commit's SUBJECT line ---
+          # Only the subject (%s, first line) is checked — not the body — so a
+          # commit whose body merely mentions the token (e.g. the commit that
+          # documents this feature) doesn't accidentally opt itself out.
+          HEAD_SUBJECT="$(git log -1 --pretty=%s "$AFTER")"
           shopt -s nocasematch
-          if [[ "$HEAD_MSG" == *"[skip patchnotes]"* ]]; then
-            echo "Head commit opts out via [skip patchnotes]; nothing to post."
+          if [[ "$HEAD_SUBJECT" == *"[skip patchnotes]"* ]]; then
+            echo "Head commit subject opts out via [skip patchnotes]; nothing to post."
             exit 0
           fi
           shopt -u nocasematch
