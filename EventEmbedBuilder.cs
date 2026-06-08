@@ -111,6 +111,12 @@ public static class EventEmbedBuilder
           .WithButton("Set Host", $"{MgmtPrefix}sethost:{clanEventId}", ButtonStyle.Secondary, row: mgmtRow)
           .WithButton("Cancel",   $"{MgmtPrefix}pcancel:{clanEventId}", ButtonStyle.Danger,    row: mgmtRow);
 
+        // Member-facing utility, available to everyone (not permission-gated) and
+        // never disabled — adding to a personal calendar is harmless even after
+        // the event starts. Its own row keeps it clearly distinct from RSVP.
+        cb.WithButton("Add to Calendar", $"{MgmtPrefix}cal:{clanEventId}", ButtonStyle.Secondary,
+            emote: new Emoji("📅"), row: mgmtRow + 1);
+
         return cb.Build();
     }
 

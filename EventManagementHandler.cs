@@ -462,6 +462,14 @@ public sealed class EventManagementHandler
             return;
         }
 
+        // On-post "Add to Calendar" button → ephemeral Google link + .ics file.
+        // Open to everyone; no manage permission required.
+        if (cid.StartsWith($"{Prefix}cal:", StringComparison.Ordinal))
+        {
+            await OnAddToCalendarAsync(component, cid);
+            return;
+        }
+
         var parts = cid.Split(':'); // evtmgmt:<cxl|editpick>:<occ|series>:<clanEventId>
         if (parts.Length != 4) return;
         var kind  = parts[1];
@@ -632,6 +640,44 @@ public sealed class EventManagementHandler
         await component.RespondAsync(
             $"Who's hosting **{ev.Title}**?",
             components: new ComponentBuilder().WithSelectMenu(menu).Build(),
+            ephemeral: true);
+    }
+
+    private async Task OnAddToCalendarAsync(SocketMessageComponent component, string cid)
+    {
+        var idStr = cid[(cid.LastIndexOf(':') + 1)..];
+        if (!int.TryParse(idStr, out var clanEventId))
+        {
+            await component.RespondAsync("Couldn't read that event.", ephemeral: true);
+            return;
+        }
+
+        ClanEvent? ev;
+        using (var scope = _services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+            ev = await db.ClanEvents.FirstOrDefaultAsync(e => e.Id == clanEventId);
+        }
+        if (ev is null)
+        {
+            await component.RespondAsync("That event is no longer available.", ephemeral: true);
+            return;
+        }
+
+        var comps = new ComponentBuilder()
+            .WithButton("Google Calendar", style: ButtonStyle.Link,
+                url: EventCalendarLinks.GoogleUrl(ev), emote: new Emoji("📅"))
+            .Build();
+
+        using var fa = new FileAttachment(
+            new MemoryStream(EventCalendarLinks.IcsBytes(ev)), EventCalendarLinks.IcsFileName(ev));
+
+        await component.RespondWithFileAsync(
+            fa,
+            text: $"📅 Add **{ev.Title}** to your calendar:\n" +
+                  "• **Google Calendar** — tap the button below.\n" +
+                  "• **Apple Calendar / Outlook** — open the attached `.ics` file.",
+            components: comps,
             ephemeral: true);
     }
 
