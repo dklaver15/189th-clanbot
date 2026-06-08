@@ -373,9 +373,10 @@ try
     //     MessageReceived + ButtonExecuted).
     //   • EventCommandHandler — /event + /timezone slash commands.
     builder.Services.AddSingleton<EventTimeParser>();
-    builder.Services.AddSingleton<IEventPublisher, LoggingEventPublisher>();
+    builder.Services.AddSingleton<IEventPublisher, EventPublisher>();
     builder.Services.AddSingleton<EventCreationWizard>();
     builder.Services.AddSingleton<EventCommandHandler>();
+    builder.Services.AddSingleton<EventRsvpInteractionHandler>();
 
     // ── Hosted Services ──────────────────────────────────────────────
     builder.Services.AddHostedService<DiscordBotService>();
