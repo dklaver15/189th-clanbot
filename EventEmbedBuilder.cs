@@ -31,7 +31,14 @@ public static class EventEmbedBuilder
     // no longer widens the embed on its own. Desktop caps at its max and wraps
     // the rest invisibly (no downside to overshooting); the only cost is a little
     // extra blank height on mobile. Tune the count if needed.
-    private static readonly string WidthSpacer = new('\u2800', 140);
+    // One desktop line of invisible Braille blanks. Its only jobs are to (a)
+    // break the inline row so the rosters get their own clean row and (b) nudge
+    // the embed toward Discord's max desktop width when no wide image is present.
+    // Kept to ~one line on purpose: a longer run just WRAPS (Discord caps embed
+    // width), and the wrapped lines are pure vertical gap between Host and the
+    // rosters — exactly the bloat we're avoiding. Tune the count if a 2-line gap
+    // appears (lower it) or the embed looks narrow with no image (raise it).
+    private static readonly string WidthSpacer = new('\u2800', 64);
 
     public static Embed BuildEmbed(ClanEvent ev, IReadOnlyCollection<EventRsvp> rsvps, string? imageFileName = null)
     {
@@ -99,23 +106,26 @@ public static class EventEmbedBuilder
     {
         var cb = new ComponentBuilder();
 
+        var mgmtRow = rsvpEnabled ? 1 : 0;
+
         if (rsvpEnabled)
         {
-            cb.WithButton(null, ButtonId("going",   clanEventId), ButtonStyle.Secondary, emote: new Emoji("✅"), disabled: locked)
-              .WithButton(null, ButtonId("maybe",   clanEventId), ButtonStyle.Secondary, emote: new Emoji("❓"), disabled: locked)
-              .WithButton(null, ButtonId("decline", clanEventId), ButtonStyle.Secondary, emote: new Emoji("❌"), disabled: locked);
+            cb.WithButton(null, ButtonId("going",   clanEventId), ButtonStyle.Secondary, emote: new Emoji("✅"), disabled: locked, row: 0)
+              .WithButton(null, ButtonId("maybe",   clanEventId), ButtonStyle.Secondary, emote: new Emoji("❓"), disabled: locked, row: 0)
+              .WithButton(null, ButtonId("decline", clanEventId), ButtonStyle.Secondary, emote: new Emoji("❌"), disabled: locked, row: 0);
         }
 
-        var mgmtRow = rsvpEnabled ? 1 : 0;
-        cb.WithButton("Edit",     $"{MgmtPrefix}pedit:{clanEventId}",   ButtonStyle.Primary,   row: mgmtRow)
-          .WithButton("Set Host", $"{MgmtPrefix}sethost:{clanEventId}", ButtonStyle.Secondary, row: mgmtRow)
-          .WithButton("Cancel",   $"{MgmtPrefix}pcancel:{clanEventId}", ButtonStyle.Danger,    row: mgmtRow);
+        // 📅 Add to Calendar — emoji-only, riding the RSVP row (or the management
+        // row when RSVP is disabled) so it never needs a row of its own. Never
+        // disabled: adding to a personal calendar is fine even after the event
+        // starts. A click opens an ephemeral reply with the Google Calendar link
+        // and a downloadable .ics (Apple/Outlook), handled by EventManagementHandler.
+        cb.WithButton(null, $"{MgmtPrefix}cal:{clanEventId}", ButtonStyle.Secondary,
+            emote: new Emoji("📅"), row: rsvpEnabled ? 0 : mgmtRow);
 
-        // Member-facing utility, available to everyone (not permission-gated) and
-        // never disabled — adding to a personal calendar is harmless even after
-        // the event starts. Its own row keeps it clearly distinct from RSVP.
-        cb.WithButton("Add to Calendar", $"{MgmtPrefix}cal:{clanEventId}", ButtonStyle.Secondary,
-            emote: new Emoji("📅"), row: mgmtRow + 1);
+        cb.WithButton("Edit",     $"{MgmtPrefix}pedit:{clanEventId}",   ButtonStyle.Primary, row: mgmtRow)
+          .WithButton("Set Host", $"{MgmtPrefix}sethost:{clanEventId}", ButtonStyle.Success, row: mgmtRow)
+          .WithButton("Cancel",   $"{MgmtPrefix}pcancel:{clanEventId}", ButtonStyle.Danger,  row: mgmtRow);
 
         return cb.Build();
     }

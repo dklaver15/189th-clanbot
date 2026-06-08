@@ -151,6 +151,7 @@ public sealed class EventPublisher : IEventPublisher
             GuildId = guildId, SeriesId = seriesId, Title = title, Description = description,
             OrganizerId = organizerId, OrganizerName = organizerName,
             StartUtc = startUtc, EndUtc = endUtc, Status = ClanEventStatus.Scheduled,
+            MaxParticipants = maxParticipants,
         };
         var previewEmbed = EventEmbedBuilder.BuildEmbed(preview, Array.Empty<EventRsvp>(), imageFileName);
         IUserMessage posted;
