@@ -25,6 +25,13 @@ public static class ClanEventRecurrence
     public static IEnumerable<(DateTime StartUtc, DateTime EndUtc)> Occurrences(
         ClanEventSeries series, DateTime fromUtc, DateTime toUtc, int maxToYield)
     {
+        // Custom (specific-dates) series have their occurrences materialized up
+        // front and must never be rule-generated — otherwise Advance's default
+        // arm would treat them as daily. Yield nothing so the scheduler and the
+        // publisher's horizon-fill both leave them untouched.
+        if (series.Frequency == ClanEventFrequency.Custom)
+            yield break;
+
         if (!TimeZoneInfo.TryFindSystemTimeZoneById(series.TimeZoneId, out var tz) || tz is null)
             tz = TimeZoneInfo.Utc;
 

@@ -178,6 +178,7 @@ public sealed class EventCreationWizard
                 case WizardStep.Image:           await HandleImageAsync(s, message, text);  break;
                 case WizardStep.MaxParticipants: await HandleMaxParticipantsAsync(s, text);  break;
                 case WizardStep.RecurrenceUntil: await HandleRecurrenceUntilAsync(s, text); break;
+                case WizardStep.SpecificDates:   await HandleSpecificDatesAsync(s, text);  break;
                 // Recurrence / Confirm are button steps — ignore stray text.
             }
         }
@@ -436,7 +437,51 @@ public sealed class EventCreationWizard
         await PromptConfirmAsync(s);
     }
 
-    // ─── Buttons (timezone / recurrence / confirm / cancel) ────────────────
+    private async Task HandleSpecificDatesAsync(EventCreationSession s, string text)
+    {
+        var lower = text.Trim().ToLowerInvariant();
+        if (lower is "done" or "finish" or "end")
+        {
+            if (s.Draft.SpecificDatesUtc.Count == 0)
+            {
+                await s.Dm.SendMessageAsync(embed: Form("🗓️ Add at least one more",
+                    "So far there's only the first date. Add another date & time, or type `cancel` to start over as a single event."));
+                return;
+            }
+            await PromptConfirmAsync(s);
+            return;
+        }
+
+        var tz = _time.ResolveZone(s.Draft.TimeZoneId);
+        var r  = _time.ParseStart(text, tz);
+        if (!r.Success)
+        {
+            await s.Dm.SendMessageAsync(embed: Form("Let's try that again",
+                string.IsNullOrWhiteSpace(r.Error) ? "I couldn't read that date — try `Thursday 8pm` or `June 20 at 7pm`." : r.Error));
+            return;
+        }
+        if (!r.HasTimeOfDay)
+        {
+            await s.Dm.SendMessageAsync(embed: Form("🕒 Need a time of day", "Include a time too, like `Thursday at 8pm`."));
+            return;
+        }
+        if (r.StartUtc <= DateTime.UtcNow)
+        {
+            await s.Dm.SendMessageAsync(embed: Form("🗓️ That's in the past", "Pick a future date & time."));
+            return;
+        }
+        if (r.StartUtc == s.Draft.StartUtc || s.Draft.SpecificDatesUtc.Contains(r.StartUtc))
+        {
+            await s.Dm.SendMessageAsync(embed: Form("🗓️ Already on the list", "That date's already added. Send a different one, or type `done`."));
+            return;
+        }
+
+        s.Draft.SpecificDatesUtc.Add(r.StartUtc);
+        s.Draft.SpecificDatesUtc.Sort();
+        var total = 1 + s.Draft.SpecificDatesUtc.Count;
+        await s.Dm.SendMessageAsync(embed: Form("🗓️ Date added",
+            $"Added **{EventTimeParser.Stamp(r.StartUtc, 'F')}** — **{total}** dates so far.\n\nAdd another, or type `done`."));
+    }
 
     private async Task OnButtonExecutedAsync(SocketMessageComponent component)
     {
@@ -504,6 +549,17 @@ public sealed class EventCreationWizard
             return;
         }
 
+        if (arg == "dates")
+        {
+            s.Draft.Frequency = ClanEventFrequency.Custom;
+            s.Step = WizardStep.SpecificDates;
+            await ClearButtons(c, "Repeats: **specific dates**.");
+            await s.Dm.SendMessageAsync(embed: Form("🗓️ Specific dates",
+                $"First date is **{EventTimeParser.Stamp(s.Draft.StartUtc, 'F')}**.\n\n" +
+                "Send another date & time (e.g. `Thursday 8pm`), one at a time. Type `done` when you've added them all."));
+            return;
+        }
+
         ClanEventFrequency? freq = arg switch
         {
             "daily"    => ClanEventFrequency.Daily,
@@ -552,6 +608,8 @@ public sealed class EventCreationWizard
         {
             if (s.Draft.Frequency is null)
                 await _publisher.PublishOneOffAsync(s.Draft);
+            else if (s.Draft.Frequency == ClanEventFrequency.Custom)
+                await _publisher.PublishSpecificDatesAsync(s.Draft);
             else
                 await _publisher.PublishSeriesAsync(s.Draft);
         }
@@ -620,9 +678,11 @@ public sealed class EventCreationWizard
             .WithButton("Daily",           $"{Prefix}rec:daily",    ButtonStyle.Secondary)
             .WithButton("Weekly",          $"{Prefix}rec:weekly",   ButtonStyle.Secondary)
             .WithButton("Biweekly",        $"{Prefix}rec:biweekly", ButtonStyle.Secondary)
-            .WithButton("Monthly",         $"{Prefix}rec:monthly",  ButtonStyle.Secondary);
+            .WithButton("Monthly",         $"{Prefix}rec:monthly",  ButtonStyle.Secondary)
+            .WithButton("Specific dates",  $"{Prefix}rec:dates",    ButtonStyle.Secondary);
 
-        await s.Dm.SendMessageAsync(embed: Form("🔁 Does this event repeat?", "Pick an option below."), components: builder.Build());
+        await s.Dm.SendMessageAsync(embed: Form("🔁 Does this event repeat?",
+            "Pick an option. **Specific dates** is for several set nights that don't follow a pattern."), components: builder.Build());
     }
 
     private async Task PromptConfirmAsync(EventCreationSession s)
@@ -640,6 +700,15 @@ public sealed class EventCreationWizard
             .AddField("Repeats", DescribeRecurrence(d), inline: true);
 
         embed.AddField("Attendee limit", d.MaxParticipants is int cap ? $"{cap} max (waitlist past that)" : "No limit", inline: true);
+
+        // For specific-dates, list every night so the creator can sanity-check.
+        if (d.Frequency == ClanEventFrequency.Custom)
+        {
+            var all = new List<DateTime> { d.StartUtc };
+            all.AddRange(d.SpecificDatesUtc);
+            all.Sort();
+            embed.AddField("Dates", string.Join("\n", all.Select(u => $"• {EventTimeParser.Stamp(u, 'f')}")));
+        }
 
         if (!string.IsNullOrWhiteSpace(d.Description))
             embed.AddField("Description", d.Description);
@@ -692,6 +761,8 @@ public sealed class EventCreationWizard
     private static string DescribeRecurrence(EventDraft d)
     {
         if (d.Frequency is null) return "Does not repeat";
+        if (d.Frequency == ClanEventFrequency.Custom)
+            return $"Specific dates ({1 + d.SpecificDatesUtc.Count})";
         var bound = d.MaxOccurrences is int n ? $", {n} times"
                   : d.UntilUtc is DateTime u ? $", until {EventTimeParser.Stamp(u, 'd')}"
                   : ", ongoing";

@@ -13,7 +13,8 @@ public interface IEventPublisher
 {
     /// <summary>Create a single, non-recurring event from the draft.</summary>
     Task PublishOneOffAsync(EventDraft draft);
-
     /// <summary>Create a recurring series from the draft and materialize its first occurrences.</summary>
     Task PublishSeriesAsync(EventDraft draft);
+    /// <summary>Create a Custom (specific-dates) series and post one occurrence per listed date.</summary>
+    Task PublishSpecificDatesAsync(EventDraft draft);
 }

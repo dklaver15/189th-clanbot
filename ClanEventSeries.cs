@@ -101,4 +101,12 @@ public enum ClanEventFrequency
     Weekly = 2,
     Biweekly = 3,
     Monthly = 4,
+
+    /// <summary>
+    /// An explicit, irregular set of dates (e.g. Wed/Thu/Fri this week, then
+    /// nothing). Occurrences are materialized up front by the publisher; the
+    /// recurrence scheduler never rule-generates more (see ClanEventRecurrence).
+    /// Stored as an int, so adding this value needs no migration.
+    /// </summary>
+    Custom = 5,
 }

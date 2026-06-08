@@ -116,6 +116,70 @@ public sealed class EventPublisher : IEventPublisher
     }
 
     /// <summary>
+    /// Create a Custom (specific-dates) series — an explicit, irregular set of
+    /// nights — and post one occurrence per date. Unlike PublishSeriesAsync there
+    /// is no rule or horizon: every listed date is materialized now, and the
+    /// scheduler never adds more (ClanEventRecurrence yields nothing for Custom).
+    /// </summary>
+    public async Task PublishSpecificDatesAsync(EventDraft d)
+    {
+        // First date (the When step) + the extras, de-duped and ordered.
+        var starts = new List<DateTime> { d.StartUtc };
+        starts.AddRange(d.SpecificDatesUtc);
+        starts = starts.Distinct().OrderBy(x => x).ToList();
+
+        if (starts.Count <= 1)
+        {
+            // Only one date after all — nothing irregular, so it's a one-off.
+            await PublishOneOffAsync(d);
+            return;
+        }
+
+        var tz         = ResolveZone(d.TimeZoneId);
+        var firstLocal = DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(starts[0], tz), DateTimeKind.Unspecified);
+        var durMinutes = (int)Math.Round((d.EndUtc - d.StartUtc).TotalMinutes);
+
+        ClanEventSeries series;
+        using (var scope = _services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+            series = new ClanEventSeries
+            {
+                GuildId         = d.GuildId,
+                Title           = d.Title,
+                Description     = d.Description,
+                OrganizerId     = d.OrganizerId,
+                OrganizerName   = d.OrganizerName,
+                Frequency       = ClanEventFrequency.Custom,
+                TimeZoneId      = string.IsNullOrWhiteSpace(d.TimeZoneId) ? tz.Id : d.TimeZoneId,
+                FirstStartLocal = firstLocal,
+                DurationMinutes = durMinutes,
+                ChannelId       = _config.GetEventPostChannelId(),
+                UntilUtc        = null,
+                MaxOccurrences  = null,
+                MaxParticipants = d.MaxParticipants,
+                Active          = true,
+                CreatedAt       = DateTime.UtcNow,
+                ImageBytes      = d.ImageBytes,
+                ImageFileName   = d.ImageFileName,
+            };
+            db.ClanEventSeries.Add(series);
+            await db.SaveChangesAsync(); // materialize series.Id
+        }
+
+        var duration = TimeSpan.FromMinutes(durMinutes);
+        foreach (var startUtc in starts)
+            await CreateOccurrenceAsync(d.GuildId, series.Id,
+                d.Title, d.Description, d.OrganizerId, d.OrganizerName, startUtc, startUtc + duration,
+                attachImageBytes: series.ImageBytes, imageFileName: series.ImageFileName,
+                maxParticipants: series.MaxParticipants);
+
+        _logger.LogInformation(
+            "Created custom-date series {SeriesId} '{Title}'; materialized {Count} occurrence(s)",
+            series.Id, series.Title, starts.Count);
+    }
+
+    /// <summary>
     /// Idempotent creation of one occurrence. For series occurrences, skips if a
     /// ClanEvent already exists for (SeriesId, StartUtc) — the same guard the
     /// scheduler relies on.
