@@ -1,0 +1,178 @@
+name: Patch Notes
+
+# Summarize the commits in each push to main into one plain-language paragraph
+# (via the Anthropic API) and post it as "patch notes" to a Discord channel
+# through a webhook. Runs independently of deploy.yml — patch notes never gate
+# a deploy, and a failed deploy never suppresses patch notes.
+on:
+  push:
+    branches: [main]
+
+# Serialize runs so quick back-to-back pushes post their notes in order rather
+# than racing. cancel-in-progress is false, so an in-progress run is never
+# killed — a newer push queues and waits for it to finish.
+# Caveat: GitHub keeps only ONE run pending per group, so if 3+ pushes land
+# within a single run's lifetime, only the newest queued one survives and the
+# middle push's notes are skipped. Fine for the occasional double-push.
+concurrency:
+  group: patch-notes-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  patch-notes:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@v4
+        with:
+          # Need the BEFORE..AFTER range to exist locally for git log.
+          fetch-depth: 0
+
+      - name: Summarize commits and post patch notes
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+          COMPARE: ${{ github.event.compare }}
+          # ANTHROPIC_API_KEY already exists as a repo secret (used by deploy.yml).
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Create this one: a webhook URL for the target channel (see setup notes).
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_PATCHNOTES_WEBHOOK }}
+        run: |
+          set -euo pipefail
+
+          ZERO="0000000000000000000000000000000000000000"
+
+          # --- Opt-out: [skip patchnotes] anywhere in the head commit message -
+          HEAD_MSG="$(git log -1 --pretty=%B "$AFTER")"
+          shopt -s nocasematch
+          if [[ "$HEAD_MSG" == *"[skip patchnotes]"* ]]; then
+            echo "Head commit opts out via [skip patchnotes]; nothing to post."
+            exit 0
+          fi
+          shopt -u nocasematch
+
+          # --- Collect this push's commits (oldest first, merges excluded) -----
+          # STAT_BASE is what the diff stats compare AFTER against: the push's
+          # base normally, or (for a new branch / unknown base) the head commit's
+          # parent, falling back to the empty tree for a root commit.
+          if [ "$BEFORE" = "$ZERO" ] || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            # New branch / unknown base: summarize the most recent commits up to HEAD.
+            COMMITS="$(git log --no-merges --reverse -n 30 --pretty=format:'- %s%n%b' "$AFTER")"
+            COMMIT_COUNT="$(git rev-list --no-merges --max-count=30 --count "$AFTER")"
+            STAT_BASE="$(git rev-parse --verify --quiet "${AFTER}^" || git hash-object -t tree /dev/null)"
+          else
+            COMMITS="$(git log --no-merges --reverse --pretty=format:'- %s%n%b' "${BEFORE}..${AFTER}")"
+            COMMIT_COUNT="$(git rev-list --no-merges --count "${BEFORE}..${AFTER}")"
+            STAT_BASE="$BEFORE"
+          fi
+
+          # Drop blank lines left behind by commits with empty bodies.
+          COMMITS="$(printf '%s\n' "$COMMITS" | sed '/^[[:space:]]*$/d')"
+
+          if [ -z "${COMMITS//[[:space:]]/}" ]; then
+            echo "No non-merge commits in this push; nothing to post."
+            exit 0
+          fi
+
+          echo "Commits being summarized:"
+          printf '%s\n' "$COMMITS"
+
+          # --- Quick stats: net diff of the push (endpoint-to-endpoint) -------
+          # Line counts come from --shortstat; file A/D/M counts from --name-status
+          # (R/C/T renames/copies/type-changes are folded into "changed").
+          INS=0; DEL=0
+          SHORTSTAT="$(git diff --shortstat "$STAT_BASE" "$AFTER" || true)"
+          [[ "$SHORTSTAT" =~ ([0-9]+)[[:space:]]+insertion ]] && INS="${BASH_REMATCH[1]}"
+          [[ "$SHORTSTAT" =~ ([0-9]+)[[:space:]]+deletion  ]] && DEL="${BASH_REMATCH[1]}"
+
+          COUNTS="$(git diff --name-status "$STAT_BASE" "$AFTER" \
+            | awk '/^A/{a++} /^D/{d++} /^[MRCT]/{m++} END{printf "%d %d %d", a+0, d+0, m+0}')"
+          read -r ADDED REMOVED MODIFIED <<< "$COUNTS"
+          TOTAL=$((ADDED + REMOVED + MODIFIED))
+
+          commits_word="commits"; [ "$COMMIT_COUNT" = "1" ] && commits_word="commit"
+          files_word="files";     [ "$TOTAL" = "1" ]        && files_word="file"
+          FOOTER="${COMMIT_COUNT} ${commits_word} • ${TOTAL} ${files_word} (${ADDED} added, ${REMOVED} removed, ${MODIFIED} changed) • +${INS} / -${DEL} lines"
+          echo "Stats footer: $FOOTER"
+
+          # --- System prompt: plain-language, member-facing patch notes -------
+          cat > /tmp/patchnotes_system.txt <<'EOF'
+          You write short, friendly "patch notes" for the 189th, a Battlefield gaming clan, summarizing changes to ClanGuard (the clan's Discord bot) for non-technical members.
+
+          You are given a list of raw git commit messages from a single push. Turn them into ONE concise paragraph (2-4 sentences) that a regular clan member would understand.
+
+          Rules:
+          - Plain language. No jargon, no file or code names, no commit hashes, no bullet lists, no headers.
+          - Describe what changed from a member's point of view, not how it was implemented.
+          - Group related commits and lead with whatever members would actually notice. Do not list every commit.
+          - If the changes are purely internal (refactors, CI/build, dependency bumps) with nothing member-facing, write one short sentence noting behind-the-scenes maintenance and stability work.
+          - Never invent features or numbers that aren't implied by the commit messages.
+          - Output only the paragraph: no preamble, no sign-off.
+          EOF
+
+          # --- Ask Claude for the summary (same model the bot uses) -----------
+          REQ="$(jq -n \
+            --arg model "claude-sonnet-4-6" \
+            --rawfile system /tmp/patchnotes_system.txt \
+            --arg user "$COMMITS" \
+            '{model: $model, max_tokens: 400, system: $system, messages: [{role: "user", content: $user}]}')"
+
+          RESP="$(curl -sS https://api.anthropic.com/v1/messages \
+            -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d "$REQ")"
+
+          SUMMARY="$(printf '%s' "$RESP" | jq -r '[.content[]? | select(.type == "text") | .text] | join("\n")')"
+
+          if [ -z "$SUMMARY" ] || [ "$SUMMARY" = "null" ]; then
+            echo "::error::Claude returned no text. Full response:"
+            printf '%s\n' "$RESP"
+            exit 1
+          fi
+
+          # Defensive cap, well under Discord's 4096-char embed-description limit.
+          SUMMARY="${SUMMARY:0:3900}"
+
+          echo "Generated patch notes:"
+          printf '%s\n' "$SUMMARY"
+
+          # --- Post to Discord via webhook (branded embed) --------------------
+          TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          PAYLOAD="$(jq -n \
+            --arg desc "$SUMMARY" \
+            --arg url "$COMPARE" \
+            --arg ts "$TS" \
+            --arg footer "$FOOTER" \
+            '{
+               username: "189th Patch Notes",
+               allowed_mentions: { parse: [] },
+               embeds: [
+                 (
+                   {
+                     title: "🛠️ ClanGuard Update",
+                     description: $desc,
+                     color: 5763719,
+                     timestamp: $ts,
+                     footer: { text: $footer }
+                   }
+                   + (if ($url | length) > 0 then { url: $url } else {} end)
+                 )
+               ]
+             }')"
+
+          HTTP_CODE="$(curl -sS -o /tmp/discord_resp.txt -w '%{http_code}' \
+            -X POST "$DISCORD_WEBHOOK" \
+            -H "content-type: application/json" \
+            -d "$PAYLOAD")"
+
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "::error::Discord webhook returned HTTP $HTTP_CODE"
+            cat /tmp/discord_resp.txt || true
+            exit 1
+          fi
+
+          echo "Patch notes posted (HTTP $HTTP_CODE)."
