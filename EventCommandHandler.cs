@@ -67,6 +67,10 @@ public sealed class EventCommandHandler
                 .WithName("cancel")
                 .WithDescription("Cancel one of your upcoming events")
                 .WithType(ApplicationCommandOptionType.SubCommand))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("sort")
+                .WithDescription("Re-post all upcoming events in chronological order (officers only)")
+                .WithType(ApplicationCommandOptionType.SubCommand))
             .Build();
 
     public static SlashCommandProperties BuildTimezoneCommand() =>
@@ -112,6 +116,7 @@ public sealed class EventCommandHandler
             case "create": await HandleCreateAsync(command);          break;
             case "edit":   await _management.StartEditAsync(command);  break;
             case "cancel": await _management.StartCancelAsync(command); break;
+            case "sort":   await _management.StartSortAsync(command);   break;
             default:       await command.RespondAsync("Unknown subcommand.", ephemeral: true); break;
         }
     }

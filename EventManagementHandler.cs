@@ -41,6 +41,7 @@ public sealed class EventManagementHandler
     private readonly DiscordSocketClient _client;
     private readonly BotConfig _config;
     private readonly EventTimeParser _time;
+    private readonly EventChannelSorter _sorter;
     private readonly ILogger<EventManagementHandler> _logger;
 
     public EventManagementHandler(
@@ -48,12 +49,14 @@ public sealed class EventManagementHandler
         DiscordSocketClient client,
         IOptions<BotConfig> config,
         EventTimeParser time,
+        EventChannelSorter sorter,
         ILogger<EventManagementHandler> logger)
     {
         _services = services;
         _client   = client;
         _config   = config.Value;
         _time     = time;
+        _sorter   = sorter;
         _logger   = logger;
     }
 
@@ -68,6 +71,26 @@ public sealed class EventManagementHandler
 
     public Task StartCancelAsync(SocketSlashCommand command) => ShowPickerAsync(command, "cancel");
     public Task StartEditAsync(SocketSlashCommand command)   => ShowPickerAsync(command, "edit");
+
+    public async Task StartSortAsync(SocketSlashCommand command)
+    {
+        await command.DeferAsync(ephemeral: true);
+        if (command.GuildId is null)
+        {
+            await command.FollowupAsync("This command can only be used in a server.", ephemeral: true);
+            return;
+        }
+        if (command.User is not SocketGuildUser gu || !HasEventPermission(gu))
+        {
+            await command.FollowupAsync($"❌ Sorting events is restricted to **{_config.EventCommandMinRank} and above**.", ephemeral: true);
+            return;
+        }
+
+        var count = await _sorter.SortAsync(command.GuildId.Value);
+        await command.FollowupAsync(
+            count <= 1 ? "Nothing to sort — there's at most one upcoming event." : $"✅ Re-posted {count} events in chronological order.",
+            ephemeral: true);
+    }
 
     private async Task ShowPickerAsync(SocketSlashCommand command, string action)
     {

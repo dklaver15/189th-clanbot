@@ -373,6 +373,7 @@ try
     //     MessageReceived + ButtonExecuted).
     //   • EventCommandHandler — /event + /timezone slash commands.
     builder.Services.AddSingleton<EventTimeParser>();
+    builder.Services.AddSingleton<EventChannelSorter>();
     builder.Services.AddSingleton<EventPublisher>();
     builder.Services.AddSingleton<IEventPublisher>(sp => sp.GetRequiredService<EventPublisher>());
     builder.Services.AddSingleton<EventCreationWizard>();
