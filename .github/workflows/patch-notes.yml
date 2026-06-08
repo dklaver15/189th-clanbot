@@ -4,9 +4,23 @@ name: Patch Notes
 # (via the Anthropic API) and post it as "patch notes" to a Discord channel
 # through a webhook. Runs independently of deploy.yml — patch notes never gate
 # a deploy, and a failed deploy never suppresses patch notes.
+#
+# Can also be triggered manually (Actions tab → Patch Notes → Run workflow) to
+# summarize an arbitrary commit range against the CURRENT workflow — handy for
+# back-filling a range that was missed, or testing without pushing.
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      from:
+        description: "Base commit SHA (exclusive). Blank = most recent commits up to 'to'."
+        required: false
+        default: ""
+      to:
+        description: "Head commit SHA to summarize up to. Blank = HEAD of the selected branch."
+        required: false
+        default: ""
 
 # Serialize runs so quick back-to-back pushes post their notes in order rather
 # than racing. cancel-in-progress is false, so an in-progress run is never
@@ -33,9 +47,14 @@ jobs:
 
       - name: Summarize commits and post patch notes
         env:
-          BEFORE: ${{ github.event.before }}
-          AFTER: ${{ github.event.after }}
+          EVENT_NAME: ${{ github.event_name }}
+          # Push: before/after/compare come from the event.
+          # Manual (workflow_dispatch): from/to come from the inputs.
+          BEFORE: ${{ github.event.inputs.from || github.event.before }}
+          AFTER: ${{ github.event.inputs.to || github.event.after }}
           COMPARE: ${{ github.event.compare }}
+          SERVER_URL: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
           # ANTHROPIC_API_KEY already exists as a repo secret (used by deploy.yml).
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           # Create this one: a webhook URL for the target channel (see setup notes).
@@ -45,24 +64,35 @@ jobs:
 
           ZERO="0000000000000000000000000000000000000000"
 
+          # Manual runs may omit 'to' — default it to the checked-out HEAD. And
+          # since push's github.event.compare doesn't exist for manual runs,
+          # rebuild a compare URL from the resolved range when we have a base.
+          [ -n "$AFTER" ] || AFTER="$(git rev-parse HEAD)"
+          if [ -z "$COMPARE" ] && [ -n "$BEFORE" ] && [ "$BEFORE" != "$ZERO" ]; then
+            COMPARE="${SERVER_URL}/${REPO}/compare/${BEFORE}...${AFTER}"
+          fi
+
           # --- Opt-out: [skip patchnotes] in the head commit's SUBJECT line ---
+          # Push only — a manual run is an explicit request, so it never auto-skips.
           # Only the subject (%s, first line) is checked — not the body — so a
           # commit whose body merely mentions the token (e.g. the commit that
           # documents this feature) doesn't accidentally opt itself out.
-          HEAD_SUBJECT="$(git log -1 --pretty=%s "$AFTER")"
-          shopt -s nocasematch
-          if [[ "$HEAD_SUBJECT" == *"[skip patchnotes]"* ]]; then
-            echo "Head commit subject opts out via [skip patchnotes]; nothing to post."
-            exit 0
+          if [ "$EVENT_NAME" = "push" ]; then
+            HEAD_SUBJECT="$(git log -1 --pretty=%s "$AFTER")"
+            shopt -s nocasematch
+            if [[ "$HEAD_SUBJECT" == *"[skip patchnotes]"* ]]; then
+              echo "Head commit subject opts out via [skip patchnotes]; nothing to post."
+              exit 0
+            fi
+            shopt -u nocasematch
           fi
-          shopt -u nocasematch
 
-          # --- Collect this push's commits (oldest first, merges excluded) -----
-          # STAT_BASE is what the diff stats compare AFTER against: the push's
-          # base normally, or (for a new branch / unknown base) the head commit's
+          # --- Collect the commits to summarize (oldest first, merges excluded) -
+          # STAT_BASE is what the diff stats compare AFTER against: the range base
+          # normally, or (for a new branch / no base given) the head commit's
           # parent, falling back to the empty tree for a root commit.
-          if [ "$BEFORE" = "$ZERO" ] || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
-            # New branch / unknown base: summarize the most recent commits up to HEAD.
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "$ZERO" ] || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            # New branch / no base given: summarize the most recent commits up to HEAD.
             COMMITS="$(git log --no-merges --reverse -n 30 --pretty=format:'- %s%n%b' "$AFTER")"
             COMMIT_COUNT="$(git rev-list --no-merges --max-count=30 --count "$AFTER")"
             STAT_BASE="$(git rev-parse --verify --quiet "${AFTER}^" || git hash-object -t tree /dev/null)"
@@ -116,9 +146,9 @@ jobs:
           - Output only the paragraph: no preamble, no sign-off.
           EOF
 
-          # --- Ask Claude for the summary (same model the bot uses) -----------
+          # --- Ask Claude for the summary (Haiku — cheap, runs on every push) -
           REQ="$(jq -n \
-            --arg model "claude-sonnet-4-6" \
+            --arg model "claude-haiku-4-5-20251001" \
             --rawfile system /tmp/patchnotes_system.txt \
             --arg user "$COMMITS" \
             '{model: $model, max_tokens: 400, system: $system, messages: [{role: "user", content: $user}]}')"
