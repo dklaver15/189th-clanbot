@@ -152,23 +152,33 @@ public sealed class EventReminderService : BackgroundService
             return; // lead still marked sent by caller to avoid a retry loop
         }
 
-        var embed = new EmbedBuilder()
+        var hasImage = ev.ImageBytes is { Length: > 0 } && !string.IsNullOrWhiteSpace(ev.ImageFileName);
+
+        var eb = new EmbedBuilder()
             .WithColor(new Color(0x5865F2))
             .WithTitle($"⏰ {ev.Title}")
             .WithDescription(
-                $"Starts {EventTimeParser.Stamp(ev.StartUtc, 'R')}\n{EventTimeParser.Stamp(ev.StartUtc, 'F')}")
-            .Build();
+                $"Starts {EventTimeParser.Stamp(ev.StartUtc, 'R')}\n{EventTimeParser.Stamp(ev.StartUtc, 'F')}");
+        if (hasImage)
+            eb.WithImageUrl($"attachment://{ev.ImageFileName}");
+        var embed = eb.Build();
 
         // Mentions must live in the message *content* to actually notify — pings
         // inside an embed don't fire. AllowedMentions limits this to users.
         var content = string.IsNullOrWhiteSpace(mentions) ? null : mentions;
+        var allowed = new AllowedMentions { AllowedTypes = AllowedMentionTypes.Users };
 
         try
         {
-            await channel.SendMessageAsync(
-                text: content,
-                embed: embed,
-                allowedMentions: new AllowedMentions { AllowedTypes = AllowedMentionTypes.Users });
+            if (hasImage)
+            {
+                using var fa = new FileAttachment(new MemoryStream(ev.ImageBytes!), ev.ImageFileName);
+                await channel.SendFileAsync(fa, text: content, embed: embed, allowedMentions: allowed);
+            }
+            else
+            {
+                await channel.SendMessageAsync(text: content, embed: embed, allowedMentions: allowed);
+            }
         }
         catch (Exception ex)
         {

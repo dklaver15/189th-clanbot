@@ -62,7 +62,7 @@ public sealed class EventManagementHandler
     private readonly ConcurrentDictionary<ulong, EditSession> _editSessions = new();
     private System.Threading.Timer? _editIdleSweep;
 
-    private enum EditStep { Menu, Title, When, Duration, Description, Image, MaxParticipants }
+    private enum EditStep { Menu, Title, When, Duration, Description, Image, MaxParticipants, Action, AddStatus, AddWho, RemoveWho, ClearConfirm }
 
     private sealed class EditSession
     {
@@ -89,6 +89,10 @@ public sealed class EventManagementHandler
         public bool ImageCleared;    // ...and was it a removal
         public byte[]? ImageBytes;
         public string? ImageFileName;
+
+        // Attendee-management scratch (Add a response / Remove a response).
+        public EventRsvpStatus PendingAddStatus;
+        public List<(ulong UserId, EventRsvpStatus Status)> RemoveCandidates = new();
     }
 
     public EventManagementHandler(
@@ -777,7 +781,7 @@ public sealed class EventManagementHandler
             Scope           = scope,
             SeriesId        = ev.SeriesId,
             Tz              = await ResolveCallerZoneAsync(user.Id),
-            Step            = EditStep.Menu,
+            Step            = EditStep.Action,
             LastActivityAt  = DateTime.UtcNow,
             Title           = ev.Title,
             StartUtc        = ev.StartUtc,
@@ -788,7 +792,7 @@ public sealed class EventManagementHandler
         };
         _editSessions[user.Id] = session;
 
-        try { await SendEditMenuAsync(session); }
+        try { await SendActionMenuAsync(session); }
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Couldn't send edit menu ({User})", user.Id);
@@ -798,51 +802,368 @@ public sealed class EventManagementHandler
         return true;
     }
 
-    private static readonly string[] NumberEmoji = { "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣" };
-
     // Whole-series edits exclude time fields — those re-anchor the recurrence and
     // are handled per-occurrence (or by the repeat-schedule field, coming next).
+    // Order mirrors Apollo's modify form (Title → Description → Start → Duration …).
     private static EditStep[] MenuFields(EditSession s) =>
         s.Scope == "series"
             ? new[] { EditStep.Title, EditStep.Description, EditStep.Image, EditStep.MaxParticipants }
-            : new[] { EditStep.Title, EditStep.When, EditStep.Duration, EditStep.Description, EditStep.Image, EditStep.MaxParticipants };
+            : new[] { EditStep.Title, EditStep.Description, EditStep.When, EditStep.Duration, EditStep.Image, EditStep.MaxParticipants };
 
     private static string FieldLabel(EditStep step) => step switch
     {
         EditStep.Title           => "Title",
-        EditStep.When            => "Start time",
-        EditStep.Duration        => "Duration / end",
+        EditStep.When            => "Start Time",
+        EditStep.Duration        => "Duration",
         EditStep.Description     => "Description",
         EditStep.Image           => "Image",
         EditStep.MaxParticipants => "Attendee limit",
         _                        => "",
     };
 
+    // Plain text (no Discord <t:> stamps): these render inside a code-block box,
+    // where timestamp markdown would show literally. The DM is the editor's own,
+    // so showing their local zone is correct.
     private static string FieldValue(EditSession s, EditStep step) => step switch
     {
         EditStep.Title           => string.IsNullOrWhiteSpace(s.Title) ? "—" : s.Title,
-        EditStep.When            => EventTimeParser.Stamp(s.StartUtc, 'F'),
+        EditStep.When            => FormatRange(s),
         EditStep.Duration        => $"{Math.Max(1, (int)Math.Round((s.EndUtc - s.StartUtc).TotalMinutes))} min",
-        EditStep.Description     => string.IsNullOrWhiteSpace(s.Description) ? "—" : Trunc(s.Description, 60),
-        EditStep.Image           => s.ImageChanged ? (s.ImageCleared ? "(will remove)" : "(new image staged)") : (s.HasImage ? "set" : "none"),
-        EditStep.MaxParticipants => s.MaxParticipants?.ToString(CultureInfo.InvariantCulture) ?? "none",
-        _                        => "",
+        EditStep.Description     => string.IsNullOrWhiteSpace(s.Description) ? "—" : s.Description,
+        EditStep.Image           => s.ImageChanged ? (s.ImageCleared ? "Will be removed" : "New image staged") : (s.HasImage ? "Set" : "None"),
+        EditStep.MaxParticipants => s.MaxParticipants?.ToString(CultureInfo.InvariantCulture) ?? "No limit",
+        _                        => "—",
     };
 
-    private static string Trunc(string s, int n) => s.Length <= n ? s : s[..n] + "…";
+    private static bool FieldInline(EditStep step) =>
+        step is EditStep.When or EditStep.Duration or EditStep.MaxParticipants;
+
+    private static string FormatRange(EditSession s)
+    {
+        var startLocal = TimeZoneInfo.ConvertTimeFromUtc(s.StartUtc, s.Tz);
+        var endLocal   = TimeZoneInfo.ConvertTimeFromUtc(s.EndUtc, s.Tz);
+        return $"{startLocal.ToString("ddd MMM d, yyyy  h:mm tt", CultureInfo.InvariantCulture)} – " +
+               $"{endLocal.ToString("h:mm tt", CultureInfo.InvariantCulture)}";
+    }
+
+    // Apollo-style grey value box: a code fence renders monospace and boxed.
+    private static string FormBox(string value)
+    {
+        var v = string.IsNullOrWhiteSpace(value) ? "—" : value;
+        if (v.Length > 1000) v = v[..1000] + "…";
+        return $"```\n{v}\n```";
+    }
 
     private async Task SendEditMenuAsync(EditSession s)
     {
         s.Step = EditStep.Menu;
         var fields = MenuFields(s);
-        var lines = new List<string>();
-        for (var i = 0; i < fields.Length; i++)
-            lines.Add($"{NumberEmoji[i]} **{FieldLabel(fields[i])}** — {FieldValue(s, fields[i])}");
 
-        var scopeNote = s.Scope == "series" ? " · whole series" : s.Scope == "occ" ? " · this occurrence" : "";
-        var body = string.Join("\n", lines) +
-                   "\n\nType a **number** to change that field, **done** to save, or **cancel** to discard.";
-        await s.Dm.SendMessageAsync(embed: EditForm($"✏️ Editing: {s.Title}{scopeNote}", body));
+        var eb = new EmbedBuilder()
+            .WithColor(new Color(0x5865F2))
+            .WithTitle("What would you like to modify?")
+            .WithFooter("Type a number to edit • \"done\" to save • \"cancel\" to discard • times out in 15 min");
+
+        var scopeNote = s.Scope == "series"
+            ? "Editing the **whole series** — applies to every upcoming occurrence."
+            : s.Scope == "occ" ? "Editing **this occurrence** only." : null;
+        if (scopeNote is not null) eb.WithDescription(scopeNote);
+
+        for (var i = 0; i < fields.Length; i++)
+            eb.AddField($"{i + 1} · {FieldLabel(fields[i])}", FormBox(FieldValue(s, fields[i])), inline: FieldInline(fields[i]));
+
+        await s.Dm.SendMessageAsync(embed: eb.Build());
+    }
+
+    // ─── Action menu (Apollo-style "What would you like to do?") ────────────
+
+    private async Task SendActionMenuAsync(EditSession s)
+    {
+        s.Step = EditStep.Action;
+        var scopeNote = s.Scope == "series"
+            ? "Recurring event — changes apply to the **whole series**.\n\n"
+            : s.Scope == "occ" ? "Recurring event — changes apply to **this occurrence**.\n\n" : "";
+        var body = scopeNote +
+            "**1 ·** Modify the event\n" +
+            "**2 ·** Add a response\n" +
+            "**3 ·** Remove a response\n" +
+            "**4 ·** Duplicate the event\n" +
+            "**5 ·** Clear all responses\n\n" +
+            "Enter a number to choose, or **cancel** to exit.";
+        await s.Dm.SendMessageAsync(embed: EditForm("What would you like to do?", body));
+    }
+
+    private static bool IsFormStep(EditStep step) =>
+        step is EditStep.Menu or EditStep.Title or EditStep.When or EditStep.Duration
+             or EditStep.Description or EditStep.Image or EditStep.MaxParticipants;
+
+    private async Task HandleActionMenuAsync(EditSession s, string text)
+    {
+        switch (text.Trim())
+        {
+            case "1": await SendEditMenuAsync(s); break;     // → field form (sets Step = Menu)
+            case "2":
+                s.Step = EditStep.AddStatus;
+                await s.Dm.SendMessageAsync(embed: EditForm("➕ Add a response",
+                    "Which response?\n**1 ·** Going\n**2 ·** Maybe\n**3 ·** Declined"));
+                break;
+            case "3": await BeginRemoveAsync(s); break;
+            case "4": await DuplicateEventAsync(s); break;
+            case "5": await BeginClearAsync(s);  break;
+            default:
+                await s.Dm.SendMessageAsync(embed: EditForm("Pick an option", "Type a number from **1–5** — or **cancel** to exit."));
+                break;
+        }
+    }
+
+    // ── Add a response ──────────────────────────────────────────────────────
+
+    private async Task HandleAddStatusAsync(EditSession s, string text)
+    {
+        EventRsvpStatus? status = text.Trim() switch
+        {
+            "1" => EventRsvpStatus.Going,
+            "2" => EventRsvpStatus.Maybe,
+            "3" => EventRsvpStatus.Decline,
+            _   => null,
+        };
+        if (status is null)
+        {
+            await s.Dm.SendMessageAsync(embed: EditForm("Pick a response", "Type **1** (Going), **2** (Maybe), or **3** (Declined)."));
+            return;
+        }
+        s.PendingAddStatus = status.Value;
+        s.Step = EditStep.AddWho;
+        await s.Dm.SendMessageAsync(embed: EditForm("➕ Who?", "Mention the member (or paste their numeric user ID)."));
+    }
+
+    private async Task HandleAddWhoAsync(EditSession s, string text)
+    {
+        if (!TryParseUserId(text, out var userId))
+        {
+            await s.Dm.SendMessageAsync(embed: EditForm("Couldn't read that",
+                "Mention the member like `@Name`, or paste their numeric user ID."));
+            return;
+        }
+
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+        var ev = await db.ClanEvents.FirstOrDefaultAsync(e => e.Id == s.ClanEventId);
+        if (ev is null || ev.Status != ClanEventStatus.Scheduled)
+        {
+            await EndEditSessionAsync(s, EditForm("Gone", "That event is no longer available."));
+            return;
+        }
+
+        var rsvp = await db.EventRsvps.FirstOrDefaultAsync(r => r.ClanEventId == ev.Id && r.UserId == userId);
+        if (rsvp is null)
+            db.EventRsvps.Add(new EventRsvp { ClanEventId = ev.Id, UserId = userId, Status = s.PendingAddStatus, UpdatedAt = DateTime.UtcNow });
+        else
+        {
+            rsvp.Status    = s.PendingAddStatus;
+            rsvp.UpdatedAt = DateTime.UtcNow;
+        }
+        await db.SaveChangesAsync();
+
+        // Rebalance enforces the cap: a Going add on a full event lands on the waitlist.
+        var rsvps = await db.EventRsvps.Where(r => r.ClanEventId == ev.Id).ToListAsync();
+        var promoted = EventWaitlist.Rebalance(rsvps, ev.MaxParticipants);
+        if (db.ChangeTracker.HasChanges()) await db.SaveChangesAsync();
+
+        var landed = rsvps.FirstOrDefault(r => r.UserId == userId)?.Status ?? s.PendingAddStatus;
+        await UpdatePostAsync(db, ev);
+        foreach (var uid in promoted) await EventWaitlist.NotifyPromotedAsync(_client, ev, uid);
+
+        var note = landed == EventRsvpStatus.Waitlisted
+            ? $"Added <@{userId}> — the event is full, so they're on the **waitlist**."
+            : $"Added <@{userId}> as **{StatusWord(landed)}**.";
+        await EndEditSessionAsync(s, EditForm("✅ Response added", note));
+    }
+
+    // ── Remove a response ───────────────────────────────────────────────────
+
+    private async Task BeginRemoveAsync(EditSession s)
+    {
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+        var rsvps = await db.EventRsvps
+            .Where(r => r.ClanEventId == s.ClanEventId)
+            .OrderBy(r => r.Status).ThenBy(r => r.UpdatedAt)
+            .ToListAsync();
+
+        if (rsvps.Count == 0)
+        {
+            s.Step = EditStep.Action;
+            await s.Dm.SendMessageAsync(embed: EditForm("No responses yet", "There's nothing to remove. Type a menu number, or **cancel**."));
+            return;
+        }
+
+        s.RemoveCandidates = rsvps.Select(r => (r.UserId, r.Status)).ToList();
+        s.Step = EditStep.RemoveWho;
+
+        var lines = new List<string>();
+        for (var i = 0; i < s.RemoveCandidates.Count; i++)
+            lines.Add($"**{i + 1} ·** <@{s.RemoveCandidates[i].UserId}> — {StatusWord(s.RemoveCandidates[i].Status)}");
+        await s.Dm.SendMessageAsync(embed: EditForm("➖ Remove a response",
+            string.Join("\n", lines) + "\n\nType the number to remove, or **cancel**."));
+    }
+
+    private async Task HandleRemoveWhoAsync(EditSession s, string text)
+    {
+        if (!int.TryParse(text.Trim(), out var n) || n < 1 || n > s.RemoveCandidates.Count)
+        {
+            await s.Dm.SendMessageAsync(embed: EditForm("Pick a number", $"Type a number from **1–{s.RemoveCandidates.Count}**, or **cancel**."));
+            return;
+        }
+
+        var targetId = s.RemoveCandidates[n - 1].UserId;
+
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+        var ev = await db.ClanEvents.FirstOrDefaultAsync(e => e.Id == s.ClanEventId);
+        if (ev is null || ev.Status != ClanEventStatus.Scheduled)
+        {
+            await EndEditSessionAsync(s, EditForm("Gone", "That event is no longer available."));
+            return;
+        }
+
+        var rsvp = await db.EventRsvps.FirstOrDefaultAsync(r => r.ClanEventId == ev.Id && r.UserId == targetId);
+        if (rsvp is not null) db.EventRsvps.Remove(rsvp);
+        await db.SaveChangesAsync();
+
+        var rsvps = await db.EventRsvps.Where(r => r.ClanEventId == ev.Id).ToListAsync();
+        var promoted = EventWaitlist.Rebalance(rsvps, ev.MaxParticipants);
+        if (db.ChangeTracker.HasChanges()) await db.SaveChangesAsync();
+
+        await UpdatePostAsync(db, ev);
+        foreach (var uid in promoted) await EventWaitlist.NotifyPromotedAsync(_client, ev, uid);
+
+        await EndEditSessionAsync(s, EditForm("✅ Response removed", $"Removed <@{targetId}>'s response."));
+    }
+
+    // ── Clear all responses ─────────────────────────────────────────────────
+
+    private async Task BeginClearAsync(EditSession s)
+    {
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+        var count = await db.EventRsvps.CountAsync(r => r.ClanEventId == s.ClanEventId);
+        if (count == 0)
+        {
+            s.Step = EditStep.Action;
+            await s.Dm.SendMessageAsync(embed: EditForm("Nothing to clear", "There are no responses yet. Type a menu number, or **cancel**."));
+            return;
+        }
+        s.Step = EditStep.ClearConfirm;
+        await s.Dm.SendMessageAsync(embed: EditForm("⚠️ Clear all responses",
+            $"This removes **all {count}** response{(count == 1 ? "" : "s")} (including the waitlist). Type **yes** to confirm, or **no** to go back."));
+    }
+
+    private async Task HandleClearConfirmAsync(EditSession s, string text)
+    {
+        var t = text.Trim();
+        if (t.Equals("no", StringComparison.OrdinalIgnoreCase) || t.Equals("n", StringComparison.OrdinalIgnoreCase))
+        {
+            await SendActionMenuAsync(s);
+            return;
+        }
+        if (!t.Equals("yes", StringComparison.OrdinalIgnoreCase) && !t.Equals("y", StringComparison.OrdinalIgnoreCase))
+        {
+            await s.Dm.SendMessageAsync(embed: EditForm("Confirm?", "Type **yes** to clear all responses, or **no** to go back."));
+            return;
+        }
+
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+        var ev = await db.ClanEvents.FirstOrDefaultAsync(e => e.Id == s.ClanEventId);
+        if (ev is null || ev.Status != ClanEventStatus.Scheduled)
+        {
+            await EndEditSessionAsync(s, EditForm("Gone", "That event is no longer available."));
+            return;
+        }
+
+        var rsvps = await db.EventRsvps.Where(r => r.ClanEventId == ev.Id).ToListAsync();
+        if (rsvps.Count > 0) db.EventRsvps.RemoveRange(rsvps);
+        await db.SaveChangesAsync();
+
+        await UpdatePostAsync(db, ev);
+        await EndEditSessionAsync(s, EditForm("✅ Cleared", "Removed all responses."));
+    }
+
+    // ── Duplicate the event ─────────────────────────────────────────────────
+
+    private async Task DuplicateEventAsync(EditSession s)
+    {
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+        var ev = await db.ClanEvents.FirstOrDefaultAsync(e => e.Id == s.ClanEventId);
+        if (ev is null)
+        {
+            await EndEditSessionAsync(s, EditForm("Gone", "That event is no longer available."));
+            return;
+        }
+
+        // Carry the banner over. Series occurrences keep their bytes on the
+        // series row, so pull from there when the occurrence has none of its own.
+        var imageBytes = ev.ImageBytes;
+        if (imageBytes is null && ev.SeriesId is int sid)
+            imageBytes = (await db.ClanEventSeries.FirstOrDefaultAsync(x => x.Id == sid))?.ImageBytes;
+
+        // The copy is always a fresh one-off (no recurrence), credited to whoever
+        // duplicated it, at the same time — they can shift it via Modify after.
+        var organizerName = _client.GetGuild(ev.GuildId)?.GetUser(s.UserId)?.DisplayName ?? ev.OrganizerName;
+        var draft = new EventDraft
+        {
+            GuildId         = ev.GuildId,
+            OrganizerId     = s.UserId,
+            OrganizerName   = organizerName,
+            TimeZoneId      = s.Tz.Id,
+            Title           = ev.Title,
+            StartUtc        = ev.StartUtc,
+            EndUtc          = ev.EndUtc,
+            Description     = ev.Description,
+            ImageBytes      = imageBytes,
+            ImageFileName   = ev.ImageFileName,
+            MaxParticipants = ev.MaxParticipants,
+            Frequency       = null,
+        };
+
+        var publisher = scope.ServiceProvider.GetRequiredService<IEventPublisher>();
+        await publisher.PublishOneOffAsync(draft);
+
+        await EndEditSessionAsync(s, EditForm("✅ Duplicated",
+            $"Posted a fresh copy of **{ev.Title}** in the events channel — open it to tweak the time or details."));
+    }
+
+    // ── shared helpers ──────────────────────────────────────────────────────
+
+    private static string StatusWord(EventRsvpStatus s) => s switch
+    {
+        EventRsvpStatus.Going      => "Going",
+        EventRsvpStatus.Maybe      => "Maybe",
+        EventRsvpStatus.Decline    => "Declined",
+        EventRsvpStatus.Waitlisted => "Waitlist",
+        _                          => s.ToString(),
+    };
+
+    private static bool TryParseUserId(string text, out ulong id)
+    {
+        id = 0;
+        text = text.Trim();
+        if (text.StartsWith("<@", StringComparison.Ordinal) && text.EndsWith(">", StringComparison.Ordinal))
+        {
+            var inner = text[2..^1];
+            if (inner.StartsWith("&", StringComparison.Ordinal)) return false; // role mention
+            if (inner.StartsWith("!", StringComparison.Ordinal)) inner = inner[1..];
+            return ulong.TryParse(inner, out id);
+        }
+        return ulong.TryParse(text, out id);
+    }
+
+    private async Task EndEditSessionAsync(EditSession s, Embed msg)
+    {
+        _editSessions.TryRemove(s.UserId, out _);
+        try { await s.Dm.SendMessageAsync(embed: msg); } catch { }
     }
 
     private async Task OnEditDmAsync(SocketMessage message)
@@ -871,12 +1192,19 @@ public sealed class EventManagementHandler
 
         if (text.Equals("done", StringComparison.OrdinalIgnoreCase))
         {
-            _editSessions.TryRemove(message.Author.Id, out _);
-            try { await ApplyEditsAsync(s); }
-            catch (Exception ex)
+            if (IsFormStep(s.Step))
             {
-                _logger.LogError(ex, "Applying DM edits failed for event {Id}", s.ClanEventId);
-                try { await s.Dm.SendMessageAsync(embed: EditForm("Something went wrong", "I couldn't apply those edits — check the post to see what stuck.")); } catch { }
+                _editSessions.TryRemove(message.Author.Id, out _);
+                try { await ApplyEditsAsync(s); }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Applying DM edits failed for event {Id}", s.ClanEventId);
+                    try { await s.Dm.SendMessageAsync(embed: EditForm("Something went wrong", "I couldn't apply those edits — check the post to see what stuck.")); } catch { }
+                }
+            }
+            else
+            {
+                await EndEditSessionAsync(s, EditForm("✅ Done", "Closed the editor — no further changes."));
             }
             return;
         }
@@ -885,6 +1213,7 @@ public sealed class EventManagementHandler
         {
             switch (s.Step)
             {
+                case EditStep.Action:          await HandleActionMenuAsync(s, text);        break;
                 case EditStep.Menu:            await HandleEditMenuAsync(s, text);           break;
                 case EditStep.Title:           await HandleEditTitleAsync(s, text);          break;
                 case EditStep.When:            await HandleEditWhenAsync(s, text);           break;
@@ -892,13 +1221,18 @@ public sealed class EventManagementHandler
                 case EditStep.Description:     await HandleEditDescriptionAsync(s, text);    break;
                 case EditStep.Image:           await HandleEditImageAsync(s, message, text); break;
                 case EditStep.MaxParticipants: await HandleEditMaxAsync(s, text);            break;
+                case EditStep.AddStatus:       await HandleAddStatusAsync(s, text);          break;
+                case EditStep.AddWho:          await HandleAddWhoAsync(s, text);             break;
+                case EditStep.RemoveWho:       await HandleRemoveWhoAsync(s, text);          break;
+                case EditStep.ClearConfirm:    await HandleClearConfirmAsync(s, text);       break;
             }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Edit DM step {Step} failed for {User}", s.Step, message.Author.Id);
             try { await s.Dm.SendMessageAsync(embed: EditForm("Something went wrong", "Let's go back to the menu.")); } catch { }
-            await SendEditMenuAsync(s);
+            if (IsFormStep(s.Step)) await SendEditMenuAsync(s);
+            else                    await SendActionMenuAsync(s);
         }
     }
 
