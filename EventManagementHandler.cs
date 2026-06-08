@@ -54,6 +54,43 @@ public sealed class EventManagementHandler
 
     private sealed record PendingImage(byte[]? Bytes, string? FileName, bool Clear, DateTime At);
 
+    // ─── DM edit sessions (Apollo-style numbered-menu editing) ─────────────
+    // Clicking "Edit" opens a DM wizard instead of a modal: a numbered field
+    // menu, edits staged into the session, applied to the live post only when
+    // the user types "done". Keyed by user id; expired after EditIdleTimeout.
+    private static readonly TimeSpan EditIdleTimeout = TimeSpan.FromMinutes(15);
+    private readonly ConcurrentDictionary<ulong, EditSession> _editSessions = new();
+    private System.Threading.Timer? _editIdleSweep;
+
+    private enum EditStep { Menu, Title, When, Duration, Description, Image, MaxParticipants }
+
+    private sealed class EditSession
+    {
+        public ulong UserId;
+        public IDMChannel Dm = null!;
+        public int ClanEventId;          // the clicked occurrence
+        public string Scope = "single";  // "single" | "occ" | "series"
+        public int? SeriesId;
+        public TimeZoneInfo Tz = TimeZoneInfo.Utc;
+        public EditStep Step = EditStep.Menu;
+        public DateTime LastActivityAt;
+
+        // Working copy, pre-loaded from the event.
+        public string Title = string.Empty;
+        public DateTime StartUtc;
+        public DateTime EndUtc;
+        public string Description = string.Empty;
+        public int? MaxParticipants;
+
+        // Image is staged separately (we don't preload bytes): only touched if
+        // the user actually changes it during this session.
+        public bool HasImage;        // did the event have a banner when we started
+        public bool ImageChanged;    // did the user stage an image change
+        public bool ImageCleared;    // ...and was it a removal
+        public byte[]? ImageBytes;
+        public string? ImageFileName;
+    }
+
     public EventManagementHandler(
         IServiceProvider services,
         DiscordSocketClient client,
@@ -68,6 +105,10 @@ public sealed class EventManagementHandler
         _time     = time;
         _sorter   = sorter;
         _logger   = logger;
+
+        // Proactively drop (and notify) edit sessions idle past EditIdleTimeout.
+        _editIdleSweep = new System.Threading.Timer(
+            _ => _ = SweepEditSessionsAsync(), null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
     }
 
     public void Register(DiscordSocketClient client)
@@ -75,6 +116,7 @@ public sealed class EventManagementHandler
         client.SelectMenuExecuted += OnSelectAsync;
         client.ButtonExecuted     += OnButtonAsync;
         client.ModalSubmitted     += OnModalAsync;
+        client.MessageReceived    += OnEditDmAsync;
     }
 
     // ─── Entry points (called by EventCommandHandler) ──────────────────────
@@ -316,7 +358,14 @@ public sealed class EventManagementHandler
         }
         else
         {
-            await component.RespondWithModalAsync(BuildEditModal("single", ev.Id, ev, withWhen: true, withDuration: true, await ResolveCallerZoneAsync(component.User.Id)));
+            var ok = await BeginEditDmAsync(component.User, ev, "single");
+            await component.UpdateAsync(m =>
+            {
+                m.Content = ok
+                    ? "📬 I've sent you a DM to edit this event."
+                    : "I couldn't DM you — check that DMs from server members are enabled.";
+                m.Components = Empty();
+            });
         }
     }
 
@@ -336,49 +385,144 @@ public sealed class EventManagementHandler
         try { await component.UpdateAsync(m => { m.Content = "⏳ Updating image…"; m.Components = Empty(); }); }
         catch (Exception ex) { _logger.LogDebug(ex, "Image ack failed for event {Id}", ev.Id); }
 
-        int rerendered = 0;
-        string scopeLabel;
-
-        using (var scope = _services.CreateScope())
-        {
-            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-
-            if (ev.SeriesId is int sid)
-            {
-                scopeLabel = "series";
-                var series = await db.ClanEventSeries.FirstOrDefaultAsync(s => s.Id == sid);
-                if (series is null) { await FinalizeImageAsync(component, "That series no longer exists."); return; }
-
-                series.ImageBytes    = pending.Clear ? null : pending.Bytes;
-                series.ImageFileName = pending.Clear ? null : pending.FileName;
-
-                var futures = await db.ClanEvents
-                    .Where(e => e.SeriesId == sid && e.Status == ClanEventStatus.Scheduled && e.StartUtc > DateTime.UtcNow)
-                    .ToListAsync();
-                foreach (var occ in futures)
-                    occ.ImageFileName = series.ImageFileName;
-                await db.SaveChangesAsync();
-
-                foreach (var occ in futures)
-                    if (await RerenderImageAsync(db, occ, pending)) rerendered++;
-            }
-            else
-            {
-                scopeLabel = "event";
-                var fresh = await db.ClanEvents.FirstOrDefaultAsync(e => e.Id == ev.Id);
-                if (fresh is null) { await FinalizeImageAsync(component, "That event no longer exists."); return; }
-
-                fresh.ImageBytes    = pending.Clear ? null : pending.Bytes;
-                fresh.ImageFileName = pending.Clear ? null : pending.FileName;
-                await db.SaveChangesAsync();
-
-                if (await RerenderImageAsync(db, fresh, pending)) rerendered++;
-            }
-        }
+        var (scopeLabel, rerendered) = await ApplyImageToEventAsync(ev.Id, pending);
+        if (scopeLabel is null) { await FinalizeImageAsync(component, "That event no longer exists."); return; }
 
         var what = pending.Clear ? "Removed the image" : "Updated the image";
         var tail = scopeLabel == "series" ? $" ({rerendered} post{(rerendered == 1 ? "" : "s")} updated)." : ".";
         await FinalizeImageAsync(component, $"✅ {what} on this {scopeLabel}{tail}");
+    }
+
+    /// <summary>
+    /// Core image apply shared by the <c>/event image</c> picker and the on-post
+    /// "Image" button: writes bytes/filename to the one-off event (or the series
+    /// plus every future occurrence) and re-renders each post in place. Returns
+    /// the scope label ("event"/"series") and how many posts were re-rendered, or
+    /// (null, 0) if the event/series no longer exists.
+    /// </summary>
+    private async Task<(string? scopeLabel, int rerendered)> ApplyImageToEventAsync(int clanEventId, PendingImage pending)
+    {
+        var rerendered = 0;
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+        var ev = await db.ClanEvents.FirstOrDefaultAsync(e => e.Id == clanEventId);
+        if (ev is null) return (null, 0);
+
+        if (ev.SeriesId is int sid)
+        {
+            var series = await db.ClanEventSeries.FirstOrDefaultAsync(s => s.Id == sid);
+            if (series is null) return (null, 0);
+
+            series.ImageBytes    = pending.Clear ? null : pending.Bytes;
+            series.ImageFileName = pending.Clear ? null : pending.FileName;
+
+            var futures = await db.ClanEvents
+                .Where(e => e.SeriesId == sid && e.Status == ClanEventStatus.Scheduled && e.StartUtc > DateTime.UtcNow)
+                .ToListAsync();
+            foreach (var occ in futures)
+                occ.ImageFileName = series.ImageFileName;
+            await db.SaveChangesAsync();
+
+            foreach (var occ in futures)
+                if (await RerenderImageAsync(db, occ, pending)) rerendered++;
+
+            return ("series", rerendered);
+        }
+
+        ev.ImageBytes    = pending.Clear ? null : pending.Bytes;
+        ev.ImageFileName = pending.Clear ? null : pending.FileName;
+        await db.SaveChangesAsync();
+
+        if (await RerenderImageAsync(db, ev, pending)) rerendered++;
+        return ("event", rerendered);
+    }
+
+    // ─── On-post "Image" button → URL modal ────────────────────────────────
+
+    private async Task OnImageEditAsync(SocketMessageComponent component, string cid)
+    {
+        var idStr = cid[(cid.LastIndexOf(':') + 1)..];
+        if (!int.TryParse(idStr, out var clanEventId))
+        {
+            await component.RespondAsync("Couldn't read that event.", ephemeral: true);
+            return;
+        }
+
+        ClanEvent? ev;
+        using (var scope = _services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+            ev = await db.ClanEvents.FirstOrDefaultAsync(e => e.Id == clanEventId);
+        }
+        if (ev is null || ev.Status == ClanEventStatus.Cancelled)
+        {
+            await component.RespondAsync("That event is no longer available.", ephemeral: true);
+            return;
+        }
+        if (!await CallerMayManageAsync(component.User, ev.OrganizerId))
+        {
+            await component.RespondAsync("You don't have permission to manage that event.", ephemeral: true);
+            return;
+        }
+
+        // Modals carry text only — no file upload — so this takes an image link
+        // (a direct image URL, or a Tenor/Giphy share link). To upload a file
+        // from your device, use /event image with an attachment instead.
+        var modal = new ModalBuilder()
+            .WithTitle("Change event image")
+            .WithCustomId($"{Prefix}imgsubmit:{ev.Id}")
+            .AddTextInput("Image link — or type \"clear\" to remove", "url", TextInputStyle.Short,
+                placeholder: "https://…   Tenor/Giphy link   clear", required: false)
+            .Build();
+        await component.RespondWithModalAsync(modal);
+    }
+
+    private async Task OnImageSubmitAsync(SocketModal modal)
+    {
+        await modal.DeferAsync(ephemeral: true);
+
+        var parts = modal.Data.CustomId.Split(':'); // evtmgmt:imgsubmit:<id>
+        if (parts.Length != 3 || !int.TryParse(parts[2], out var clanEventId))
+        { await modal.FollowupAsync("Couldn't read that form.", ephemeral: true); return; }
+
+        var raw = (modal.Data.Components.FirstOrDefault(c => c.CustomId == "url")?.Value ?? string.Empty).Trim();
+
+        ClanEvent? ev;
+        using (var scope = _services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+            ev = await db.ClanEvents.FirstOrDefaultAsync(e => e.Id == clanEventId);
+        }
+        if (ev is null || ev.Status == ClanEventStatus.Cancelled)
+        { await modal.FollowupAsync("That event is no longer available.", ephemeral: true); return; }
+        if (!await CallerMayManageAsync(modal.User, ev.OrganizerId))
+        { await modal.FollowupAsync("You don't have permission to edit that event.", ephemeral: true); return; }
+
+        if (raw.Length == 0)
+        { await modal.FollowupAsync("No change — left the image as-is.", ephemeral: true); return; }
+
+        PendingImage pending;
+        if (raw.Equals("clear", StringComparison.OrdinalIgnoreCase)
+         || raw.Equals("none", StringComparison.OrdinalIgnoreCase)
+         || raw.Equals("remove", StringComparison.OrdinalIgnoreCase))
+        {
+            pending = new PendingImage(null, null, Clear: true, DateTime.UtcNow);
+        }
+        else
+        {
+            var res = await EventImageFetcher.FromUrlAsync(raw);
+            if (!res.Ok)
+            { await modal.FollowupAsync($"Couldn't use that link: {res.Error}", ephemeral: true); return; }
+            pending = new PendingImage(EventImage.Downscale(res.Bytes!, res.FileName), res.FileName, Clear: false, DateTime.UtcNow);
+        }
+
+        var (scopeLabel, rerendered) = await ApplyImageToEventAsync(ev.Id, pending);
+        if (scopeLabel is null) { await modal.FollowupAsync("That event no longer exists.", ephemeral: true); return; }
+
+        var what = pending.Clear ? "Removed the image" : "Updated the image";
+        var tail = scopeLabel == "series" ? $" ({rerendered} post{(rerendered == 1 ? "" : "s")} updated)." : ".";
+        await modal.FollowupAsync($"✅ {what} on this {scopeLabel}{tail}", ephemeral: true);
     }
 
     /// <summary>
@@ -470,6 +614,13 @@ public sealed class EventManagementHandler
             return;
         }
 
+        // On-post "Image" button → opens a URL modal to swap/clear the banner.
+        if (cid.StartsWith($"{Prefix}imgedit:", StringComparison.Ordinal))
+        {
+            await OnImageEditAsync(component, cid);
+            return;
+        }
+
         var parts = cid.Split(':'); // evtmgmt:<cxl|editpick>:<occ|series>:<clanEventId>
         if (parts.Length != 4) return;
         var kind  = parts[1];
@@ -511,16 +662,20 @@ public sealed class EventManagementHandler
         }
         else if (kind == "editpick")
         {
-            var tz = await ResolveCallerZoneAsync(component.User.Id);
-            if (scope == "series")
+            if (scope == "series" && ev.SeriesId is null)
             {
-                if (ev.SeriesId is not int seriesId) { await component.UpdateAsync(m => { m.Content = "That isn't a series."; m.Components = Empty(); }); return; }
-                await component.RespondWithModalAsync(BuildSeriesEditModal(seriesId, ev));
+                await component.UpdateAsync(m => { m.Content = "That isn't a series."; m.Components = Empty(); });
+                return;
             }
-            else
+
+            var ok = await BeginEditDmAsync(component.User, ev, scope == "series" ? "series" : "occ");
+            await component.UpdateAsync(m =>
             {
-                await component.RespondWithModalAsync(BuildEditModal("occ", ev.Id, ev, withWhen: false, withDuration: true, tz));
-            }
+                m.Content = ok
+                    ? "📬 I've sent you a DM to edit this event."
+                    : "I couldn't DM you — check that DMs from server members are enabled.";
+                m.Components = Empty();
+            });
         }
     }
 
@@ -596,10 +751,396 @@ public sealed class EventManagementHandler
         }
         else
         {
-            var tz = await ResolveCallerZoneAsync(component.User.Id);
-            await component.RespondWithModalAsync(
-                BuildEditModal("single", ev.Id, ev, withWhen: true, withDuration: true, tz));
+            var ok = await BeginEditDmAsync(component.User, ev, "single");
+            await component.RespondAsync(
+                ok ? "📬 I've sent you a DM to edit this event."
+                   : "I couldn't DM you — check that DMs from server members are enabled.",
+                ephemeral: true);
         }
+    }
+
+    // ─── DM edit wizard (numbered-menu editing; staged, applied on "done") ──
+
+    /// <summary>Builds an edit session from the clicked event and DMs the field
+    /// menu. Returns false if the DM couldn't be opened (closed DMs).</summary>
+    private async Task<bool> BeginEditDmAsync(SocketUser user, ClanEvent ev, string scope)
+    {
+        IDMChannel dm;
+        try { dm = await user.CreateDMChannelAsync(); }
+        catch (Exception ex) { _logger.LogDebug(ex, "Couldn't open DM for edit ({User})", user.Id); return false; }
+
+        var session = new EditSession
+        {
+            UserId          = user.Id,
+            Dm              = dm,
+            ClanEventId     = ev.Id,
+            Scope           = scope,
+            SeriesId        = ev.SeriesId,
+            Tz              = await ResolveCallerZoneAsync(user.Id),
+            Step            = EditStep.Menu,
+            LastActivityAt  = DateTime.UtcNow,
+            Title           = ev.Title,
+            StartUtc        = ev.StartUtc,
+            EndUtc          = ev.EndUtc,
+            Description     = ev.Description ?? string.Empty,
+            MaxParticipants = ev.MaxParticipants,
+            HasImage        = !string.IsNullOrWhiteSpace(ev.ImageFileName),
+        };
+        _editSessions[user.Id] = session;
+
+        try { await SendEditMenuAsync(session); }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Couldn't send edit menu ({User})", user.Id);
+            _editSessions.TryRemove(user.Id, out _);
+            return false;
+        }
+        return true;
+    }
+
+    private static readonly string[] NumberEmoji = { "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣" };
+
+    // Whole-series edits exclude time fields — those re-anchor the recurrence and
+    // are handled per-occurrence (or by the repeat-schedule field, coming next).
+    private static EditStep[] MenuFields(EditSession s) =>
+        s.Scope == "series"
+            ? new[] { EditStep.Title, EditStep.Description, EditStep.Image, EditStep.MaxParticipants }
+            : new[] { EditStep.Title, EditStep.When, EditStep.Duration, EditStep.Description, EditStep.Image, EditStep.MaxParticipants };
+
+    private static string FieldLabel(EditStep step) => step switch
+    {
+        EditStep.Title           => "Title",
+        EditStep.When            => "Start time",
+        EditStep.Duration        => "Duration / end",
+        EditStep.Description     => "Description",
+        EditStep.Image           => "Image",
+        EditStep.MaxParticipants => "Attendee limit",
+        _                        => "",
+    };
+
+    private static string FieldValue(EditSession s, EditStep step) => step switch
+    {
+        EditStep.Title           => string.IsNullOrWhiteSpace(s.Title) ? "—" : s.Title,
+        EditStep.When            => EventTimeParser.Stamp(s.StartUtc, 'F'),
+        EditStep.Duration        => $"{Math.Max(1, (int)Math.Round((s.EndUtc - s.StartUtc).TotalMinutes))} min",
+        EditStep.Description     => string.IsNullOrWhiteSpace(s.Description) ? "—" : Trunc(s.Description, 60),
+        EditStep.Image           => s.ImageChanged ? (s.ImageCleared ? "(will remove)" : "(new image staged)") : (s.HasImage ? "set" : "none"),
+        EditStep.MaxParticipants => s.MaxParticipants?.ToString(CultureInfo.InvariantCulture) ?? "none",
+        _                        => "",
+    };
+
+    private static string Trunc(string s, int n) => s.Length <= n ? s : s[..n] + "…";
+
+    private async Task SendEditMenuAsync(EditSession s)
+    {
+        s.Step = EditStep.Menu;
+        var fields = MenuFields(s);
+        var lines = new List<string>();
+        for (var i = 0; i < fields.Length; i++)
+            lines.Add($"{NumberEmoji[i]} **{FieldLabel(fields[i])}** — {FieldValue(s, fields[i])}");
+
+        var scopeNote = s.Scope == "series" ? " · whole series" : s.Scope == "occ" ? " · this occurrence" : "";
+        var body = string.Join("\n", lines) +
+                   "\n\nType a **number** to change that field, **done** to save, or **cancel** to discard.";
+        await s.Dm.SendMessageAsync(embed: EditForm($"✏️ Editing: {s.Title}{scopeNote}", body));
+    }
+
+    private async Task OnEditDmAsync(SocketMessage message)
+    {
+        if (message.Author.IsBot) return;
+        if (message is not SocketUserMessage) return;
+        if (message.Channel is not IDMChannel) return;
+        if (!_editSessions.TryGetValue(message.Author.Id, out var s)) return;
+
+        if (IsEditExpired(s))
+        {
+            _editSessions.TryRemove(message.Author.Id, out _);
+            try { await s.Dm.SendMessageAsync(embed: EditForm("⌛ Edit timed out", "That edit expired from inactivity — **nothing was changed**. Hit Edit again to retry.")); } catch { }
+            return;
+        }
+
+        s.LastActivityAt = DateTime.UtcNow;
+        var text = message.Content.Trim();
+
+        if (text.Equals("cancel", StringComparison.OrdinalIgnoreCase))
+        {
+            _editSessions.TryRemove(message.Author.Id, out _);
+            try { await s.Dm.SendMessageAsync(embed: EditForm("Discarded", "No changes were made.")); } catch { }
+            return;
+        }
+
+        if (text.Equals("done", StringComparison.OrdinalIgnoreCase))
+        {
+            _editSessions.TryRemove(message.Author.Id, out _);
+            try { await ApplyEditsAsync(s); }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Applying DM edits failed for event {Id}", s.ClanEventId);
+                try { await s.Dm.SendMessageAsync(embed: EditForm("Something went wrong", "I couldn't apply those edits — check the post to see what stuck.")); } catch { }
+            }
+            return;
+        }
+
+        try
+        {
+            switch (s.Step)
+            {
+                case EditStep.Menu:            await HandleEditMenuAsync(s, text);           break;
+                case EditStep.Title:           await HandleEditTitleAsync(s, text);          break;
+                case EditStep.When:            await HandleEditWhenAsync(s, text);           break;
+                case EditStep.Duration:        await HandleEditDurationAsync(s, text);       break;
+                case EditStep.Description:     await HandleEditDescriptionAsync(s, text);    break;
+                case EditStep.Image:           await HandleEditImageAsync(s, message, text); break;
+                case EditStep.MaxParticipants: await HandleEditMaxAsync(s, text);            break;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Edit DM step {Step} failed for {User}", s.Step, message.Author.Id);
+            try { await s.Dm.SendMessageAsync(embed: EditForm("Something went wrong", "Let's go back to the menu.")); } catch { }
+            await SendEditMenuAsync(s);
+        }
+    }
+
+    private async Task HandleEditMenuAsync(EditSession s, string text)
+    {
+        var fields = MenuFields(s);
+        if (!int.TryParse(text, out var n) || n < 1 || n > fields.Length)
+        {
+            await s.Dm.SendMessageAsync(embed: EditForm("Pick a field", $"Type a number from **1–{fields.Length}**, or **done** / **cancel**."));
+            return;
+        }
+
+        s.Step = fields[n - 1];
+        var prompt = s.Step switch
+        {
+            EditStep.Title           => ("📝 New title", "Send the new title."),
+            EditStep.When            => ("🕒 New start time", "Send the new start, e.g. `7pm tomorrow` or `June 14 at 8pm`. The duration stays the same."),
+            EditStep.Duration        => ("⏱️ New duration", "Send a duration or end time, e.g. `90 minutes` or `until 9pm`."),
+            EditStep.Description     => ("📄 New description", "Send the new description, or `none` to clear it."),
+            EditStep.Image           => ("🖼️ New image", "Drag in an image/GIF, paste a link, or type `clear` to remove the banner."),
+            EditStep.MaxParticipants => ("👥 New attendee limit", "Send a whole number, or `none` for no limit."),
+            _                        => ("Edit", "Send the new value."),
+        };
+        await s.Dm.SendMessageAsync(embed: EditForm(prompt.Item1, prompt.Item2));
+    }
+
+    private async Task HandleEditTitleAsync(EditSession s, string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) { await s.Dm.SendMessageAsync(embed: EditForm("📝 Title", "Title can't be empty — send some text.")); return; }
+        if (text.Length > 100)               { await s.Dm.SendMessageAsync(embed: EditForm("📝 Too long", "Keep it under 100 characters.")); return; }
+        s.Title = text.Trim();
+        await SendEditMenuAsync(s);
+    }
+
+    private async Task HandleEditWhenAsync(EditSession s, string text)
+    {
+        var r = _time.ParseStart(text, s.Tz);
+        if (!r.Success)      { await s.Dm.SendMessageAsync(embed: EditForm("Let's try that again", r.Error)); return; }
+        if (!r.HasTimeOfDay) { await s.Dm.SendMessageAsync(embed: EditForm("🕒 Need a time of day", "Include a time too, like `June 14 at 7pm`.")); return; }
+        var duration = s.EndUtc - s.StartUtc;
+        if (duration <= TimeSpan.Zero) duration = TimeSpan.FromHours(1);
+        s.StartUtc = r.StartUtc;
+        s.EndUtc   = r.StartUtc + duration; // preserve the event's length
+        await SendEditMenuAsync(s);
+    }
+
+    private async Task HandleEditDurationAsync(EditSession s, string text)
+    {
+        var d = _time.ParseEnd(text, s.StartUtc, s.Tz);
+        if (!d.Success) { await s.Dm.SendMessageAsync(embed: EditForm("Let's try that again", d.Error)); return; }
+        s.EndUtc = d.EndUtc;
+        await SendEditMenuAsync(s);
+    }
+
+    private async Task HandleEditDescriptionAsync(EditSession s, string text)
+    {
+        s.Description = text.Equals("none", StringComparison.OrdinalIgnoreCase) ? string.Empty : text.Trim();
+        await SendEditMenuAsync(s);
+    }
+
+    private async Task HandleEditMaxAsync(EditSession s, string text)
+    {
+        text = text.Trim();
+        if (text.Equals("none", StringComparison.OrdinalIgnoreCase) || text.Equals("unlimited", StringComparison.OrdinalIgnoreCase) || text == "0")
+            s.MaxParticipants = null;
+        else if (int.TryParse(text, out var n) && n > 0)
+            s.MaxParticipants = n;
+        else { await s.Dm.SendMessageAsync(embed: EditForm("👥 Need a number", "Give me a whole number greater than 0, or `none`.")); return; }
+        await SendEditMenuAsync(s);
+    }
+
+    private async Task HandleEditImageAsync(EditSession s, SocketMessage message, string text)
+    {
+        if (text.Equals("clear", StringComparison.OrdinalIgnoreCase) || text.Equals("none", StringComparison.OrdinalIgnoreCase) || text.Equals("remove", StringComparison.OrdinalIgnoreCase))
+        {
+            s.ImageChanged = true; s.ImageCleared = true; s.ImageBytes = null; s.ImageFileName = null;
+            await SendEditMenuAsync(s);
+            return;
+        }
+
+        var att = message.Attachments.FirstOrDefault();
+        if (att is null)
+        {
+            if (text.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || text.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                await s.Dm.SendMessageAsync("⏳ Fetching that image…");
+                var res = await EventImageFetcher.FromUrlAsync(text);
+                if (!res.Ok) { await s.Dm.SendMessageAsync(embed: EditForm("🖼️ Couldn't use that link", $"{res.Error} Try another, drag a file in, or type `clear`.")); return; }
+                s.ImageChanged = true; s.ImageCleared = false;
+                s.ImageFileName = res.FileName;
+                s.ImageBytes    = EventImage.Downscale(res.Bytes!, res.FileName);
+                await SendEditMenuAsync(s);
+                return;
+            }
+            await s.Dm.SendMessageAsync(embed: EditForm("🖼️ New image", "Drag an image into this DM, paste a link, or type `clear`."));
+            return;
+        }
+
+        var looksImage = (att.ContentType?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) ?? false) || EventImage.IsAllowedExtension(att.Filename);
+        if (!looksImage)               { await s.Dm.SendMessageAsync(embed: EditForm("🖼️ Not an image", "That doesn't look like a PNG/JPG/GIF/WebP. Try another, or type `clear`.")); return; }
+        if (att.Size > EventImage.MaxBytes) { await s.Dm.SendMessageAsync(embed: EditForm("🖼️ Too large", $"Max is {EventImage.MaxBytes / (1024 * 1024)} MB.")); return; }
+
+        byte[] bytes;
+        try { bytes = await Http.GetByteArrayAsync(att.Url); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Edit image download failed for {User}", s.UserId);
+            await s.Dm.SendMessageAsync(embed: EditForm("🖼️ Download failed", "Couldn't download that. Try again, or type `clear`."));
+            return;
+        }
+        if (bytes.Length > EventImage.MaxBytes) { await s.Dm.SendMessageAsync(embed: EditForm("🖼️ Too large", $"Max is {EventImage.MaxBytes / (1024 * 1024)} MB.")); return; }
+
+        var name = EventImage.Sanitize(att.Filename);
+        s.ImageChanged = true; s.ImageCleared = false;
+        s.ImageFileName = name;
+        s.ImageBytes    = EventImage.Downscale(bytes, name);
+        await SendEditMenuAsync(s);
+    }
+
+    /// <summary>Applies the staged edits to the live event (or series + future
+    /// occurrences) and re-renders the post(s). Called when the user types "done".</summary>
+    private async Task ApplyEditsAsync(EditSession s)
+    {
+        var pending = s.ImageChanged
+            ? new PendingImage(s.ImageCleared ? null : s.ImageBytes, s.ImageCleared ? null : s.ImageFileName, s.ImageCleared, DateTime.UtcNow)
+            : null;
+
+        var promoted = new List<(ClanEvent Ev, ulong UserId)>();
+        string summary;
+
+        using (var scope = _services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+            if (s.Scope == "series")
+            {
+                if (s.SeriesId is not int sid) { await s.Dm.SendMessageAsync(embed: EditForm("Gone", "That series no longer exists.")); return; }
+                var series = await db.ClanEventSeries.FirstOrDefaultAsync(x => x.Id == sid);
+                if (series is null)            { await s.Dm.SendMessageAsync(embed: EditForm("Gone", "That series no longer exists.")); return; }
+
+                series.Title           = s.Title;
+                series.Description     = s.Description;
+                series.MaxParticipants = s.MaxParticipants;
+                if (pending is not null)
+                {
+                    series.ImageBytes    = pending.Clear ? null : pending.Bytes;
+                    series.ImageFileName = pending.Clear ? null : pending.FileName;
+                }
+
+                var futures = await db.ClanEvents
+                    .Where(e => e.SeriesId == sid && e.Status == ClanEventStatus.Scheduled && e.StartUtc > DateTime.UtcNow)
+                    .ToListAsync();
+                foreach (var occ in futures)
+                {
+                    occ.Title           = s.Title;
+                    occ.Description     = s.Description;
+                    occ.MaxParticipants = s.MaxParticipants;
+                    if (pending is not null) occ.ImageFileName = series.ImageFileName;
+                    await ApplyCalendarUpdateAsync(db, occ);
+                }
+                await db.SaveChangesAsync();
+
+                foreach (var occ in futures)
+                {
+                    var rsvps = await db.EventRsvps.Where(r => r.ClanEventId == occ.Id).ToListAsync();
+                    foreach (var uid in EventWaitlist.Rebalance(rsvps, occ.MaxParticipants)) promoted.Add((occ, uid));
+                }
+                if (db.ChangeTracker.HasChanges()) await db.SaveChangesAsync();
+
+                foreach (var occ in futures)
+                {
+                    if (pending is not null) await RerenderImageAsync(db, occ, pending);
+                    else                     await UpdatePostAsync(db, occ);
+                }
+
+                summary = $"the series **{s.Title}** and {futures.Count} upcoming occurrence{(futures.Count == 1 ? "" : "s")}";
+            }
+            else
+            {
+                var ev = await db.ClanEvents.FirstOrDefaultAsync(x => x.Id == s.ClanEventId);
+                if (ev is null || ev.Status != ClanEventStatus.Scheduled) { await s.Dm.SendMessageAsync(embed: EditForm("Gone", "That event is no longer available.")); return; }
+
+                var startMoved = ev.StartUtc != s.StartUtc;
+                ev.Title           = s.Title;
+                ev.StartUtc        = s.StartUtc;
+                ev.EndUtc          = s.EndUtc;
+                ev.Description     = s.Description;
+                ev.MaxParticipants = s.MaxParticipants;
+                if (pending is not null)
+                {
+                    ev.ImageBytes    = pending.Clear ? null : pending.Bytes;
+                    ev.ImageFileName = pending.Clear ? null : pending.FileName;
+                }
+                if (startMoved) ev.RemindersSentCsv = string.Empty; // re-arm reminders
+
+                await ApplyCalendarUpdateAsync(db, ev);
+                await db.SaveChangesAsync();
+
+                var rsvps = await db.EventRsvps.Where(r => r.ClanEventId == ev.Id).ToListAsync();
+                foreach (var uid in EventWaitlist.Rebalance(rsvps, ev.MaxParticipants)) promoted.Add((ev, uid));
+                if (db.ChangeTracker.HasChanges()) await db.SaveChangesAsync();
+
+                if (pending is not null) await RerenderImageAsync(db, ev, pending);
+                else                     await UpdatePostAsync(db, ev);
+
+                summary = $"**{s.Title}**";
+            }
+        }
+
+        foreach (var (ev, uid) in promoted)
+            await EventWaitlist.NotifyPromotedAsync(_client, ev, uid);
+
+        await s.Dm.SendMessageAsync(embed: EditForm("✅ Saved", $"Updated {summary}."));
+    }
+
+    private async Task SweepEditSessionsAsync()
+    {
+        try
+        {
+            foreach (var kv in _editSessions)
+            {
+                if (!IsEditExpired(kv.Value)) continue;
+                if (_editSessions.TryRemove(kv.Key, out var s))
+                {
+                    try { await s.Dm.SendMessageAsync(embed: EditForm("⌛ Edit timed out", "I didn't hear back, so this edit was dropped and **nothing was changed**.")); }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Edit timeout DM failed for {User}", kv.Key); }
+                }
+            }
+        }
+        catch (Exception ex) { _logger.LogDebug(ex, "Edit idle sweep failed"); }
+    }
+
+    private static bool IsEditExpired(EditSession s) => DateTime.UtcNow - s.LastActivityAt > EditIdleTimeout;
+
+    private static Embed EditForm(string title, string? body = null)
+    {
+        var eb = new EmbedBuilder()
+            .WithColor(new Color(0x5865F2))
+            .WithTitle(title)
+            .WithFooter("Reply in this DM • \"done\" saves • \"cancel\" discards • times out after 15 min");
+        if (!string.IsNullOrWhiteSpace(body)) eb.WithDescription(body);
+        return eb.Build();
     }
 
     // ─── Set Host (on-post button → user-select) ───────────────────────────
@@ -763,6 +1304,13 @@ public sealed class EventManagementHandler
 
     private async Task OnModalAsync(SocketModal modal)
     {
+        // Image-change modal (from the on-post "Image" button) is handled separately.
+        if (modal.Data.CustomId.StartsWith($"{Prefix}imgsubmit:", StringComparison.Ordinal))
+        {
+            await OnImageSubmitAsync(modal);
+            return;
+        }
+
         if (!modal.Data.CustomId.StartsWith($"{Prefix}editsubmit:", StringComparison.Ordinal)) return;
 
         // Acknowledge immediately. A whole-series edit re-renders every future
