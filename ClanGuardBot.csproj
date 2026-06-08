@@ -23,6 +23,14 @@
     <PackageReference Include="Microsoft.Recognizers.Text.DateTime" Version="1.8.13" />
 
     <!--
+      Downscales oversized event banner images before they're stored/attached
+      (EventImage.Downscale). 2.1.9 is the last Apache-2.0 release; the
+      load/resize/SaveAs* API used is identical on 3.x if ever bumped (3.x uses
+      the Six Labors Split License, free for this project's scale).
+    -->
+    <PackageReference Include="SixLabors.ImageSharp" Version="2.1.9" />
+
+    <!--
       Chart rendering for the /timeline command. ScottPlot 5 produces PNG
       bytes directly via Plot.GetImageBytes(); we attach the result to
       Discord embeds using FileAttachment + the attachment:// embed-image URL.

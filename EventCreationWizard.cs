@@ -321,8 +321,8 @@ public sealed class EventCreationWizard
                     return;
                 }
 
-                s.Draft.ImageBytes    = res.Bytes;
                 s.Draft.ImageFileName = res.FileName;
+                s.Draft.ImageBytes    = EventImage.Downscale(res.Bytes!, res.FileName);
                 s.Step = WizardStep.Recurrence;
                 await PromptRecurrenceAsync(s);
                 return;
@@ -362,8 +362,9 @@ public sealed class EventCreationWizard
             return;
         }
 
-        s.Draft.ImageBytes    = bytes;
-        s.Draft.ImageFileName = EventImage.Sanitize(att.Filename);
+        var imgName = EventImage.Sanitize(att.Filename);
+        s.Draft.ImageFileName = imgName;
+        s.Draft.ImageBytes    = EventImage.Downscale(bytes, imgName);
         s.Step = WizardStep.Recurrence;
         await PromptRecurrenceAsync(s);
     }

@@ -149,7 +149,8 @@ public sealed class EventManagementHandler
                 return;
             }
 
-            pending = new PendingImage(bytes, EventImage.Sanitize(attachment.Filename), Clear: false, DateTime.UtcNow);
+            var imgName = EventImage.Sanitize(attachment.Filename);
+            pending = new PendingImage(EventImage.Downscale(bytes, imgName), imgName, Clear: false, DateTime.UtcNow);
         }
         else
         {
@@ -159,7 +160,7 @@ public sealed class EventManagementHandler
                 await command.FollowupAsync(res.Error ?? "Couldn't use that link.", ephemeral: true);
                 return;
             }
-            pending = new PendingImage(res.Bytes, res.FileName, Clear: false, DateTime.UtcNow);
+            pending = new PendingImage(EventImage.Downscale(res.Bytes!, res.FileName), res.FileName, Clear: false, DateTime.UtcNow);
         }
 
         _pendingImages[command.User.Id] = pending;

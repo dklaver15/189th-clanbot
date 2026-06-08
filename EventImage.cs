@@ -2,6 +2,8 @@ using System.Text;
 using ClanGuardBot.Data;
 using ClanGuardBot.Models;
 using Microsoft.EntityFrameworkCore;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Processing;
 
 namespace ClanGuardBot.Services;
 
@@ -22,7 +24,55 @@ public static class EventImage
     /// <summary>Max accepted image size. Keeps the DB (and its backups) sane.</summary>
     public const long MaxBytes = 8 * 1024 * 1024;
 
+    /// <summary>
+    /// Longest-side pixel cap applied by <see cref="Downscale"/>. Discord scales
+    /// the embed's main image to the embed width, so a high-res (especially
+    /// square) banner renders very tall; downscaling the stored bytes makes it
+    /// render smaller. Tune to taste — higher = larger in the post.
+    /// </summary>
+    public const int MaxImageDimension = 320;
+
     public static readonly string[] AllowedExtensions = { ".png", ".jpg", ".jpeg", ".gif", ".webp" };
+
+    /// <summary>
+    /// Shrinks an image so its longest side is at most <see cref="MaxImageDimension"/>,
+    /// re-encoding in the same format (animated GIFs are resized frame-by-frame).
+    /// Images already within the cap are returned unchanged (no upscaling or
+    /// needless re-encode). Any failure returns the original bytes so a resize
+    /// hiccup never blocks event creation.
+    /// </summary>
+    public static byte[] Downscale(byte[] bytes, string? fileName)
+    {
+        try
+        {
+            using var image = Image.Load(bytes);
+
+            var longest = Math.Max(image.Width, image.Height);
+            if (longest <= MaxImageDimension) return bytes;
+
+            var scale = (double)MaxImageDimension / longest;
+            var w = Math.Max(1, (int)Math.Round(image.Width * scale));
+            var h = Math.Max(1, (int)Math.Round(image.Height * scale));
+            image.Mutate(x => x.Resize(w, h));
+
+            using var ms = new MemoryStream();
+            switch (Path.GetExtension(fileName ?? string.Empty).ToLowerInvariant())
+            {
+                case ".jpg":
+                case ".jpeg": image.SaveAsJpeg(ms); break;
+                case ".webp": image.SaveAsWebp(ms); break;
+                case ".gif":  image.SaveAsGif(ms);  break;
+                default:      image.SaveAsPng(ms);  break;
+            }
+
+            var outBytes = ms.ToArray();
+            return outBytes.Length > 0 ? outBytes : bytes;
+        }
+        catch
+        {
+            return bytes;
+        }
+    }
 
     public static bool IsAllowedExtension(string? fileName)
     {
