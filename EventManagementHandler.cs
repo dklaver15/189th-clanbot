@@ -8,6 +8,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Newtonsoft.Json;
+using System.Collections.Concurrent;
 using System.Globalization;
 
 namespace ClanGuardBot.Handlers;
@@ -44,6 +45,15 @@ public sealed class EventManagementHandler
     private readonly EventChannelSorter _sorter;
     private readonly ILogger<EventManagementHandler> _logger;
 
+    // /event image supplies the file at command time but applies it after the
+    // user picks an event (a later interaction), so the bytes are stashed here
+    // per user between the two steps.
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(20) };
+    private static readonly TimeSpan PendingImageTtl = TimeSpan.FromMinutes(5);
+    private readonly ConcurrentDictionary<ulong, PendingImage> _pendingImages = new();
+
+    private sealed record PendingImage(byte[]? Bytes, string? FileName, bool Clear, DateTime At);
+
     public EventManagementHandler(
         IServiceProvider services,
         DiscordSocketClient client,
@@ -69,8 +79,81 @@ public sealed class EventManagementHandler
 
     // ─── Entry points (called by EventCommandHandler) ──────────────────────
 
-    public Task StartCancelAsync(SocketSlashCommand command) => ShowPickerAsync(command, "cancel");
-    public Task StartEditAsync(SocketSlashCommand command)   => ShowPickerAsync(command, "edit");
+    public async Task StartCancelAsync(SocketSlashCommand command)
+    {
+        await command.DeferAsync(ephemeral: true);
+        await ShowPickerAsync(command, "cancel");
+    }
+
+    public async Task StartEditAsync(SocketSlashCommand command)
+    {
+        await command.DeferAsync(ephemeral: true);
+        await ShowPickerAsync(command, "edit");
+    }
+
+    public async Task StartImageAsync(SocketSlashCommand command)
+    {
+        await command.DeferAsync(ephemeral: true);
+
+        if (command.GuildId is null)
+        {
+            await command.FollowupAsync("This command can only be used in a server.", ephemeral: true);
+            return;
+        }
+
+        var sub        = command.Data.Options.FirstOrDefault();
+        var attachment = sub?.Options?.FirstOrDefault(o => o.Name == "image")?.Value as IAttachment;
+        var clear      = sub?.Options?.FirstOrDefault(o => o.Name == "clear")?.Value as bool? ?? false;
+
+        if (!clear && attachment is null)
+        {
+            await command.FollowupAsync("Attach an image, or pass `clear:true` to remove the current one.", ephemeral: true);
+            return;
+        }
+
+        PendingImage pending;
+        if (clear)
+        {
+            pending = new PendingImage(null, null, Clear: true, DateTime.UtcNow);
+        }
+        else
+        {
+            var looksImage = (attachment!.ContentType?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) ?? false)
+                          || EventImage.IsAllowedExtension(attachment.Filename);
+            if (!looksImage)
+            {
+                await command.FollowupAsync("That doesn't look like an image (PNG/JPG/GIF/WebP).", ephemeral: true);
+                return;
+            }
+            if (attachment.Size > EventImage.MaxBytes)
+            {
+                await command.FollowupAsync($"That image is too large. Max is {EventImage.MaxBytes / (1024 * 1024)} MB.", ephemeral: true);
+                return;
+            }
+
+            byte[] bytes;
+            try
+            {
+                bytes = await Http.GetByteArrayAsync(attachment.Url);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to download event image for {User}", command.User.Id);
+                await command.FollowupAsync("Couldn't download that image. Try again.", ephemeral: true);
+                return;
+            }
+            if (bytes.Length > EventImage.MaxBytes)
+            {
+                await command.FollowupAsync($"That image is too large. Max is {EventImage.MaxBytes / (1024 * 1024)} MB.", ephemeral: true);
+                return;
+            }
+
+            pending = new PendingImage(bytes, EventImage.Sanitize(attachment.Filename), Clear: false, DateTime.UtcNow);
+        }
+
+        _pendingImages[command.User.Id] = pending;
+        await ShowPickerAsync(command, "image");
+    }
 
     public async Task StartSortAsync(SocketSlashCommand command)
     {
@@ -94,7 +177,12 @@ public sealed class EventManagementHandler
 
     private async Task ShowPickerAsync(SocketSlashCommand command, string action)
     {
-        await command.DeferAsync(ephemeral: true);
+        // Caller has already deferred (ephemeral).
+        var display = action switch
+        {
+            "image" => "set an image for",
+            _       => action,
+        };
 
         if (command.GuildId is null)
         {
@@ -119,13 +207,13 @@ public sealed class EventManagementHandler
 
         if (events.Count == 0)
         {
-            await command.FollowupAsync($"You have no upcoming events to {action}.", ephemeral: true);
+            await command.FollowupAsync($"You have no upcoming events to {display}.", ephemeral: true);
             return;
         }
 
         var menu = new SelectMenuBuilder()
             .WithCustomId($"{Prefix}{action}:pick")
-            .WithPlaceholder($"Choose an event to {action}")
+            .WithPlaceholder($"Choose an event to {display}")
             .WithMinValues(1)
             .WithMaxValues(1);
 
@@ -137,7 +225,7 @@ public sealed class EventManagementHandler
         }
 
         var components = new ComponentBuilder().WithSelectMenu(menu).Build();
-        await command.FollowupAsync($"Which event would you like to {action}?", components: components, ephemeral: true);
+        await command.FollowupAsync($"Which event would you like to {display}?", components: components, ephemeral: true);
     }
 
     // ─── Select menu ───────────────────────────────────────────────────────
@@ -145,7 +233,7 @@ public sealed class EventManagementHandler
     private async Task OnSelectAsync(SocketMessageComponent component)
     {
         var id = component.Data.CustomId;
-        if (id is not ($"{Prefix}cancel:pick" or $"{Prefix}edit:pick"))
+        if (id is not ($"{Prefix}cancel:pick" or $"{Prefix}edit:pick" or $"{Prefix}image:pick"))
             return;
 
         if (!int.TryParse(component.Data.Values.FirstOrDefault(), out var clanEventId))
@@ -155,6 +243,7 @@ public sealed class EventManagementHandler
         }
 
         var isCancel = id == $"{Prefix}cancel:pick";
+        var isImage  = id == $"{Prefix}image:pick";
 
         ClanEvent? ev;
         using (var scope = _services.CreateScope())
@@ -171,6 +260,14 @@ public sealed class EventManagementHandler
         if (!await CallerMayManageAsync(component.User, ev.OrganizerId))
         {
             await component.UpdateAsync(m => { m.Content = "You don't have permission to manage that event."; m.Components = Empty(); });
+            return;
+        }
+
+        // /event image applies to the one-off event or the whole series — no
+        // this-occurrence/whole-series prompt (per-occurrence banners aren't a thing).
+        if (isImage)
+        {
+            await ApplyImageAsync(component, ev);
             return;
         }
 
@@ -200,6 +297,119 @@ public sealed class EventManagementHandler
         {
             await component.RespondWithModalAsync(BuildEditModal("single", ev.Id, ev, withWhen: true, withDuration: true, await ResolveCallerZoneAsync(component.User.Id)));
         }
+    }
+
+    // ─── Image apply (/event image) ────────────────────────────────────────
+
+    private async Task ApplyImageAsync(SocketMessageComponent component, ClanEvent ev)
+    {
+        if (!_pendingImages.TryRemove(component.User.Id, out var pending)
+            || DateTime.UtcNow - pending.At > PendingImageTtl)
+        {
+            await component.UpdateAsync(m => { m.Content = "That image request expired — run `/event image` again."; m.Components = Empty(); });
+            return;
+        }
+
+        // Ack first — applying to a whole series re-renders every future
+        // occurrence's post, which can exceed Discord's 3-second window.
+        try { await component.UpdateAsync(m => { m.Content = "⏳ Updating image…"; m.Components = Empty(); }); }
+        catch (Exception ex) { _logger.LogDebug(ex, "Image ack failed for event {Id}", ev.Id); }
+
+        int rerendered = 0;
+        string scopeLabel;
+
+        using (var scope = _services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+            if (ev.SeriesId is int sid)
+            {
+                scopeLabel = "series";
+                var series = await db.ClanEventSeries.FirstOrDefaultAsync(s => s.Id == sid);
+                if (series is null) { await FinalizeImageAsync(component, "That series no longer exists."); return; }
+
+                series.ImageBytes    = pending.Clear ? null : pending.Bytes;
+                series.ImageFileName = pending.Clear ? null : pending.FileName;
+
+                var futures = await db.ClanEvents
+                    .Where(e => e.SeriesId == sid && e.Status == ClanEventStatus.Scheduled && e.StartUtc > DateTime.UtcNow)
+                    .ToListAsync();
+                foreach (var occ in futures)
+                    occ.ImageFileName = series.ImageFileName;
+                await db.SaveChangesAsync();
+
+                foreach (var occ in futures)
+                    if (await RerenderImageAsync(db, occ, pending)) rerendered++;
+            }
+            else
+            {
+                scopeLabel = "event";
+                var fresh = await db.ClanEvents.FirstOrDefaultAsync(e => e.Id == ev.Id);
+                if (fresh is null) { await FinalizeImageAsync(component, "That event no longer exists."); return; }
+
+                fresh.ImageBytes    = pending.Clear ? null : pending.Bytes;
+                fresh.ImageFileName = pending.Clear ? null : pending.FileName;
+                await db.SaveChangesAsync();
+
+                if (await RerenderImageAsync(db, fresh, pending)) rerendered++;
+            }
+        }
+
+        var what = pending.Clear ? "Removed the image" : "Updated the image";
+        var tail = scopeLabel == "series" ? $" ({rerendered} post{(rerendered == 1 ? "" : "s")} updated)." : ".";
+        await FinalizeImageAsync(component, $"✅ {what} on this {scopeLabel}{tail}");
+    }
+
+    /// <summary>
+    /// Replaces (or removes) the banner on an existing event post in place via a
+    /// message edit — swapping the attachment and the embed's image reference,
+    /// without deleting/re-posting the message (so RSVPs and position survive).
+    /// </summary>
+    private async Task<bool> RerenderImageAsync(BotDbContext db, ClanEvent ev, PendingImage pending)
+    {
+        try
+        {
+            if (_client.GetChannel(ev.ChannelId) is not IMessageChannel channel) return false;
+            if (await channel.GetMessageAsync(ev.MessageId) is not IUserMessage msg) return false;
+
+            var rsvps = await db.EventRsvps.Where(r => r.ClanEventId == ev.Id).ToListAsync();
+            var embed = EventEmbedBuilder.BuildEmbed(ev, rsvps, ev.ImageFileName);
+            var comps = ev.Status == ClanEventStatus.Cancelled
+                ? Empty()
+                : EventEmbedBuilder.BuildComponents(ev.Id, _config.EventRsvpEnabled, locked: DateTime.UtcNow >= ev.StartUtc);
+
+            if (pending.Clear || pending.Bytes is not { Length: > 0 } || string.IsNullOrWhiteSpace(ev.ImageFileName))
+            {
+                await msg.ModifyAsync(m =>
+                {
+                    m.Embed      = embed;
+                    m.Components  = comps;
+                    m.Attachments = new List<FileAttachment>(); // drop any existing attachment
+                });
+            }
+            else
+            {
+                using var fa = new FileAttachment(new MemoryStream(pending.Bytes), ev.ImageFileName);
+                await msg.ModifyAsync(m =>
+                {
+                    m.Embed      = embed;
+                    m.Components  = comps;
+                    m.Attachments = new[] { fa };
+                });
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to re-render image for event {Id} (msg {MsgId})", ev.Id, ev.MessageId);
+            return false;
+        }
+    }
+
+    private async Task FinalizeImageAsync(SocketMessageComponent c, string content)
+    {
+        try { await c.ModifyOriginalResponseAsync(m => { m.Content = content; m.Components = Empty(); m.Embed = null; }); }
+        catch (Exception ex) { _logger.LogDebug(ex, "Failed to finalize image message"); }
     }
 
     // ─── Buttons (series branch + abort) ───────────────────────────────────
