@@ -491,7 +491,8 @@ public sealed class EventCreationWizard
             {
                 m.Content    = "⏳ Creating your event…";
                 m.Embed      = null;
-                m.Components = new ComponentBuilder().Build();
+                m.Components  = new ComponentBuilder().Build();
+                m.Attachments = new List<FileAttachment>(); // drop the preview image
             });
         }
         catch (Exception ex)
@@ -533,6 +534,7 @@ public sealed class EventCreationWizard
                 m.Content    = content;
                 m.Embed      = null;
                 m.Components  = new ComponentBuilder().Build();
+                m.Attachments = new List<FileAttachment>(); // no lingering preview image
             });
         }
         catch (Exception ex)
@@ -598,8 +600,10 @@ public sealed class EventCreationWizard
         var zoneLabel = string.IsNullOrWhiteSpace(d.TimeZoneId) ? _config.EventDefaultTimeZone : d.TimeZoneId;
         embed.WithFooter($"Read in {zoneLabel} • shown in your local time • /timezone to change");
 
+        // Compact thumbnail in the DM preview to keep it tidy — the actual
+        // #events post still shows the full-width banner (via BuildEmbed).
         if (!string.IsNullOrWhiteSpace(d.ImageFileName))
-            embed.WithImageUrl($"attachment://{d.ImageFileName}");
+            embed.WithThumbnailUrl($"attachment://{d.ImageFileName}");
 
         var buttons = new ComponentBuilder()
             .WithButton("Create event", $"{Prefix}confirm", ButtonStyle.Success)
