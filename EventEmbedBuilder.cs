@@ -37,6 +37,11 @@ public static class EventEmbedBuilder
         if (!string.IsNullOrWhiteSpace(ev.Description))
             eb.WithDescription(ev.Description);
 
+        // Spacer to complete the Ends/Organizer row, so the three RSVP rosters
+        // start a fresh row and render as clean side-by-side columns (Apollo-style)
+        // instead of wrapping under Ends/Organizer.
+        eb.AddField("\u200b", "\u200b", inline: true);
+
         eb.AddField($"✅ Going ({going.Count})",        Names(going),   inline: true);
         eb.AddField($"❔ Maybe ({maybe.Count})",        Names(maybe),   inline: true);
         eb.AddField($"❌ Can't make it ({decline.Count})", Names(decline), inline: true);
@@ -64,7 +69,7 @@ public static class EventEmbedBuilder
 
         return new ComponentBuilder()
             .WithButton("Going",         ButtonId("going",   clanEventId), ButtonStyle.Success,   disabled: locked)
-            .WithButton("Maybe",         ButtonId("maybe",   clanEventId), ButtonStyle.Secondary, disabled: locked)
+            .WithButton("Maybe",         ButtonId("maybe",   clanEventId), ButtonStyle.Primary,   disabled: locked)
             .WithButton("Can't make it", ButtonId("decline", clanEventId), ButtonStyle.Danger,    disabled: locked)
             .Build();
     }
