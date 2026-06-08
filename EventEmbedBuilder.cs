@@ -16,6 +16,9 @@ public static class EventEmbedBuilder
 {
     public const string RsvpPrefix = "evt:rsvp:";
 
+    /// <summary>Prefix for the on-post Edit/Cancel buttons — must match EventManagementHandler.Prefix.</summary>
+    private const string MgmtPrefix = "evtmgmt:";
+
     /// <summary>Custom id for an RSVP button: <c>evt:rsvp:&lt;status&gt;:&lt;clanEventId&gt;</c>.</summary>
     public static string ButtonId(string status, int clanEventId) => $"{RsvpPrefix}{status}:{clanEventId}";
 
@@ -59,19 +62,27 @@ public static class EventEmbedBuilder
     }
 
     /// <summary>
-    /// The RSVP button row. Returns an empty component set when RSVP is disabled.
-    /// Buttons are disabled (locked) once the event has started.
+    /// The button rows: emoji-only RSVP buttons (Apollo-style) on the first row,
+    /// then Edit/Cancel on a second row. RSVP buttons are omitted when RSVP is
+    /// disabled and are locked once the event has started; Edit/Cancel always
+    /// show (permission is checked on click) so the post is self-managing.
     /// </summary>
     public static MessageComponent BuildComponents(int clanEventId, bool rsvpEnabled, bool locked)
     {
-        if (!rsvpEnabled)
-            return new ComponentBuilder().Build();
+        var cb = new ComponentBuilder();
 
-        return new ComponentBuilder()
-            .WithButton("Going",         ButtonId("going",   clanEventId), ButtonStyle.Success,   disabled: locked)
-            .WithButton("Maybe",         ButtonId("maybe",   clanEventId), ButtonStyle.Primary,   disabled: locked)
-            .WithButton("Can't make it", ButtonId("decline", clanEventId), ButtonStyle.Danger,    disabled: locked)
-            .Build();
+        if (rsvpEnabled)
+        {
+            cb.WithButton(null, ButtonId("going",   clanEventId), ButtonStyle.Success, emote: new Emoji("✅"), disabled: locked)
+              .WithButton(null, ButtonId("maybe",   clanEventId), ButtonStyle.Primary, emote: new Emoji("❓"), disabled: locked)
+              .WithButton(null, ButtonId("decline", clanEventId), ButtonStyle.Danger,  emote: new Emoji("❌"), disabled: locked);
+        }
+
+        var mgmtRow = rsvpEnabled ? 1 : 0;
+        cb.WithButton("Edit",   $"{MgmtPrefix}pedit:{clanEventId}",   ButtonStyle.Primary, row: mgmtRow)
+          .WithButton("Cancel", $"{MgmtPrefix}pcancel:{clanEventId}", ButtonStyle.Danger,  row: mgmtRow);
+
+        return cb.Build();
     }
 
     private static string Names(IReadOnlyCollection<EventRsvp> rsvps)

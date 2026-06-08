@@ -436,6 +436,15 @@ public sealed class EventManagementHandler
             return;
         }
 
+        // On-post Edit/Cancel buttons (evtmgmt:pedit:<id> / evtmgmt:pcancel:<id>).
+        // These fire on the public event post, so every reply must be ephemeral.
+        if (cid.StartsWith($"{Prefix}pedit:", StringComparison.Ordinal)
+         || cid.StartsWith($"{Prefix}pcancel:", StringComparison.Ordinal))
+        {
+            await OnPostButtonAsync(component, cid);
+            return;
+        }
+
         var parts = cid.Split(':'); // evtmgmt:<cxl|editpick>:<occ|series>:<clanEventId>
         if (parts.Length != 4) return;
         var kind  = parts[1];
@@ -469,7 +478,9 @@ public sealed class EventManagementHandler
             var count = await DoCancelAsync(clanEventId, whole);
             var msg = whole
                 ? $"✅ Cancelled the series **{ev.Title}** ({count} upcoming occurrence{(count == 1 ? "" : "s")})."
-                : $"✅ Cancelled this occurrence of **{ev.Title}**.";
+                : ev.SeriesId.HasValue
+                    ? $"✅ Cancelled this occurrence of **{ev.Title}**."
+                    : $"✅ Cancelled **{ev.Title}**.";
             try { await component.ModifyOriginalResponseAsync(m => { m.Content = msg; m.Components = Empty(); m.Embed = null; }); }
             catch (Exception ex) { _logger.LogDebug(ex, "Failed to finalize cancel message for event {Id}", clanEventId); }
         }
@@ -485,6 +496,84 @@ public sealed class EventManagementHandler
             {
                 await component.RespondWithModalAsync(BuildEditModal("occ", ev.Id, ev, withWhen: false, withDuration: true, tz));
             }
+        }
+    }
+
+    // ─── On-post Edit/Cancel buttons ───────────────────────────────────────
+
+    /// <summary>
+    /// Handles the Edit/Cancel buttons rendered on the public event post. All
+    /// replies are ephemeral (or a modal) so the post itself is never touched
+    /// here; the actual edit/cancel work happens in the shared modal/cxl paths.
+    /// </summary>
+    private async Task OnPostButtonAsync(SocketMessageComponent component, string cid)
+    {
+        var isCancel = cid.StartsWith($"{Prefix}pcancel:", StringComparison.Ordinal);
+        var idStr    = cid[(cid.LastIndexOf(':') + 1)..];
+        if (!int.TryParse(idStr, out var clanEventId))
+        {
+            await component.RespondAsync("Couldn't read that event.", ephemeral: true);
+            return;
+        }
+
+        ClanEvent? ev;
+        using (var scope = _services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+            ev = await db.ClanEvents.FirstOrDefaultAsync(e => e.Id == clanEventId);
+        }
+
+        if (ev is null || ev.Status != ClanEventStatus.Scheduled)
+        {
+            await component.RespondAsync("That event is no longer available.", ephemeral: true);
+            return;
+        }
+        if (!await CallerMayManageAsync(component.User, ev.OrganizerId))
+        {
+            await component.RespondAsync("You don't have permission to manage that event.", ephemeral: true);
+            return;
+        }
+
+        if (isCancel)
+        {
+            if (ev.SeriesId.HasValue)
+            {
+                var buttons = new ComponentBuilder()
+                    .WithButton("This occurrence", $"{Prefix}cxl:occ:{ev.Id}",    ButtonStyle.Primary)
+                    .WithButton("Whole series",    $"{Prefix}cxl:series:{ev.Id}", ButtonStyle.Danger)
+                    .WithButton("Never mind",      $"{Prefix}abort",              ButtonStyle.Secondary);
+                await component.RespondAsync(
+                    $"**{ev.Title}** is a recurring event. Cancel just this occurrence, or the whole series?",
+                    components: buttons.Build(), ephemeral: true);
+            }
+            else
+            {
+                var buttons = new ComponentBuilder()
+                    .WithButton("Yes, cancel", $"{Prefix}cxl:occ:{ev.Id}", ButtonStyle.Danger)
+                    .WithButton("Never mind",  $"{Prefix}abort",           ButtonStyle.Secondary);
+                await component.RespondAsync(
+                    $"Cancel **{ev.Title}**? This removes the post and the calendar entry.",
+                    components: buttons.Build(), ephemeral: true);
+            }
+            return;
+        }
+
+        // Edit
+        if (ev.SeriesId.HasValue)
+        {
+            var buttons = new ComponentBuilder()
+                .WithButton("This occurrence", $"{Prefix}editpick:occ:{ev.Id}",    ButtonStyle.Primary)
+                .WithButton("Whole series",    $"{Prefix}editpick:series:{ev.Id}", ButtonStyle.Danger)
+                .WithButton("Never mind",      $"{Prefix}abort",                   ButtonStyle.Secondary);
+            await component.RespondAsync(
+                $"**{ev.Title}** is a recurring event. Edit just this occurrence, or the whole series?",
+                components: buttons.Build(), ephemeral: true);
+        }
+        else
+        {
+            var tz = await ResolveCallerZoneAsync(component.User.Id);
+            await component.RespondWithModalAsync(
+                BuildEditModal("single", ev.Id, ev, withWhen: true, withDuration: true, tz));
         }
     }
 

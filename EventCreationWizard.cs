@@ -35,7 +35,7 @@ namespace ClanGuardBot.Handlers;
 /// </summary>
 public sealed class EventCreationWizard
 {
-    private static readonly TimeSpan IdleTimeout = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan IdleTimeout = TimeSpan.FromMinutes(15);
     private const string Prefix = "evtwiz:";
 
     private readonly ConcurrentDictionary<ulong, EventCreationSession> _sessions = new();
@@ -48,6 +48,7 @@ public sealed class EventCreationWizard
     private readonly BotConfig _config;
     private readonly EventTimeParser _time;
     private readonly IEventPublisher _publisher;
+    private readonly System.Threading.Timer _idleSweep;
 
     public EventCreationWizard(
         IServiceProvider services,
@@ -61,6 +62,11 @@ public sealed class EventCreationWizard
         _config    = config.Value;
         _time      = time;
         _publisher = publisher;
+
+        // Proactively time out abandoned DM sessions: every minute, DM anyone
+        // who's gone idle past IdleTimeout and drop their session.
+        _idleSweep = new System.Threading.Timer(_ => _ = SweepIdleAsync(), null,
+            TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
     }
 
     public void Register(DiscordSocketClient client)
@@ -122,7 +128,7 @@ public sealed class EventCreationWizard
             // names the zone it was read in, so a wrong assumption is visible —
             // and /timezone sets a personal override that sticks.
             session.Step = WizardStep.Title;
-            await dm.SendMessageAsync("🎯 **New event!** What's the **title**?");
+            await dm.SendMessageAsync(embed: Form("🎯 New event", "What's the **title** of the event?"));
             return true;
         }
         catch (Exception ex)
@@ -145,12 +151,20 @@ public sealed class EventCreationWizard
         if (IsExpired(s))
         {
             _sessions.TryRemove(message.Author.Id, out _);
-            await SafeSend(s, "⌛ That event setup timed out. Run `/event` again to start over.");
+            await SafeSendEmbed(s, Form("⌛ Event setup timed out",
+                "That setup expired from inactivity and **nothing was created**. Run `/event` to start over."));
             return;
         }
 
         s.LastActivityAt = DateTime.UtcNow;
         var text = message.Content.Trim();
+
+        if (text.Equals("cancel", StringComparison.OrdinalIgnoreCase))
+        {
+            _sessions.TryRemove(message.Author.Id, out _);
+            await SafeSendEmbed(s, Form("Cancelled", "No event was created. Run `/event` to start again anytime."));
+            return;
+        }
 
         try
         {
@@ -193,19 +207,18 @@ public sealed class EventCreationWizard
     {
         if (string.IsNullOrWhiteSpace(text))
         {
-            await s.Dm.SendMessageAsync("Give the event a title — e.g. `Friday Night Ops`.");
+            await s.Dm.SendMessageAsync(embed: Form("📝 Title", "Give the event a title — e.g. `Friday Night Ops`."));
             return;
         }
         if (text.Length > 100)
         {
-            await s.Dm.SendMessageAsync("That title is a bit long (100 characters max). Try a shorter one.");
+            await s.Dm.SendMessageAsync(embed: Form("📝 Title too long", "Keep it under 100 characters — try a shorter one."));
             return;
         }
 
         s.Draft.Title = text;
         s.Step = WizardStep.When;
-        await s.Dm.SendMessageAsync(
-            "🕒 **When** is it? You can say things like `7pm tomorrow`, `in 2 hours`, or `June 14 at 8pm`.");
+        await s.Dm.SendMessageAsync(embed: Form("🕒 When is it?", "Say things like `7pm tomorrow`, `in 2 hours`, or `June 14 at 8pm`."));
     }
 
     private async Task HandleWhenAsync(EventCreationSession s, string text)
@@ -215,13 +228,12 @@ public sealed class EventCreationWizard
 
         if (!r.Success)
         {
-            await s.Dm.SendMessageAsync(r.Error);
+            await s.Dm.SendMessageAsync(embed: Form("Let's try that again", r.Error));
             return;
         }
         if (!r.HasTimeOfDay)
         {
-            await s.Dm.SendMessageAsync(
-                "I got a date but no time of day — include a time too, like `June 14 at 7pm`.");
+            await s.Dm.SendMessageAsync(embed: Form("🕒 Need a time of day", "I got a date but no time — include a time too, like `June 14 at 7pm`."));
             return;
         }
 
@@ -235,13 +247,13 @@ public sealed class EventCreationWizard
         {
             // A range was given ("7-9pm tomorrow") — skip the duration step.
             s.Draft.EndUtc = end;
-            await s.Dm.SendMessageAsync($"{echo}\n⏱️ Ends: {EventTimeParser.Stamp(end, 't')}");
+            await s.Dm.SendMessageAsync(embed: Form("🕒 Start & end set", $"{echo}\n⏱️ Ends: {EventTimeParser.Stamp(end, 't')}"));
             await AdvanceToDescriptionAsync(s);
         }
         else
         {
             s.Step = WizardStep.Duration;
-            await s.Dm.SendMessageAsync($"{echo}\n\n⏱️ How long does it run? e.g. `2 hours`, `90 minutes`, or `until 9pm`.");
+            await s.Dm.SendMessageAsync(embed: Form("⏱️ How long does it run?", $"{echo}\n\ne.g. `2 hours`, `90 minutes`, or `until 9pm`."));
         }
     }
 
@@ -252,7 +264,7 @@ public sealed class EventCreationWizard
 
         if (!r.Success)
         {
-            await s.Dm.SendMessageAsync(r.Error);
+            await s.Dm.SendMessageAsync(embed: Form("Let's try that again", r.Error));
             return;
         }
 
@@ -263,7 +275,7 @@ public sealed class EventCreationWizard
     private async Task AdvanceToDescriptionAsync(EventCreationSession s)
     {
         s.Step = WizardStep.Description;
-        await s.Dm.SendMessageAsync("📝 Add a **description** (or type `skip`).");
+        await s.Dm.SendMessageAsync(embed: Form("📝 Description", "Add a short description for the event, or type `skip`."));
     }
 
     private async Task HandleDescriptionAsync(EventCreationSession s, string text)
@@ -279,8 +291,7 @@ public sealed class EventCreationWizard
     private async Task PromptImageAsync(EventCreationSession s)
     {
         s.Step = WizardStep.Image;
-        await s.Dm.SendMessageAsync(
-            "🖼️ Want an **image** on the event post? Drag one in or paste a GIF/image link (Tenor, Giphy, or direct — PNG/JPG/GIF/WebP, max 8 MB), or type `skip`.");
+        await s.Dm.SendMessageAsync(embed: Form("🖼️ Event image", "Drag an image into this DM, or paste a GIF/image link (Tenor, Giphy, or direct — PNG/JPG/GIF/WebP, max 8 MB). Or type `skip`."));
     }
 
     private async Task HandleImageAsync(EventCreationSession s, SocketMessage message, string text)
@@ -306,7 +317,7 @@ public sealed class EventCreationWizard
                 var res = await EventImageFetcher.FromUrlAsync(text);
                 if (!res.Ok)
                 {
-                    await s.Dm.SendMessageAsync($"{res.Error} Try another link, drag the file in, or type `skip`.");
+                    await s.Dm.SendMessageAsync(embed: Form("🖼️ Couldn't use that link", $"{res.Error} Try another link, drag the file in, or type `skip`."));
                     return;
                 }
 
@@ -317,7 +328,7 @@ public sealed class EventCreationWizard
                 return;
             }
 
-            await s.Dm.SendMessageAsync("Drag an **image** into this DM, paste a GIF/image link, or type `skip`.");
+            await s.Dm.SendMessageAsync(embed: Form("🖼️ Event image", "Drag an image into this DM, paste a GIF/image link, or type `skip`."));
             return;
         }
 
@@ -325,12 +336,12 @@ public sealed class EventCreationWizard
                       || EventImage.IsAllowedExtension(att.Filename);
         if (!looksImage)
         {
-            await s.Dm.SendMessageAsync("That doesn't look like an image (PNG/JPG/GIF/WebP). Try another, or type `skip`.");
+            await s.Dm.SendMessageAsync(embed: Form("🖼️ Not an image", "That doesn't look like a PNG/JPG/GIF/WebP. Try another, or type `skip`."));
             return;
         }
         if (att.Size > EventImage.MaxBytes)
         {
-            await s.Dm.SendMessageAsync($"That image is too large. Max is {EventImage.MaxBytes / (1024 * 1024)} MB — try a smaller one, or type `skip`.");
+            await s.Dm.SendMessageAsync(embed: Form("🖼️ Image too large", $"Max is {EventImage.MaxBytes / (1024 * 1024)} MB — try a smaller one, or type `skip`."));
             return;
         }
 
@@ -342,12 +353,12 @@ public sealed class EventCreationWizard
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to download event image for {User}", s.Draft.OrganizerId);
-            await s.Dm.SendMessageAsync("Couldn't download that image. Try again, or type `skip`.");
+            await s.Dm.SendMessageAsync(embed: Form("🖼️ Download failed", "Couldn't download that image. Try again, or type `skip`."));
             return;
         }
         if (bytes.Length > EventImage.MaxBytes)
         {
-            await s.Dm.SendMessageAsync($"That image is too large. Max is {EventImage.MaxBytes / (1024 * 1024)} MB — try a smaller one, or type `skip`.");
+            await s.Dm.SendMessageAsync(embed: Form("🖼️ Image too large", $"Max is {EventImage.MaxBytes / (1024 * 1024)} MB — try a smaller one, or type `skip`."));
             return;
         }
 
@@ -377,7 +388,7 @@ public sealed class EventCreationWizard
             var r  = _time.ParseStart(text, tz);
             if (!r.Success)
             {
-                await s.Dm.SendMessageAsync("Tell me an end date (`August 1`), a number of times (`8`), or `none` for open-ended.");
+                await s.Dm.SendMessageAsync(embed: Form("🔁 Until when?", "Tell me an **end date** (`August 1`), a **number of times** (`8`), or `none` for open-ended."));
                 return;
             }
             s.Draft.UntilUtc = r.StartUtc;
@@ -473,8 +484,7 @@ public sealed class EventCreationWizard
         s.Draft.Frequency = freq;
         s.Step = WizardStep.RecurrenceUntil;
         await ClearButtons(c, $"Repeats: **{freq}**.");
-        await s.Dm.SendMessageAsync(
-            "Until when should it repeat? Give an **end date** (`August 1`), a **number of times** (`8`), or `none` for open-ended.");
+        await s.Dm.SendMessageAsync(embed: Form("🔁 Until when?", "Give an **end date** (`August 1`), a **number of times** (`8`), or `none` for open-ended."));
     }
 
     private async Task OnConfirmAsync(EventCreationSession s, SocketMessageComponent c)
@@ -574,7 +584,7 @@ public sealed class EventCreationWizard
             .WithButton("Biweekly",        $"{Prefix}rec:biweekly", ButtonStyle.Secondary)
             .WithButton("Monthly",         $"{Prefix}rec:monthly",  ButtonStyle.Secondary);
 
-        await s.Dm.SendMessageAsync("🔁 Does this event **repeat**?", components: builder.Build());
+        await s.Dm.SendMessageAsync(embed: Form("🔁 Does this event repeat?", "Pick an option below."), components: builder.Build());
     }
 
     private async Task PromptConfirmAsync(EventCreationSession s)
@@ -657,6 +667,42 @@ public sealed class EventCreationWizard
         return mins == 0 ? $"{hours}h" : $"{hours}h {mins}m";
     }
 
+    private static readonly Color FormColor = new(0x5865F2);
+
+    /// <summary>Builds the consistent "form" embed used for every wizard prompt.</summary>
+    private static Embed Form(string title, string? body = null)
+    {
+        var eb = new EmbedBuilder()
+            .WithColor(FormColor)
+            .WithTitle(title)
+            .WithFooter("Reply in this DM • type cancel to quit • times out after 15 min");
+        if (!string.IsNullOrWhiteSpace(body)) eb.WithDescription(body);
+        return eb.Build();
+    }
+
+    /// <summary>Times out idle sessions: DMs the organizer, then drops the session.</summary>
+    private async Task SweepIdleAsync()
+    {
+        try
+        {
+            foreach (var kv in _sessions)
+            {
+                if (!IsExpired(kv.Value)) continue;
+                if (_sessions.TryRemove(kv.Key, out var s))
+                {
+                    try
+                    {
+                        await s.Dm.SendMessageAsync(embed: Form(
+                            "⌛ Event setup timed out",
+                            "Looks like you stepped away — I didn't hear back, so I've cancelled this setup and **nothing was created**. Run `/event` whenever you're ready to start again."));
+                    }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to send wizard timeout DM to {User}", kv.Key); }
+                }
+            }
+        }
+        catch (Exception ex) { _logger.LogDebug(ex, "Wizard idle sweep failed"); }
+    }
+
     private static bool IsExpired(EventCreationSession s) =>
         DateTime.UtcNow - s.LastActivityAt > IdleTimeout;
 
@@ -680,6 +726,12 @@ public sealed class EventCreationWizard
     private async Task SafeSend(EventCreationSession s, string content)
     {
         try { await s.Dm.SendMessageAsync(content); }
+        catch (Exception ex) { _logger.LogDebug(ex, "Failed to send wizard DM to {User}", s.Draft.OrganizerId); }
+    }
+
+    private async Task SafeSendEmbed(EventCreationSession s, Embed embed)
+    {
+        try { await s.Dm.SendMessageAsync(embed: embed); }
         catch (Exception ex) { _logger.LogDebug(ex, "Failed to send wizard DM to {User}", s.Draft.OrganizerId); }
     }
 }
