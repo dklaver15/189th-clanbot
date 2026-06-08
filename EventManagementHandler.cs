@@ -245,6 +245,15 @@ public sealed class EventManagementHandler
     private async Task OnSelectAsync(SocketMessageComponent component)
     {
         var id = component.Data.CustomId;
+
+        // "Set Host" user-select (evtmgmt:hostpick:<id>) — values are user ids,
+        // not event ids, so handle it before the event-id picker parsing below.
+        if (id.StartsWith($"{Prefix}hostpick:", StringComparison.Ordinal))
+        {
+            await ApplyHostAsync(component, id);
+            return;
+        }
+
         if (id is not ($"{Prefix}cancel:pick" or $"{Prefix}edit:pick" or $"{Prefix}image:pick"))
             return;
 
@@ -446,6 +455,13 @@ public sealed class EventManagementHandler
             return;
         }
 
+        // On-post "Set Host" button → opens an ephemeral guild user-select.
+        if (cid.StartsWith($"{Prefix}sethost:", StringComparison.Ordinal))
+        {
+            await OnSetHostAsync(component, cid);
+            return;
+        }
+
         var parts = cid.Split(':'); // evtmgmt:<cxl|editpick>:<occ|series>:<clanEventId>
         if (parts.Length != 4) return;
         var kind  = parts[1];
@@ -578,7 +594,85 @@ public sealed class EventManagementHandler
         }
     }
 
-    // ─── Modal submit ──────────────────────────────────────────────────────
+    // ─── Set Host (on-post button → user-select) ───────────────────────────
+
+    private async Task OnSetHostAsync(SocketMessageComponent component, string cid)
+    {
+        var idStr = cid[(cid.LastIndexOf(':') + 1)..];
+        if (!int.TryParse(idStr, out var clanEventId))
+        {
+            await component.RespondAsync("Couldn't read that event.", ephemeral: true);
+            return;
+        }
+
+        ClanEvent? ev;
+        using (var scope = _services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+            ev = await db.ClanEvents.FirstOrDefaultAsync(e => e.Id == clanEventId);
+        }
+        if (ev is null || ev.Status != ClanEventStatus.Scheduled)
+        {
+            await component.RespondAsync("That event is no longer available.", ephemeral: true);
+            return;
+        }
+        if (!await CallerMayManageAsync(component.User, ev.OrganizerId))
+        {
+            await component.RespondAsync("You don't have permission to manage that event.", ephemeral: true);
+            return;
+        }
+
+        var menu = new SelectMenuBuilder()
+            .WithCustomId($"{Prefix}hostpick:{ev.Id}")
+            .WithType(ComponentType.UserSelect)
+            .WithPlaceholder("Choose the host")
+            .WithMinValues(1)
+            .WithMaxValues(1);
+
+        await component.RespondAsync(
+            $"Who's hosting **{ev.Title}**?",
+            components: new ComponentBuilder().WithSelectMenu(menu).Build(),
+            ephemeral: true);
+    }
+
+    private async Task ApplyHostAsync(SocketMessageComponent component, string id)
+    {
+        var idStr = id[(id.LastIndexOf(':') + 1)..];
+        if (!int.TryParse(idStr, out var clanEventId)
+            || !ulong.TryParse(component.Data.Values.FirstOrDefault(), out var hostId))
+        {
+            await component.UpdateAsync(m => { m.Content = "Something went wrong reading that selection."; m.Components = Empty(); });
+            return;
+        }
+
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+        var ev = await db.ClanEvents.FirstOrDefaultAsync(e => e.Id == clanEventId);
+        if (ev is null || ev.Status != ClanEventStatus.Scheduled)
+        {
+            await component.UpdateAsync(m => { m.Content = "That event is no longer available."; m.Components = Empty(); });
+            return;
+        }
+        if (!await CallerMayManageAsync(component.User, ev.OrganizerId))
+        {
+            await component.UpdateAsync(m => { m.Content = "You don't have permission to manage that event."; m.Components = Empty(); });
+            return;
+        }
+
+        ev.HostId = hostId;
+        await db.SaveChangesAsync();
+        await UpdatePostAsync(db, ev);
+
+        await component.UpdateAsync(m =>
+        {
+            m.Content    = $"✅ Host set to <@{hostId}>.";
+            m.Components  = Empty();
+            m.AllowedMentions = AllowedMentions.None; // confirm shouldn't ping the new host
+        });
+    }
+
+
 
     private async Task OnModalAsync(SocketModal modal)
     {

@@ -113,7 +113,7 @@ public sealed class EventCreationWizard
             {
                 GuildId       = guildId,
                 OrganizerId   = user.Id,
-                OrganizerName = user.GlobalName ?? user.Username,
+                OrganizerName = (user as SocketGuildUser)?.DisplayName ?? user.GlobalName ?? user.Username,
                 TimeZoneId    = tz ?? string.Empty,
             },
         };

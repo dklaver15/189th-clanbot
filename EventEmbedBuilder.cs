@@ -42,7 +42,7 @@ public static class EventEmbedBuilder
             .WithColor(ev.Status == ClanEventStatus.Cancelled ? Color.DarkGrey : Blurple)
             .AddField("When", $"{EventTimeParser.Stamp(ev.StartUtc, 'F')}\n{EventTimeParser.Stamp(ev.StartUtc, 'R')}")
             .AddField("Ends", EventTimeParser.Stamp(ev.EndUtc, 't'), inline: true)
-            .AddField("Organizer", $"<@{ev.OrganizerId}>", inline: true);
+            .AddField("Host", $"<@{ev.HostId ?? ev.OrganizerId}>", inline: true);
 
         if (!string.IsNullOrWhiteSpace(ev.Description))
             eb.WithDescription(ev.Description);
@@ -57,10 +57,18 @@ public static class EventEmbedBuilder
         eb.AddField($"❔ Maybe ({maybe.Count})",        Names(maybe),   inline: true);
         eb.AddField($"❌ Declined ({decline.Count})", Names(decline), inline: true);
 
+        // Footer: "Created by <name>" (the creator — officers often create on
+        // someone else's behalf), plus a recurring/cancelled note. A footer is
+        // plain text, so this is the stored display name, not a mention.
+        var footer = new List<string>();
+        if (!string.IsNullOrWhiteSpace(ev.OrganizerName))
+            footer.Add($"Created by {ev.OrganizerName}");
         if (ev.Status == ClanEventStatus.Cancelled)
-            eb.WithFooter("This event was cancelled.");
+            footer.Add("This event was cancelled");
         else if (ev.SeriesId.HasValue)
-            eb.WithFooter("🔁 Recurring event");
+            footer.Add("🔁 Recurring");
+        if (footer.Count > 0)
+            eb.WithFooter(string.Join(" • ", footer));
 
         // References the file attached to this same message (see EventImage).
         if (!string.IsNullOrWhiteSpace(imageFileName))
@@ -87,8 +95,9 @@ public static class EventEmbedBuilder
         }
 
         var mgmtRow = rsvpEnabled ? 1 : 0;
-        cb.WithButton("Edit",   $"{MgmtPrefix}pedit:{clanEventId}",   ButtonStyle.Primary, row: mgmtRow)
-          .WithButton("Cancel", $"{MgmtPrefix}pcancel:{clanEventId}", ButtonStyle.Danger,  row: mgmtRow);
+        cb.WithButton("Edit",     $"{MgmtPrefix}pedit:{clanEventId}",   ButtonStyle.Primary,   row: mgmtRow)
+          .WithButton("Set Host", $"{MgmtPrefix}sethost:{clanEventId}", ButtonStyle.Secondary, row: mgmtRow)
+          .WithButton("Cancel",   $"{MgmtPrefix}pcancel:{clanEventId}", ButtonStyle.Danger,    row: mgmtRow);
 
         return cb.Build();
     }

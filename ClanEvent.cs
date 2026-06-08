@@ -60,6 +60,15 @@ public class ClanEvent
     public ulong OrganizerId { get; set; }
     public string OrganizerName { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Optional host — the person actually running the event, which may differ
+    /// from the creator (officers often create events on someone else's behalf).
+    /// Shown in the embed's "Host" field; null falls back to <see cref="OrganizerId"/>.
+    /// Set via the "Set Host" button on the post (a guild user-select), not the
+    /// DM wizard (a DM has no guild context for a member picker).
+    /// </summary>
+    public ulong? HostId { get; set; }
+
     public DateTime StartUtc { get; set; }
     public DateTime EndUtc { get; set; }
 
