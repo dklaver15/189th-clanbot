@@ -25,12 +25,14 @@ public static class EventImage
     public const long MaxBytes = 8 * 1024 * 1024;
 
     /// <summary>
-    /// Longest-side pixel cap applied by <see cref="Downscale"/>. Discord scales
-    /// the embed's main image to the embed width, so a high-res (especially
-    /// square) banner renders very tall; downscaling the stored bytes makes it
-    /// render smaller. Tune to taste — higher = larger in the post.
+    /// Longest-side pixel cap applied by <see cref="Downscale"/>. Discord renders
+    /// the embed's main image up to the embed's max width, so a wide (landscape)
+    /// banner stored too small gets pinned narrow and upscaled (blurry); storing
+    /// it nearer Discord's embed width makes it fill the post crisply. The
+    /// trade-off: a square/portrait banner renders correspondingly taller.
+    /// Tune to taste — higher = larger in the post.
     /// </summary>
-    public const int MaxImageDimension = 320;
+    public const int MaxImageDimension = 512;
 
     public static readonly string[] AllowedExtensions = { ".png", ".jpg", ".jpeg", ".gif", ".webp" };
 
