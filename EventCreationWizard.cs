@@ -280,7 +280,7 @@ public sealed class EventCreationWizard
     {
         s.Step = WizardStep.Image;
         await s.Dm.SendMessageAsync(
-            "🖼️ Want an **image** on the event post? Drag one into this DM (PNG/JPG/GIF/WebP, max 8 MB), or type `skip`.");
+            "🖼️ Want an **image** on the event post? Drag one in or paste a GIF/image link (Tenor, Giphy, or direct — PNG/JPG/GIF/WebP, max 8 MB), or type `skip`.");
     }
 
     private async Task HandleImageAsync(EventCreationSession s, SocketMessage message, string text)
@@ -298,7 +298,26 @@ public sealed class EventCreationWizard
         var att = message.Attachments.FirstOrDefault();
         if (att is null)
         {
-            await s.Dm.SendMessageAsync("Drag an **image** into this DM, or type `skip`.");
+            // No file dragged in — maybe they pasted a GIF/image link.
+            if (text.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+             || text.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                await s.Dm.SendMessageAsync("⏳ Fetching that image…");
+                var res = await EventImageFetcher.FromUrlAsync(text);
+                if (!res.Ok)
+                {
+                    await s.Dm.SendMessageAsync($"{res.Error} Try another link, drag the file in, or type `skip`.");
+                    return;
+                }
+
+                s.Draft.ImageBytes    = res.Bytes;
+                s.Draft.ImageFileName = res.FileName;
+                s.Step = WizardStep.Recurrence;
+                await PromptRecurrenceAsync(s);
+                return;
+            }
+
+            await s.Dm.SendMessageAsync("Drag an **image** into this DM, paste a GIF/image link, or type `skip`.");
             return;
         }
 

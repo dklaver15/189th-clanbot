@@ -76,6 +76,7 @@ public sealed class EventCommandHandler
                 .WithDescription("Set or remove the banner image on one of your events")
                 .WithType(ApplicationCommandOptionType.SubCommand)
                 .AddOption("image", ApplicationCommandOptionType.Attachment, "PNG/JPG/GIF/WebP, max 8 MB", isRequired: false)
+                .AddOption("url", ApplicationCommandOptionType.String, "Link to a GIF/image (Tenor, Giphy, or direct)", isRequired: false)
                 .AddOption("clear", ApplicationCommandOptionType.Boolean, "Remove the current image instead", isRequired: false))
             .Build();
 

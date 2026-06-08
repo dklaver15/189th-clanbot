@@ -103,11 +103,12 @@ public sealed class EventManagementHandler
 
         var sub        = command.Data.Options.FirstOrDefault();
         var attachment = sub?.Options?.FirstOrDefault(o => o.Name == "image")?.Value as IAttachment;
+        var url         = sub?.Options?.FirstOrDefault(o => o.Name == "url")?.Value as string;
         var clear      = sub?.Options?.FirstOrDefault(o => o.Name == "clear")?.Value as bool? ?? false;
 
-        if (!clear && attachment is null)
+        if (!clear && attachment is null && string.IsNullOrWhiteSpace(url))
         {
-            await command.FollowupAsync("Attach an image, or pass `clear:true` to remove the current one.", ephemeral: true);
+            await command.FollowupAsync("Attach an image, paste a GIF/image `url:`, or pass `clear:true` to remove the current one.", ephemeral: true);
             return;
         }
 
@@ -116,9 +117,9 @@ public sealed class EventManagementHandler
         {
             pending = new PendingImage(null, null, Clear: true, DateTime.UtcNow);
         }
-        else
+        else if (attachment is not null)
         {
-            var looksImage = (attachment!.ContentType?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) ?? false)
+            var looksImage = (attachment.ContentType?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) ?? false)
                           || EventImage.IsAllowedExtension(attachment.Filename);
             if (!looksImage)
             {
@@ -149,6 +150,16 @@ public sealed class EventManagementHandler
             }
 
             pending = new PendingImage(bytes, EventImage.Sanitize(attachment.Filename), Clear: false, DateTime.UtcNow);
+        }
+        else
+        {
+            var res = await EventImageFetcher.FromUrlAsync(url!);
+            if (!res.Ok)
+            {
+                await command.FollowupAsync(res.Error ?? "Couldn't use that link.", ephemeral: true);
+                return;
+            }
+            pending = new PendingImage(res.Bytes, res.FileName, Clear: false, DateTime.UtcNow);
         }
 
         _pendingImages[command.User.Id] = pending;
