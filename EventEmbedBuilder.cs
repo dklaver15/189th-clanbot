@@ -88,8 +88,26 @@ public static class EventEmbedBuilder
     private static string Names(IReadOnlyCollection<EventRsvp> rsvps)
     {
         if (rsvps.Count == 0) return "—";
-        var joined = string.Join(" ", rsvps.Select(r => $"<@{r.UserId}>"));
-        // Discord embed field values cap at 1024 chars.
-        return joined.Length <= 1024 ? joined : joined[..1000] + " …";
+
+        // Apollo-style: each mention on its own line inside a blockquote (the
+        // "> " prefix draws the vertical bar). Consecutive quoted lines merge
+        // into one continuous quote. Truncate at a line boundary so we never cut
+        // a mention in half, and stay under the 1024-char embed-field cap.
+        var mentions = rsvps.Select(r => $"<@{r.UserId}>").ToList();
+        var lines = new List<string>();
+        var len = 0;
+        var shown = 0;
+        foreach (var m in mentions)
+        {
+            var add = m.Length + 3; // "> " prefix + newline
+            if (len + add > 980) break;
+            lines.Add($"> {m}");
+            len += add;
+            shown++;
+        }
+        if (shown < mentions.Count)
+            lines.Add($"> …and {mentions.Count - shown} more");
+
+        return string.Join("\n", lines);
     }
 }
