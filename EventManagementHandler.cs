@@ -795,7 +795,10 @@ public sealed class EventManagementHandler
         });
     }
 
-    /// <summary>Re-renders an event's #events post from current state (or shows it cancelled).</summary>
+    /// <summary>
+    /// Re-renders an event's #events post from current state — or, when the event
+    /// has been cancelled, deletes the post from the channel entirely.
+    /// </summary>
     private async Task UpdatePostAsync(BotDbContext db, ClanEvent ev)
     {
         try
@@ -803,17 +806,23 @@ public sealed class EventManagementHandler
             if (_client.GetChannel(ev.ChannelId) is not IMessageChannel channel) return;
             if (await channel.GetMessageAsync(ev.MessageId) is not IUserMessage msg) return;
 
+            // Cancelled → remove the post from the channel (calendar Delete is
+            // enqueued separately in CancelOccurrenceAsync).
+            if (ev.Status == ClanEventStatus.Cancelled)
+            {
+                await msg.DeleteAsync();
+                return;
+            }
+
             var rsvps = await db.EventRsvps.Where(r => r.ClanEventId == ev.Id).ToListAsync();
             var embed = EventEmbedBuilder.BuildEmbed(ev, rsvps, ev.ImageFileName);
-            var comps = ev.Status == ClanEventStatus.Cancelled
-                ? Empty()
-                : EventEmbedBuilder.BuildComponents(ev.Id, _config.EventRsvpEnabled, locked: DateTime.UtcNow >= ev.StartUtc);
+            var comps = EventEmbedBuilder.BuildComponents(ev.Id, _config.EventRsvpEnabled, locked: DateTime.UtcNow >= ev.StartUtc);
 
             await msg.ModifyAsync(m => { m.Embed = embed; m.Components = comps; });
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to re-render post for event {ClanId} (msg {MsgId})", ev.Id, ev.MessageId);
+            _logger.LogWarning(ex, "Failed to update post for event {ClanId} (msg {MsgId})", ev.Id, ev.MessageId);
         }
     }
 
