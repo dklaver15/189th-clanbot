@@ -43,6 +43,7 @@ public class DiscordBotService : IHostedService
     private readonly EventCommandHandler _eventCommandHandler;
     private readonly EventCreationWizard _eventWizard;
     private readonly EventRsvpInteractionHandler _eventRsvpHandler;
+    private readonly EventManagementHandler _eventMgmtHandler;
     private readonly PromoteCommandHandler _promoteHandler;
     private readonly DemoteCommandHandler _demoteHandler;
     private readonly SetNickCommandHandler _setNickHandler;
@@ -100,6 +101,7 @@ public class DiscordBotService : IHostedService
         EventCommandHandler eventCommandHandler,
         EventCreationWizard eventWizard,
         EventRsvpInteractionHandler eventRsvpHandler,
+        EventManagementHandler eventMgmtHandler,
         PromoteCommandHandler promoteHandler,
         DemoteCommandHandler demoteHandler,
         SetNickCommandHandler setNickHandler,
@@ -156,6 +158,7 @@ public class DiscordBotService : IHostedService
         _eventCommandHandler         = eventCommandHandler;
         _eventWizard                 = eventWizard;
         _eventRsvpHandler            = eventRsvpHandler;
+        _eventMgmtHandler            = eventMgmtHandler;
         _promoteHandler              = promoteHandler;
         _demoteHandler               = demoteHandler;
         _setNickHandler              = setNickHandler;
@@ -232,6 +235,7 @@ public class DiscordBotService : IHostedService
         _eventCommandHandler.Register(_client);
         _eventWizard.Register(_client);
         _eventRsvpHandler.Register(_client);
+        _eventMgmtHandler.Register(_client);
         _promoteHandler.Register(_client);
         _demoteHandler.Register(_client);
         _setNickHandler.Register(_client);

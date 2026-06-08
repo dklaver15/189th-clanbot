@@ -377,6 +377,7 @@ try
     builder.Services.AddSingleton<IEventPublisher>(sp => sp.GetRequiredService<EventPublisher>());
     builder.Services.AddSingleton<EventCreationWizard>();
     builder.Services.AddSingleton<EventCommandHandler>();
+    builder.Services.AddSingleton<EventManagementHandler>();
     builder.Services.AddSingleton<EventRsvpInteractionHandler>();
     builder.Services.AddHostedService<EventReminderService>();
     builder.Services.AddHostedService<EventRecurrenceScheduler>();

@@ -28,19 +28,22 @@ public sealed class EventCommandHandler
     private readonly BotConfig _config;
     private readonly EventCreationWizard _wizard;
     private readonly EventTimeParser _timeParser;
+    private readonly EventManagementHandler _management;
 
     public EventCommandHandler(
         IServiceProvider services,
         ILogger<EventCommandHandler> logger,
         IOptions<BotConfig> config,
         EventCreationWizard wizard,
-        EventTimeParser timeParser)
+        EventTimeParser timeParser,
+        EventManagementHandler management)
     {
         _services   = services;
         _logger     = logger;
         _config     = config.Value;
         _wizard     = wizard;
         _timeParser = timeParser;
+        _management = management;
     }
 
     public void Register(DiscordSocketClient client)
@@ -51,7 +54,19 @@ public sealed class EventCommandHandler
     public static SlashCommandProperties BuildEventCommand(string minRank) =>
         new SlashCommandBuilder()
             .WithName(EventCommandName)
-            .WithDescription($"Create a clan event — walks you through it in DMs ({minRank}+ only)")
+            .WithDescription("Create, edit, or cancel a clan event")
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("create")
+                .WithDescription($"Create a clan event — walks you through it in DMs ({minRank}+ only)")
+                .WithType(ApplicationCommandOptionType.SubCommand))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("edit")
+                .WithDescription("Edit one of your upcoming events")
+                .WithType(ApplicationCommandOptionType.SubCommand))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("cancel")
+                .WithDescription("Cancel one of your upcoming events")
+                .WithType(ApplicationCommandOptionType.SubCommand))
             .Build();
 
     public static SlashCommandProperties BuildTimezoneCommand() =>
@@ -87,6 +102,21 @@ public sealed class EventCommandHandler
     // ─── /event ──────────────────────────────────────────────────────────
 
     private async Task HandleEventAsync(SocketSlashCommand command)
+    {
+        // Dispatch by subcommand. Each branch owns its own defer/respond — do
+        // NOT defer here, or edit/cancel (which defer in the management handler)
+        // would double-acknowledge.
+        var sub = command.Data.Options.FirstOrDefault()?.Name ?? "create";
+        switch (sub)
+        {
+            case "create": await HandleCreateAsync(command);          break;
+            case "edit":   await _management.StartEditAsync(command);  break;
+            case "cancel": await _management.StartCancelAsync(command); break;
+            default:       await command.RespondAsync("Unknown subcommand.", ephemeral: true); break;
+        }
+    }
+
+    private async Task HandleCreateAsync(SocketSlashCommand command)
     {
         await command.DeferAsync(ephemeral: true);
 
