@@ -40,10 +40,10 @@ public static class EventEmbedBuilder
         if (!string.IsNullOrWhiteSpace(ev.Description))
             eb.WithDescription(ev.Description);
 
-        // Spacer to complete the Ends/Organizer row, so the three RSVP rosters
-        // start a fresh row and render as clean side-by-side columns (Apollo-style)
-        // instead of wrapping under Ends/Organizer.
-        eb.AddField("\u200b", "\u200b", inline: true);
+        // Full-width blank line between the Ends/Organizer row and the RSVP
+        // rosters: adds visual separation and forces the three rosters onto a
+        // fresh row as clean side-by-side columns (Apollo-style).
+        eb.AddField("\u200b", "\u200b", inline: false);
 
         eb.AddField($"✅ Going ({going.Count})",        Names(going),   inline: true);
         eb.AddField($"❔ Maybe ({maybe.Count})",        Names(maybe),   inline: true);
