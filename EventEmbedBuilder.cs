@@ -73,9 +73,9 @@ public static class EventEmbedBuilder
 
         if (rsvpEnabled)
         {
-            cb.WithButton(null, ButtonId("going",   clanEventId), ButtonStyle.Success, emote: new Emoji("✅"), disabled: locked)
-              .WithButton(null, ButtonId("maybe",   clanEventId), ButtonStyle.Primary, emote: new Emoji("❓"), disabled: locked)
-              .WithButton(null, ButtonId("decline", clanEventId), ButtonStyle.Danger,  emote: new Emoji("❌"), disabled: locked);
+            cb.WithButton(null, ButtonId("going",   clanEventId), ButtonStyle.Secondary, emote: new Emoji("✅"), disabled: locked)
+              .WithButton(null, ButtonId("maybe",   clanEventId), ButtonStyle.Secondary, emote: new Emoji("❓"), disabled: locked)
+              .WithButton(null, ButtonId("decline", clanEventId), ButtonStyle.Secondary, emote: new Emoji("❌"), disabled: locked);
         }
 
         var mgmtRow = rsvpEnabled ? 1 : 0;
