@@ -238,8 +238,11 @@ public sealed class EventManagementHandler
         {
             // Ack first — a whole-series cancel re-renders every future
             // occurrence's post (two REST calls each) and can exceed Discord's
-            // 3-second window. Update to a holding state, then finalize.
-            await component.UpdateAsync(m => { m.Content = "⏳ Cancelling…"; m.Components = Empty(); m.Embed = null; });
+            // 3-second window. Update to a holding state, then finalize. The ack
+            // is best-effort: the cancel (and its GCal Delete enqueue) must run
+            // regardless of whether the ack render succeeds.
+            try { await component.UpdateAsync(m => { m.Content = "⏳ Cancelling…"; m.Components = Empty(); m.Embed = null; }); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Cancel ack (UpdateAsync) failed for event {Id}", clanEventId); }
 
             var whole = scope == "series";
             var count = await DoCancelAsync(clanEventId, whole);
@@ -490,7 +493,7 @@ public sealed class EventManagementHandler
             if (await channel.GetMessageAsync(ev.MessageId) is not IUserMessage msg) return;
 
             var rsvps = await db.EventRsvps.Where(r => r.ClanEventId == ev.Id).ToListAsync();
-            var embed = EventEmbedBuilder.BuildEmbed(ev, rsvps);
+            var embed = EventEmbedBuilder.BuildEmbed(ev, rsvps, ev.ImageFileName);
             var comps = ev.Status == ClanEventStatus.Cancelled
                 ? Empty()
                 : EventEmbedBuilder.BuildComponents(ev.Id, _config.EventRsvpEnabled, locked: DateTime.UtcNow >= ev.StartUtc);

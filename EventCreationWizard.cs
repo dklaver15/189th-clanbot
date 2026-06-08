@@ -40,6 +40,9 @@ public sealed class EventCreationWizard
 
     private readonly ConcurrentDictionary<ulong, EventCreationSession> _sessions = new();
 
+    // Shared client for pulling the organizer's uploaded image off the Discord CDN.
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(20) };
+
     private readonly IServiceProvider _services;
     private readonly ILogger<EventCreationWizard> _logger;
     private readonly BotConfig _config;
@@ -158,6 +161,7 @@ public sealed class EventCreationWizard
                 case WizardStep.When:            await HandleWhenAsync(s, text);           break;
                 case WizardStep.Duration:        await HandleDurationAsync(s, text);       break;
                 case WizardStep.Description:     await HandleDescriptionAsync(s, text);    break;
+                case WizardStep.Image:           await HandleImageAsync(s, message, text);  break;
                 case WizardStep.RecurrenceUntil: await HandleRecurrenceUntilAsync(s, text); break;
                 // Recurrence / Confirm are button steps — ignore stray text.
             }
@@ -269,6 +273,67 @@ public sealed class EventCreationWizard
             ? string.Empty
             : text;
 
+        await PromptImageAsync(s);
+    }
+
+    private async Task PromptImageAsync(EventCreationSession s)
+    {
+        s.Step = WizardStep.Image;
+        await s.Dm.SendMessageAsync(
+            "🖼️ Want an **image** on the event post? Drag one into this DM (PNG/JPG/GIF/WebP, max 8 MB), or type `skip`.");
+    }
+
+    private async Task HandleImageAsync(EventCreationSession s, SocketMessage message, string text)
+    {
+        if (text.Equals("skip", StringComparison.OrdinalIgnoreCase)
+         || text.Equals("none", StringComparison.OrdinalIgnoreCase))
+        {
+            s.Draft.ImageBytes    = null;
+            s.Draft.ImageFileName = null;
+            s.Step = WizardStep.Recurrence;
+            await PromptRecurrenceAsync(s);
+            return;
+        }
+
+        var att = message.Attachments.FirstOrDefault();
+        if (att is null)
+        {
+            await s.Dm.SendMessageAsync("Drag an **image** into this DM, or type `skip`.");
+            return;
+        }
+
+        var looksImage = (att.ContentType?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) ?? false)
+                      || EventImage.IsAllowedExtension(att.Filename);
+        if (!looksImage)
+        {
+            await s.Dm.SendMessageAsync("That doesn't look like an image (PNG/JPG/GIF/WebP). Try another, or type `skip`.");
+            return;
+        }
+        if (att.Size > EventImage.MaxBytes)
+        {
+            await s.Dm.SendMessageAsync($"That image is too large. Max is {EventImage.MaxBytes / (1024 * 1024)} MB — try a smaller one, or type `skip`.");
+            return;
+        }
+
+        byte[] bytes;
+        try
+        {
+            bytes = await Http.GetByteArrayAsync(att.Url);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to download event image for {User}", s.Draft.OrganizerId);
+            await s.Dm.SendMessageAsync("Couldn't download that image. Try again, or type `skip`.");
+            return;
+        }
+        if (bytes.Length > EventImage.MaxBytes)
+        {
+            await s.Dm.SendMessageAsync($"That image is too large. Max is {EventImage.MaxBytes / (1024 * 1024)} MB — try a smaller one, or type `skip`.");
+            return;
+        }
+
+        s.Draft.ImageBytes    = bytes;
+        s.Draft.ImageFileName = EventImage.Sanitize(att.Filename);
         s.Step = WizardStep.Recurrence;
         await PromptRecurrenceAsync(s);
     }
@@ -514,12 +579,24 @@ public sealed class EventCreationWizard
         var zoneLabel = string.IsNullOrWhiteSpace(d.TimeZoneId) ? _config.EventDefaultTimeZone : d.TimeZoneId;
         embed.WithFooter($"Read in {zoneLabel} • shown in your local time • /timezone to change");
 
+        if (!string.IsNullOrWhiteSpace(d.ImageFileName))
+            embed.WithImageUrl($"attachment://{d.ImageFileName}");
+
         var buttons = new ComponentBuilder()
             .WithButton("Create event", $"{Prefix}confirm", ButtonStyle.Success)
             .WithButton("Cancel",       $"{Prefix}cancel",  ButtonStyle.Danger);
 
-        await s.Dm.SendMessageAsync(
-            "Here's how it'll look — create it?", embed: embed.Build(), components: buttons.Build());
+        if (d.ImageBytes is { Length: > 0 } && !string.IsNullOrWhiteSpace(d.ImageFileName))
+        {
+            using var fa = new FileAttachment(new MemoryStream(d.ImageBytes), d.ImageFileName);
+            await s.Dm.SendFileAsync(fa,
+                text: "Here's how it'll look — create it?", embed: embed.Build(), components: buttons.Build());
+        }
+        else
+        {
+            await s.Dm.SendMessageAsync(
+                "Here's how it'll look — create it?", embed: embed.Build(), components: buttons.Build());
+        }
     }
 
     // ─── Helpers ───────────────────────────────────────────────────────────

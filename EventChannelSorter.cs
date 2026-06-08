@@ -94,7 +94,19 @@ public sealed class EventChannelSorter
             foreach (var ev in events)
             {
                 var rsvps = rsvpsByEvent.TryGetValue(ev.Id, out var list) ? list : Array.Empty<EventRsvp>();
-                var posted = await channel.SendMessageAsync(embed: EventEmbedBuilder.BuildEmbed(ev, rsvps));
+                var (imgBytes, imgName) = await EventImage.ResolveAsync(db, ev);
+                var embed = EventEmbedBuilder.BuildEmbed(ev, rsvps, imgName);
+
+                IUserMessage posted;
+                if (imgBytes is { Length: > 0 } && !string.IsNullOrWhiteSpace(imgName))
+                {
+                    using var fa = new FileAttachment(new MemoryStream(imgBytes), imgName);
+                    posted = await channel.SendFileAsync(fa, embed: embed);
+                }
+                else
+                {
+                    posted = await channel.SendMessageAsync(embed: embed);
+                }
 
                 ev.MessageId = posted.Id;
                 await db.SaveChangesAsync();

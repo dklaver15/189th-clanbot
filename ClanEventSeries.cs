@@ -75,6 +75,17 @@ public class ClanEventSeries
     public bool Active { get; set; } = true;
 
     public DateTime CreatedAt { get; set; }
+
+    /// <summary>
+    /// Optional banner image bytes for the series, stored once here. Every
+    /// occurrence's #events post attaches these bytes (resolved via
+    /// EventImage.ResolveAsync) under <see cref="ImageFileName"/>, so the blob
+    /// is not duplicated onto each materialized occurrence row.
+    /// </summary>
+    public byte[]? ImageBytes { get; set; }
+
+    /// <summary>Attachment file name for the series banner image.</summary>
+    public string? ImageFileName { get; set; }
 }
 
 public enum ClanEventFrequency

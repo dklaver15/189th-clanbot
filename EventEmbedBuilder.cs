@@ -21,7 +21,7 @@ public static class EventEmbedBuilder
 
     private static readonly Color Blurple = new(0x5865F2);
 
-    public static Embed BuildEmbed(ClanEvent ev, IReadOnlyCollection<EventRsvp> rsvps)
+    public static Embed BuildEmbed(ClanEvent ev, IReadOnlyCollection<EventRsvp> rsvps, string? imageFileName = null)
     {
         var going   = rsvps.Where(r => r.Status == EventRsvpStatus.Going).ToList();
         var maybe   = rsvps.Where(r => r.Status == EventRsvpStatus.Maybe).ToList();
@@ -45,6 +45,10 @@ public static class EventEmbedBuilder
             eb.WithFooter("This event was cancelled.");
         else if (ev.SeriesId.HasValue)
             eb.WithFooter("🔁 Recurring event");
+
+        // References the file attached to this same message (see EventImage).
+        if (!string.IsNullOrWhiteSpace(imageFileName))
+            eb.WithImageUrl($"attachment://{imageFileName}");
 
         return eb.Build();
     }

@@ -14,6 +14,7 @@ public enum WizardStep
     When,
     Duration,
     Description,
+    Image,           // optional attachment step (or 'skip')
     Recurrence,      // button step
     RecurrenceUntil,
     Confirm,         // button step
@@ -38,6 +39,12 @@ public sealed class EventDraft
     public DateTime StartUtc { get; set; }
     public DateTime EndUtc { get; set; }
     public string Description { get; set; } = string.Empty;
+
+    /// <summary>Optional banner image bytes (downloaded from the organizer's DM upload); null = no image.</summary>
+    public byte[]? ImageBytes { get; set; }
+
+    /// <summary>Sanitized attachment file name for <see cref="ImageBytes"/>.</summary>
+    public string? ImageFileName { get; set; }
 
     /// <summary>Null = one-off event; otherwise a recurring series.</summary>
     public ClanEventFrequency? Frequency { get; set; }

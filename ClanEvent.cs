@@ -79,6 +79,21 @@ public class ClanEvent
 
     /// <summary>Stamped when Status flips to Cancelled.</summary>
     public DateTime? CancelledAt { get; set; }
+
+    /// <summary>
+    /// Optional banner image bytes for a one-off event, attached to the #events
+    /// post as <c>attachment://</c><see cref="ImageFileName"/>. Null for series
+    /// occurrences — they resolve bytes from their <see cref="ClanEventSeries"/>
+    /// so the blob isn't duplicated across every occurrence. See EventImage.
+    /// </summary>
+    public byte[]? ImageBytes { get; set; }
+
+    /// <summary>
+    /// Attachment file name for the banner image (set for both one-off events
+    /// and series occurrences). Drives the embed's <c>attachment://</c> image
+    /// reference; the bytes are resolved separately via EventImage.ResolveAsync.
+    /// </summary>
+    public string? ImageFileName { get; set; }
 }
 
 public enum ClanEventStatus

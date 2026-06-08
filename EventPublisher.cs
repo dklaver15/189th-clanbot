@@ -48,7 +48,8 @@ public sealed class EventPublisher : IEventPublisher
 
     public Task PublishOneOffAsync(EventDraft d) =>
         CreateOccurrenceAsync(d.GuildId, seriesId: null,
-            d.Title, d.Description, d.OrganizerId, d.OrganizerName, d.StartUtc, d.EndUtc);
+            d.Title, d.Description, d.OrganizerId, d.OrganizerName, d.StartUtc, d.EndUtc,
+            attachImageBytes: d.ImageBytes, imageFileName: d.ImageFileName);
 
     public async Task PublishSeriesAsync(EventDraft d)
     {
@@ -83,6 +84,8 @@ public sealed class EventPublisher : IEventPublisher
                 MaxOccurrences  = d.MaxOccurrences,
                 Active          = true,
                 CreatedAt       = DateTime.UtcNow,
+                ImageBytes      = d.ImageBytes,
+                ImageFileName   = d.ImageFileName,
             };
             db.ClanEventSeries.Add(series);
             await db.SaveChangesAsync(); // materialize series.Id
@@ -101,7 +104,8 @@ public sealed class EventPublisher : IEventPublisher
 
         foreach (var (startUtc, endUtc) in occurrences)
             await CreateOccurrenceAsync(d.GuildId, series.Id,
-                d.Title, d.Description, d.OrganizerId, d.OrganizerName, startUtc, endUtc);
+                d.Title, d.Description, d.OrganizerId, d.OrganizerName, startUtc, endUtc,
+                attachImageBytes: series.ImageBytes, imageFileName: series.ImageFileName);
 
         _logger.LogInformation(
             "Created series {SeriesId} '{Title}' ({Freq}); materialized {Count} occurrence(s)",
@@ -116,7 +120,8 @@ public sealed class EventPublisher : IEventPublisher
     public async Task CreateOccurrenceAsync(
         ulong guildId, int? seriesId,
         string title, string description, ulong organizerId, string organizerName,
-        DateTime startUtc, DateTime endUtc)
+        DateTime startUtc, DateTime endUtc,
+        byte[]? attachImageBytes = null, string? imageFileName = null)
     {
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
@@ -143,7 +148,17 @@ public sealed class EventPublisher : IEventPublisher
             OrganizerId = organizerId, OrganizerName = organizerName,
             StartUtc = startUtc, EndUtc = endUtc, Status = ClanEventStatus.Scheduled,
         };
-        var posted = await channel.SendMessageAsync(embed: EventEmbedBuilder.BuildEmbed(preview, Array.Empty<EventRsvp>()));
+        var previewEmbed = EventEmbedBuilder.BuildEmbed(preview, Array.Empty<EventRsvp>(), imageFileName);
+        IUserMessage posted;
+        if (attachImageBytes is { Length: > 0 } && !string.IsNullOrWhiteSpace(imageFileName))
+        {
+            using var fa = new FileAttachment(new MemoryStream(attachImageBytes), imageFileName);
+            posted = await channel.SendFileAsync(fa, embed: previewEmbed);
+        }
+        else
+        {
+            posted = await channel.SendMessageAsync(embed: previewEmbed);
+        }
         var messageId = posted.Id;
 
         // 2) Persist the CalendarEvent hub row, the ClanEvent, and the outbox row.
@@ -179,6 +194,8 @@ public sealed class EventPublisher : IEventPublisher
             Status           = ClanEventStatus.Scheduled,
             RemindersSentCsv = string.Empty,
             CreatedAt        = DateTime.UtcNow,
+            ImageFileName    = imageFileName,
+            ImageBytes       = seriesId == null ? attachImageBytes : null,
         };
         db.ClanEvents.Add(clanEvent);
 
