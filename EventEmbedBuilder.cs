@@ -50,8 +50,8 @@ public static class EventEmbedBuilder
         var eb = new EmbedBuilder()
             .WithTitle($"📅 {ev.Title}")
             .WithColor(ev.Status == ClanEventStatus.Cancelled ? Color.DarkGrey : Blurple)
-            .AddField("When", $"{EventTimeParser.Stamp(ev.StartUtc, 'F')}\n{EventTimeParser.Stamp(ev.StartUtc, 'R')}")
-            .AddField("Ends", EventTimeParser.Stamp(ev.EndUtc, 't'), inline: true)
+            .AddField("Time",
+                $"{EventTimeParser.Stamp(ev.StartUtc, 'F')} - {EventTimeParser.Stamp(ev.EndUtc, 't')}\n🕐 {EventTimeParser.Stamp(ev.StartUtc, 'R')}")
             .AddField("Host", $"<@{ev.HostId ?? ev.OrganizerId}>", inline: true);
 
         if (!string.IsNullOrWhiteSpace(ev.Description))
