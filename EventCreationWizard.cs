@@ -676,7 +676,7 @@ public sealed class EventCreationWizard
         var eb = new EmbedBuilder()
             .WithColor(FormColor)
             .WithTitle(title)
-            .WithFooter("Reply in this DM • type cancel to quit • times out after 15 min");
+            .WithFooter("Reply in this DM • type \"cancel\" to quit • times out after 15 min");
         if (!string.IsNullOrWhiteSpace(body)) eb.WithDescription(body);
         return eb.Build();
     }
