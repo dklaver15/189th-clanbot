@@ -90,13 +90,13 @@ public static class EventEmbedBuilder
         if (rsvpEnabled)
         {
             cb.WithButton(null, ButtonId("going",   clanEventId), ButtonStyle.Secondary, emote: new Emoji("✅"), disabled: locked)
-              .WithButton(null, ButtonId("maybe",   clanEventId), ButtonStyle.Secondary, emote: new Emoji("❓"), disabled: locked)
+              .WithButton(null, ButtonId("maybe",   clanEventId), ButtonStyle.Secondary, emote: new Emoji("❔"), disabled: locked)
               .WithButton(null, ButtonId("decline", clanEventId), ButtonStyle.Secondary, emote: new Emoji("❌"), disabled: locked);
         }
 
         var mgmtRow = rsvpEnabled ? 1 : 0;
         cb.WithButton("Edit",     $"{MgmtPrefix}pedit:{clanEventId}",   ButtonStyle.Primary,   row: mgmtRow)
-          .WithButton("Set Host", $"{MgmtPrefix}sethost:{clanEventId}", ButtonStyle.Secondary, row: mgmtRow)
+          .WithButton("Set Host", $"{MgmtPrefix}sethost:{clanEventId}", ButtonStyle.Success,   row: mgmtRow)
           .WithButton("Cancel",   $"{MgmtPrefix}pcancel:{clanEventId}", ButtonStyle.Danger,    row: mgmtRow);
 
         return cb.Build();
