@@ -399,6 +399,24 @@ public sealed class EventCreationWizard
     {
         _sessions.TryRemove(s.Draft.OrganizerId, out _);
 
+        // Acknowledge immediately and strip the buttons (also prevents a
+        // double-submit). Publishing a recurring series posts several messages,
+        // which can exceed Discord's 3-second interaction window — so we ack
+        // here, publish, then edit the message to its final state.
+        try
+        {
+            await c.UpdateAsync(m =>
+            {
+                m.Content    = "⏳ Creating your event…";
+                m.Embed      = null;
+                m.Components = new ComponentBuilder().Build();
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Confirm ack (UpdateAsync) failed for {User}", s.Draft.OrganizerId);
+        }
+
         try
         {
             if (s.Draft.Frequency is null)
@@ -409,13 +427,36 @@ public sealed class EventCreationWizard
         catch (Exception ex)
         {
             _logger.LogError(ex, "Publishing event '{Title}' failed for {User}", s.Draft.Title, s.Draft.OrganizerId);
-            await ClearButtons(c, "❌ Something went wrong creating the event. Please try `/event` again.");
+            await FinalizeConfirmAsync(c, "❌ Something went wrong creating the event. Please try `/event` again.");
             return;
         }
 
         var postChannelId = _config.GetEventPostChannelId();
         var channelMention = postChannelId != 0 ? $"<#{postChannelId}>" : "the events channel";
-        await ClearButtons(c, $"✅ **Event created!** It's been posted to {channelMention}.");
+        await FinalizeConfirmAsync(c, $"✅ **Event created!** It's been posted to {channelMention}.");
+    }
+
+    /// <summary>
+    /// Edits the already-acknowledged confirm message to its final text. Used
+    /// instead of <see cref="ClearButtons"/> on the confirm path because that
+    /// path has already called UpdateAsync (the immediate ack), and a component
+    /// interaction can only be updated once.
+    /// </summary>
+    private async Task FinalizeConfirmAsync(SocketMessageComponent c, string content)
+    {
+        try
+        {
+            await c.ModifyOriginalResponseAsync(m =>
+            {
+                m.Content    = content;
+                m.Embed      = null;
+                m.Components  = new ComponentBuilder().Build();
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to finalize confirm message");
+        }
     }
 
     private async Task OnCancelAsync(EventCreationSession s, SocketMessageComponent c)

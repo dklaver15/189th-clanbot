@@ -6,7 +6,6 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using System.Collections.Concurrent;
 
 namespace ClanGuardBot.Handlers;
 
@@ -30,7 +29,16 @@ public sealed class EventRsvpInteractionHandler
     private readonly ILogger<EventRsvpInteractionHandler> _logger;
     private readonly BotConfig _config;
 
-    private readonly ConcurrentDictionary<int, SemaphoreSlim> _locks = new();
+    // Striped locks: a fixed pool of gates indexed by event id. Serializes the
+    // read-modify-render of a given event's embed without growing per-event
+    // (the previous per-id dictionary was never pruned, a slow leak). Two
+    // distinct events may occasionally share a stripe — harmless, since the
+    // critical section is brief.
+    private const int LockStripeCount = 64;
+    private readonly SemaphoreSlim[] _locks =
+        Enumerable.Range(0, LockStripeCount).Select(_ => new SemaphoreSlim(1, 1)).ToArray();
+
+    private SemaphoreSlim GateFor(int clanEventId) => _locks[(uint)clanEventId % LockStripeCount];
 
     public EventRsvpInteractionHandler(
         IServiceProvider services,
@@ -73,7 +81,7 @@ public sealed class EventRsvpInteractionHandler
             return;
         }
 
-        var gate = _locks.GetOrAdd(clanEventId, _ => new SemaphoreSlim(1, 1));
+        var gate = GateFor(clanEventId);
         await gate.WaitAsync();
         try
         {

@@ -236,12 +236,18 @@ public sealed class EventManagementHandler
 
         if (kind == "cxl")
         {
+            // Ack first — a whole-series cancel re-renders every future
+            // occurrence's post (two REST calls each) and can exceed Discord's
+            // 3-second window. Update to a holding state, then finalize.
+            await component.UpdateAsync(m => { m.Content = "⏳ Cancelling…"; m.Components = Empty(); m.Embed = null; });
+
             var whole = scope == "series";
             var count = await DoCancelAsync(clanEventId, whole);
             var msg = whole
                 ? $"✅ Cancelled the series **{ev.Title}** ({count} upcoming occurrence{(count == 1 ? "" : "s")})."
                 : $"✅ Cancelled this occurrence of **{ev.Title}**.";
-            await component.UpdateAsync(m => { m.Content = msg; m.Components = Empty(); });
+            try { await component.ModifyOriginalResponseAsync(m => { m.Content = msg; m.Components = Empty(); m.Embed = null; }); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to finalize cancel message for event {Id}", clanEventId); }
         }
         else if (kind == "editpick")
         {
@@ -264,8 +270,14 @@ public sealed class EventManagementHandler
     {
         if (!modal.Data.CustomId.StartsWith($"{Prefix}editsubmit:", StringComparison.Ordinal)) return;
 
+        // Acknowledge immediately. A whole-series edit re-renders every future
+        // occurrence's post (two REST calls each), which can exceed Discord's
+        // 3-second initial-response window — so we defer here and every reply
+        // below uses FollowupAsync.
+        await modal.DeferAsync(ephemeral: true);
+
         var parts = modal.Data.CustomId.Split(':'); // evtmgmt:editsubmit:<single|occ|series>:<id>
-        if (parts.Length != 4 || !int.TryParse(parts[3], out var id)) { await modal.RespondAsync("Couldn't read that form.", ephemeral: true); return; }
+        if (parts.Length != 4 || !int.TryParse(parts[3], out var id)) { await modal.FollowupAsync("Couldn't read that form.", ephemeral: true); return; }
         var scope = parts[2];
 
         var fields = modal.Data.Components.ToDictionary(c => c.CustomId, c => c.Value ?? string.Empty);
@@ -278,13 +290,13 @@ public sealed class EventManagementHandler
                 case "single": await SubmitSingleEditAsync(modal, id, fields, tz, allowTimeChange: true);  break;
                 case "occ":    await SubmitSingleEditAsync(modal, id, fields, tz, allowTimeChange: false); break;
                 case "series": await SubmitSeriesEditAsync(modal, id, fields);                              break;
-                default:       await modal.RespondAsync("Unknown edit type.", ephemeral: true);             break;
+                default:       await modal.FollowupAsync("Unknown edit type.", ephemeral: true);             break;
             }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Event edit submit failed ({Scope} {Id})", scope, id);
-            try { await modal.RespondAsync("Something went wrong applying the edit.", ephemeral: true); } catch { }
+            try { await modal.FollowupAsync("Something went wrong applying the edit.", ephemeral: true); } catch { }
         }
     }
 
@@ -292,26 +304,26 @@ public sealed class EventManagementHandler
         SocketModal modal, int clanEventId, IReadOnlyDictionary<string, string> f, TimeZoneInfo tz, bool allowTimeChange)
     {
         var title = f.GetValueOrDefault("title", "").Trim();
-        if (string.IsNullOrWhiteSpace(title)) { await modal.RespondAsync("Title can't be empty.", ephemeral: true); return; }
+        if (string.IsNullOrWhiteSpace(title)) { await modal.FollowupAsync("Title can't be empty.", ephemeral: true); return; }
 
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
         var ev = await db.ClanEvents.FirstOrDefaultAsync(e => e.Id == clanEventId);
-        if (ev is null || ev.Status == ClanEventStatus.Cancelled) { await modal.RespondAsync("That event is no longer available.", ephemeral: true); return; }
-        if (!await CallerMayManageAsync(modal.User, ev.OrganizerId)) { await modal.RespondAsync("You don't have permission to edit that event.", ephemeral: true); return; }
+        if (ev is null || ev.Status == ClanEventStatus.Cancelled) { await modal.FollowupAsync("That event is no longer available.", ephemeral: true); return; }
+        if (!await CallerMayManageAsync(modal.User, ev.OrganizerId)) { await modal.FollowupAsync("You don't have permission to edit that event.", ephemeral: true); return; }
 
         var newStart = ev.StartUtc;
         if (allowTimeChange)
         {
             var w = _time.ParseStart(f.GetValueOrDefault("when", ""), tz);
-            if (!w.Success)        { await modal.RespondAsync($"Couldn't read the time: {w.Error}", ephemeral: true); return; }
-            if (!w.HasTimeOfDay)   { await modal.RespondAsync("Please include a time of day.", ephemeral: true); return; }
+            if (!w.Success)        { await modal.FollowupAsync($"Couldn't read the time: {w.Error}", ephemeral: true); return; }
+            if (!w.HasTimeOfDay)   { await modal.FollowupAsync("Please include a time of day.", ephemeral: true); return; }
             newStart = w.StartUtc;
         }
 
         var d = _time.ParseEnd(f.GetValueOrDefault("dur", ""), newStart, tz);
-        if (!d.Success) { await modal.RespondAsync($"Couldn't read the duration/end: {d.Error}", ephemeral: true); return; }
+        if (!d.Success) { await modal.FollowupAsync($"Couldn't read the duration/end: {d.Error}", ephemeral: true); return; }
 
         var timeMoved = ev.StartUtc != newStart;
         ev.Title       = title;
@@ -324,21 +336,21 @@ public sealed class EventManagementHandler
         await db.SaveChangesAsync();
         await UpdatePostAsync(db, ev);
 
-        await modal.RespondAsync($"✅ Updated **{ev.Title}**.", ephemeral: true);
+        await modal.FollowupAsync($"✅ Updated **{ev.Title}**.", ephemeral: true);
     }
 
     private async Task SubmitSeriesEditAsync(SocketModal modal, int seriesId, IReadOnlyDictionary<string, string> f)
     {
         var title = f.GetValueOrDefault("title", "").Trim();
-        if (string.IsNullOrWhiteSpace(title)) { await modal.RespondAsync("Title can't be empty.", ephemeral: true); return; }
+        if (string.IsNullOrWhiteSpace(title)) { await modal.FollowupAsync("Title can't be empty.", ephemeral: true); return; }
         var description = f.GetValueOrDefault("desc", "").Trim();
 
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
         var series = await db.ClanEventSeries.FirstOrDefaultAsync(s => s.Id == seriesId);
-        if (series is null) { await modal.RespondAsync("That series no longer exists.", ephemeral: true); return; }
-        if (!await CallerMayManageAsync(modal.User, series.OrganizerId)) { await modal.RespondAsync("You don't have permission to edit that series.", ephemeral: true); return; }
+        if (series is null) { await modal.FollowupAsync("That series no longer exists.", ephemeral: true); return; }
+        if (!await CallerMayManageAsync(modal.User, series.OrganizerId)) { await modal.FollowupAsync("You don't have permission to edit that series.", ephemeral: true); return; }
 
         series.Title       = title;
         series.Description = description;
@@ -359,7 +371,7 @@ public sealed class EventManagementHandler
         foreach (var ev in futures)
             await UpdatePostAsync(db, ev);
 
-        await modal.RespondAsync(
+        await modal.FollowupAsync(
             $"✅ Updated the series **{title}** and {futures.Count} upcoming occurrence{(futures.Count == 1 ? "" : "s")}.",
             ephemeral: true);
     }
