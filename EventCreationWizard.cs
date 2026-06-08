@@ -112,16 +112,14 @@ public sealed class EventCreationWizard
 
         try
         {
-            if (session.TimezoneKnown)
-            {
-                session.Step = WizardStep.Title;
-                await dm.SendMessageAsync("🎯 **New event!** What's the **title**?");
-            }
-            else
-            {
-                session.Step = WizardStep.Timezone;
-                await PromptTimezoneAsync(session);
-            }
+            // We never ask for a timezone during creation (like Apollo). If the
+            // user set one via /timezone we use it; otherwise their input is
+            // interpreted in EventDefaultTimeZone. The confirm card shows the
+            // time in the creator's own local Discord clock (via <t:unix>) and
+            // names the zone it was read in, so a wrong assumption is visible —
+            // and /timezone sets a personal override that sticks.
+            session.Step = WizardStep.Title;
+            await dm.SendMessageAsync("🎯 **New event!** What's the **title**?");
             return true;
         }
         catch (Exception ex)
@@ -509,6 +507,12 @@ public sealed class EventCreationWizard
 
         if (!string.IsNullOrWhiteSpace(d.Description))
             embed.AddField("Description", d.Description);
+
+        // Make the assumed zone visible: the times above render in each viewer's
+        // own local clock, but the creator's text input was interpreted in this
+        // zone. If it's wrong, /timezone sets a personal override.
+        var zoneLabel = string.IsNullOrWhiteSpace(d.TimeZoneId) ? _config.EventDefaultTimeZone : d.TimeZoneId;
+        embed.WithFooter($"Read in {zoneLabel} • shown in your local time • /timezone to change");
 
         var buttons = new ComponentBuilder()
             .WithButton("Create event", $"{Prefix}confirm", ButtonStyle.Success)
