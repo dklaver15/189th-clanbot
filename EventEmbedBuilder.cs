@@ -47,7 +47,7 @@ public static class EventEmbedBuilder
 
         eb.AddField($"✅ Going ({going.Count})",        Names(going),   inline: true);
         eb.AddField($"❔ Maybe ({maybe.Count})",        Names(maybe),   inline: true);
-        eb.AddField($"❌ Can't make it ({decline.Count})", Names(decline), inline: true);
+        eb.AddField($"❌ Declined ({decline.Count})", Names(decline), inline: true);
 
         if (ev.Status == ClanEventStatus.Cancelled)
             eb.WithFooter("This event was cancelled.");
