@@ -262,8 +262,9 @@ public class BotConfig
     /// Minimum rank required to create events via /event, and to edit/cancel
     /// any event. The organizer of an event may always edit/cancel their own
     /// regardless of rank. Must match a rank name in RankRoles (case-insensitive).
+    /// Default is the lowest officer rank (any officer can create events).
     /// </summary>
-    public string EventCommandMinRank { get; set; } = "CPT";
+    public string EventCommandMinRank { get; set; } = "2ndLT";
 
     /// <summary>
     /// Channel that ClanGuard-created event embeds are posted to. 0 falls back
