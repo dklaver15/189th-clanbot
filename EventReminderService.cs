@@ -11,10 +11,11 @@ using Microsoft.Extensions.Options;
 namespace ClanGuardBot.Services;
 
 /// <summary>
-/// Posts reminder pings for upcoming events at the configured lead times
-/// (EventReminderLeadMinutes, default 60 and 15 minutes before start). The ping
-/// @-mentions every member whose RSVP is in EventReminderPingStatuses (default
-/// Going), and still posts when no one matches.
+/// Posts reminders for upcoming events at the configured lead times
+/// (EventReminderLeadMinutes, default 60 and 15 minutes before start). Each
+/// reminder is an embed; the accompanying ping line @-mentions the organizer
+/// plus every member whose RSVP is in EventReminderPingStatuses (default Going
+/// and Maybe), and still posts when no one else matches.
 ///
 /// ── Restart-safe ──
 /// Fired lead values are recorded on ClanEvent.RemindersSentCsv, so a
@@ -106,7 +107,7 @@ public sealed class EventReminderService : BackgroundService
             // Fire only the most urgent due lead; suppress any stale larger ones
             // (relevant only after downtime).
             var fire = due.Min();
-            var mentions = await BuildMentionsAsync(db, ev.Id, pingStatuses, ct);
+            var mentions = await BuildMentionsAsync(db, ev, pingStatuses, ct);
             await PostReminderAsync(ev, mentions);
 
             foreach (var L in due) fired.Add(L);
@@ -119,16 +120,22 @@ public sealed class EventReminderService : BackgroundService
     }
 
     private async Task<string> BuildMentionsAsync(
-        BotDbContext db, int clanEventId, HashSet<EventRsvpStatus> statuses, CancellationToken ct)
+        BotDbContext db, ClanEvent ev, HashSet<EventRsvpStatus> statuses, CancellationToken ct)
     {
-        if (statuses.Count == 0) return string.Empty;
+        // Always ping the organizer; add anyone whose RSVP matches the configured
+        // statuses (deduped — the organizer may also have RSVP'd).
+        var ids = new HashSet<ulong> { ev.OrganizerId };
 
-        var userIds = await db.EventRsvps
-            .Where(r => r.ClanEventId == clanEventId && statuses.Contains(r.Status))
-            .Select(r => r.UserId)
-            .ToListAsync(ct);
+        if (statuses.Count > 0)
+        {
+            var rsvpIds = await db.EventRsvps
+                .Where(r => r.ClanEventId == ev.Id && statuses.Contains(r.Status))
+                .Select(r => r.UserId)
+                .ToListAsync(ct);
+            foreach (var id in rsvpIds) ids.Add(id);
+        }
 
-        return string.Join(" ", userIds.Select(id => $"<@{id}>"));
+        return string.Join(" ", ids.Select(id => $"<@{id}>"));
     }
 
     private async Task PostReminderAsync(ClanEvent ev, string mentions)
@@ -145,15 +152,22 @@ public sealed class EventReminderService : BackgroundService
             return; // lead still marked sent by caller to avoid a retry loop
         }
 
-        var content = $"⏰ **{ev.Title}** starts {EventTimeParser.Stamp(ev.StartUtc, 'R')} " +
-                      $"({EventTimeParser.Stamp(ev.StartUtc, 't')}).";
-        if (!string.IsNullOrWhiteSpace(mentions))
-            content += $"\n{mentions}";
+        var embed = new EmbedBuilder()
+            .WithColor(new Color(0x5865F2))
+            .WithTitle($"⏰ {ev.Title}")
+            .WithDescription(
+                $"Starts {EventTimeParser.Stamp(ev.StartUtc, 'R')}\n{EventTimeParser.Stamp(ev.StartUtc, 'F')}")
+            .Build();
+
+        // Mentions must live in the message *content* to actually notify — pings
+        // inside an embed don't fire. AllowedMentions limits this to users.
+        var content = string.IsNullOrWhiteSpace(mentions) ? null : mentions;
 
         try
         {
             await channel.SendMessageAsync(
                 text: content,
+                embed: embed,
                 allowedMentions: new AllowedMentions { AllowedTypes = AllowedMentionTypes.Users });
         }
         catch (Exception ex)
@@ -190,7 +204,7 @@ public sealed class EventReminderService : BackgroundService
                 case "decline": set.Add(EventRsvpStatus.Decline); break;
             }
         }
-        if (set.Count == 0) set.Add(EventRsvpStatus.Going); // sensible default
+        if (set.Count == 0) { set.Add(EventRsvpStatus.Going); set.Add(EventRsvpStatus.Maybe); } // sensible default
         return set;
     }
 }
