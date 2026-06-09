@@ -19,6 +19,14 @@ public static class EventEmbedBuilder
     /// <summary>Prefix for the on-post Edit/Cancel buttons — must match EventManagementHandler.Prefix.</summary>
     private const string MgmtPrefix = "evtmgmt:";
 
+    /// <summary>
+    /// Custom "Tentative/Maybe" emoji — a 189th server emoji that mirrors Apollo's
+    /// blue-box look (Discord's native ❔ renders as a plain white mark). Used on
+    /// the Maybe button and roster header. If the emoji is ever re-uploaded its id
+    /// changes, so update this string to the new <c>&lt;:tentative:id&gt;</c>.
+    /// </summary>
+    private const string MaybeEmote = "<:tentative:1513692865350602892>";
+
     /// <summary>Custom id for an RSVP button: <c>evt:rsvp:&lt;status&gt;:&lt;clanEventId&gt;</c>.</summary>
     public static string ButtonId(string status, int clanEventId) => $"{RsvpPrefix}{status}:{clanEventId}";
 
@@ -67,7 +75,7 @@ public static class EventEmbedBuilder
             ? $"✅ Going ({going.Count}/{cap})"
             : $"✅ Going ({going.Count})";
         eb.AddField(goingLabel,                       Names(going),   inline: true);
-        eb.AddField($"❔ Maybe ({maybe.Count})",        Names(maybe),   inline: true);
+        eb.AddField($"{MaybeEmote} Maybe ({maybe.Count})",        Names(maybe),   inline: true);
         eb.AddField($"❌ Declined ({decline.Count})", Names(decline), inline: true);
 
         // Waitlist sits on its own full-width row below the trio, in signup
@@ -111,7 +119,7 @@ public static class EventEmbedBuilder
         if (rsvpEnabled)
         {
             cb.WithButton(null, ButtonId("going",   clanEventId), ButtonStyle.Secondary, emote: new Emoji("✅"), disabled: locked, row: 0)
-              .WithButton(null, ButtonId("maybe",   clanEventId), ButtonStyle.Secondary, emote: new Emoji("❔"), disabled: locked, row: 0)
+              .WithButton(null, ButtonId("maybe",   clanEventId), ButtonStyle.Secondary, emote: Emote.Parse(MaybeEmote), disabled: locked, row: 0)
               .WithButton(null, ButtonId("decline", clanEventId), ButtonStyle.Secondary, emote: new Emoji("❌"), disabled: locked, row: 0);
         }
 
