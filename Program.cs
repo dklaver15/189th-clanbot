@@ -222,6 +222,7 @@ try
     builder.Services.AddSingleton<PromoteCommandHandler>();
     builder.Services.AddSingleton<DemoteCommandHandler>();
     builder.Services.AddSingleton<SetNickCommandHandler>();
+    builder.Services.AddSingleton<ChannelRenameCommandHandler>();
 
     // SeedPromotionCreditCommandHandler: one-time /seed-promotion-credit command
     // that reads the "Seed Events" column from the roster sheet and writes those

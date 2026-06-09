@@ -47,6 +47,7 @@ public class DiscordBotService : IHostedService
     private readonly PromoteCommandHandler _promoteHandler;
     private readonly DemoteCommandHandler _demoteHandler;
     private readonly SetNickCommandHandler _setNickHandler;
+    private readonly ChannelRenameCommandHandler _channelRenameHandler;
     private readonly SeedPromotionCreditCommandHandler _seedHandler;
     private readonly EventCreditCommandHandler _eventCreditHandler;
     private readonly AttendanceCommandHandler _attendanceHandler;
@@ -105,6 +106,7 @@ public class DiscordBotService : IHostedService
         PromoteCommandHandler promoteHandler,
         DemoteCommandHandler demoteHandler,
         SetNickCommandHandler setNickHandler,
+        ChannelRenameCommandHandler channelRenameHandler,
         SeedPromotionCreditCommandHandler seedHandler,
         EventCreditCommandHandler eventCreditHandler,
         AttendanceCommandHandler attendanceHandler,
@@ -162,6 +164,7 @@ public class DiscordBotService : IHostedService
         _promoteHandler              = promoteHandler;
         _demoteHandler               = demoteHandler;
         _setNickHandler              = setNickHandler;
+        _channelRenameHandler        = channelRenameHandler;
         _seedHandler                 = seedHandler;
         _eventCreditHandler          = eventCreditHandler;
         _attendanceHandler           = attendanceHandler;
@@ -239,6 +242,7 @@ public class DiscordBotService : IHostedService
         _promoteHandler.Register(_client);
         _demoteHandler.Register(_client);
         _setNickHandler.Register(_client);
+        _channelRenameHandler.Register(_client);
         _seedHandler.Register(_client);
         _eventCreditHandler.Register(_client);
         _attendanceHandler.Register(_client);
@@ -372,6 +376,22 @@ public class DiscordBotService : IHostedService
                         "The member to rename", isRequired: true)
                     .AddOption("nickname", ApplicationCommandOptionType.String,
                         "The new nickname", isRequired: true)
+                    .Build(),
+
+                new SlashCommandBuilder()
+                    .WithName(ChannelRenameCommandHandler.CommandName)
+                    .WithDescription("Rename a voice/stage channel, optionally on two lines (Officer+ only)")
+                    .AddOption(new SlashCommandOptionBuilder()
+                        .WithName("channel")
+                        .WithDescription("The voice or stage channel to rename")
+                        .WithType(ApplicationCommandOptionType.Channel)
+                        .AddChannelType(ChannelType.Voice)
+                        .AddChannelType(ChannelType.Stage)
+                        .WithRequired(true))
+                    .AddOption("line1", ApplicationCommandOptionType.String,
+                        "First line (or the whole name; use \\n to break it yourself)", isRequired: true)
+                    .AddOption("line2", ApplicationCommandOptionType.String,
+                        "Optional second line — placed below line1 on its own line", isRequired: false)
                     .Build(),
 
                 // One-time operational command: reads the "Seed Events" column
