@@ -176,9 +176,24 @@ public class ApolloReconciliationService : BackgroundService
         // Source filter excludes CompDiv events, which are bot-generated
         // (DiscordMessageId == 0) and don't have an Apollo source message
         // to reconcile against.
+        //
+        // The owning-ClanEvent exclusion is load-bearing: the in-house event
+        // system (EventPublisher) writes CalendarEvents with the SAME
+        // Source="Clan" value, but posts its RSVP message to
+        // GetEventPostChannelId() (EventPostChannelId — often a dedicated test
+        // channel), NOT the Apollo EventsTextChannelId that ResolveEventsChannel
+        // scans below. Without this guard, every in-house event looks like an
+        // orphaned Apollo post — its message is "missing" only because we're
+        // looking in the wrong channel — and the future-events arm deletes the
+        // hub row, orphaning the ClanEvent + outbox and silently dropping the
+        // event from Google Calendar. A CalendarEvent owned by a ClanEvent is
+        // managed by ClanGuard's own create/edit/cancel/archive lifecycle and
+        // must never be reconciled here. Apollo-sourced events never have an
+        // owning ClanEvent, so Apollo reconciliation is unaffected.
         var candidates = await db.CalendarEvents
             .Where(c => c.Source == ClanEventSource
-                     && (c.CreatedAt >= cutoff || c.StartUtc > now))
+                     && (c.CreatedAt >= cutoff || c.StartUtc > now)
+                     && !db.ClanEvents.Any(e => e.CalendarEventId == c.Id))
             .OrderBy(c => c.CreatedAt)
             .ToListAsync(ct);
 
