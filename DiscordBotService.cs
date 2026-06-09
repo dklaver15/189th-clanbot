@@ -48,6 +48,7 @@ public class DiscordBotService : IHostedService
     private readonly DemoteCommandHandler _demoteHandler;
     private readonly SetNickCommandHandler _setNickHandler;
     private readonly ChannelRenameCommandHandler _channelRenameHandler;
+    private readonly BotFixChannelPermsCommandHandler _botFixChannelPermsHandler;
     private readonly SeedPromotionCreditCommandHandler _seedHandler;
     private readonly EventCreditCommandHandler _eventCreditHandler;
     private readonly AttendanceCommandHandler _attendanceHandler;
@@ -107,6 +108,7 @@ public class DiscordBotService : IHostedService
         DemoteCommandHandler demoteHandler,
         SetNickCommandHandler setNickHandler,
         ChannelRenameCommandHandler channelRenameHandler,
+        BotFixChannelPermsCommandHandler botFixChannelPermsHandler,
         SeedPromotionCreditCommandHandler seedHandler,
         EventCreditCommandHandler eventCreditHandler,
         AttendanceCommandHandler attendanceHandler,
@@ -165,6 +167,7 @@ public class DiscordBotService : IHostedService
         _demoteHandler               = demoteHandler;
         _setNickHandler              = setNickHandler;
         _channelRenameHandler        = channelRenameHandler;
+        _botFixChannelPermsHandler   = botFixChannelPermsHandler;
         _seedHandler                 = seedHandler;
         _eventCreditHandler          = eventCreditHandler;
         _attendanceHandler           = attendanceHandler;
@@ -243,6 +246,7 @@ public class DiscordBotService : IHostedService
         _demoteHandler.Register(_client);
         _setNickHandler.Register(_client);
         _channelRenameHandler.Register(_client);
+        _botFixChannelPermsHandler.Register(_client);
         _seedHandler.Register(_client);
         _eventCreditHandler.Register(_client);
         _attendanceHandler.Register(_client);
@@ -392,6 +396,13 @@ public class DiscordBotService : IHostedService
                         "First line (or the whole name; use \\n to break it yourself)", isRequired: true)
                     .AddOption("line2", ApplicationCommandOptionType.String,
                         "Optional second line — placed below line1 on its own line", isRequired: false)
+                    .Build(),
+
+                new SlashCommandBuilder()
+                    .WithName(BotFixChannelPermsCommandHandler.CommandName)
+                    .WithDescription("Grant the bot Manage Channel on every channel (dry-run by default) — Admin only")
+                    .AddOption("dry_run", ApplicationCommandOptionType.Boolean,
+                        "Preview without applying. Default true; pass false to apply.", isRequired: false)
                     .Build(),
 
                 // One-time operational command: reads the "Seed Events" column
