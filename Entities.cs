@@ -145,6 +145,17 @@ public class AwolRecord
     /// a fresh AwolRecord will be created on the next AWOL check cycle.
     /// </summary>
     public DateTime? LastNotificationAttemptUtc { get; set; }
+
+    /// <summary>
+    /// The channel the HQ notification embed was posted to, and the message ID
+    /// of that embed. Both null until the embed is actually posted (Step 3 of
+    /// the AWOL check). Stored so the auto-recovery path can delete the embed
+    /// when the member becomes active again. Cleared back to null once the
+    /// embed has been deleted, so a later cycle won't try to delete a message
+    /// that is already gone.
+    /// </summary>
+    public ulong? NotificationChannelId { get; set; }
+    public ulong? NotificationMessageId { get; set; }
 }
 
 /// <summary>

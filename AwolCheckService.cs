@@ -295,17 +295,7 @@ public class AwolCheckService : BackgroundService
                             "Triggering exempt role(s): {ExemptRoles}",
                             member.Username, member.Id, guild.Name, exemptRoleNames);
 
-                        var pendingRecords = await db.AwolRecords
-                            .Where(r => r.GuildId == guild.Id
-                                     && r.UserId == member.Id
-                                     && !r.NotificationSent)
-                            .ToListAsync(ct);
-
-                        foreach (var record in pendingRecords)
-                        {
-                            record.NotificationSent = true;
-                            record.NotificationSentAt = DateTime.UtcNow;
-                        }
+                        await CloseAwolRecordsAndDeleteEmbedsAsync(db, guild, member, ct);
 
                         selfHealedCount++;
                     }
@@ -356,17 +346,7 @@ public class AwolCheckService : BackgroundService
                             member.Username, member.Id, guild.Name,
                             messageCount, voiceSeconds / 3600.0, userWindowDays);
 
-                        var pendingRecords = await db.AwolRecords
-                            .Where(r => r.GuildId == guild.Id
-                                     && r.UserId == member.Id
-                                     && !r.NotificationSent)
-                            .ToListAsync(ct);
-
-                        foreach (var record in pendingRecords)
-                        {
-                            record.NotificationSent = true;
-                            record.NotificationSentAt = DateTime.UtcNow;
-                        }
+                        await CloseAwolRecordsAndDeleteEmbedsAsync(db, guild, member, ct);
                     }
                     catch (Exception ex)
                     {
@@ -569,9 +549,11 @@ public class AwolCheckService : BackgroundService
 
             try
             {
-                await hqChannel.SendMessageAsync(embed: embed.Build());
+                var posted = await hqChannel.SendMessageAsync(embed: embed.Build());
                 record.NotificationSent = true;
                 record.NotificationSentAt = DateTime.UtcNow;
+                record.NotificationChannelId = hqChannel.Id;
+                record.NotificationMessageId = posted.Id;
                 notified++;
 
                 _logger.LogInformation("Posted AWOL notification for {Username} in {Guild} #{Channel}",
@@ -591,6 +573,70 @@ public class AwolCheckService : BackgroundService
             _logger.LogInformation(
                 "AWOL Step 3 summary for {Guild}: notified={Notified}, given up={GivenUp}, stale suppressed={Stale}, role gone={RoleGone}, user gone={UserGone}, failed={Failed} (out of {Total} pending)",
                 guild.Name, notified, givenUp, stale, roleGone, userGone, failed, pendingNotifications.Count);
+        }
+    }
+
+    /// <summary>
+    /// Closes any open AWOL records for a member who is no longer AWOL — whether
+    /// they recovered through activity or were self-healed via an exempt role —
+    /// and deletes the HQ notification embed if one was posted. The bot posted
+    /// the embed itself, so removing it needs no Manage Messages permission.
+    ///
+    /// Idempotent: records with no stored message ID are simply marked resolved,
+    /// a message that is already gone (manually deleted, or cleared by
+    /// /clear-awol-list) is treated as success, and the message IDs are nulled
+    /// after deletion so a subsequent cycle never retries.
+    /// </summary>
+    private async Task CloseAwolRecordsAndDeleteEmbedsAsync(
+        BotDbContext db, SocketGuild guild, SocketGuildUser member, CancellationToken ct)
+    {
+        // Catch both pending records (embed not yet posted: NotificationSent
+        // false, no message ID) and posted records (NotificationSent true with a
+        // stored message ID). The OR covers both states.
+        var openRecords = await db.AwolRecords
+            .Where(r => r.GuildId == guild.Id
+                     && r.UserId == member.Id
+                     && (!r.NotificationSent || r.NotificationMessageId != null))
+            .ToListAsync(ct);
+
+        foreach (var record in openRecords)
+        {
+            if (record.NotificationMessageId.HasValue
+                && record.NotificationChannelId.HasValue)
+            {
+                try
+                {
+                    var notifChannel = guild.GetTextChannel(record.NotificationChannelId.Value);
+                    if (notifChannel is not null)
+                    {
+                        await notifChannel.DeleteMessageAsync(record.NotificationMessageId.Value);
+                        _logger.LogInformation(
+                            "Deleted AWOL notification embed for {Username} ({UserId}) in #{Channel} on AWOL clear",
+                            member.Username, member.Id, notifChannel.Name);
+                    }
+                }
+                catch (Discord.Net.HttpException ex)
+                    when (ex.HttpCode == System.Net.HttpStatusCode.NotFound)
+                {
+                    // Already gone — manually deleted, or removed by
+                    // /clear-awol-list. Nothing to do.
+                    _logger.LogInformation(
+                        "AWOL embed for {Username} ({UserId}) was already gone on AWOL clear",
+                        member.Username, member.Id);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "Failed to delete AWOL embed for {Username} ({UserId}) on AWOL clear (message {MessageId})",
+                        member.Username, member.Id, record.NotificationMessageId.Value);
+                }
+
+                record.NotificationChannelId = null;
+                record.NotificationMessageId = null;
+            }
+
+            record.NotificationSent = true;
+            record.NotificationSentAt = DateTime.UtcNow;
         }
     }
 
