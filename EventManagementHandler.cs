@@ -132,7 +132,6 @@ public sealed class EventManagementHandler
     {
         client.SelectMenuExecuted += OnSelectAsync;
         client.ButtonExecuted     += OnButtonAsync;
-        client.ModalSubmitted     += OnModalAsync;
         client.MessageReceived    += OnEditDmAsync;
     }
 
@@ -455,93 +454,6 @@ public sealed class EventManagementHandler
         return ("event", rerendered);
     }
 
-    // ─── On-post "Image" button → URL modal ────────────────────────────────
-
-    private async Task OnImageEditAsync(SocketMessageComponent component, string cid)
-    {
-        var idStr = cid[(cid.LastIndexOf(':') + 1)..];
-        if (!int.TryParse(idStr, out var clanEventId))
-        {
-            await component.RespondAsync("Couldn't read that event.", ephemeral: true);
-            return;
-        }
-
-        ClanEvent? ev;
-        using (var scope = _services.CreateScope())
-        {
-            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-            ev = await db.ClanEvents.FirstOrDefaultAsync(e => e.Id == clanEventId);
-        }
-        if (ev is null || ev.Status == ClanEventStatus.Cancelled)
-        {
-            await component.RespondAsync("That event is no longer available.", ephemeral: true);
-            return;
-        }
-        if (!await CallerMayManageAsync(component.User, ev.OrganizerId))
-        {
-            await component.RespondAsync("You don't have permission to manage that event.", ephemeral: true);
-            return;
-        }
-
-        // Modals carry text only — no file upload — so this takes an image link
-        // (a direct image URL, or a Tenor/Giphy share link). To upload a file
-        // from your device, use /event image with an attachment instead.
-        var modal = new ModalBuilder()
-            .WithTitle("Change event image")
-            .WithCustomId($"{Prefix}imgsubmit:{ev.Id}")
-            .AddTextInput("Image link — or type \"clear\" to remove", "url", TextInputStyle.Short,
-                placeholder: "https://…   Tenor/Giphy link   clear", required: false)
-            .Build();
-        await component.RespondWithModalAsync(modal);
-    }
-
-    private async Task OnImageSubmitAsync(SocketModal modal)
-    {
-        await modal.DeferAsync(ephemeral: true);
-
-        var parts = modal.Data.CustomId.Split(':'); // evtmgmt:imgsubmit:<id>
-        if (parts.Length != 3 || !int.TryParse(parts[2], out var clanEventId))
-        { await modal.FollowupAsync("Couldn't read that form.", ephemeral: true); return; }
-
-        var raw = (modal.Data.Components.FirstOrDefault(c => c.CustomId == "url")?.Value ?? string.Empty).Trim();
-
-        ClanEvent? ev;
-        using (var scope = _services.CreateScope())
-        {
-            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-            ev = await db.ClanEvents.FirstOrDefaultAsync(e => e.Id == clanEventId);
-        }
-        if (ev is null || ev.Status == ClanEventStatus.Cancelled)
-        { await modal.FollowupAsync("That event is no longer available.", ephemeral: true); return; }
-        if (!await CallerMayManageAsync(modal.User, ev.OrganizerId))
-        { await modal.FollowupAsync("You don't have permission to edit that event.", ephemeral: true); return; }
-
-        if (raw.Length == 0)
-        { await modal.FollowupAsync("No change — left the image as-is.", ephemeral: true); return; }
-
-        PendingImage pending;
-        if (raw.Equals("clear", StringComparison.OrdinalIgnoreCase)
-         || raw.Equals("none", StringComparison.OrdinalIgnoreCase)
-         || raw.Equals("remove", StringComparison.OrdinalIgnoreCase))
-        {
-            pending = new PendingImage(null, null, Clear: true, DateTime.UtcNow);
-        }
-        else
-        {
-            var res = await EventImageFetcher.FromUrlAsync(raw);
-            if (!res.Ok)
-            { await modal.FollowupAsync($"Couldn't use that link: {res.Error}", ephemeral: true); return; }
-            pending = new PendingImage(EventImage.Downscale(res.Bytes!, res.FileName), res.FileName, Clear: false, DateTime.UtcNow);
-        }
-
-        var (scopeLabel, rerendered) = await ApplyImageToEventAsync(ev.Id, pending);
-        if (scopeLabel is null) { await modal.FollowupAsync("That event no longer exists.", ephemeral: true); return; }
-
-        var what = pending.Clear ? "Removed the image" : "Updated the image";
-        var tail = scopeLabel == "series" ? $" ({rerendered} post{(rerendered == 1 ? "" : "s")} updated)." : ".";
-        await modal.FollowupAsync($"✅ {what} on this {scopeLabel}{tail}", ephemeral: true);
-    }
-
     /// <summary>
     /// Replaces (or removes) the banner on an existing event post in place via a
     /// message edit — swapping the attachment and the embed's image reference,
@@ -628,13 +540,6 @@ public sealed class EventManagementHandler
         if (cid.StartsWith($"{Prefix}cal:", StringComparison.Ordinal))
         {
             await OnAddToCalendarAsync(component, cid);
-            return;
-        }
-
-        // On-post "Image" button → opens a URL modal to swap/clear the banner.
-        if (cid.StartsWith($"{Prefix}imgedit:", StringComparison.Ordinal))
-        {
-            await OnImageEditAsync(component, cid);
             return;
         }
 
@@ -844,11 +749,17 @@ public sealed class EventManagementHandler
     // Whole-series edits exclude time fields — those re-anchor the recurrence and
     // are handled per-occurrence (or by the repeat-schedule field, coming next).
     // Order mirrors Apollo's modify form (Title → Description → Start → Duration …).
+    // Field sets by scope. A single occurrence ("occ") deliberately omits the
+    // time fields: moving one occurrence's start would orphan its (SeriesId,
+    // StartUtc) cadence slot, and the scheduler would then regenerate a duplicate
+    // at the original time. To shift a single instance, cancel it and create a
+    // one-off (Duplicate). Whole-series time/rhythm changes go through the
+    // Repeat-schedule field; one-offs ("single") keep full time control.
     private static EditStep[] MenuFields(EditSession s) =>
         s.Scope == "series"
             ? new[] { EditStep.Title, EditStep.Description, EditStep.Image, EditStep.MaxParticipants, EditStep.Recurrence }
         : s.Scope == "occ"
-            ? new[] { EditStep.Title, EditStep.Description, EditStep.When, EditStep.Duration, EditStep.Image, EditStep.MaxParticipants }
+            ? new[] { EditStep.Title, EditStep.Description, EditStep.Image, EditStep.MaxParticipants }
             : new[] { EditStep.Title, EditStep.Description, EditStep.When, EditStep.Duration, EditStep.Image, EditStep.MaxParticipants, EditStep.Recurrence };
 
     private static string FieldLabel(EditStep step) => step switch
@@ -2155,150 +2066,6 @@ public sealed class EventManagementHandler
         }
     }
 
-
-
-    private async Task OnModalAsync(SocketModal modal)
-    {
-        // Image-change modal (from the on-post "Image" button) is handled separately.
-        if (modal.Data.CustomId.StartsWith($"{Prefix}imgsubmit:", StringComparison.Ordinal))
-        {
-            await OnImageSubmitAsync(modal);
-            return;
-        }
-
-        if (!modal.Data.CustomId.StartsWith($"{Prefix}editsubmit:", StringComparison.Ordinal)) return;
-
-        // Acknowledge immediately. A whole-series edit re-renders every future
-        // occurrence's post (two REST calls each), which can exceed Discord's
-        // 3-second initial-response window — so we defer here and every reply
-        // below uses FollowupAsync.
-        await modal.DeferAsync(ephemeral: true);
-
-        var parts = modal.Data.CustomId.Split(':'); // evtmgmt:editsubmit:<single|occ|series>:<id>
-        if (parts.Length != 4 || !int.TryParse(parts[3], out var id)) { await modal.FollowupAsync("Couldn't read that form.", ephemeral: true); return; }
-        var scope = parts[2];
-
-        var fields = modal.Data.Components.ToDictionary(c => c.CustomId, c => c.Value ?? string.Empty);
-        var tz = await ResolveCallerZoneAsync(modal.User.Id);
-
-        try
-        {
-            switch (scope)
-            {
-                case "single": await SubmitSingleEditAsync(modal, id, fields, tz, allowTimeChange: true);  break;
-                case "occ":    await SubmitSingleEditAsync(modal, id, fields, tz, allowTimeChange: false); break;
-                case "series": await SubmitSeriesEditAsync(modal, id, fields);                              break;
-                default:       await modal.FollowupAsync("Unknown edit type.", ephemeral: true);             break;
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Event edit submit failed ({Scope} {Id})", scope, id);
-            try { await modal.FollowupAsync("Something went wrong applying the edit.", ephemeral: true); } catch { }
-        }
-    }
-
-    private async Task SubmitSingleEditAsync(
-        SocketModal modal, int clanEventId, IReadOnlyDictionary<string, string> f, TimeZoneInfo tz, bool allowTimeChange)
-    {
-        var title = f.GetValueOrDefault("title", "").Trim();
-        if (string.IsNullOrWhiteSpace(title)) { await modal.FollowupAsync("Title can't be empty.", ephemeral: true); return; }
-
-        using var scope = _services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-
-        var ev = await db.ClanEvents.FirstOrDefaultAsync(e => e.Id == clanEventId);
-        if (ev is null || ev.Status == ClanEventStatus.Cancelled) { await modal.FollowupAsync("That event is no longer available.", ephemeral: true); return; }
-        if (!await CallerMayManageAsync(modal.User, ev.OrganizerId)) { await modal.FollowupAsync("You don't have permission to edit that event.", ephemeral: true); return; }
-
-        var newStart = ev.StartUtc;
-        if (allowTimeChange)
-        {
-            var w = _time.ParseStart(f.GetValueOrDefault("when", ""), tz);
-            if (!w.Success)        { await modal.FollowupAsync($"Couldn't read the time: {w.Error}", ephemeral: true); return; }
-            if (!w.HasTimeOfDay)   { await modal.FollowupAsync("Please include a time of day.", ephemeral: true); return; }
-            newStart = w.StartUtc;
-        }
-
-        var d = _time.ParseEnd(f.GetValueOrDefault("dur", ""), newStart, tz);
-        if (!d.Success) { await modal.FollowupAsync($"Couldn't read the duration/end: {d.Error}", ephemeral: true); return; }
-
-        var timeMoved = ev.StartUtc != newStart;
-        ev.Title       = title;
-        ev.StartUtc    = newStart;
-        ev.EndUtc      = d.EndUtc;
-        ev.Description = f.GetValueOrDefault("desc", "").Trim();
-        ev.MaxParticipants = ParseMaxField(f.GetValueOrDefault("max", ""));
-        if (timeMoved) ev.RemindersSentCsv = string.Empty; // re-arm reminders for the new time
-
-        await ApplyCalendarUpdateAsync(db, ev);
-        await db.SaveChangesAsync();
-
-        // Re-derive Going vs Waitlist under the (possibly changed) cap — lowering
-        // it demotes the newest confirmed members; raising/clearing it promotes
-        // waitlisters — then re-render and DM anyone bumped up.
-        var rsvps = await db.EventRsvps.Where(r => r.ClanEventId == ev.Id).ToListAsync();
-        var promoted = EventWaitlist.Rebalance(rsvps, ev.MaxParticipants);
-        if (promoted.Count > 0 || db.ChangeTracker.HasChanges()) await db.SaveChangesAsync();
-
-        await UpdatePostAsync(db, ev);
-        foreach (var uid in promoted) await EventWaitlist.NotifyPromotedAsync(_client, ev, uid);
-
-        await modal.FollowupAsync($"✅ Updated **{ev.Title}**.", ephemeral: true);
-    }
-
-    private async Task SubmitSeriesEditAsync(SocketModal modal, int seriesId, IReadOnlyDictionary<string, string> f)
-    {
-        var title = f.GetValueOrDefault("title", "").Trim();
-        if (string.IsNullOrWhiteSpace(title)) { await modal.FollowupAsync("Title can't be empty.", ephemeral: true); return; }
-        var description = f.GetValueOrDefault("desc", "").Trim();
-
-        using var scope = _services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-
-        var series = await db.ClanEventSeries.FirstOrDefaultAsync(s => s.Id == seriesId);
-        if (series is null) { await modal.FollowupAsync("That series no longer exists.", ephemeral: true); return; }
-        if (!await CallerMayManageAsync(modal.User, series.OrganizerId)) { await modal.FollowupAsync("You don't have permission to edit that series.", ephemeral: true); return; }
-
-        series.Title       = title;
-        series.Description = description;
-        series.MaxParticipants = ParseMaxField(f.GetValueOrDefault("max", ""));
-
-        var now = DateTime.UtcNow;
-        var futures = await db.ClanEvents
-            .Where(e => e.SeriesId == seriesId && e.Status == ClanEventStatus.Scheduled && e.StartUtc > now)
-            .ToListAsync();
-
-        foreach (var ev in futures)
-        {
-            ev.Title       = title;
-            ev.Description = description;
-            ev.MaxParticipants = series.MaxParticipants;
-            await ApplyCalendarUpdateAsync(db, ev);
-        }
-        await db.SaveChangesAsync();
-
-        // Rebalance every future occurrence under the new series cap, then render.
-        var promotions = new List<(ClanEvent Ev, ulong UserId)>();
-        foreach (var ev in futures)
-        {
-            var rsvps = await db.EventRsvps.Where(r => r.ClanEventId == ev.Id).ToListAsync();
-            foreach (var uid in EventWaitlist.Rebalance(rsvps, ev.MaxParticipants))
-                promotions.Add((ev, uid));
-        }
-        if (db.ChangeTracker.HasChanges()) await db.SaveChangesAsync();
-
-        foreach (var ev in futures)
-            await UpdatePostAsync(db, ev);
-
-        foreach (var (ev, uid) in promotions)
-            await EventWaitlist.NotifyPromotedAsync(_client, ev, uid);
-
-        await modal.FollowupAsync(
-            $"✅ Updated the series **{title}** and {futures.Count} upcoming occurrence{(futures.Count == 1 ? "" : "s")}.",
-            ephemeral: true);
-    }
-
     // ─── Cancel core ───────────────────────────────────────────────────────
 
     /// <summary>Cancels one occurrence or a whole series. Returns the number of occurrences cancelled.</summary>
@@ -2433,60 +2200,6 @@ public sealed class EventManagementHandler
         {
             _logger.LogWarning(ex, "Failed to update post for event {ClanId} (msg {MsgId})", ev.Id, ev.MessageId);
         }
-    }
-
-    /// <summary>
-    /// Parses the "Attendee limit" modal field. Blank, "0", "none" or any
-    /// non-positive/garbage value means unlimited (null); a positive integer is
-    /// the cap. Forgiving on purpose — the modal field is free text.
-    /// </summary>
-    private static int? ParseMaxField(string raw)
-    {
-        raw = raw.Trim();
-        if (raw.Length == 0) return null;
-        if (int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) && n > 0)
-            return n;
-        return null;
-    }
-
-    private Modal BuildEditModal(string scope, int clanEventId, ClanEvent ev, bool withWhen, bool withDuration, TimeZoneInfo tz)
-    {
-        var mb = new ModalBuilder()
-            .WithTitle("Edit event")
-            .WithCustomId($"{Prefix}editsubmit:{scope}:{clanEventId}")
-            .AddTextInput("Title", "title", TextInputStyle.Short, value: ev.Title, required: true, maxLength: 100);
-
-        if (withWhen)
-        {
-            var local = TimeZoneInfo.ConvertTimeFromUtc(ev.StartUtc, tz);
-            mb.AddTextInput("When", "when", TextInputStyle.Short,
-                value: local.ToString("MMMM d, yyyy h:mm tt", CultureInfo.InvariantCulture), required: true);
-        }
-        if (withDuration)
-        {
-            var minutes = Math.Max(1, (int)Math.Round((ev.EndUtc - ev.StartUtc).TotalMinutes));
-            mb.AddTextInput("Duration or end time", "dur", TextInputStyle.Short,
-                value: $"{minutes} minutes", required: true);
-        }
-
-        mb.AddTextInput("Description", "desc", TextInputStyle.Paragraph,
-            value: string.IsNullOrEmpty(ev.Description) ? null : ev.Description, required: false);
-        mb.AddTextInput("Attendee limit (number, blank = no limit)", "max", TextInputStyle.Short,
-            value: ev.MaxParticipants?.ToString(CultureInfo.InvariantCulture), required: false, maxLength: 6);
-        return mb.Build();
-    }
-
-    private Modal BuildSeriesEditModal(int seriesId, ClanEvent ev)
-    {
-        return new ModalBuilder()
-            .WithTitle("Edit series")
-            .WithCustomId($"{Prefix}editsubmit:series:{seriesId}")
-            .AddTextInput("Title", "title", TextInputStyle.Short, value: ev.Title, required: true, maxLength: 100)
-            .AddTextInput("Description", "desc", TextInputStyle.Paragraph,
-                value: string.IsNullOrEmpty(ev.Description) ? null : ev.Description, required: false)
-            .AddTextInput("Attendee limit (number, blank = no limit)", "max", TextInputStyle.Short,
-                value: ev.MaxParticipants?.ToString(CultureInfo.InvariantCulture), required: false, maxLength: 6)
-            .Build();
     }
 
     private async Task<TimeZoneInfo> ResolveCallerZoneAsync(ulong userId)
