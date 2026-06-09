@@ -27,6 +27,10 @@ public static class EventEmbedBuilder
     /// </summary>
     private const string MaybeEmote = "<:tentative:1513692865350602892>";
 
+    /// <summary>Custom "Declined" emoji — a 189th server emoji (red box, white X)
+    /// matching the Maybe style. Update if the emoji is ever re-uploaded.</summary>
+    private const string DeclineEmote = "<:declined:1513695018022600834>";
+
     /// <summary>Custom id for an RSVP button: <c>evt:rsvp:&lt;status&gt;:&lt;clanEventId&gt;</c>.</summary>
     public static string ButtonId(string status, int clanEventId) => $"{RsvpPrefix}{status}:{clanEventId}";
 
@@ -76,7 +80,7 @@ public static class EventEmbedBuilder
             : $"✅ Going ({going.Count})";
         eb.AddField(goingLabel,                       Names(going),   inline: true);
         eb.AddField($"{MaybeEmote} Maybe ({maybe.Count})",        Names(maybe),   inline: true);
-        eb.AddField($"❌ Declined ({decline.Count})", Names(decline), inline: true);
+        eb.AddField($"{DeclineEmote} Declined ({decline.Count})", Names(decline), inline: true);
 
         // Waitlist sits on its own full-width row below the trio, in signup
         // order. Shown only when someone's actually waitlisted, so uncapped
@@ -120,7 +124,7 @@ public static class EventEmbedBuilder
         {
             cb.WithButton(null, ButtonId("going",   clanEventId), ButtonStyle.Secondary, emote: new Emoji("✅"), disabled: locked, row: 0)
               .WithButton(null, ButtonId("maybe",   clanEventId), ButtonStyle.Secondary, emote: Emote.Parse(MaybeEmote), disabled: locked, row: 0)
-              .WithButton(null, ButtonId("decline", clanEventId), ButtonStyle.Secondary, emote: new Emoji("❌"), disabled: locked, row: 0);
+              .WithButton(null, ButtonId("decline", clanEventId), ButtonStyle.Secondary, emote: Emote.Parse(DeclineEmote), disabled: locked, row: 0);
         }
 
         // 📅 Add to Calendar — emoji-only, riding the RSVP row (or the management
