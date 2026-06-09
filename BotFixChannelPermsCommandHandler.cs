@@ -34,8 +34,9 @@ public class BotFixChannelPermsCommandHandler
     public const string CommandName = "bot-fix-channel-perms";
 
     // Keep the per-channel listing from blowing past Discord's 2000-char
-    // message limit; anything beyond this is summarized as "+N more".
-    private const int MaxListedChannels = 40;
+    // message limit; lines now carry an ID + parent, so cap conservatively and
+    // summarize anything beyond as "+N more".
+    private const int MaxListedChannels = 20;
 
     private readonly ILogger<BotFixChannelPermsCommandHandler> _logger;
 
@@ -94,6 +95,14 @@ public class BotFixChannelPermsCommandHandler
         var dryRunOption = command.Data.Options.FirstOrDefault(o => o.Name == "dry_run");
         var dryRun = dryRunOption?.Value as bool? ?? true;
 
+        // skip_categories: comma-separated category names or IDs. Any matching
+        // category — and every channel nested under it — is excluded from the
+        // scan entirely (useful for noise like Statbot's auto-updating
+        // category). Matched leniently: a token matches a category by exact
+        // (case-insensitive) name or by numeric ID.
+        var skipOption = command.Data.Options.FirstOrDefault(o => o.Name == "skip_categories");
+        var skipCategoryIds = ResolveSkipCategories(guild, skipOption?.Value as string);
+
         var botUser = guild.CurrentUser;
         if (botUser is null)
         {
@@ -102,6 +111,7 @@ public class BotFixChannelPermsCommandHandler
         }
 
         var alreadyOk = 0;
+        var skipped   = 0;
         var changed   = new List<string>();
         var failed    = new List<string>();
 
@@ -114,6 +124,23 @@ public class BotFixChannelPermsCommandHandler
 
         foreach (var channel in ordered)
         {
+            // Skip excluded categories and anything nested under them.
+            if (skipCategoryIds.Count > 0)
+            {
+                if (channel is SocketCategoryChannel && skipCategoryIds.Contains(channel.Id))
+                {
+                    skipped++;
+                    continue;
+                }
+                if (channel is INestedChannel nested
+                    && nested.CategoryId is ulong cat
+                    && skipCategoryIds.Contains(cat))
+                {
+                    skipped++;
+                    continue;
+                }
+            }
+
             var existing = channel.GetPermissionOverwrite(botUser);
 
             if (existing?.ManageChannel == PermValue.Allow)
@@ -122,7 +149,7 @@ public class BotFixChannelPermsCommandHandler
                 continue;
             }
 
-            var label = Describe(channel);
+            var label = Describe(channel, guild);
 
             if (dryRun)
             {
@@ -157,14 +184,45 @@ public class BotFixChannelPermsCommandHandler
         }
 
         _logger.LogInformation(
-            "bot-fix-channel-perms ({Mode}) by {Caller} in {Guild}: alreadyOk={Ok}, changed={Changed}, failed={Failed}",
+            "bot-fix-channel-perms ({Mode}) by {Caller} in {Guild}: alreadyOk={Ok}, changed={Changed}, failed={Failed}, skipped={Skipped}",
             dryRun ? "DRY RUN" : "APPLIED", caller.Username, guild.Name,
-            alreadyOk, changed.Count, failed.Count);
+            alreadyOk, changed.Count, failed.Count, skipped);
 
-        await command.FollowupAsync(BuildReport(dryRun, alreadyOk, changed, failed), ephemeral: true);
+        await command.FollowupAsync(BuildReport(dryRun, alreadyOk, skipped, changed, failed), ephemeral: true);
     }
 
-    private static string Describe(SocketGuildChannel channel)
+    /// <summary>
+    /// Resolves a comma-separated list of category names/IDs into the set of
+    /// category channel IDs to exclude. Unmatched tokens are ignored.
+    /// </summary>
+    private static HashSet<ulong> ResolveSkipCategories(SocketGuild guild, string? raw)
+    {
+        var result = new HashSet<ulong>();
+        if (string.IsNullOrWhiteSpace(raw))
+            return result;
+
+        foreach (var token in raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            // Numeric ID match.
+            if (ulong.TryParse(token, out var id)
+                && guild.GetCategoryChannel(id) is not null)
+            {
+                result.Add(id);
+                continue;
+            }
+
+            // Name match (case-insensitive, exact).
+            foreach (var cat in guild.CategoryChannels)
+            {
+                if (string.Equals(cat.Name, token, StringComparison.OrdinalIgnoreCase))
+                    result.Add(cat.Id);
+            }
+        }
+
+        return result;
+    }
+
+    private static string Describe(SocketGuildChannel channel, SocketGuild guild)
     {
         var kind = channel switch
         {
@@ -174,10 +232,23 @@ public class BotFixChannelPermsCommandHandler
             SocketTextChannel     => "text",
             _                     => "channel"
         };
-        return $"{channel.Name} ({kind})";
+
+        // Include the channel ID and parent category so that channels sharing a
+        // name (e.g. multiple "----------" divider spacers placed under
+        // different categories) can be told apart and located via right-click →
+        // Copy Channel ID. Categories have no parent.
+        var parent = (channel is INestedChannel nested && nested.CategoryId is ulong catId)
+            ? guild.GetChannel(catId)?.Name
+            : null;
+
+        var suffix = parent is null
+            ? $"[id {channel.Id}]"
+            : $"[id {channel.Id}, under {parent}]";
+
+        return $"{channel.Name} ({kind}) {suffix}";
     }
 
-    private static string BuildReport(bool dryRun, int alreadyOk, List<string> changed, List<string> failed)
+    private static string BuildReport(bool dryRun, int alreadyOk, int skipped, List<string> changed, List<string> failed)
     {
         var sb = new StringBuilder();
 
@@ -191,6 +262,8 @@ public class BotFixChannelPermsCommandHandler
             : $"Granted Manage Channel: **{changed.Count}**");
         if (failed.Count > 0)
             sb.AppendLine($"Could not update (needs manual fix): **{failed.Count}**");
+        if (skipped > 0)
+            sb.AppendLine($"Skipped (excluded categories): **{skipped}**");
 
         AppendList(sb, dryRun ? "Would change" : "Changed", changed);
         AppendList(sb, "Failed — bot lacks Manage Roles here", failed);

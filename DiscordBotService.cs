@@ -403,6 +403,8 @@ public class DiscordBotService : IHostedService
                     .WithDescription("Grant the bot Manage Channel on every channel (dry-run by default) — Admin only")
                     .AddOption("dry_run", ApplicationCommandOptionType.Boolean,
                         "Preview without applying. Default true; pass false to apply.", isRequired: false)
+                    .AddOption("skip_categories", ApplicationCommandOptionType.String,
+                        "Comma-separated category names or IDs to exclude (e.g. Statbot Statdocks)", isRequired: false)
                     .Build(),
 
                 // One-time operational command: reads the "Seed Events" column
