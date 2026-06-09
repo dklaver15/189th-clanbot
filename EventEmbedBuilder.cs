@@ -139,7 +139,7 @@ public static class EventEmbedBuilder
         cb.WithButton(null, $"{MgmtPrefix}cal:{clanEventId}", ButtonStyle.Secondary,
             emote: new Emoji("📅"), row: rsvpEnabled ? 0 : mgmtRow);
 
-        cb.WithButton("Set Host", $"{MgmtPrefix}sethost:{clanEventId}", ButtonStyle.Success, row: mgmtRow)
+        cb.WithButton("Set Host", $"{MgmtPrefix}sethost:{clanEventId}", ButtonStyle.Secondary, row: mgmtRow)
           .WithButton("Edit",     $"{MgmtPrefix}pedit:{clanEventId}",   ButtonStyle.Primary, row: mgmtRow)
           .WithButton("Cancel",   $"{MgmtPrefix}pcancel:{clanEventId}", ButtonStyle.Danger,  row: mgmtRow);
 
