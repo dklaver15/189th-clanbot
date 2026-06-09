@@ -317,4 +317,30 @@ public sealed class EventPublisher : IEventPublisher
             return def;
         return TimeZoneInfo.Utc;
     }
+
+    public async Task FillHorizonAsync(ClanEventSeries series)
+    {
+        var horizonEnd  = DateTime.UtcNow.AddDays(_config.EventRecurrenceHorizonDays);
+        var occurrences = ClanEventRecurrence
+            .Occurrences(series, DateTime.UtcNow.AddMinutes(-1), horizonEnd, _config.EventRecurrenceMaxBackfill)
+            .ToList();
+
+        foreach (var (startUtc, endUtc) in occurrences)
+            await CreateOccurrenceAsync(series.GuildId, series.Id,
+                series.Title, series.Description, series.OrganizerId, series.OrganizerName,
+                startUtc, endUtc,
+                attachImageBytes: series.ImageBytes, imageFileName: series.ImageFileName,
+                maxParticipants: series.MaxParticipants);
+    }
+
+    public async Task MaterializeDatesAsync(ClanEventSeries series, IEnumerable<DateTime> startsUtc)
+    {
+        var duration = TimeSpan.FromMinutes(series.DurationMinutes);
+        foreach (var startUtc in startsUtc.Distinct().OrderBy(x => x))
+            await CreateOccurrenceAsync(series.GuildId, series.Id,
+                series.Title, series.Description, series.OrganizerId, series.OrganizerName,
+                startUtc, startUtc + duration,
+                attachImageBytes: series.ImageBytes, imageFileName: series.ImageFileName,
+                maxParticipants: series.MaxParticipants);
+    }
 }

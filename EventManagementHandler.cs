@@ -62,7 +62,7 @@ public sealed class EventManagementHandler
     private readonly ConcurrentDictionary<ulong, EditSession> _editSessions = new();
     private System.Threading.Timer? _editIdleSweep;
 
-    private enum EditStep { Menu, Title, When, Duration, Description, Image, MaxParticipants, Action, AddStatus, AddWho, RemoveWho, ClearConfirm }
+    private enum EditStep { Menu, Title, When, Duration, Description, Image, MaxParticipants, Action, AddStatus, AddWho, RemoveWho, ClearConfirm, Recurrence, RecurrenceUntil, RecurrenceDates }
 
     private sealed class EditSession
     {
@@ -93,6 +93,19 @@ public sealed class EventManagementHandler
         // Attendee-management scratch (Add a response / Remove a response).
         public EventRsvpStatus PendingAddStatus;
         public List<(ulong UserId, EventRsvpStatus Status)> RemoveCandidates = new();
+
+        // ── Repeat-schedule editing (staged like the other fields; applied on "done") ──
+        // CurrentFrequency is the schedule as it stands now (null = one-off / single
+        // scope). New* hold the staged target: NewFrequency null = "does not repeat",
+        // Custom = an explicit date set in NewDatesUtc. ScheduleChanged gates whether
+        // ApplyEditsAsync performs any recurrence regeneration at all.
+        public ClanEventFrequency? CurrentFrequency;
+        public string ScheduleNowLabel = "Does not repeat";
+        public bool ScheduleChanged;
+        public ClanEventFrequency? NewFrequency;
+        public DateTime? NewUntilUtc;
+        public int? NewMaxOccurrences;
+        public List<DateTime> NewDatesUtc = new();
     }
 
     public EventManagementHandler(
@@ -792,6 +805,9 @@ public sealed class EventManagementHandler
         };
         _editSessions[user.Id] = session;
 
+        if (scope == "series" && ev.SeriesId is int sid0)
+            await LoadSeriesScheduleAsync(session, sid0);
+
         try { await SendActionMenuAsync(session); }
         catch (Exception ex)
         {
@@ -802,13 +818,38 @@ public sealed class EventManagementHandler
         return true;
     }
 
+    private async Task LoadSeriesScheduleAsync(EditSession s, int seriesId)
+    {
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+        var series = await db.ClanEventSeries.FirstOrDefaultAsync(x => x.Id == seriesId);
+        if (series is null) return;
+
+        s.CurrentFrequency  = series.Frequency;
+        s.NewFrequency      = series.Frequency;
+        s.NewUntilUtc       = series.UntilUtc;
+        s.NewMaxOccurrences = series.MaxOccurrences;
+
+        if (series.Frequency == ClanEventFrequency.Custom)
+            s.NewDatesUtc = await db.ClanEvents
+                .Where(e => e.SeriesId == seriesId && e.Status == ClanEventStatus.Scheduled && e.StartUtc > DateTime.UtcNow)
+                .OrderBy(e => e.StartUtc)
+                .Select(e => e.StartUtc)
+                .ToListAsync();
+
+        s.ScheduleNowLabel = DescribeScheduleFrom(
+            s.CurrentFrequency, s.NewUntilUtc, s.NewMaxOccurrences, s.NewDatesUtc.Count, s.Tz);
+    }
+
     // Whole-series edits exclude time fields — those re-anchor the recurrence and
     // are handled per-occurrence (or by the repeat-schedule field, coming next).
     // Order mirrors Apollo's modify form (Title → Description → Start → Duration …).
     private static EditStep[] MenuFields(EditSession s) =>
         s.Scope == "series"
-            ? new[] { EditStep.Title, EditStep.Description, EditStep.Image, EditStep.MaxParticipants }
-            : new[] { EditStep.Title, EditStep.Description, EditStep.When, EditStep.Duration, EditStep.Image, EditStep.MaxParticipants };
+            ? new[] { EditStep.Title, EditStep.Description, EditStep.Image, EditStep.MaxParticipants, EditStep.Recurrence }
+        : s.Scope == "occ"
+            ? new[] { EditStep.Title, EditStep.Description, EditStep.When, EditStep.Duration, EditStep.Image, EditStep.MaxParticipants }
+            : new[] { EditStep.Title, EditStep.Description, EditStep.When, EditStep.Duration, EditStep.Image, EditStep.MaxParticipants, EditStep.Recurrence };
 
     private static string FieldLabel(EditStep step) => step switch
     {
@@ -818,6 +859,7 @@ public sealed class EventManagementHandler
         EditStep.Description     => "Description",
         EditStep.Image           => "Image",
         EditStep.MaxParticipants => "Attendee limit",
+        EditStep.Recurrence      => "Repeat schedule",
         _                        => "",
     };
 
@@ -832,6 +874,7 @@ public sealed class EventManagementHandler
         EditStep.Description     => string.IsNullOrWhiteSpace(s.Description) ? "—" : s.Description,
         EditStep.Image           => s.ImageChanged ? (s.ImageCleared ? "Will be removed" : "New image staged") : (s.HasImage ? "Set" : "None"),
         EditStep.MaxParticipants => s.MaxParticipants?.ToString(CultureInfo.InvariantCulture) ?? "No limit",
+        EditStep.Recurrence      => DescribeSchedule(s),
         _                        => "—",
     };
 
@@ -844,6 +887,32 @@ public sealed class EventManagementHandler
         var endLocal   = TimeZoneInfo.ConvertTimeFromUtc(s.EndUtc, s.Tz);
         return $"{startLocal.ToString("ddd MMM d, yyyy  h:mm tt", CultureInfo.InvariantCulture)} – " +
                $"{endLocal.ToString("h:mm tt", CultureInfo.InvariantCulture)}";
+    }
+
+    private static string DescribeSchedule(EditSession s) =>
+        DescribeScheduleFrom(s.NewFrequency, s.NewUntilUtc, s.NewMaxOccurrences, s.NewDatesUtc.Count, s.Tz);
+
+    private static string DescribeScheduleFrom(
+        ClanEventFrequency? freq, DateTime? untilUtc, int? maxOcc, int dateCount, TimeZoneInfo tz)
+    {
+        if (freq is null) return "Does not repeat";
+        if (freq == ClanEventFrequency.Custom) return $"Specific dates ({dateCount})";
+
+        var word = freq switch
+        {
+            ClanEventFrequency.Daily    => "Daily",
+            ClanEventFrequency.Weekly   => "Weekly",
+            ClanEventFrequency.Biweekly => "Biweekly",
+            ClanEventFrequency.Monthly  => "Monthly",
+            _                           => freq.ToString(),
+        };
+        if (maxOcc is int m) return $"{word} × {m}";
+        if (untilUtc is DateTime u)
+        {
+            var local = TimeZoneInfo.ConvertTimeFromUtc(u, tz);
+            return $"{word} until {local.ToString("MMM d, yyyy", CultureInfo.InvariantCulture)}";
+        }
+        return word;
     }
 
     // Apollo-style grey value box: a code fence renders monospace and boxed.
@@ -1192,6 +1261,12 @@ public sealed class EventManagementHandler
 
         if (text.Equals("done", StringComparison.OrdinalIgnoreCase))
         {
+            if (s.Step == EditStep.RecurrenceDates) { await HandleScheduleDatesAsync(s, "done"); return; }
+            if (s.Step is EditStep.Recurrence or EditStep.RecurrenceUntil)
+            {
+                await s.Dm.SendMessageAsync(embed: EditForm("Not yet", "Finish choosing a schedule first — or type **cancel** to discard."));
+                return;
+            }
             if (IsFormStep(s.Step))
             {
                 _editSessions.TryRemove(message.Author.Id, out _);
@@ -1221,6 +1296,9 @@ public sealed class EventManagementHandler
                 case EditStep.Description:     await HandleEditDescriptionAsync(s, text);    break;
                 case EditStep.Image:           await HandleEditImageAsync(s, message, text); break;
                 case EditStep.MaxParticipants: await HandleEditMaxAsync(s, text);            break;
+                case EditStep.Recurrence:      await HandleScheduleChoiceAsync(s, text);     break;
+                case EditStep.RecurrenceUntil: await HandleScheduleUntilAsync(s, text);      break;
+                case EditStep.RecurrenceDates: await HandleScheduleDatesAsync(s, text);      break;
                 case EditStep.AddStatus:       await HandleAddStatusAsync(s, text);          break;
                 case EditStep.AddWho:          await HandleAddWhoAsync(s, text);             break;
                 case EditStep.RemoveWho:       await HandleRemoveWhoAsync(s, text);          break;
@@ -1246,6 +1324,9 @@ public sealed class EventManagementHandler
         }
 
         s.Step = fields[n - 1];
+
+        if (s.Step == EditStep.Recurrence) { await SendScheduleMenuAsync(s); return; }
+
         var prompt = s.Step switch
         {
             EditStep.Title           => ("📝 New title", "Send the new title."),
@@ -1302,6 +1383,200 @@ public sealed class EventManagementHandler
             s.MaxParticipants = n;
         else { await s.Dm.SendMessageAsync(embed: EditForm("👥 Need a number", "Give me a whole number greater than 0, or `none`.")); return; }
         await SendEditMenuAsync(s);
+    }
+
+    // ── Repeat schedule sub-flow ────────────────────────────────────────────
+
+    private async Task SendScheduleMenuAsync(EditSession s)
+    {
+        s.Step = EditStep.Recurrence;
+        var ctx = s.Scope == "series"
+            ? $"Currently: **{s.ScheduleNowLabel}**.\n" +
+              "Changing this updates upcoming occurrences — ones that no longer fit the new rhythm are removed (their RSVPs too); ones that still line up keep theirs.\n\n"
+            : "Turn this into a repeating series, anchored to the event's current date & time.\n\n";
+        var body = ctx +
+            "**1 ·** Does not repeat\n" +
+            "**2 ·** Daily\n" +
+            "**3 ·** Weekly\n" +
+            "**4 ·** Biweekly\n" +
+            "**5 ·** Monthly\n" +
+            "**6 ·** Specific dates\n\n" +
+            "Pick a number, or **cancel** to discard everything.";
+        await s.Dm.SendMessageAsync(embed: EditForm("🔁 Repeat schedule", body));
+    }
+
+    private async Task HandleScheduleChoiceAsync(EditSession s, string text)
+    {
+        switch (text.Trim())
+        {
+            case "1": // does not repeat
+                s.NewFrequency = null;
+                s.NewUntilUtc = null;
+                s.NewMaxOccurrences = null;
+                s.NewDatesUtc.Clear();
+                s.ScheduleChanged = true;
+                await SendEditMenuAsync(s);
+                break;
+            case "2": case "3": case "4": case "5":
+                s.NewFrequency = text.Trim() switch
+                {
+                    "2" => ClanEventFrequency.Daily,
+                    "3" => ClanEventFrequency.Weekly,
+                    "4" => ClanEventFrequency.Biweekly,
+                    "5" => ClanEventFrequency.Monthly,
+                    _   => ClanEventFrequency.Weekly,
+                };
+                s.Step = EditStep.RecurrenceUntil;
+                await s.Dm.SendMessageAsync(embed: EditForm("🔁 Until when?",
+                    "Give an **end date** (`August 1`), a **number of times** (`8`), or `none` for open-ended."));
+                break;
+            case "6":
+                s.NewFrequency = ClanEventFrequency.Custom;
+                await BeginScheduleDatesAsync(s);
+                break;
+            default:
+                await s.Dm.SendMessageAsync(embed: EditForm("Pick an option", "Type a number from **1–6**, or **cancel**."));
+                break;
+        }
+    }
+
+    private async Task HandleScheduleUntilAsync(EditSession s, string text)
+    {
+        var lower = text.Trim().ToLowerInvariant();
+        if (lower is "none" or "forever" or "open" or "ongoing")
+        {
+            s.NewUntilUtc = null;
+            s.NewMaxOccurrences = null;
+        }
+        else if (int.TryParse(lower, out var count) && count > 0)
+        {
+            s.NewMaxOccurrences = count;
+            s.NewUntilUtc = null;
+        }
+        else
+        {
+            var r = _time.ParseStart(text, s.Tz);
+            if (!r.Success)
+            {
+                await s.Dm.SendMessageAsync(embed: EditForm("🔁 Until when?",
+                    "Tell me an **end date** (`August 1`), a **number of times** (`8`), or `none`."));
+                return;
+            }
+            s.NewUntilUtc = r.StartUtc;
+            s.NewMaxOccurrences = null;
+        }
+        s.NewDatesUtc.Clear();          // leaving any prior Custom date list behind
+        s.ScheduleChanged = true;
+        await SendEditMenuAsync(s);
+    }
+
+    private async Task BeginScheduleDatesAsync(EditSession s)
+    {
+        // Seed the working list: an existing Custom series already has it; a rule
+        // series seeds from its upcoming occurrences (so you prune what's there); a
+        // one-off seeds from its own start.
+        if (s.NewDatesUtc.Count == 0)
+        {
+            if (s.Scope == "series" && s.SeriesId is int sid)
+            {
+                using var scope = _services.CreateScope();
+                var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+                s.NewDatesUtc = await db.ClanEvents
+                    .Where(e => e.SeriesId == sid && e.Status == ClanEventStatus.Scheduled && e.StartUtc > DateTime.UtcNow)
+                    .OrderBy(e => e.StartUtc)
+                    .Select(e => e.StartUtc)
+                    .ToListAsync();
+            }
+            if (s.NewDatesUtc.Count == 0)
+                s.NewDatesUtc = new List<DateTime> { s.StartUtc };
+        }
+        await SendScheduleDatesAsync(s);
+    }
+
+    private async Task SendScheduleDatesAsync(EditSession s)
+    {
+        s.Step = EditStep.RecurrenceDates;
+        s.NewDatesUtc = s.NewDatesUtc.OrderBy(x => x).ToList();
+
+        var lines = s.NewDatesUtc
+            .Select((d, i) =>
+            {
+                var local = TimeZoneInfo.ConvertTimeFromUtc(d, s.Tz);
+                return $"**{i + 1} ·** {local.ToString("ddd MMM d, yyyy  h:mm tt", CultureInfo.InvariantCulture)}";
+            })
+            .ToList();
+        var list = lines.Count > 0 ? string.Join("\n", lines) : "_(no dates yet)_";
+
+        var body = list + "\n\n" +
+            "Send another **date & time** to add (e.g. `Thursday 8pm`), `remove 2` to drop one, or **done** when finished.";
+        await s.Dm.SendMessageAsync(embed: EditForm("🗓️ Specific dates", body));
+    }
+
+    private async Task HandleScheduleDatesAsync(EditSession s, string text)
+    {
+        var t = text.Trim();
+
+        if (t.Equals("done", StringComparison.OrdinalIgnoreCase) || t.Equals("finish", StringComparison.OrdinalIgnoreCase))
+        {
+            s.ScheduleChanged = true;
+            if (s.NewDatesUtc.Count <= 1)
+            {
+                // Collapsed to one (or zero) date → no longer a recurrence.
+                s.NewFrequency = null;
+                s.NewUntilUtc = null;
+                s.NewMaxOccurrences = null;
+                if (s.NewDatesUtc.Count == 1) s.StartUtc = s.NewDatesUtc[0];
+            }
+            else
+            {
+                s.NewFrequency = ClanEventFrequency.Custom;
+            }
+            await SendEditMenuAsync(s);
+            return;
+        }
+
+        if (t.StartsWith("remove", StringComparison.OrdinalIgnoreCase))
+        {
+            var rest = t.Length > 6 ? t[6..].Trim() : string.Empty;
+            if (int.TryParse(rest, out var idx) && idx >= 1 && idx <= s.NewDatesUtc.Count)
+            {
+                var ordered = s.NewDatesUtc.OrderBy(x => x).ToList();
+                ordered.RemoveAt(idx - 1);
+                s.NewDatesUtc = ordered;
+                await SendScheduleDatesAsync(s);
+            }
+            else
+            {
+                await s.Dm.SendMessageAsync(embed: EditForm("Which one?",
+                    $"Type `remove N` where N is between **1** and **{s.NewDatesUtc.Count}**."));
+            }
+            return;
+        }
+
+        var r = _time.ParseStart(t, s.Tz);
+        if (!r.Success)
+        {
+            await s.Dm.SendMessageAsync(embed: EditForm("Let's try that again",
+                string.IsNullOrWhiteSpace(r.Error) ? "Try `Thursday 8pm` or `June 20 at 7pm`." : r.Error));
+            return;
+        }
+        if (!r.HasTimeOfDay)
+        {
+            await s.Dm.SendMessageAsync(embed: EditForm("🕒 Need a time of day", "Include a time too, like `June 20 at 7pm`."));
+            return;
+        }
+        if (r.StartUtc <= DateTime.UtcNow)
+        {
+            await s.Dm.SendMessageAsync(embed: EditForm("That's in the past", "Pick a future date & time."));
+            return;
+        }
+        if (s.NewDatesUtc.Any(d => d == r.StartUtc))
+        {
+            await s.Dm.SendMessageAsync(embed: EditForm("Already added", "That date's already in the list."));
+            return;
+        }
+        s.NewDatesUtc.Add(r.StartUtc);
+        await SendScheduleDatesAsync(s);
     }
 
     private async Task HandleEditImageAsync(EditSession s, SocketMessage message, string text)
@@ -1445,7 +1720,253 @@ public sealed class EventManagementHandler
         foreach (var (ev, uid) in promoted)
             await EventWaitlist.NotifyPromotedAsync(_client, ev, uid);
 
-        await s.Dm.SendMessageAsync(embed: EditForm("✅ Saved", $"Updated {summary}."));
+        string? scheduleNote = null;
+        if (s.ScheduleChanged)
+        {
+            try { scheduleNote = await ApplyScheduleChangeAsync(s); }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Applying schedule change failed for event {Id}", s.ClanEventId);
+                scheduleNote = "…but the repeat-schedule change hit a snag — check the events channel.";
+            }
+        }
+
+        var note = string.IsNullOrWhiteSpace(scheduleNote) ? "" : "\n\n" + scheduleNote;
+        await s.Dm.SendMessageAsync(embed: EditForm("✅ Saved", $"Updated {summary}.{note}"));
+    }
+
+    // ─── Repeat-schedule application ────────────────────────────────────────
+    // Runs after the field edits commit. Routes to one of four transitions based
+    // on what the event is now and what the staged target is. Regeneration is
+    // "preserve-matching": occurrences whose start still lands on the new rhythm
+    // are kept (RSVPs intact); only the slots that actually changed churn.
+
+    private async Task<string> ApplyScheduleChangeAsync(EditSession s)
+    {
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+        var publisher = scope.ServiceProvider.GetRequiredService<IEventPublisher>();
+        var now = DateTime.UtcNow;
+
+        var ev = await db.ClanEvents.FirstOrDefaultAsync(e => e.Id == s.ClanEventId);
+        if (ev is null) return "The event went away before the schedule change could apply.";
+
+        // One-off (no series yet).
+        if (ev.SeriesId is not int seriesId)
+        {
+            if (s.NewFrequency is null) return string.Empty; // stayed a one-off — nothing to do
+            return await StartRecurringFromOneOffAsync(db, publisher, ev, s, now);
+        }
+
+        var series = await db.ClanEventSeries.FirstOrDefaultAsync(x => x.Id == seriesId);
+        if (series is null) return "The series went away before the schedule change could apply.";
+
+        if (s.NewFrequency is null)
+            return await StopRepeatingAsync(db, series, ev, now);
+
+        if (s.NewFrequency == ClanEventFrequency.Custom)
+            return await ReconcileCustomDatesAsync(db, publisher, series, s, now);
+
+        return await RegenerateRuleAsync(db, publisher, series, s, now);
+    }
+
+    /// <summary>One-off → recurring: build a series anchored on this event, link the
+    /// event in as its first occurrence, and materialize the rest forward.</summary>
+    private async Task<string> StartRecurringFromOneOffAsync(
+        BotDbContext db, IEventPublisher publisher, ClanEvent ev, EditSession s, DateTime now)
+    {
+        var zone       = await ResolveCallerZoneAsync(ev.OrganizerId);
+        var firstLocal = DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(ev.StartUtc, zone), DateTimeKind.Unspecified);
+        var durMinutes = Math.Max(1, (int)Math.Round((ev.EndUtc - ev.StartUtc).TotalMinutes));
+        var isCustom   = s.NewFrequency == ClanEventFrequency.Custom;
+
+        var series = new ClanEventSeries
+        {
+            GuildId         = ev.GuildId,
+            Title           = ev.Title,
+            Description     = ev.Description,
+            OrganizerId     = ev.OrganizerId,
+            OrganizerName   = ev.OrganizerName,
+            Frequency       = s.NewFrequency!.Value,
+            TimeZoneId      = zone.Id,
+            FirstStartLocal = firstLocal,
+            DurationMinutes = durMinutes,
+            ChannelId       = _config.GetEventPostChannelId(),
+            UntilUtc        = isCustom ? null : s.NewUntilUtc,
+            MaxOccurrences  = isCustom ? null : s.NewMaxOccurrences,
+            MaxParticipants = ev.MaxParticipants,
+            Active          = true,
+            CreatedAt       = now,
+            ImageBytes      = ev.ImageBytes,
+            ImageFileName   = ev.ImageFileName,
+        };
+        db.ClanEventSeries.Add(series);
+        await db.SaveChangesAsync(); // materialize series.Id
+
+        // Link this event in as the series' first occurrence. The banner bytes now
+        // live on the series row; the already-posted message keeps its attachment.
+        ev.SeriesId   = series.Id;
+        ev.ImageBytes = null;
+        await db.SaveChangesAsync();
+
+        if (isCustom)
+        {
+            var dates = new List<DateTime>(s.NewDatesUtc);
+            if (!dates.Contains(ev.StartUtc)) dates.Add(ev.StartUtc);
+            await publisher.MaterializeDatesAsync(series, dates); // ev's own start is skipped (idempotent)
+            return $"**{ev.Title}** now runs on {dates.Distinct().Count()} specific dates.";
+        }
+
+        await publisher.FillHorizonAsync(series); // first occurrence (== ev) skipped (idempotent)
+        return $"**{ev.Title}** now repeats — {DescribeScheduleFrom(series.Frequency, series.UntilUtc, series.MaxOccurrences, 0, s.Tz)}.";
+    }
+
+    /// <summary>Series → does not repeat: retire the series, keep a single event
+    /// (the clicked occurrence if upcoming, else the next one), cancel the rest.</summary>
+    private async Task<string> StopRepeatingAsync(BotDbContext db, ClanEventSeries series, ClanEvent ev, DateTime now)
+    {
+        series.Active = false;
+
+        var futures = await db.ClanEvents
+            .Where(e => e.SeriesId == series.Id && e.Status == ClanEventStatus.Scheduled && e.StartUtc > now)
+            .OrderBy(e => e.StartUtc)
+            .ToListAsync();
+
+        var survivor = (ev.Status == ClanEventStatus.Scheduled && ev.StartUtc > now)
+            ? futures.FirstOrDefault(f => f.Id == ev.Id) ?? ev
+            : futures.FirstOrDefault();
+
+        var cancelled = new List<ClanEvent>();
+        foreach (var occ in futures)
+        {
+            if (survivor is not null && occ.Id == survivor.Id) continue;
+            await CancelOccurrenceAsync(db, occ);
+            cancelled.Add(occ);
+        }
+
+        if (survivor is not null)
+        {
+            survivor.SeriesId = null; // becomes a true one-off
+            if (survivor.ImageBytes is null && series.ImageBytes is not null)
+            {
+                survivor.ImageBytes    = series.ImageBytes;
+                survivor.ImageFileName = series.ImageFileName;
+            }
+        }
+
+        await db.SaveChangesAsync();
+        foreach (var occ in cancelled) await UpdatePostAsync(db, occ);
+
+        var n = cancelled.Count;
+        return survivor is not null
+            ? $"Stopped repeating — kept the {EventTimeParser.Stamp(survivor.StartUtc, 'f')} event and removed {n} upcoming occurrence{(n == 1 ? "" : "s")}."
+            : $"Stopped repeating — removed {n} upcoming occurrence{(n == 1 ? "" : "s")}.";
+    }
+
+    /// <summary>Rule-based frequency/end change with preserve-matching: cancel only
+    /// the upcoming occurrences that no longer fall on the new rhythm, then fill in
+    /// the new ones (idempotent, so survivors are untouched and keep their RSVPs).</summary>
+    private async Task<string> RegenerateRuleAsync(
+        BotDbContext db, IEventPublisher publisher, ClanEventSeries series, EditSession s, DateTime now)
+    {
+        series.Frequency      = s.NewFrequency!.Value;
+        series.UntilUtc       = s.NewUntilUtc;
+        series.MaxOccurrences = s.NewMaxOccurrences;
+        series.Active         = true;
+        await db.SaveChangesAsync(); // persist the new rule before computing/filling
+
+        var horizonEnd = now.AddDays(_config.EventRecurrenceHorizonDays);
+        var newSet = ClanEventRecurrence
+            .Occurrences(series, now.AddMinutes(-1), horizonEnd, _config.EventRecurrenceMaxBackfill)
+            .Select(o => o.StartUtc)
+            .ToHashSet();
+
+        var futures = await db.ClanEvents
+            .Where(e => e.SeriesId == series.Id && e.Status == ClanEventStatus.Scheduled && e.StartUtc > now)
+            .ToListAsync();
+        var existing = futures.Select(f => f.StartUtc).ToHashSet();
+
+        var dropped = new List<ClanEvent>();
+        foreach (var occ in futures)
+            if (!newSet.Contains(occ.StartUtc)) { await CancelOccurrenceAsync(db, occ); dropped.Add(occ); }
+        await db.SaveChangesAsync();
+        foreach (var occ in dropped) await UpdatePostAsync(db, occ);
+
+        await publisher.FillHorizonAsync(series);
+
+        var kept  = futures.Count - dropped.Count;
+        var added = newSet.Count(d => !existing.Contains(d));
+        return $"Now {DescribeScheduleFrom(series.Frequency, series.UntilUtc, series.MaxOccurrences, 0, s.Tz)} — " +
+               $"kept {kept}, removed {dropped.Count}, added {added} upcoming occurrence{(added == 1 ? "" : "s")}.";
+    }
+
+    /// <summary>Custom (specific-dates) reconcile with preserve-matching. Collapses
+    /// to a single event if the edited list ends up with one date or fewer.</summary>
+    private async Task<string> ReconcileCustomDatesAsync(
+        BotDbContext db, IEventPublisher publisher, ClanEventSeries series, EditSession s, DateTime now)
+    {
+        var target = s.NewDatesUtc.Where(d => d > now).Distinct().OrderBy(x => x).ToList();
+
+        if (target.Count <= 1)
+        {
+            series.Active = false;
+            var keep = target.FirstOrDefault();
+
+            var futuresC = await db.ClanEvents
+                .Where(e => e.SeriesId == series.Id && e.Status == ClanEventStatus.Scheduled && e.StartUtc > now)
+                .OrderBy(e => e.StartUtc)
+                .ToListAsync();
+
+            var survivor = keep != default ? futuresC.FirstOrDefault(f => f.StartUtc == keep) : null;
+            survivor ??= futuresC.FirstOrDefault(f => f.Id == s.ClanEventId) ?? futuresC.FirstOrDefault();
+
+            var cancelledC = new List<ClanEvent>();
+            foreach (var occ in futuresC)
+            {
+                if (survivor is not null && occ.Id == survivor.Id) continue;
+                await CancelOccurrenceAsync(db, occ);
+                cancelledC.Add(occ);
+            }
+            if (survivor is not null)
+            {
+                survivor.SeriesId = null;
+                if (survivor.ImageBytes is null && series.ImageBytes is not null)
+                {
+                    survivor.ImageBytes    = series.ImageBytes;
+                    survivor.ImageFileName = series.ImageFileName;
+                }
+            }
+            await db.SaveChangesAsync();
+            foreach (var occ in cancelledC) await UpdatePostAsync(db, occ);
+
+            return survivor is not null
+                ? $"Reduced to a single event on {EventTimeParser.Stamp(survivor.StartUtc, 'f')}; removed {cancelledC.Count} other date{(cancelledC.Count == 1 ? "" : "s")}."
+                : $"Removed {cancelledC.Count} date{(cancelledC.Count == 1 ? "" : "s")}.";
+        }
+
+        series.Frequency      = ClanEventFrequency.Custom;
+        series.UntilUtc       = null;
+        series.MaxOccurrences = null;
+        series.Active         = true;
+        await db.SaveChangesAsync();
+
+        var futures = await db.ClanEvents
+            .Where(e => e.SeriesId == series.Id && e.Status == ClanEventStatus.Scheduled && e.StartUtc > now)
+            .ToListAsync();
+        var existing  = futures.Select(f => f.StartUtc).ToHashSet();
+        var targetSet = target.ToHashSet();
+
+        var dropped = new List<ClanEvent>();
+        foreach (var occ in futures)
+            if (!targetSet.Contains(occ.StartUtc)) { await CancelOccurrenceAsync(db, occ); dropped.Add(occ); }
+        await db.SaveChangesAsync();
+        foreach (var occ in dropped) await UpdatePostAsync(db, occ);
+
+        var toCreate = target.Where(d => !existing.Contains(d)).ToList();
+        if (toCreate.Count > 0) await publisher.MaterializeDatesAsync(series, toCreate);
+
+        var kept = futures.Count - dropped.Count;
+        return $"Updated specific dates — kept {kept}, removed {dropped.Count}, added {toCreate.Count}.";
     }
 
     private async Task SweepEditSessionsAsync()

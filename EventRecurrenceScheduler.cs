@@ -68,8 +68,7 @@ public sealed class EventRecurrenceScheduler : BackgroundService
 
     private async Task TickAsync(CancellationToken ct)
     {
-        var now         = DateTime.UtcNow;
-        var horizonEnd  = now.AddDays(_config.EventRecurrenceHorizonDays);
+        var now = DateTime.UtcNow;
 
         // Load active series and retire any whose end has passed, in one scope.
         List<ClanEventSeries> active;
@@ -99,23 +98,11 @@ public sealed class EventRecurrenceScheduler : BackgroundService
 
         // Materialize via the publisher (each call opens its own scope and is
         // idempotent), so we don't hold a DbContext across Discord I/O.
+        // FillHorizonAsync also carries the series banner onto each new occurrence.
         foreach (var series in active)
         {
             if (ct.IsCancellationRequested) break;
-
-            var occurrences = ClanEventRecurrence
-                .Occurrences(series, now.AddMinutes(-1), horizonEnd, _config.EventRecurrenceMaxBackfill)
-                .ToList();
-
-            foreach (var (startUtc, endUtc) in occurrences)
-            {
-                if (ct.IsCancellationRequested) break;
-                await _publisher.CreateOccurrenceAsync(
-                    series.GuildId, series.Id,
-                    series.Title, series.Description, series.OrganizerId, series.OrganizerName,
-                    startUtc, endUtc,
-                    maxParticipants: series.MaxParticipants);
-            }
+            await _publisher.FillHorizonAsync(series);
         }
     }
 }
