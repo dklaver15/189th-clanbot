@@ -31,6 +31,10 @@ public static class EventEmbedBuilder
     /// matching the Maybe style. Update if the emoji is ever re-uploaded.</summary>
     private const string DeclineEmote = "<:declined:1513695018022600834>";
 
+    /// <summary>Custom "Going" emoji — a 189th server emoji (green box, white check)
+    /// matching the Maybe/Declined style. Update if the emoji is ever re-uploaded.</summary>
+    private const string GoingEmote = "<:going:1513698727913586768>";
+
     /// <summary>Custom id for an RSVP button: <c>evt:rsvp:&lt;status&gt;:&lt;clanEventId&gt;</c>.</summary>
     public static string ButtonId(string status, int clanEventId) => $"{RsvpPrefix}{status}:{clanEventId}";
 
@@ -76,8 +80,8 @@ public static class EventEmbedBuilder
         eb.AddField("\u200b", WidthSpacer, inline: false);
 
         var goingLabel = ev.MaxParticipants is int cap
-            ? $"✅ Going ({going.Count}/{cap})"
-            : $"✅ Going ({going.Count})";
+            ? $"{GoingEmote} Going ({going.Count}/{cap})"
+            : $"{GoingEmote} Going ({going.Count})";
         eb.AddField(goingLabel,                       Names(going),   inline: true);
         eb.AddField($"{MaybeEmote} Maybe ({maybe.Count})",        Names(maybe),   inline: true);
         eb.AddField($"{DeclineEmote} Declined ({decline.Count})", Names(decline), inline: true);
@@ -122,7 +126,7 @@ public static class EventEmbedBuilder
 
         if (rsvpEnabled)
         {
-            cb.WithButton(null, ButtonId("going",   clanEventId), ButtonStyle.Secondary, emote: new Emoji("✅"), disabled: locked, row: 0)
+            cb.WithButton(null, ButtonId("going",   clanEventId), ButtonStyle.Secondary, emote: Emote.Parse(GoingEmote), disabled: locked, row: 0)
               .WithButton(null, ButtonId("maybe",   clanEventId), ButtonStyle.Secondary, emote: Emote.Parse(MaybeEmote), disabled: locked, row: 0)
               .WithButton(null, ButtonId("decline", clanEventId), ButtonStyle.Secondary, emote: Emote.Parse(DeclineEmote), disabled: locked, row: 0);
         }
