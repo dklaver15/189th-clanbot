@@ -306,10 +306,10 @@ public class BotConfig
 
     /// <summary>
     /// CSV of RSVP statuses whose members get @-mentioned in the reminder
-    /// (any of: Going, Maybe, Decline). Default pings only those who said Going.
-    /// The reminder still posts to the channel even when no one matches.
+    /// (any of: Going, Maybe, Decline, Waitlisted). Default pings Going, Maybe,
+    /// and the waitlist. The reminder still posts to the channel even when no one matches.
     /// </summary>
-    public string EventReminderPingStatuses { get; set; } = "Going";
+    public string EventReminderPingStatuses { get; set; } = "Going,Maybe,Waitlisted";
 
     /// <summary>How far ahead the recurrence scheduler materializes occurrences.</summary>
     public int EventRecurrenceHorizonDays { get; set; } = 14;

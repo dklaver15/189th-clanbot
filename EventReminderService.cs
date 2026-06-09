@@ -14,8 +14,8 @@ namespace ClanGuardBot.Services;
 /// Posts reminders for upcoming events at the configured lead times
 /// (EventReminderLeadMinutes, default 60 and 15 minutes before start). Each
 /// reminder is an embed; the accompanying ping line @-mentions the organizer
-/// plus every member whose RSVP is in EventReminderPingStatuses (default Going
-/// and Maybe), and still posts when no one else matches.
+/// plus every member whose RSVP is in EventReminderPingStatuses (default Going,
+/// Maybe, and Waitlisted), and still posts when no one else matches.
 ///
 /// ── Restart-safe ──
 /// Fired lead values are recorded on ClanEvent.RemindersSentCsv, so a
@@ -209,12 +209,13 @@ public sealed class EventReminderService : BackgroundService
         {
             switch (part.ToLowerInvariant())
             {
-                case "going":   set.Add(EventRsvpStatus.Going);   break;
-                case "maybe":   set.Add(EventRsvpStatus.Maybe);   break;
-                case "decline": set.Add(EventRsvpStatus.Decline); break;
+                case "going":      set.Add(EventRsvpStatus.Going);      break;
+                case "maybe":      set.Add(EventRsvpStatus.Maybe);      break;
+                case "decline":    set.Add(EventRsvpStatus.Decline);    break;
+                case "waitlisted": set.Add(EventRsvpStatus.Waitlisted); break;
             }
         }
-        if (set.Count == 0) { set.Add(EventRsvpStatus.Going); set.Add(EventRsvpStatus.Maybe); } // sensible default
+        if (set.Count == 0) { set.Add(EventRsvpStatus.Going); set.Add(EventRsvpStatus.Maybe); set.Add(EventRsvpStatus.Waitlisted); } // sensible default
         return set;
     }
 }
