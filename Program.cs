@@ -222,7 +222,6 @@ try
     builder.Services.AddSingleton<PromoteCommandHandler>();
     builder.Services.AddSingleton<DemoteCommandHandler>();
     builder.Services.AddSingleton<SetNickCommandHandler>();
-    builder.Services.AddSingleton<ChannelRenameCommandHandler>();
     builder.Services.AddSingleton<BotFixChannelPermsCommandHandler>();
 
     // SeedPromotionCreditCommandHandler: one-time /seed-promotion-credit command

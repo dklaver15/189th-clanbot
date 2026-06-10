@@ -47,7 +47,6 @@ public class DiscordBotService : IHostedService
     private readonly PromoteCommandHandler _promoteHandler;
     private readonly DemoteCommandHandler _demoteHandler;
     private readonly SetNickCommandHandler _setNickHandler;
-    private readonly ChannelRenameCommandHandler _channelRenameHandler;
     private readonly BotFixChannelPermsCommandHandler _botFixChannelPermsHandler;
     private readonly SeedPromotionCreditCommandHandler _seedHandler;
     private readonly EventCreditCommandHandler _eventCreditHandler;
@@ -107,7 +106,6 @@ public class DiscordBotService : IHostedService
         PromoteCommandHandler promoteHandler,
         DemoteCommandHandler demoteHandler,
         SetNickCommandHandler setNickHandler,
-        ChannelRenameCommandHandler channelRenameHandler,
         BotFixChannelPermsCommandHandler botFixChannelPermsHandler,
         SeedPromotionCreditCommandHandler seedHandler,
         EventCreditCommandHandler eventCreditHandler,
@@ -166,7 +164,6 @@ public class DiscordBotService : IHostedService
         _promoteHandler              = promoteHandler;
         _demoteHandler               = demoteHandler;
         _setNickHandler              = setNickHandler;
-        _channelRenameHandler        = channelRenameHandler;
         _botFixChannelPermsHandler   = botFixChannelPermsHandler;
         _seedHandler                 = seedHandler;
         _eventCreditHandler          = eventCreditHandler;
@@ -245,7 +242,6 @@ public class DiscordBotService : IHostedService
         _promoteHandler.Register(_client);
         _demoteHandler.Register(_client);
         _setNickHandler.Register(_client);
-        _channelRenameHandler.Register(_client);
         _botFixChannelPermsHandler.Register(_client);
         _seedHandler.Register(_client);
         _eventCreditHandler.Register(_client);
@@ -380,22 +376,6 @@ public class DiscordBotService : IHostedService
                         "The member to rename", isRequired: true)
                     .AddOption("nickname", ApplicationCommandOptionType.String,
                         "The new nickname", isRequired: true)
-                    .Build(),
-
-                new SlashCommandBuilder()
-                    .WithName(ChannelRenameCommandHandler.CommandName)
-                    .WithDescription("Rename a voice/stage channel, with an optional emoji second line (Officer+ only)")
-                    .AddOption(new SlashCommandOptionBuilder()
-                        .WithName("channel")
-                        .WithDescription("The voice or stage channel to rename")
-                        .WithType(ApplicationCommandOptionType.Channel)
-                        .AddChannelType(ChannelType.Voice)
-                        .AddChannelType(ChannelType.Stage)
-                        .WithRequired(true))
-                    .AddOption("line1", ApplicationCommandOptionType.String,
-                        "First line — plain readable text (e.g. Lobby)", isRequired: true)
-                    .AddOption("line2", ApplicationCommandOptionType.String,
-                        "Second line — plain text, auto-converted to wide emoji that wraps below (e.g. 5K HOURS)", isRequired: false)
                     .Build(),
 
                 new SlashCommandBuilder()
