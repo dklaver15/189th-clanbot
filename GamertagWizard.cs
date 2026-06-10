@@ -167,7 +167,7 @@ public sealed partial class GamertagWizard
         if (IsExpired(s))
         {
             _sessions.TryRemove(message.Author.Id, out _);
-            await EditBoardAsync(s, BuildClosingEmbed("⌛ Gamertag setup timed out",
+            await RepostBoardAsync(s, BuildClosingEmbed("⌛ Gamertag setup timed out",
                 "That setup expired from inactivity and **nothing was saved**. Run `/gamertags` to start over."));
             return;
         }
@@ -178,7 +178,7 @@ public sealed partial class GamertagWizard
         if (text.Equals("cancel", StringComparison.OrdinalIgnoreCase))
         {
             _sessions.TryRemove(message.Author.Id, out _);
-            await EditBoardAsync(s, BuildClosingEmbed("❌ Cancelled",
+            await RepostBoardAsync(s, BuildClosingEmbed("❌ Cancelled",
                 "Nothing was saved. Run `/gamertags` to start again anytime."));
             return;
         }
@@ -221,8 +221,8 @@ public sealed partial class GamertagWizard
         {
             if (RequiresDiscriminator(step) && !DiscriminatorPattern.IsMatch(text))
             {
-                // Re-render the board so the inline error is visible, but stay put.
-                await EditBoardAsync(s, BuildBoardEmbed(s, error:
+                // Repost so the inline error lands below the member's bad input.
+                await RepostBoardAsync(s, BuildBoardEmbed(s, error:
                     $"⚠️ **{PlatformName(step)}** tags look like `Name#1234` (a name, then `#`, then 4 digits). Try again, or use the buttons."),
                     BuildBoardComponents(s));
                 return;
@@ -348,7 +348,12 @@ public sealed partial class GamertagWizard
             _onboardingReminder.NotifyGamertagCompleted(d.GuildId, d.UserId);
     }
 
-    /// <summary>Advances to the next step and re-renders the board in place.</summary>
+    /// <summary>
+    /// Advances to the next step and re-renders the board. A button click edits
+    /// the board in place (it's already the newest message, so it stays put). A
+    /// typed reply reposts the board at the bottom instead — otherwise the
+    /// member's typed tags would stack below it and push the card out of view.
+    /// </summary>
     private async Task AdvanceAsync(GamertagWizardSession s, GamertagWizardStep next, SocketMessageComponent? viaInteraction)
     {
         s.Step = next;
@@ -358,7 +363,7 @@ public sealed partial class GamertagWizard
         if (viaInteraction is not null)
             await EditBoardViaInteractionAsync(viaInteraction, embed, buttons);
         else
-            await EditBoardAsync(s, embed, buttons);
+            await RepostBoardAsync(s, embed, buttons);
     }
 
     // ─── Board rendering ───────────────────────────────────────────────────
@@ -479,7 +484,7 @@ public sealed partial class GamertagWizard
 
     // ─── Board edit plumbing ───────────────────────────────────────────────
 
-    /// <summary>Edits the board out-of-band (typed-reply path), via the stored message handle.</summary>
+    /// <summary>Edits the board in place via the stored handle (used by the idle-timeout sweep, where no new user message triggered it).</summary>
     private async Task EditBoardAsync(GamertagWizardSession s, Embed embed, MessageComponent? components = null)
     {
         if (s.BoardMessage is null) return;
@@ -494,6 +499,33 @@ public sealed partial class GamertagWizard
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Failed to edit gamertag board for {User}", s.Draft.UserId);
+        }
+    }
+
+    /// <summary>
+    /// Reposts the board as a fresh message at the bottom and deletes the old
+    /// one — used on the typed-reply path so the card follows the member's typed
+    /// tags instead of scrolling out of view above them. New message first, so a
+    /// failed delete still leaves exactly one live board.
+    /// </summary>
+    private async Task RepostBoardAsync(GamertagWizardSession s, Embed embed, MessageComponent? components = null)
+    {
+        var old = s.BoardMessage;
+        try
+        {
+            s.BoardMessage = await s.Dm.SendMessageAsync(
+                embed: embed, components: components ?? new ComponentBuilder().Build());
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to repost gamertag board for {User}", s.Draft.UserId);
+            return;
+        }
+
+        if (old is not null)
+        {
+            try { await old.DeleteAsync(); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to delete previous gamertag board for {User}", s.Draft.UserId); }
         }
     }
 
