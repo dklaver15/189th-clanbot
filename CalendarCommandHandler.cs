@@ -11,7 +11,7 @@ namespace ClanGuardBot.Handlers;
 
 /// <summary>
 /// Handles the /calendar slash command — a view of upcoming events on the
-/// clan's Google Calendar, rendered as an ephemeral embed.
+/// clan's Google Calendar, rendered as a public embed.
 ///
 /// Two render modes selectable via the `view` option:
 ///   • list (default) — date-grouped fields, each event a bullet line with
@@ -48,10 +48,9 @@ namespace ClanGuardBot.Handlers;
 /// No rank gate. Schedule visibility benefits everyone in the clan,
 /// including recruits.
 ///
-/// ── Ephemeral ──
-/// Always ephemeral. /calendar is informational and tends to be invoked
-/// repeatedly; broadcasting the full embed each time would clutter
-/// channels.
+/// ── Visibility ──
+/// Public (non-ephemeral). The rendered calendar is shared with the whole
+/// channel so everyone sees the schedule when someone runs /calendar.
 /// </summary>
 public class CalendarCommandHandler
 {
@@ -137,7 +136,7 @@ public class CalendarCommandHandler
             {
                 await command.FollowupAsync(
                     "Something went wrong rendering the calendar. Check the bot logs.",
-                    ephemeral: true);
+                    ephemeral: false);
             }
             catch { /* already responded */ }
         }
@@ -145,7 +144,7 @@ public class CalendarCommandHandler
 
     private async Task HandleCalendarAsync(SocketSlashCommand command)
     {
-        await command.DeferAsync(ephemeral: true);
+        await command.DeferAsync(ephemeral: false);
 
         var days = ResolveDaysOption(command);
         var view = ResolveViewOption(command);
@@ -172,7 +171,7 @@ public class CalendarCommandHandler
             _logger.LogError(ex, "Failed to list calendar events for /calendar");
             await command.FollowupAsync(
                 "Couldn't reach Google Calendar. Try again in a moment.",
-                ephemeral: true);
+                ephemeral: false);
             return;
         }
 
@@ -182,7 +181,7 @@ public class CalendarCommandHandler
         {
             await command.FollowupAsync(
                 embed: BuildEmptyEmbed(days, view),
-                ephemeral: true);
+                ephemeral: false);
             return;
         }
 
@@ -190,7 +189,7 @@ public class CalendarCommandHandler
             ? BuildGridEmbed(events, days, displayTz)
             : BuildListEmbed(events, days, displayTz);
 
-        await command.FollowupAsync(embed: embed, ephemeral: true);
+        await command.FollowupAsync(embed: embed, ephemeral: false);
     }
 
     // ─── List-View Embed ──────────────────────────────────────────────
