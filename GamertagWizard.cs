@@ -454,21 +454,30 @@ public sealed partial class GamertagWizard
     /// </summary>
     private async Task OnSetButtonAsync(GamertagWizardSession s, SocketMessageComponent c, string[] parts)
     {
-        if (parts.Length < 4)
+        // Acknowledge immediately with a deferred update (type 6): it changes
+        // nothing on screen and doesn't resize the clicked message, so we never
+        // miss Discord's 3-second window even if the bot was briefly busy (e.g.
+        // mid-restart when a click arrives from another device). We do the real
+        // work below and edit the message afterwards via the interaction.
+        try
         {
             await c.DeferAsync();
+        }
+        catch (Exception ex)
+        {
+            // Token already expired/invalid (bot was down past the window) — the
+            // member can just click again now that we're responsive.
+            _logger.LogDebug(ex, "Set-button defer failed for {User}", s.Draft.UserId);
             return;
         }
+
+        if (parts.Length < 4) return;
 
         var stepStr = parts[2];
         var action  = parts[3];
 
         // Guard against a click on a previous step's (now stale) buttons.
-        if (!string.Equals(stepStr, s.Step.ToString(), StringComparison.Ordinal))
-        {
-            await c.DeferAsync();
-            return;
-        }
+        if (!string.Equals(stepStr, s.Step.ToString(), StringComparison.Ordinal)) return;
 
         var step     = s.Step;
         var hadValue = s.LastPromptHadValue;
@@ -483,7 +492,6 @@ public sealed partial class GamertagWizard
                 SetField(s.Draft, step, string.Empty);
                 break;
             default:
-                await c.DeferAsync();
                 return;
         }
 
@@ -495,19 +503,17 @@ public sealed partial class GamertagWizard
         // Advance FIRST. Posting the next prompt as a brand-new message is what
         // makes Discord's client scroll to the bottom, and it only does so while
         // the member is still pinned there. If we resized the clicked message
-        // first (the old order), a short prompt — like a "Skip" step — could
-        // nudge the view a few pixels off the bottom, and the next message then
-        // wouldn't auto-scroll. Editing the now-older clicked message afterwards
-        // doesn't move the scroll position. AdvanceAsync also overwrites
-        // s.LastPromptMessage with the new prompt, so there's no double-resolve.
+        // first, a short prompt — like a "Skip" step — could nudge the view a few
+        // pixels off the bottom and the next message wouldn't auto-scroll.
+        // Editing the now-older clicked message afterwards doesn't move scroll.
         await AdvanceAsync(s, NextStep(step));
 
         // Resolve the clicked message in place: its embed stays (now showing the
-        // result) with disabled buttons. c.UpdateAsync still targets the clicked
-        // message and is a valid first response to the interaction.
+        // result) with disabled buttons. After a deferred update, the clicked
+        // message is the interaction's original response.
         try
         {
-            await c.UpdateAsync(m =>
+            await c.ModifyOriginalResponseAsync(m =>
             {
                 m.Embed      = embed;
                 m.Components = buttons;
@@ -515,7 +521,7 @@ public sealed partial class GamertagWizard
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "Set-button resolve (UpdateAsync) failed for {User}", s.Draft.UserId);
+            _logger.LogDebug(ex, "Set-button resolve failed for {User}", s.Draft.UserId);
         }
     }
 
