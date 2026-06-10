@@ -109,14 +109,26 @@ public sealed partial class GamertagWizard
 
         var discordName = user.GlobalName ?? user.Username;
 
-        GamertagLookupResult? existing = null;
+        // Prefill from the existing roster row so Keep/Skip preserve tags. A read
+        // FAILURE must not start the wizard from blanks — a member who then skips
+        // through would overwrite their saved tags with empties on Save. So abort
+        // on exception and let them retry. (A genuine "no row yet" returns null,
+        // which is fine: that's a real first-time member starting empty.)
+        GamertagLookupResult? existing;
         try
         {
             existing = await _sheetsService.LookupGamertagsAsync(user.Id, discordName);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Could not prefill existing gamertags for {User}", user.Id);
+            _logger.LogWarning(ex, "Gamertag prefill lookup failed for {User}; aborting to avoid data loss", user.Id);
+            try
+            {
+                await dm.SendMessageAsync(
+                    "⚠️ I couldn't load your current gamertags from the roster just now, so I didn't start — **your existing tags are safe**. Please try `/gamertags` again in a moment.");
+            }
+            catch { /* DM failed too — nothing more we can do */ }
+            return true; // we reached their DMs (with the error), so don't report a DM failure
         }
 
         var session = new GamertagWizardSession
