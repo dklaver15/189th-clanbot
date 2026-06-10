@@ -1155,6 +1155,31 @@ public class BotConfig
     /// </summary>
     public int HeartbeatIntervalSeconds { get; set; } = 60;
 
+    // ─── Gateway watchdog ────────────────────────────────────────────
+
+    /// <summary>
+    /// Whether the gateway watchdog runs. Default true. The watchdog catches
+    /// the "process alive but gateway wedged" failure mode that the heartbeat
+    /// alone cannot — Discord.Net can report ConnectionState=Connected while
+    /// the socket has actually stalled, so a state check isn't enough.
+    /// </summary>
+    public bool GatewayWatchdogEnabled { get; set; } = true;
+
+    /// <summary>
+    /// How long (seconds) the gateway may go with zero activity before the
+    /// watchdog declares it wedged and exits the process for a Docker restart.
+    /// Default 180. The truth signal is the gateway heartbeat ACK, surfaced as
+    /// DiscordSocketClient.LatencyUpdated roughly every 41s; 180s is ~4 missed
+    /// ACKs, comfortably past a single transient blip. Floored to 60s.
+    /// </summary>
+    public int GatewayWatchdogStallSeconds { get; set; } = 180;
+
+    /// <summary>
+    /// How often (seconds) the watchdog evaluates idle time. Default 30.
+    /// Floored to 15s.
+    /// </summary>
+    public int GatewayWatchdogCheckSeconds { get; set; } = 30;
+
     // ─── Helpers ─────────────────────────────────────────────────────
 
     /// <summary>

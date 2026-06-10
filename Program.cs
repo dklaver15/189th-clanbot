@@ -496,6 +496,12 @@ try
     // class comment for the full design rationale.
     builder.Services.AddHostedService<HeartbeatService>();
 
+    // GatewayWatchdogService: detects a wedged/stalled gateway (process alive
+    // but no inbound gateway activity) and exits so Docker restarts the bot for
+    // a clean reconnect. Complements HeartbeatService, which can't see this
+    // state because it trusts ConnectionState. See GatewayWatchdogService.
+    builder.Services.AddHostedService<GatewayWatchdogService>();
+
     // HealthCommandHandler: /health diagnostic. Officer+ gated. Reads from
     // BotState + BotDbContext only — no external API calls, so /health works
     // even when Drive / Sheets / Calendar are degraded.
