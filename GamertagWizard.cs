@@ -392,17 +392,19 @@ public sealed partial class GamertagWizard
         var list = new StringBuilder();
         for (var i = 0; i < PlatformOrder.Length; i++)
         {
-            var p    = PlatformOrder[i];
-            var name = PlatformName(p);
-            var val  = GetField(d, p);
+            var p     = PlatformOrder[i];
+            var name  = PlatformName(p);
+            var val   = GetField(d, p);
             var shown = string.IsNullOrWhiteSpace(val) ? "—" : val;
 
-            if (atConfirm || i < currentIdx)
-                list.AppendLine($"✅ **{name}** — {shown}");
-            else if (i == currentIdx)
-                list.AppendLine($"▶️ **{name}**");
-            else
-                list.AppendLine($"▫️ {name}");
+            // Show the value on EVERY row (including not-yet-reached ones) so a
+            // returning member sees their whole prefilled roster up front and
+            // knows nothing was lost. The marker just tracks progress: ✅ done,
+            // ▶️ current, ▫️ still to come.
+            var marker = atConfirm || i < currentIdx ? "✅"
+                       : i == currentIdx             ? "▶️"
+                       :                               "▫️";
+            list.AppendLine($"{marker} **{name}** — {shown}");
         }
 
         var eb = new EmbedBuilder()
