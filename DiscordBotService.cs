@@ -21,6 +21,7 @@ public class DiscordBotService : IHostedService
     private readonly GamertagCommandHandler _gamertagHandler;
     private readonly GamertagWizard _gamertagWizard;
     private readonly GamertagSetupCommandHandler _gamertagSetupHandler;
+    private readonly GamertagBackfillCommandHandler _gamertagBackfillHandler;
     private readonly LookupCommandHandler _lookupHandler;
     private readonly PromoEligibilityCommandHandler _promoEligibilityHandler;
     private readonly RankTrackingHandler _rankHandler;
@@ -81,6 +82,7 @@ public class DiscordBotService : IHostedService
         GamertagCommandHandler gamertagHandler,
         GamertagWizard gamertagWizard,
         GamertagSetupCommandHandler gamertagSetupHandler,
+        GamertagBackfillCommandHandler gamertagBackfillHandler,
         LookupCommandHandler lookupHandler,
         PromoEligibilityCommandHandler promoEligibilityHandler,
         RankTrackingHandler rankHandler,
@@ -140,6 +142,7 @@ public class DiscordBotService : IHostedService
         _gamertagHandler             = gamertagHandler;
         _gamertagWizard              = gamertagWizard;
         _gamertagSetupHandler        = gamertagSetupHandler;
+        _gamertagBackfillHandler     = gamertagBackfillHandler;
         _lookupHandler               = lookupHandler;
         _promoEligibilityHandler     = promoEligibilityHandler;
         _rankHandler                 = rankHandler;
@@ -204,6 +207,7 @@ public class DiscordBotService : IHostedService
         _gamertagHandler.Register(_client);
         _gamertagWizard.Register(_client);
         _gamertagSetupHandler.Register(_client);
+        _gamertagBackfillHandler.Register(_client);
         _lookupHandler.Register(_client);
         _promoEligibilityHandler.Register(_client);
         _rankHandler.Register(_client);
@@ -325,6 +329,10 @@ public class DiscordBotService : IHostedService
                 // persistent "Enter Gamertags" button to the configured
                 // instructions channel. HQ-gated via BotConfig.GamertagSetupRoleId.
                 GamertagSetupCommandHandler.BuildCommand(),
+
+                // /gamertag-backfill-ids — officer-run maintenance: fills missing
+                // Discord IDs on legacy roster rows (dry-run unless apply:true).
+                GamertagBackfillCommandHandler.BuildCommand(),
 
                 new SlashCommandBuilder()
                     .WithName("lookup")

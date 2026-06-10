@@ -37,6 +37,14 @@ public record GamertagLookupResult(
 public record GamertagReconcileResult(int Deleted, int Kept, int LegacySkipped, int Candidates, bool Aborted);
 
 /// <summary>
+/// A roster row that has no parseable Discord ID in column A (a legacy / manually
+/// added row). <see cref="RowNumber"/> is the 1-based sheet row. ColA/ColB are
+/// the raw first two cells so a backfill caller can match by name and an operator
+/// can eyeball the layout before anything is written.
+/// </summary>
+public record LegacyGamertagRow(int RowNumber, string ColA, string ColB);
+
+/// <summary>
 /// Writes gamertag data to a Google Sheet.
 /// Expects a service account credentials JSON file.
 /// </summary>
@@ -340,6 +348,85 @@ public class GoogleSheetsService
             toDelete.Count, kept, legacySkipped);
 
         return new GamertagReconcileResult(toDelete.Count, kept, legacySkipped, toDelete.Count, Aborted: false);
+    }
+
+    /// <summary>
+    /// Returns every roster row whose column A is not a parseable Discord ID —
+    /// i.e. legacy/manually-added rows that the ID-keyed reconciler can't manage.
+    /// Fully blank rows are skipped. Read-only; used by the /gamertag-backfill-ids
+    /// command to propose name → ID matches.
+    /// </summary>
+    public async Task<List<LegacyGamertagRow>> GetLegacyGamertagRowsAsync()
+    {
+        var credential = GoogleCredential
+            .FromFile(_config.GoogleCredentialsPath)
+            .CreateScoped(SheetsService.Scope.Spreadsheets);
+
+        using var service = new SheetsService(new BaseClientService.Initializer
+        {
+            HttpClientInitializer = credential,
+            ApplicationName = "ClanGuardBot"
+        });
+
+        var range = $"{_config.GoogleSheetName}!A:H";
+        var resp = await service.Spreadsheets.Values.Get(_config.GoogleSpreadsheetId, range).ExecuteAsync();
+
+        var result = new List<LegacyGamertagRow>();
+        if (resp.Values is null) return result;
+
+        // Skip the header row (index 0).
+        for (var i = 1; i < resp.Values.Count; i++)
+        {
+            var row  = resp.Values[i];
+            var colA = row.Count > 0 ? row[0]?.ToString() ?? "" : "";
+            var colB = row.Count > 1 ? row[1]?.ToString() ?? "" : "";
+
+            if (ulong.TryParse(colA, out _)) continue;            // already has an ID
+            if (string.IsNullOrWhiteSpace(colA) && string.IsNullOrWhiteSpace(colB)) continue; // blank row
+
+            result.Add(new LegacyGamertagRow(i + 1, colA, colB)); // i+1 = 1-based sheet row
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Writes Discord IDs into column A for the given rows (keyed by 1-based sheet
+    /// row number). ONLY column A is touched — every other cell (name, tags) is
+    /// left exactly as-is — so this is safe to run against rows of unknown layout.
+    /// Batched into one API call. Returns the number of cells written.
+    /// </summary>
+    public async Task<int> BackfillGamertagIdsAsync(IReadOnlyDictionary<int, ulong> rowToId)
+    {
+        if (rowToId.Count == 0) return 0;
+
+        var credential = GoogleCredential
+            .FromFile(_config.GoogleCredentialsPath)
+            .CreateScoped(SheetsService.Scope.Spreadsheets);
+
+        using var service = new SheetsService(new BaseClientService.Initializer
+        {
+            HttpClientInitializer = credential,
+            ApplicationName = "ClanGuardBot"
+        });
+
+        var sheetName = _config.GoogleSheetName;
+        var data = rowToId.Select(kv => new ValueRange
+        {
+            Range  = $"{sheetName}!A{kv.Key}",
+            Values = new List<IList<object>> { new List<object> { kv.Value.ToString() } }
+        }).ToList();
+
+        var body = new BatchUpdateValuesRequest
+        {
+            ValueInputOption = "USER_ENTERED",
+            Data = data
+        };
+
+        await service.Spreadsheets.Values.BatchUpdate(body, _config.GoogleSpreadsheetId).ExecuteAsync();
+
+        _logger.LogInformation("Backfilled {Count} Discord ID(s) into the gamertag roster", rowToId.Count);
+        return rowToId.Count;
     }
 
     /// <summary>

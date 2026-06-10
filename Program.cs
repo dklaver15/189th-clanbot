@@ -216,6 +216,12 @@ try
     // is handled by GamertagCommandHandler, which opens the DM wizard.
     builder.Services.AddSingleton<GamertagSetupCommandHandler>();
 
+    // GamertagBackfillCommandHandler: /gamertag-backfill-ids — officer-run
+    // maintenance command that fills missing Discord IDs on legacy roster rows
+    // by matching names to current members (dry-run by default). Lets the
+    // ID-keyed reconciler eventually manage those rows.
+    builder.Services.AddSingleton<GamertagBackfillCommandHandler>();
+
     // LookupCommandHandler: /lookup slash command. Takes a Discord user picker
     // and returns that user's gamertags from the roster sheet (ephemeral, open
     // to any member). Register() is called from DiscordBotService alongside the
