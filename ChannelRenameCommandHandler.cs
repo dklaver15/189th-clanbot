@@ -99,25 +99,30 @@ public class ChannelRenameCommandHandler
         }
 
         // Build the final name.
-        //  - If line2 is supplied, join the two with a real LF.
-        //  - Otherwise, let a power user embed the line break themselves by
-        //    typing the literal two-character sequence \n in line1, which we
-        //    convert to a real newline here.
+        //
+        // Discord strips newline characters from channel names, so a real two-
+        // ROW name can't be made with a line break. The effect is achieved by
+        // wrapping: line1 stays plain readable text, and line2 is converted to
+        // WIDE native emoji (regional-indicator letters + keycap digits) that
+        // overflow the narrow sidebar and wrap onto a second visual line — the
+        // same technique the official Battlefield server uses for "Lobby /
+        // 5K HOURS". Custom server emoji are NOT allowed in channel names, so
+        // only native emoji work, which is exactly what this produces.
         string newName;
         if (!string.IsNullOrWhiteSpace(line2))
         {
-            newName = $"{line1}\n{line2}";
+            newName = $"{line1} {EmojifyForWrap(line2)}";
         }
         else
         {
-            newName = line1.Replace("\\n", "\n");
+            newName = line1;
         }
 
         if (newName.Length > MaxNameLength)
         {
             await command.FollowupAsync(
                 $"❌ That name is {newName.Length} characters — Discord's limit is {MaxNameLength}. " +
-                "Shorten it and try again.",
+                "The emoji on the second line each count for several characters, so try a shorter line 2.",
                 ephemeral: true);
             return;
         }
@@ -154,12 +159,63 @@ public class ChannelRenameCommandHandler
         }
 
         _logger.LogInformation("Channel renamed: {Old} → {New} (#{Id}) by {Caller}",
-            oldName, newName.Replace("\n", "\\n"), channel.Id, caller.Username);
+            oldName, newName, channel.Id, caller.Username);
 
-        // Show the multi-line result in a code block so the newline is visible.
         await command.FollowupAsync(
-            $"✅ **Channel Renamed**\n```\n{newName}\n```",
+            $"✅ **Channel Renamed** to:\n{newName}\n\n" +
+            "_The emoji should wrap to a second line in the sidebar. Rendering varies by " +
+            "device — check on mobile and desktop. If it didn't wrap, line 2 may be too short " +
+            "to overflow; add a little more._",
             ephemeral: true);
+    }
+
+    /// <summary>
+    /// Converts plain text into a string of WIDE native Unicode emoji so it
+    /// overflows the channel sidebar and wraps to a second line:
+    ///   • A–Z  → regional-indicator letters (the blue block letters)
+    ///   • 0–9  → keycap digit emoji
+    ///   • anything else passes through unchanged
+    ///
+    /// Each emitted glyph is followed by a space. The spaces are load-bearing:
+    /// two adjacent regional indicators that form a valid country code render
+    /// as that country's FLAG instead of two letters (e.g. U+R → 🇺🇷 Uruguay),
+    /// and a separating space defeats that pairing. The gaps also match the
+    /// spaced-out look of the Battlefield server's "5K HOURS".
+    /// </summary>
+    private static string EmojifyForWrap(string text)
+    {
+        var sb = new System.Text.StringBuilder();
+
+        foreach (var ch in text)
+        {
+            if (ch is >= 'A' and <= 'Z' or >= 'a' and <= 'z')
+            {
+                // Regional indicator A (U+1F1E6) offset by the letter index.
+                var codePoint = 0x1F1E6 + (char.ToUpperInvariant(ch) - 'A');
+                sb.Append(char.ConvertFromUtf32(codePoint));
+                sb.Append(' ');
+            }
+            else if (ch is >= '0' and <= '9')
+            {
+                // Keycap sequence: digit + VS16 + combining enclosing keycap.
+                sb.Append(ch);
+                sb.Append('\uFE0F');
+                sb.Append('\u20E3');
+                sb.Append(' ');
+            }
+            else if (ch == ' ')
+            {
+                // Word break → an extra gap between the emoji "words".
+                sb.Append(' ');
+            }
+            else
+            {
+                sb.Append(ch);
+                sb.Append(' ');
+            }
+        }
+
+        return sb.ToString().Trim();
     }
 
     private bool HasPermission(SocketGuildUser user)

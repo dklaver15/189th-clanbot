@@ -384,7 +384,7 @@ public class DiscordBotService : IHostedService
 
                 new SlashCommandBuilder()
                     .WithName(ChannelRenameCommandHandler.CommandName)
-                    .WithDescription("Rename a voice/stage channel, optionally on two lines (Officer+ only)")
+                    .WithDescription("Rename a voice/stage channel, with an optional emoji second line (Officer+ only)")
                     .AddOption(new SlashCommandOptionBuilder()
                         .WithName("channel")
                         .WithDescription("The voice or stage channel to rename")
@@ -393,9 +393,9 @@ public class DiscordBotService : IHostedService
                         .AddChannelType(ChannelType.Stage)
                         .WithRequired(true))
                     .AddOption("line1", ApplicationCommandOptionType.String,
-                        "First line (or the whole name; use \\n to break it yourself)", isRequired: true)
+                        "First line — plain readable text (e.g. Lobby)", isRequired: true)
                     .AddOption("line2", ApplicationCommandOptionType.String,
-                        "Optional second line — placed below line1 on its own line", isRequired: false)
+                        "Second line — plain text, auto-converted to wide emoji that wraps below (e.g. 5K HOURS)", isRequired: false)
                     .Build(),
 
                 new SlashCommandBuilder()
