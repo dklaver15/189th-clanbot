@@ -57,12 +57,11 @@ public sealed class GamertagWizardSession
     public DateTime LastActivityAt { get; set; }
 
     /// <summary>
-    /// The most recent platform prompt message, kept so it can be resolved once
-    /// the step is answered (by click or by typing) — the embed stays visible
-    /// with its buttons disabled, so all six choices remain on screen.
+    /// The single "board" message that drives the whole wizard. It's posted once
+    /// on start and edited in place at every step (the checklist of all six
+    /// platforms plus the current question and buttons). Editing in place — never
+    /// posting a new message — means the board never moves, so Discord never has
+    /// to scroll and can't clip a freshly-posted button row.
     /// </summary>
-    public IUserMessage? LastPromptMessage { get; set; }
-
-    /// <summary>Whether the current prompt offered Keep/Clear (true) or Skip (false) — drives the disabled-button layout when it's resolved.</summary>
-    public bool LastPromptHadValue { get; set; }
+    public IUserMessage? BoardMessage { get; set; }
 }

@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text;
 using System.Text.RegularExpressions;
 using ClanGuardBot.Services;
 using Discord;
@@ -7,32 +8,39 @@ using Discord.WebSocket;
 namespace ClanGuardBot.Handlers;
 
 /// <summary>
-/// The DM gamertag wizard — the same shape as <see cref="EventCreationWizard"/>.
-/// Triggered by /gamertags (or the persistent "Enter Gamertags" button), it
-/// walks the member through their six platform tags one at a time in their DMs,
-/// then writes the result to the roster sheet.
+/// The DM gamertag wizard. Triggered by /gamertags (or the "Enter Gamertags"
+/// button), it collects the member's six platform tags and writes them to the
+/// roster sheet.
 ///
-/// ── Why a DM wizard? ──
-/// The old flow was a two-page modal (Discord caps modals at 5 inputs but we
-/// collect 6). Lots of members never realized there was a page 2 and submitted
-/// half their tags. A DM wizard has no field cap, asks one thing at a time, and
-/// shows a confirm card before anything is saved.
+/// ── Single-board design ──
+/// The whole wizard is ONE message (the "board"), posted once on start and
+/// edited in place at every step. The board shows a checklist of all six
+/// platforms (answered ones with their value, the current one highlighted, the
+/// rest pending) plus the current question and its buttons. Because we never
+/// post a second message, the board never moves and Discord never has to scroll
+/// — which sidesteps the client quirk where a freshly-posted button row gets
+/// clipped below the fold.
+///
+/// ── Why not a modal? ──
+/// The old flow was a two-page modal (Discord caps modals at 5 inputs, we need
+/// 6) and members routinely missed page 2. A DM board has no field cap and shows
+/// everything at once.
 ///
 /// ── Routing ──
-/// Self-registers MessageReceived (DM text replies) and ButtonExecuted (the
-/// Save/Cancel buttons, prefixed "gtwiz:"). Both filter to the member's active
-/// session, so this coexists with every other handler on those events. The
-/// entry points (slash command + open button) live on
-/// <see cref="GamertagCommandHandler"/>, which calls <see cref="StartAsync"/>.
+/// Self-registers MessageReceived (typed replies) and ButtonExecuted (buttons,
+/// prefixed "gtwiz:"). Both filter to the member's active session. The entry
+/// points live on <see cref="GamertagCommandHandler"/>, which calls
+/// <see cref="StartAsync"/>.
 ///
 /// ── Preserve-on-skip ──
-/// On start we prefill the draft from the member's existing roster row. Each
-/// prompt offers `keep` (leave as-is) and `clear` (remove); a bare reply
-/// replaces the value. So updating one tag never wipes the others.
+/// On start the board is prefilled from the member's existing roster row, so
+/// Keep leaves a tag as-is and Clear removes it; updating one tag never wipes
+/// the others.
 ///
 /// ── Sessions ──
-/// In-memory, keyed by user id, expired after <see cref="IdleTimeout"/> of
-/// inactivity and removed on completion/cancel.
+/// In-memory, keyed by user id, expired after <see cref="IdleTimeout"/> and
+/// removed on completion/cancel. A restart drops in-progress sessions; the
+/// member just re-runs /gamertags.
 /// </summary>
 public sealed partial class GamertagWizard
 {
@@ -40,6 +48,17 @@ public sealed partial class GamertagWizard
     private const string Prefix = "gtwiz:";
 
     private static readonly Regex DiscriminatorPattern = MyRegex();
+
+    /// <summary>The six platform steps, in the order they're asked.</summary>
+    private static readonly GamertagWizardStep[] PlatformOrder =
+    {
+        GamertagWizardStep.Ea,
+        GamertagWizardStep.Steam,
+        GamertagWizardStep.Psn,
+        GamertagWizardStep.Xbox,
+        GamertagWizardStep.Embark,
+        GamertagWizardStep.Bungie,
+    };
 
     private readonly ConcurrentDictionary<ulong, GamertagWizardSession> _sessions = new();
 
@@ -57,8 +76,6 @@ public sealed partial class GamertagWizard
         _onboardingReminder = onboardingReminder;
         _logger            = logger;
 
-        // Proactively time out abandoned DM sessions: every minute, DM anyone
-        // who's gone idle past IdleTimeout and drop their session.
         _idleSweep = new System.Threading.Timer(_ => _ = SweepIdleAsync(), null,
             TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
     }
@@ -72,9 +89,8 @@ public sealed partial class GamertagWizard
     // ─── Entry point (called by GamertagCommandHandler) ────────────────────
 
     /// <summary>
-    /// Opens a DM and starts the wizard. Returns false if the member's DMs are
-    /// closed (the caller surfaces that). Prefills the draft from the roster so
-    /// skipped fields keep their existing values.
+    /// Opens a DM and posts the board. Returns false if the member's DMs are
+    /// closed. Prefills the draft from the roster so Keep/Skip preserve tags.
     /// </summary>
     public async Task<bool> StartAsync(IUser user, ulong guildId)
     {
@@ -93,7 +109,6 @@ public sealed partial class GamertagWizard
 
         var discordName = user.GlobalName ?? user.Username;
 
-        // Prefill from the existing roster row so "keep"/skip preserves tags.
         GamertagLookupResult? existing = null;
         try
         {
@@ -101,7 +116,6 @@ public sealed partial class GamertagWizard
         }
         catch (Exception ex)
         {
-            // Non-fatal: if the lookup fails we just start from blanks.
             _logger.LogWarning(ex, "Could not prefill existing gamertags for {User}", user.Id);
         }
 
@@ -129,24 +143,19 @@ public sealed partial class GamertagWizard
 
         try
         {
-            var intro = existing is null
-                ? "🎮 **Let's register your gamertags!** I'll ask about one platform at a time.\n\n" +
-                  "For each one, send your tag or tap **Skip**. Tap **Cancel** anytime to quit — nothing is saved until the end."
-                : "🎮 **Let's update your gamertags!** I'll go through one platform at a time and show what you've got now.\n\n" +
-                  "Send a new tag to change it, or use the **Keep** / **Clear** buttons. Tap **Cancel** to quit — nothing is saved until the end.";
-            await dm.SendMessageAsync(intro);
-            await PromptStepAsync(session);
+            session.BoardMessage = await dm.SendMessageAsync(
+                embed: BuildBoardEmbed(session), components: BuildBoardComponents(session));
             return true;
         }
         catch (Exception ex)
         {
-            _logger.LogInformation(ex, "Could not send opening DM to {User} for /gamertags", user.Id);
+            _logger.LogInformation(ex, "Could not send opening board to {User} for /gamertags", user.Id);
             _sessions.TryRemove(user.Id, out _);
             return false;
         }
     }
 
-    // ─── DM text replies ───────────────────────────────────────────────────
+    // ─── Typed replies ─────────────────────────────────────────────────────
 
     private async Task OnMessageReceivedAsync(SocketMessage message)
     {
@@ -158,7 +167,8 @@ public sealed partial class GamertagWizard
         if (IsExpired(s))
         {
             _sessions.TryRemove(message.Author.Id, out _);
-            await SafeSend(s, "⌛ That gamertag setup expired from inactivity and **nothing was saved**. Run `/gamertags` to start over.");
+            await EditBoardAsync(s, BuildClosingEmbed("⌛ Gamertag setup timed out",
+                "That setup expired from inactivity and **nothing was saved**. Run `/gamertags` to start over."));
             return;
         }
 
@@ -168,11 +178,12 @@ public sealed partial class GamertagWizard
         if (text.Equals("cancel", StringComparison.OrdinalIgnoreCase))
         {
             _sessions.TryRemove(message.Author.Id, out _);
-            await SafeSend(s, "❌ Cancelled. Nothing was saved. Run `/gamertags` to start again anytime.");
+            await EditBoardAsync(s, BuildClosingEmbed("❌ Cancelled",
+                "Nothing was saved. Run `/gamertags` to start again anytime."));
             return;
         }
 
-        // Confirm is a button step — ignore stray text there.
+        // Confirm is a button-only step — ignore stray text there.
         if (s.Step == GamertagWizardStep.Confirm) return;
 
         try
@@ -188,9 +199,9 @@ public sealed partial class GamertagWizard
     }
 
     /// <summary>
-    /// Handles a typed reply on a platform step: interprets keep/skip/clear
-    /// keywords, validates (Embark/Bungie need a Name#1234 discriminator),
-    /// stores the value, and advances. Buttons are the primary path, but typing
+    /// Handles a typed reply on a platform step: keep/skip/clear keywords,
+    /// validation (Embark/Bungie need Name#1234), stores the value, advances, and
+    /// re-renders the board in place. Buttons are the primary path, but typing
     /// stays supported.
     /// </summary>
     private async Task HandlePlatformTextAsync(GamertagWizardSession s, string text)
@@ -200,7 +211,7 @@ public sealed partial class GamertagWizard
 
         if (lower is "keep" or "skip" or "next" or "leave")
         {
-            // Leave the current value (which may be empty) untouched.
+            // Leave the current value (possibly empty) untouched.
         }
         else if (lower is "clear" or "none" or "remove" or "delete" or "n/a")
         {
@@ -210,28 +221,323 @@ public sealed partial class GamertagWizard
         {
             if (RequiresDiscriminator(step) && !DiscriminatorPattern.IsMatch(text))
             {
-                await s.Dm.SendMessageAsync(embed: Form(
-                    $"⚠️ {PlatformName(step)} format",
-                    $"That doesn't look right. **{PlatformName(step)}** tags look like `Name#1234` (a name, then `#`, then 4 digits).\n\n" +
-                    "Try again, or use the buttons above."));
-                return; // stay on this step
+                // Re-render the board so the inline error is visible, but stay put.
+                await EditBoardAsync(s, BuildBoardEmbed(s, error:
+                    $"⚠️ **{PlatformName(step)}** tags look like `Name#1234` (a name, then `#`, then 4 digits). Try again, or use the buttons."),
+                    BuildBoardComponents(s));
+                return;
             }
             SetField(s.Draft, step, text);
         }
 
-        // Leave the answered prompt visible (embed shows the result) with its
-        // buttons disabled, then move on.
-        await ResolvePromptByEditAsync(s, step);
-        await AdvanceAsync(s, NextStep(step));
+        await AdvanceAsync(s, NextStep(step), viaInteraction: null);
     }
 
-    private async Task AdvanceAsync(GamertagWizardSession s, GamertagWizardStep next)
+    // ─── Buttons ───────────────────────────────────────────────────────────
+
+    private async Task OnButtonExecutedAsync(SocketMessageComponent component)
+    {
+        if (!component.Data.CustomId.StartsWith(Prefix, StringComparison.Ordinal)) return;
+
+        if (!_sessions.TryGetValue(component.User.Id, out var s))
+        {
+            await RespondStaleAsync(component);
+            return;
+        }
+        if (IsExpired(s))
+        {
+            _sessions.TryRemove(component.User.Id, out _);
+            await RespondStaleAsync(component, "⌛ Timed out. Run `/gamertags` again.");
+            return;
+        }
+
+        s.LastActivityAt = DateTime.UtcNow;
+
+        var parts = component.Data.CustomId.Split(':'); // gtwiz:<kind>[:<step>:<action>]
+        var kind  = parts.Length > 1 ? parts[1] : string.Empty;
+        try
+        {
+            switch (kind)
+            {
+                case "save":   await OnSaveAsync(s, component);          break;
+                case "cancel": await OnCancelAsync(s, component);        break;
+                case "set":    await OnSetButtonAsync(s, component, parts); break;
+                default:       await component.DeferAsync();             break;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Gamertag wizard button {CustomId} failed", component.Data.CustomId);
+        }
+    }
+
+    /// <summary>
+    /// Handles a Keep / Skip / Clear button. The CustomId carries the step it
+    /// belongs to, so a click on a stale board state (step mismatch) is ignored.
+    /// </summary>
+    private async Task OnSetButtonAsync(GamertagWizardSession s, SocketMessageComponent c, string[] parts)
+    {
+        // Acknowledge immediately (deferred update: no visual change) so we never
+        // miss Discord's 3-second window even if the bot was briefly busy.
+        try
+        {
+            await c.DeferAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Set-button defer failed for {User}", s.Draft.UserId);
+            return;
+        }
+
+        if (parts.Length < 4) return;
+
+        var stepStr = parts[2];
+        var action  = parts[3];
+
+        if (!string.Equals(stepStr, s.Step.ToString(), StringComparison.Ordinal)) return;
+
+        var step = s.Step;
+        switch (action)
+        {
+            case "keep":
+            case "skip":
+                break;
+            case "clear":
+                SetField(s.Draft, step, string.Empty);
+                break;
+            default:
+                return;
+        }
+
+        await AdvanceAsync(s, NextStep(step), viaInteraction: c);
+    }
+
+    private async Task OnCancelAsync(GamertagWizardSession s, SocketMessageComponent c)
+    {
+        _sessions.TryRemove(s.Draft.UserId, out _);
+        await AckAsync(c);
+        await EditBoardViaInteractionAsync(c, BuildClosingEmbed("❌ Cancelled", "Nothing was saved."), null);
+    }
+
+    private async Task OnSaveAsync(GamertagWizardSession s, SocketMessageComponent c)
+    {
+        _sessions.TryRemove(s.Draft.UserId, out _);
+        await AckAsync(c);
+
+        var d = s.Draft;
+
+        // Show progress while the sheet write happens (can exceed the 3s window).
+        await EditBoardViaInteractionAsync(c, BuildClosingEmbed("⏳ Saving…", "Writing your gamertags to the roster sheet."), null);
+
+        try
+        {
+            await _sheetsService.WriteGamertagsAsync(
+                d.UserId, d.DiscordName, d.Ea, d.Steam, d.Psn, d.Xbox, d.Embark, d.Bungie);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to save gamertags for {User}", d.UserId);
+            await EditBoardViaInteractionAsync(c, BuildClosingEmbed("❌ Save failed",
+                "Couldn't write to the roster sheet. Please try `/gamertags` again or contact an admin."), null);
+            return;
+        }
+
+        await EditBoardViaInteractionAsync(c, BuildSavedEmbed(d), null);
+
+        if (d.GuildId != 0)
+            _onboardingReminder.NotifyGamertagCompleted(d.GuildId, d.UserId);
+    }
+
+    /// <summary>Advances to the next step and re-renders the board in place.</summary>
+    private async Task AdvanceAsync(GamertagWizardSession s, GamertagWizardStep next, SocketMessageComponent? viaInteraction)
     {
         s.Step = next;
-        if (next == GamertagWizardStep.Confirm)
-            await PromptConfirmAsync(s);
+        var embed   = BuildBoardEmbed(s);
+        var buttons = BuildBoardComponents(s);
+
+        if (viaInteraction is not null)
+            await EditBoardViaInteractionAsync(viaInteraction, embed, buttons);
         else
-            await PromptStepAsync(s);
+            await EditBoardAsync(s, embed, buttons);
+    }
+
+    // ─── Board rendering ───────────────────────────────────────────────────
+
+    private static readonly Color FormColor = new(0x5865F2);
+
+    /// <summary>Builds the board embed: the six-platform checklist plus the current question (or an inline error / confirm prompt).</summary>
+    private Embed BuildBoardEmbed(GamertagWizardSession s, string? error = null)
+    {
+        var d          = s.Draft;
+        var currentIdx = Array.IndexOf(PlatformOrder, s.Step); // -1 at Confirm
+        var atConfirm  = s.Step == GamertagWizardStep.Confirm;
+
+        var list = new StringBuilder();
+        for (var i = 0; i < PlatformOrder.Length; i++)
+        {
+            var p    = PlatformOrder[i];
+            var name = PlatformName(p);
+            var val  = GetField(d, p);
+            var shown = string.IsNullOrWhiteSpace(val) ? "—" : val;
+
+            if (atConfirm || i < currentIdx)
+                list.AppendLine($"✅ **{name}** — {shown}");
+            else if (i == currentIdx)
+                list.AppendLine($"▶️ **{name}**");
+            else
+                list.AppendLine($"▫️ {name}");
+        }
+
+        var eb = new EmbedBuilder()
+            .WithColor(FormColor)
+            .WithDescription(list.ToString());
+
+        if (atConfirm)
+        {
+            eb.WithTitle("📋 Confirm your gamertags")
+              .AddField("Ready to save?", "Tap **Save** to write these to the roster sheet, or **Cancel** to discard.")
+              .WithFooter("Nothing has been saved yet.");
+        }
+        else
+        {
+            var name = PlatformName(s.Step);
+            var val  = GetField(d, s.Step);
+            eb.WithTitle($"🎮 Your gamertags  ·  {StepNumber(s.Step)}/6");
+
+            string q;
+            if (!string.IsNullOrWhiteSpace(val))
+            {
+                q = $"Current: **{val}**\nSend a new tag to change it, or use the buttons below.";
+            }
+            else
+            {
+                q = $"Send your **{name}** tag, or tap **Skip**.";
+                var hint = PlatformHint(s.Step);
+                if (!string.IsNullOrEmpty(hint)) q += $"\n{hint}";
+            }
+
+            if (!string.IsNullOrWhiteSpace(error)) q = $"{error}\n\n{q}";
+            eb.AddField($"Now: {name}", q);
+            eb.WithFooter("Reply in this DM or use the buttons • \"cancel\" to quit • times out after 15 min");
+        }
+
+        return eb.Build();
+    }
+
+    /// <summary>Buttons for the current step: Keep/Clear or Skip on platform steps; Save/Cancel at Confirm.</summary>
+    private static MessageComponent BuildBoardComponents(GamertagWizardSession s)
+    {
+        var b = new ComponentBuilder();
+
+        if (s.Step == GamertagWizardStep.Confirm)
+        {
+            b.WithButton("Save",   $"{Prefix}save",   ButtonStyle.Success)
+             .WithButton("Cancel", $"{Prefix}cancel", ButtonStyle.Danger);
+            return b.Build();
+        }
+
+        var step     = s.Step;
+        var hasValue = !string.IsNullOrWhiteSpace(GetField(s.Draft, step));
+        if (hasValue)
+        {
+            b.WithButton("Keep",   $"{Prefix}set:{step}:keep",  ButtonStyle.Primary)
+             .WithButton("Clear",  $"{Prefix}set:{step}:clear", ButtonStyle.Secondary)
+             .WithButton("Cancel", $"{Prefix}cancel",           ButtonStyle.Danger);
+        }
+        else
+        {
+            b.WithButton("Skip",   $"{Prefix}set:{step}:skip", ButtonStyle.Primary)
+             .WithButton("Cancel", $"{Prefix}cancel",          ButtonStyle.Danger);
+        }
+        return b.Build();
+    }
+
+    /// <summary>The final "saved" board: every platform checked, with its value.</summary>
+    private Embed BuildSavedEmbed(GamertagDraft d)
+    {
+        var list = new StringBuilder();
+        foreach (var p in PlatformOrder)
+        {
+            var val = GetField(d, p);
+            list.AppendLine($"✅ **{PlatformName(p)}** — {(string.IsNullOrWhiteSpace(val) ? "—" : val)}");
+        }
+
+        return new EmbedBuilder()
+            .WithColor(Color.Green)
+            .WithTitle("🎮 Gamertags Saved!")
+            .WithDescription(list.ToString())
+            .WithFooter("Exported to the roster sheet • run /gamertags anytime to update.")
+            .Build();
+    }
+
+    private static Embed BuildClosingEmbed(string title, string body) =>
+        new EmbedBuilder()
+            .WithColor(FormColor)
+            .WithTitle(title)
+            .WithDescription(body)
+            .Build();
+
+    // ─── Board edit plumbing ───────────────────────────────────────────────
+
+    /// <summary>Edits the board out-of-band (typed-reply path), via the stored message handle.</summary>
+    private async Task EditBoardAsync(GamertagWizardSession s, Embed embed, MessageComponent? components = null)
+    {
+        if (s.BoardMessage is null) return;
+        try
+        {
+            await s.BoardMessage.ModifyAsync(m =>
+            {
+                m.Embed      = embed;
+                m.Components = components ?? new ComponentBuilder().Build();
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to edit gamertag board for {User}", s.Draft.UserId);
+        }
+    }
+
+    /// <summary>Edits the board through a button interaction (the board IS the interaction's message).</summary>
+    private async Task EditBoardViaInteractionAsync(SocketMessageComponent c, Embed embed, MessageComponent? components)
+    {
+        try
+        {
+            await c.ModifyOriginalResponseAsync(m =>
+            {
+                m.Embed      = embed;
+                m.Components = components ?? new ComponentBuilder().Build();
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to edit gamertag board via interaction");
+        }
+    }
+
+    /// <summary>Acknowledges a button interaction (deferred update — no visual change).</summary>
+    private async Task AckAsync(SocketMessageComponent c)
+    {
+        try { await c.DeferAsync(); }
+        catch (Exception ex) { _logger.LogDebug(ex, "Gamertag button ack failed"); }
+    }
+
+    /// <summary>A click arrived for a session that no longer exists — edit that stale board to an "expired" note.</summary>
+    private async Task RespondStaleAsync(SocketMessageComponent c, string? message = null)
+    {
+        var embed = BuildClosingEmbed("That gamertag setup has expired",
+            message is null ? "Run `/gamertags` to start again." : message + " Run `/gamertags` to start again.");
+        try
+        {
+            await c.UpdateAsync(m =>
+            {
+                m.Embed      = embed;
+                m.Components = new ComponentBuilder().Build();
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to clear stale gamertag board");
+        }
     }
 
     // ─── Step metadata helpers ─────────────────────────────────────────────
@@ -291,321 +597,11 @@ public sealed partial class GamertagWizard
         }
     }
 
-    private static int StepNumber(GamertagWizardStep step) => step switch
-    {
-        GamertagWizardStep.Ea     => 1,
-        GamertagWizardStep.Steam  => 2,
-        GamertagWizardStep.Psn    => 3,
-        GamertagWizardStep.Xbox   => 4,
-        GamertagWizardStep.Embark => 5,
-        GamertagWizardStep.Bungie => 6,
-        _                         => 6,
-    };
+    private static int StepNumber(GamertagWizardStep step) =>
+        Array.IndexOf(PlatformOrder, step) is var i && i >= 0 ? i + 1 : PlatformOrder.Length;
 
-    // ─── Prompts ───────────────────────────────────────────────────────────
+    // ─── Lifecycle ─────────────────────────────────────────────────────────
 
-    private async Task PromptStepAsync(GamertagWizardSession s)
-    {
-        var step    = s.Step;
-        var name    = PlatformName(step);
-        var current = GetField(s.Draft, step);
-        var title   = $"🎮 {name} tag  ·  {StepNumber(step)}/6";
-        var hasValue = !string.IsNullOrWhiteSpace(current);
-
-        string body;
-        var buttons = new ComponentBuilder();
-        if (hasValue)
-        {
-            body = $"Current: **{current}**\n\nSend a new tag to change it, or use the buttons below.";
-            buttons.WithButton("Keep",  $"{Prefix}set:{step}:keep",  ButtonStyle.Primary)
-                   .WithButton("Clear", $"{Prefix}set:{step}:clear", ButtonStyle.Secondary)
-                   .WithButton("Cancel", $"{Prefix}cancel",          ButtonStyle.Danger);
-        }
-        else
-        {
-            body = $"Send your **{name}** gamertag, or use the buttons below.";
-            var hint = PlatformHint(step);
-            if (!string.IsNullOrEmpty(hint)) body += $"\n{hint}";
-            buttons.WithButton("Skip",  $"{Prefix}set:{step}:skip", ButtonStyle.Primary)
-                   .WithButton("Cancel", $"{Prefix}cancel",         ButtonStyle.Danger);
-        }
-
-        s.LastPromptHadValue = hasValue;
-        s.LastPromptMessage  = await s.Dm.SendMessageAsync(embed: Form(title, body), components: buttons.Build());
-    }
-
-    /// <summary>
-    /// Resolves the current step's prompt after a typed reply: leaves the embed
-    /// in place (now showing the resulting value) and swaps the buttons for a
-    /// disabled set, so the answered prompt stays visible but inert.
-    /// </summary>
-    private async Task ResolvePromptByEditAsync(GamertagWizardSession s, GamertagWizardStep step)
-    {
-        var msg = s.LastPromptMessage;
-        var hadValue = s.LastPromptHadValue;
-        s.LastPromptMessage = null;
-        if (msg is null) return;
-
-        var embed   = BuildResolvedEmbed(step, GetField(s.Draft, step));
-        var buttons = BuildDisabledButtons(step, hadValue);
-        try { await msg.ModifyAsync(m => { m.Embed = embed; m.Components = buttons; }); }
-        catch (Exception ex) { _logger.LogDebug(ex, "Failed to resolve gamertag prompt for {User}", s.Draft.UserId); }
-    }
-
-    /// <summary>The answered-prompt embed: same title, now showing the final value (or "none").</summary>
-    private static Embed BuildResolvedEmbed(GamertagWizardStep step, string value)
-    {
-        var shown = string.IsNullOrWhiteSpace(value) ? "*(none)*" : $"**{value}**";
-        return new EmbedBuilder()
-            .WithColor(ResolvedColor)
-            .WithTitle($"✅ {PlatformName(step)} tag  ·  {StepNumber(step)}/6")
-            .WithDescription(shown)
-            .Build();
-    }
-
-    /// <summary>The same buttons the prompt showed, all disabled.</summary>
-    private static MessageComponent BuildDisabledButtons(GamertagWizardStep step, bool hadValue)
-    {
-        var b = new ComponentBuilder();
-        if (hadValue)
-        {
-            b.WithButton("Keep",  $"{Prefix}set:{step}:keep",  ButtonStyle.Primary,   disabled: true)
-             .WithButton("Clear", $"{Prefix}set:{step}:clear", ButtonStyle.Secondary, disabled: true)
-             .WithButton("Cancel", $"{Prefix}cancel",          ButtonStyle.Danger,    disabled: true);
-        }
-        else
-        {
-            b.WithButton("Skip",  $"{Prefix}set:{step}:skip", ButtonStyle.Primary, disabled: true)
-             .WithButton("Cancel", $"{Prefix}cancel",         ButtonStyle.Danger,  disabled: true);
-        }
-        return b.Build();
-    }
-
-    private async Task PromptConfirmAsync(GamertagWizardSession s)
-    {
-        s.Step = GamertagWizardStep.Confirm;
-        var d = s.Draft;
-
-        string F(string v) => string.IsNullOrWhiteSpace(v) ? "—" : v;
-
-        var embed = new EmbedBuilder()
-            .WithTitle("📋 Confirm your gamertags")
-            .WithColor(new Color(0x5865F2))
-            .AddField("EA",     F(d.Ea),     true)
-            .AddField("Steam",  F(d.Steam),  true)
-            .AddField("PSN",    F(d.Psn),    true)
-            .AddField("Xbox",   F(d.Xbox),   true)
-            .AddField("Embark", F(d.Embark), true)
-            .AddField("Bungie", F(d.Bungie), true)
-            .WithFooter("Save writes these to the roster sheet. Nothing has been saved yet.")
-            .Build();
-
-        var buttons = new ComponentBuilder()
-            .WithButton("Save", $"{Prefix}save",   ButtonStyle.Success)
-            .WithButton("Cancel", $"{Prefix}cancel", ButtonStyle.Danger)
-            .Build();
-
-        await s.Dm.SendMessageAsync(
-            "Here's everything — save it?", embed: embed, components: buttons);
-    }
-
-    // ─── Buttons (Save / Cancel) ───────────────────────────────────────────
-
-    private async Task OnButtonExecutedAsync(SocketMessageComponent component)
-    {
-        if (!component.Data.CustomId.StartsWith(Prefix, StringComparison.Ordinal)) return;
-
-        if (!_sessions.TryGetValue(component.User.Id, out var s))
-        {
-            await ClearButtons(component, "That gamertag setup has expired. Run `/gamertags` to start again.");
-            return;
-        }
-        if (IsExpired(s))
-        {
-            _sessions.TryRemove(component.User.Id, out _);
-            await ClearButtons(component, "⌛ Timed out. Run `/gamertags` again.");
-            return;
-        }
-
-        s.LastActivityAt = DateTime.UtcNow;
-
-        var parts = component.Data.CustomId.Split(':'); // gtwiz:<kind>[:<step>:<action>]
-        var kind  = parts.Length > 1 ? parts[1] : string.Empty;
-        try
-        {
-            switch (kind)
-            {
-                case "save":   await OnSaveAsync(s, component);   break;
-                case "cancel": await OnCancelAsync(s, component); break;
-                case "set":    await OnSetButtonAsync(s, component, parts); break;
-                default:       await component.DeferAsync();      break;
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Gamertag wizard button {CustomId} failed", component.Data.CustomId);
-        }
-    }
-
-    /// <summary>
-    /// Handles a Keep / Skip / Clear button on a platform step. The CustomId
-    /// carries the step it belongs to, so a click on a stale earlier prompt
-    /// (step mismatch) is ignored rather than mis-applied.
-    /// </summary>
-    private async Task OnSetButtonAsync(GamertagWizardSession s, SocketMessageComponent c, string[] parts)
-    {
-        // Acknowledge immediately with a deferred update (type 6): it changes
-        // nothing on screen and doesn't resize the clicked message, so we never
-        // miss Discord's 3-second window even if the bot was briefly busy (e.g.
-        // mid-restart when a click arrives from another device). We do the real
-        // work below and edit the message afterwards via the interaction.
-        try
-        {
-            await c.DeferAsync();
-        }
-        catch (Exception ex)
-        {
-            // Token already expired/invalid (bot was down past the window) — the
-            // member can just click again now that we're responsive.
-            _logger.LogDebug(ex, "Set-button defer failed for {User}", s.Draft.UserId);
-            return;
-        }
-
-        if (parts.Length < 4) return;
-
-        var stepStr = parts[2];
-        var action  = parts[3];
-
-        // Guard against a click on a previous step's (now stale) buttons.
-        if (!string.Equals(stepStr, s.Step.ToString(), StringComparison.Ordinal)) return;
-
-        var step     = s.Step;
-        var hadValue = s.LastPromptHadValue;
-
-        switch (action)
-        {
-            case "keep":
-            case "skip":
-                // Leave the current value (possibly empty) untouched.
-                break;
-            case "clear":
-                SetField(s.Draft, step, string.Empty);
-                break;
-            default:
-                return;
-        }
-
-        // Build the resolved view of the clicked prompt now, before AdvanceAsync
-        // changes s.Step.
-        var embed   = BuildResolvedEmbed(step, GetField(s.Draft, step));
-        var buttons = BuildDisabledButtons(step, hadValue);
-
-        // Advance FIRST. Posting the next prompt as a brand-new message is what
-        // makes Discord's client scroll to the bottom, and it only does so while
-        // the member is still pinned there. If we resized the clicked message
-        // first, a short prompt — like a "Skip" step — could nudge the view a few
-        // pixels off the bottom and the next message wouldn't auto-scroll.
-        // Editing the now-older clicked message afterwards doesn't move scroll.
-        await AdvanceAsync(s, NextStep(step));
-
-        // Resolve the clicked message in place: its embed stays (now showing the
-        // result) with disabled buttons. After a deferred update, the clicked
-        // message is the interaction's original response.
-        try
-        {
-            await c.ModifyOriginalResponseAsync(m =>
-            {
-                m.Embed      = embed;
-                m.Components = buttons;
-            });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Set-button resolve failed for {User}", s.Draft.UserId);
-        }
-    }
-
-    private async Task OnSaveAsync(GamertagWizardSession s, SocketMessageComponent c)
-    {
-        _sessions.TryRemove(s.Draft.UserId, out _);
-
-        // Ack + strip buttons immediately (also prevents a double-submit). The
-        // sheet write can exceed Discord's 3-second interaction window.
-        try
-        {
-            await c.UpdateAsync(m =>
-            {
-                m.Content    = "⏳ Saving your gamertags…";
-                m.Embed      = null;
-                m.Components = new ComponentBuilder().Build();
-            });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Save ack (UpdateAsync) failed for {User}", s.Draft.UserId);
-        }
-
-        var d = s.Draft;
-        try
-        {
-            await _sheetsService.WriteGamertagsAsync(
-                d.UserId, d.DiscordName, d.Ea, d.Steam, d.Psn, d.Xbox, d.Embark, d.Bungie);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to save gamertags for {User}", d.UserId);
-            await FinalizeAsync(c, "❌ Failed to save your gamertags. Please try `/gamertags` again or contact an admin.");
-            return;
-        }
-
-        string Field(string v) => string.IsNullOrWhiteSpace(v) ? "—" : v;
-        var saved = new EmbedBuilder()
-            .WithTitle("🎮 Gamertags Saved!")
-            .WithColor(Color.Green)
-            .AddField("EA",     Field(d.Ea),     true)
-            .AddField("Steam",  Field(d.Steam),  true)
-            .AddField("PSN",    Field(d.Psn),    true)
-            .AddField("Xbox",   Field(d.Xbox),   true)
-            .AddField("Embark", Field(d.Embark), true)
-            .AddField("Bungie", Field(d.Bungie), true)
-            .WithFooter("Your gamertags have been exported to the roster sheet.")
-            .Build();
-
-        try { await c.Channel.SendMessageAsync(embed: saved); }
-        catch (Exception ex) { _logger.LogDebug(ex, "Failed to send saved confirmation to {User}", d.UserId); }
-
-        await FinalizeAsync(c, "✅ **Saved!** You can run `/gamertags` again anytime to update them.");
-
-        // Triggers a 24h onboarding reminder cleanup if this member was still a Guest.
-        if (d.GuildId != 0)
-            _onboardingReminder.NotifyGamertagCompleted(d.GuildId, d.UserId);
-    }
-
-    private async Task OnCancelAsync(GamertagWizardSession s, SocketMessageComponent c)
-    {
-        _sessions.TryRemove(s.Draft.UserId, out _);
-        await ClearButtons(c, "❌ Cancelled. Nothing was saved.");
-    }
-
-    // ─── Helpers ───────────────────────────────────────────────────────────
-
-    private static readonly Color FormColor = new(0x5865F2);
-
-    /// <summary>Muted grey for an answered/resolved prompt, so it visibly recedes behind the active one.</summary>
-    private static readonly Color ResolvedColor = new(0x4E5058);
-
-    /// <summary>Builds the consistent "form" embed used for every wizard prompt.</summary>
-    private static Embed Form(string title, string? body = null)
-    {
-        var eb = new EmbedBuilder()
-            .WithColor(FormColor)
-            .WithTitle(title)
-            .WithFooter("Reply in this DM • type \"cancel\" to quit • times out after 15 min");
-        if (!string.IsNullOrWhiteSpace(body)) eb.WithDescription(body);
-        return eb.Build();
-    }
-
-    /// <summary>Times out idle sessions: DMs the member, then drops the session.</summary>
     private async Task SweepIdleAsync()
     {
         try
@@ -615,13 +611,8 @@ public sealed partial class GamertagWizard
                 if (!IsExpired(kv.Value)) continue;
                 if (_sessions.TryRemove(kv.Key, out var s))
                 {
-                    try
-                    {
-                        await s.Dm.SendMessageAsync(embed: Form(
-                            "⌛ Gamertag setup timed out",
-                            "Looks like you stepped away — I've cancelled this setup and **nothing was saved**. Run `/gamertags` whenever you're ready to start again."));
-                    }
-                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to send gamertag timeout DM to {User}", kv.Key); }
+                    await EditBoardAsync(s, BuildClosingEmbed("⌛ Gamertag setup timed out",
+                        "Looks like you stepped away — I've cancelled this setup and **nothing was saved**. Run `/gamertags` whenever you're ready."));
                 }
             }
         }
@@ -636,39 +627,6 @@ public sealed partial class GamertagWizard
         foreach (var kv in _sessions)
             if (IsExpired(kv.Value))
                 _sessions.TryRemove(kv.Key, out _);
-    }
-
-    private async Task ClearButtons(SocketMessageComponent c, string content)
-    {
-        try
-        {
-            await c.UpdateAsync(m =>
-            {
-                m.Content    = content;
-                m.Embed      = null;
-                m.Components = new ComponentBuilder().Build();
-            });
-        }
-        catch (Exception ex) { _logger.LogDebug(ex, "Failed to clear gamertag wizard buttons"); }
-    }
-
-    /// <summary>
-    /// Edits the already-acknowledged Save message to its final text. Used on the
-    /// save path because that path already called UpdateAsync (the immediate ack),
-    /// and a component interaction can only be updated once.
-    /// </summary>
-    private async Task FinalizeAsync(SocketMessageComponent c, string content)
-    {
-        try
-        {
-            await c.ModifyOriginalResponseAsync(m =>
-            {
-                m.Content    = content;
-                m.Embed      = null;
-                m.Components = new ComponentBuilder().Build();
-            });
-        }
-        catch (Exception ex) { _logger.LogDebug(ex, "Failed to finalize gamertag save message"); }
     }
 
     private async Task SafeSend(GamertagWizardSession s, string content)
