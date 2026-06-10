@@ -247,11 +247,11 @@ public sealed class GamertagSetupCommandHandler
             **How it Works:**
             - **Getting Started:** Click the **Enter Gamertags** button below, or run `/gamertags`.
             - **Check your DMs:** The bot will message you and walk you through each platform — **EA**, **Steam**, **PSN**, **Xbox**, **Embark**, and **Bungie** — one at a time.
-            - **Note:** For any platform you don't use, just type `skip`.
+            - **Answering:** For each one, type your tag or tap a button (**Skip** it if you don't use that platform).
 
             **Managing Your Info:**
-            - **Confirmation:** You'll see a summary to review, then a confirmation once you save.
-            - **Updates:** If your tags ever change, just run it again. It shows your current tags and only changes what you update.{{rosterSection}}
+            - **Confirmation:** You'll see a summary of everything, then tap **Save** to finish.
+            - **Updates:** Run it again anytime — it shows your current tags and only changes the ones you update.{{rosterSection}}
             """;
     }
 
