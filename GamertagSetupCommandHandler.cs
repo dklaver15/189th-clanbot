@@ -242,17 +242,16 @@ public sealed class GamertagSetupCommandHandler
         return $$"""
             🎮 **How to Register Your Gamertags**
 
-            To keep the master roster updated, we use a bot button to track everyone's handles across different platforms.
+            To keep the master roster updated, we track everyone's handles across different platforms.
 
             **How it Works:**
-            - **Getting Started:** Click the **Enter Gamertags** button below.
-            - **Step 1:** A popup will appear for your **EA**, **Steam**, and **PSN** tags.
-            - **Step 2:** Click the **Continue** button to enter your **Xbox**, **Embark**, and **Bungie** tags.
-            - **Note:** If a field doesn't apply to you, just leave it blank!
+            - **Getting Started:** Click the **Enter Gamertags** button below, or run `/gamertags`.
+            - **Check your DMs:** The bot will message you and walk you through each platform — **EA**, **Steam**, **PSN**, **Xbox**, **Embark**, and **Bungie** — one at a time.
+            - **Note:** For any platform you don't use, just type `skip`.
 
             **Managing Your Info:**
-            - **Confirmation:** You'll receive a message confirming everything you submitted once you're finished.
-            - **Updates:** If your tags ever change, just click the button again. It will automatically update your existing entry.{{rosterSection}}
+            - **Confirmation:** You'll see a summary to review, then a confirmation once you save.
+            - **Updates:** If your tags ever change, just run it again. It shows your current tags and only changes what you update.{{rosterSection}}
             """;
     }
 

@@ -19,6 +19,7 @@ public class DiscordBotService : IHostedService
     private readonly DiscordSocketClient _client;
     private readonly ActivityTrackingHandler _activityHandler;
     private readonly GamertagCommandHandler _gamertagHandler;
+    private readonly GamertagWizard _gamertagWizard;
     private readonly GamertagSetupCommandHandler _gamertagSetupHandler;
     private readonly LookupCommandHandler _lookupHandler;
     private readonly PromoEligibilityCommandHandler _promoEligibilityHandler;
@@ -78,6 +79,7 @@ public class DiscordBotService : IHostedService
         DiscordSocketClient client,
         ActivityTrackingHandler activityHandler,
         GamertagCommandHandler gamertagHandler,
+        GamertagWizard gamertagWizard,
         GamertagSetupCommandHandler gamertagSetupHandler,
         LookupCommandHandler lookupHandler,
         PromoEligibilityCommandHandler promoEligibilityHandler,
@@ -136,6 +138,7 @@ public class DiscordBotService : IHostedService
         _client                      = client;
         _activityHandler             = activityHandler;
         _gamertagHandler             = gamertagHandler;
+        _gamertagWizard              = gamertagWizard;
         _gamertagSetupHandler        = gamertagSetupHandler;
         _lookupHandler               = lookupHandler;
         _promoEligibilityHandler     = promoEligibilityHandler;
@@ -199,6 +202,7 @@ public class DiscordBotService : IHostedService
 
         _activityHandler.Register(_client);
         _gamertagHandler.Register(_client);
+        _gamertagWizard.Register(_client);
         _gamertagSetupHandler.Register(_client);
         _lookupHandler.Register(_client);
         _promoEligibilityHandler.Register(_client);
@@ -311,11 +315,15 @@ public class DiscordBotService : IHostedService
                         "The user to clear", isRequired: true)
                     .Build(),
 
+                // /gamertags — member-facing. Opens the DM wizard that walks
+                // them through their six platform tags one at a time (replaces
+                // the old two-page modal). The "Enter Gamertags" button opens
+                // the same wizard. Handled by GamertagCommandHandler.
+                GamertagCommandHandler.BuildCommand(),
+
                 // /setup-gamertags — posts (or re-posts with force:true) the
                 // persistent "Enter Gamertags" button to the configured
-                // instructions channel. Replaced the old member-facing
-                // /gamertags slash command — members now hit the button
-                // instead. HQ-gated via BotConfig.GamertagSetupRoleId.
+                // instructions channel. HQ-gated via BotConfig.GamertagSetupRoleId.
                 GamertagSetupCommandHandler.BuildCommand(),
 
                 new SlashCommandBuilder()

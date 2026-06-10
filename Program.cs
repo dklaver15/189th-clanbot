@@ -187,14 +187,24 @@ try
     builder.Services.AddSingleton<OnboardingReminderHandler>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<OnboardingReminderHandler>());
 
+    // GamertagWizard: the DM state machine behind /gamertags (and the "Enter
+    // Gamertags" button). Self-registers MessageReceived + ButtonExecuted, walks
+    // the member through their six platform tags one at a time, and writes the
+    // result to the roster sheet. Depends on OnboardingReminderHandler (above)
+    // and GoogleSheetsService.
+    builder.Services.AddSingleton<GamertagWizard>();
+
+    // GamertagCommandHandler: the /gamertags slash command + "Enter Gamertags"
+    // button — both open the DM wizard (GamertagWizard). Replaced the old
+    // two-page modal flow.
     builder.Services.AddSingleton<GamertagCommandHandler>();
 
     // GamertagSetupCommandHandler: /setup-gamertags slash command (HQ-gated
     // via BotConfig.GamertagSetupRoleId or Administrator). Posts the
     // persistent "Enter Gamertags" button to the configured instructions
     // channel. Idempotent — re-running without force:true reports the
-    // existing message via BotState.GamertagButtonMessageId. Pairs with
-    // GamertagCommandHandler, which owns the button-click → modal flow.
+    // existing message via BotState.GamertagButtonMessageId. The button click
+    // is handled by GamertagCommandHandler, which opens the DM wizard.
     builder.Services.AddSingleton<GamertagSetupCommandHandler>();
 
     // LookupCommandHandler: /lookup slash command. Takes a Discord user picker
