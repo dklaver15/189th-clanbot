@@ -1,5 +1,6 @@
 using ClanGuardBot.Data;
 using ClanGuardBot.Models;
+using ClanGuardBot.Services;
 using Discord.WebSocket;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -8,7 +9,12 @@ using Microsoft.Extensions.Logging;
 namespace ClanGuardBot.Handlers;
 
 /// <summary>
-/// Cleans up per-member promotion state when a user leaves the guild.
+/// Cleans up per-member state when a user leaves the guild (which covers
+/// voluntary leaves, kicks, and bans — all surface as the gateway UserLeft
+/// event). Two things are removed:
+///   • the member's RankHistory row(s) in the local DB (promotion state), and
+///   • the member's row in the gamertag roster sheet (operational data that
+///     shouldn't linger for people who are gone).
 ///
 /// ── Why this exists ──
 /// RankHistory rows are keyed by (GuildId, UserId) and track when a user's
@@ -31,27 +37,35 @@ namespace ClanGuardBot.Handlers;
 /// and avoids surprising future code that reads RankHistory directly.
 ///
 /// ── Scope ──
-/// Only RankHistory is removed here. Other per-user tables (MessageEvents,
-/// VoiceSessions, EventAttendance, AwolRecords, InviteJoins, etc.) are
-/// intentionally left alone — they're audit/analytics data that survives
-/// membership transitions by design, and several have their own age-based
-/// prune jobs.
+/// RankHistory (DB) and the member's gamertag roster row (Google Sheet) are
+/// removed here. Other per-user tables (MessageEvents, VoiceSessions,
+/// EventAttendance, AwolRecords, InviteJoins, etc.) are intentionally left
+/// alone — they're audit/analytics data that survives membership transitions by
+/// design, and several have their own age-based prune jobs. The gamertag row is
+/// matched by Discord ID only (see GoogleSheetsService.DeleteGamertagsAsync).
 ///
 /// ── Failure handling ──
-/// Failures here are logged but never thrown — a DB hiccup on a leave event
-/// must not crash the gateway. The GetRankInfoAsync defense still protects
-/// the auto-promotion path if this cleanup pass misses a leave.
+/// Both cleanups are fire-and-forget and their failures are logged but never
+/// thrown — a DB or Sheets-API hiccup on a leave event must not crash the
+/// gateway. The GetRankInfoAsync defense still protects the auto-promotion path
+/// if the RankHistory cleanup misses a leave. If a leave is missed entirely
+/// (e.g. the bot was offline, since Discord doesn't replay UserLeft), the stale
+/// gamertag row simply persists until that member is re-processed or removed
+/// manually.
 /// </summary>
 public class MemberLifecycleHandler
 {
     private readonly IServiceProvider _services;
+    private readonly GoogleSheetsService _sheetsService;
     private readonly ILogger<MemberLifecycleHandler> _logger;
 
     public MemberLifecycleHandler(
         IServiceProvider services,
+        GoogleSheetsService sheetsService,
         ILogger<MemberLifecycleHandler> logger)
     {
         _services = services;
+        _sheetsService = sheetsService;
         _logger = logger;
     }
 
@@ -65,7 +79,24 @@ public class MemberLifecycleHandler
     {
         // Fire-and-forget; gateway handlers must not block the event loop.
         _ = CleanupRankHistoryAsync(guild.Id, user.Id, user.Username);
+        _ = CleanupGamertagsAsync(user.Id, user.Username);
         return Task.CompletedTask;
+    }
+
+    private async Task CleanupGamertagsAsync(ulong userId, string username)
+    {
+        try
+        {
+            var removed = await _sheetsService.DeleteGamertagsAsync(userId);
+            if (removed)
+                _logger.LogInformation(
+                    "Removed gamertag roster row for departing user {Username} ({UserId})", username, userId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to remove gamertag roster row for departing user {Username} ({UserId})", username, userId);
+        }
     }
 
     private async Task CleanupRankHistoryAsync(ulong guildId, ulong userId, string username)

@@ -23,6 +23,20 @@ public record GamertagLookupResult(
     string Bungie);
 
 /// <summary>
+/// Outcome of a roster reconcile sweep.
+///   • <see cref="Deleted"/>       — rows removed (departed members, by ID).
+///   • <see cref="Kept"/>          — ID rows whose member is still in the guild.
+///   • <see cref="LegacySkipped"/> — rows with no parseable Discord ID; never
+///                                   auto-deleted (can't safely confirm departure).
+///   • <see cref="Aborted"/>       — a safety brake tripped (too many candidates,
+///                                   or the sheet couldn't be resolved); nothing
+///                                   was deleted this sweep.
+///   • <see cref="Candidates"/>    — how many rows looked departed (deleted only
+///                                   when not aborted).
+/// </summary>
+public record GamertagReconcileResult(int Deleted, int Kept, int LegacySkipped, int Candidates, bool Aborted);
+
+/// <summary>
 /// Writes gamertag data to a Google Sheet.
 /// Expects a service account credentials JSON file.
 /// </summary>
@@ -128,6 +142,204 @@ public class GoogleSheetsService
         _logger.LogInformation("Appended gamertags for {DiscordName} ({DiscordId})", discordName, discordId);
 
         await SortSheetBySecondColumnAsync(service, spreadsheetId, sheetName);
+    }
+
+    /// <summary>
+    /// Removes a member's row from the roster sheet, matched by Discord ID in
+    /// column A, and physically deletes the row so no blank gap is left behind.
+    /// Called when a member leaves / is kicked / is banned. Returns true if a row
+    /// was removed.
+    ///
+    /// Matches by Discord ID ONLY — legacy rows with no stored ID (name in
+    /// column A or B) are intentionally left alone, because matching a departure
+    /// by display name risks deleting the wrong person when names collide or
+    /// change.
+    /// </summary>
+    public async Task<bool> DeleteGamertagsAsync(ulong discordId)
+    {
+        var credential = GoogleCredential
+            .FromFile(_config.GoogleCredentialsPath)
+            .CreateScoped(SheetsService.Scope.Spreadsheets);
+
+        using var service = new SheetsService(new BaseClientService.Initializer
+        {
+            HttpClientInitializer = credential,
+            ApplicationName = "ClanGuardBot"
+        });
+
+        var spreadsheetId = _config.GoogleSpreadsheetId;
+        var sheetName     = _config.GoogleSheetName;
+        var range         = $"{sheetName}!A:H";
+
+        var getResponse = await service.Spreadsheets.Values.Get(spreadsheetId, range).ExecuteAsync();
+        if (getResponse.Values is null) return false;
+
+        var idStr    = discordId.ToString();
+        var rowIndex = -1; // 0-based index into the sheet (row 0 is the header)
+        for (var i = 0; i < getResponse.Values.Count; i++)
+        {
+            var row = getResponse.Values[i];
+            if (row.Count > 0 && string.Equals(row[0]?.ToString(), idStr, StringComparison.Ordinal))
+            {
+                rowIndex = i;
+                break;
+            }
+        }
+
+        if (rowIndex < 0)
+        {
+            _logger.LogDebug("No gamertag row to delete for {DiscordId}", discordId);
+            return false;
+        }
+
+        // DeleteDimension needs the numeric sheet ID, not its name.
+        var spreadsheet = await service.Spreadsheets.Get(spreadsheetId).ExecuteAsync();
+        var sheet = spreadsheet.Sheets.FirstOrDefault(s => s.Properties.Title == sheetName);
+        if (sheet is null)
+        {
+            _logger.LogWarning("Sheet {SheetName} not found — cannot delete gamertag row for {DiscordId}", sheetName, discordId);
+            return false;
+        }
+        var sheetId = sheet.Properties.SheetId ?? 0;
+
+        var deleteRequest = new Request
+        {
+            DeleteDimension = new DeleteDimensionRequest
+            {
+                Range = new DimensionRange
+                {
+                    SheetId    = sheetId,
+                    Dimension  = "ROWS",
+                    StartIndex = rowIndex,     // inclusive, 0-based
+                    EndIndex   = rowIndex + 1, // exclusive
+                }
+            }
+        };
+
+        await service.Spreadsheets.BatchUpdate(
+            new BatchUpdateSpreadsheetRequest { Requests = new List<Request> { deleteRequest } },
+            spreadsheetId).ExecuteAsync();
+
+        _logger.LogInformation("Deleted gamertag row {Row} for departing member {DiscordId}", rowIndex + 1, discordId);
+        return true;
+    }
+
+    /// <summary>
+    /// Reconciles the roster sheet against the current guild membership: removes
+    /// rows for members who are no longer present. Used by the offline-gap
+    /// reconciler to catch departures that happened while the bot was down (when
+    /// Discord doesn't replay UserLeft).
+    ///
+    /// ── Legacy rows ──
+    /// A row is only ever deleted when column A holds a parseable Discord ID that
+    /// is NOT in <paramref name="currentMemberIds"/>. Rows with no ID (blank
+    /// column A, or a legacy name-in-A row) are COUNTED but never deleted — there
+    /// is no reliable key to confirm they belong to a departed member, and
+    /// matching by display name risks deleting the wrong person. Those rows
+    /// become reconcilable once that member re-runs /gamertags (which backfills
+    /// their ID).
+    ///
+    /// ── Safety brake ──
+    /// If the number of departed candidates exceeds <paramref name="maxDeletions"/>,
+    /// the sweep deletes NOTHING and reports Aborted — a guard against a botched
+    /// member-list fetch making most of the roster look departed. The caller is
+    /// expected to also verify the member list is non-empty before calling.
+    /// </summary>
+    public async Task<GamertagReconcileResult> ReconcileGamertagsAsync(
+        IReadOnlySet<ulong> currentMemberIds, int maxDeletions)
+    {
+        var credential = GoogleCredential
+            .FromFile(_config.GoogleCredentialsPath)
+            .CreateScoped(SheetsService.Scope.Spreadsheets);
+
+        using var service = new SheetsService(new BaseClientService.Initializer
+        {
+            HttpClientInitializer = credential,
+            ApplicationName = "ClanGuardBot"
+        });
+
+        var spreadsheetId = _config.GoogleSpreadsheetId;
+        var sheetName     = _config.GoogleSheetName;
+        var range         = $"{sheetName}!A:H";
+
+        var getResponse = await service.Spreadsheets.Values.Get(spreadsheetId, range).ExecuteAsync();
+        var values = getResponse.Values;
+        if (values is null || values.Count <= 1)
+            return new GamertagReconcileResult(0, 0, 0, 0, Aborted: false);
+
+        var toDelete      = new List<int>(); // 0-based sheet row indices
+        var legacySkipped = 0;
+        var kept          = 0;
+
+        // Row 0 is the header — start at 1.
+        for (var i = 1; i < values.Count; i++)
+        {
+            var row  = values[i];
+            var colA = row.Count > 0 ? row[0]?.ToString() : null;
+
+            if (ulong.TryParse(colA, out var id))
+            {
+                if (currentMemberIds.Contains(id)) kept++;
+                else toDelete.Add(i);
+            }
+            else
+            {
+                // No parseable Discord ID — legacy / name-only row. Never auto-delete.
+                legacySkipped++;
+            }
+        }
+
+        if (toDelete.Count == 0)
+            return new GamertagReconcileResult(0, kept, legacySkipped, 0, Aborted: false);
+
+        if (toDelete.Count > maxDeletions)
+        {
+            _logger.LogWarning(
+                "Gamertag reconcile: {Count} rows look departed, over the safety cap of {Cap}. " +
+                "Deleting nothing this sweep — likely an incomplete guild member list. Verify, then " +
+                "re-run or clean up manually.",
+                toDelete.Count, maxDeletions);
+            return new GamertagReconcileResult(0, kept, legacySkipped, toDelete.Count, Aborted: true);
+        }
+
+        // DeleteDimension needs the numeric sheet ID.
+        var spreadsheet = await service.Spreadsheets.Get(spreadsheetId).ExecuteAsync();
+        var sheet = spreadsheet.Sheets.FirstOrDefault(s => s.Properties.Title == sheetName);
+        if (sheet is null)
+        {
+            _logger.LogWarning("Sheet {SheetName} not found — gamertag reconcile aborted", sheetName);
+            return new GamertagReconcileResult(0, kept, legacySkipped, toDelete.Count, Aborted: true);
+        }
+        var sheetId = sheet.Properties.SheetId ?? 0;
+
+        // Delete bottom-up (highest index first): requests apply sequentially, so
+        // removing a lower row would shift the indices of higher rows. Descending
+        // order keeps every remaining index valid.
+        var requests = toDelete
+            .OrderByDescending(idx => idx)
+            .Select(idx => new Request
+            {
+                DeleteDimension = new DeleteDimensionRequest
+                {
+                    Range = new DimensionRange
+                    {
+                        SheetId    = sheetId,
+                        Dimension  = "ROWS",
+                        StartIndex = idx,
+                        EndIndex   = idx + 1,
+                    }
+                }
+            })
+            .ToList();
+
+        await service.Spreadsheets.BatchUpdate(
+            new BatchUpdateSpreadsheetRequest { Requests = requests }, spreadsheetId).ExecuteAsync();
+
+        _logger.LogInformation(
+            "Gamertag reconcile: removed {Deleted} departed row(s); kept {Kept}; skipped {Legacy} legacy/no-ID row(s)",
+            toDelete.Count, kept, legacySkipped);
+
+        return new GamertagReconcileResult(toDelete.Count, kept, legacySkipped, toDelete.Count, Aborted: false);
     }
 
     /// <summary>

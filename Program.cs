@@ -68,12 +68,12 @@ try
     builder.Services.AddSingleton<SlashCommandHandler>();
     builder.Services.AddSingleton<RankTrackingHandler>();
 
-    // MemberLifecycleHandler: hooks UserLeft to clear RankHistory rows for
-    // departing members. Prevents stale AssignedAt timestamps from prior
-    // memberships influencing auto-promotion when a former member rejoins.
-    // PromotionService.GetRankInfoAsync has a read-side defense for the same
-    // case (compares JoinedAt to AssignedAt) — this handler keeps the DB
-    // honest. Register() is called from DiscordBotService.
+    // MemberLifecycleHandler: hooks UserLeft (leaves, kicks, bans) to clean up
+    // departing members — clears their RankHistory rows and removes their
+    // gamertag roster-sheet row. Clearing RankHistory prevents stale AssignedAt
+    // timestamps from prior memberships influencing auto-promotion when a former
+    // member rejoins (PromotionService.GetRankInfoAsync also has a read-side
+    // defense). Register() is called from DiscordBotService.
     builder.Services.AddSingleton<MemberLifecycleHandler>();
 
     // DepartureCaptureHandler: retention feature. Hooks UserLeft +
@@ -99,6 +99,15 @@ try
     // DiscordBotService.
     builder.Services.AddSingleton<MemberRosterReconciler>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<MemberRosterReconciler>());
+
+    // GamertagRosterReconciler: offline-gap cleanup for the gamertag roster
+    // sheet. The live path (MemberLifecycleHandler on UserLeft) removes a row
+    // the moment someone leaves; this sweep catches departures that happened
+    // while the bot was offline. On startup + every RetentionRosterReconcileHours
+    // it downloads the full member list and deletes sheet rows whose Discord ID
+    // is no longer in the guild. Legacy rows without an ID are never deleted.
+    // Disabled automatically when no roster spreadsheet is configured.
+    builder.Services.AddHostedService<GamertagRosterReconciler>();
 
 
     // AccountAgeGateHandler: server-protection feature #1. Hooks UserJoined,
