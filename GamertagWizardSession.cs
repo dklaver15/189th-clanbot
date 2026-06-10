@@ -55,4 +55,14 @@ public sealed class GamertagWizardSession
     public IDMChannel Dm { get; set; } = null!;
     public DateTime StartedAt { get; set; }
     public DateTime LastActivityAt { get; set; }
+
+    /// <summary>
+    /// The most recent platform prompt message, kept so it can be resolved once
+    /// the step is answered (by click or by typing) — the embed stays visible
+    /// with its buttons disabled, so all six choices remain on screen.
+    /// </summary>
+    public IUserMessage? LastPromptMessage { get; set; }
+
+    /// <summary>Whether the current prompt offered Keep/Clear (true) or Skip (false) — drives the disabled-button layout when it's resolved.</summary>
+    public bool LastPromptHadValue { get; set; }
 }

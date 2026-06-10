@@ -131,9 +131,9 @@ public sealed partial class GamertagWizard
         {
             var intro = existing is null
                 ? "🎮 **Let's register your gamertags!** I'll ask about one platform at a time.\n\n" +
-                  "For any platform you don't use, just type `skip`. Type `cancel` anytime to quit — nothing is saved until the end."
+                  "For each one, send your tag or tap **Skip**. Tap **Cancel** anytime to quit — nothing is saved until the end."
                 : "🎮 **Let's update your gamertags!** I'll go through one platform at a time and show what you've got now.\n\n" +
-                  "Send a new tag to change it, type `keep` to leave it, or `clear` to remove it. Type `cancel` to quit — nothing is saved until the end.";
+                  "Send a new tag to change it, or use the **Keep** / **Clear** buttons. Tap **Cancel** to quit — nothing is saved until the end.";
             await dm.SendMessageAsync(intro);
             await PromptStepAsync(session);
             return true;
@@ -172,18 +172,12 @@ public sealed partial class GamertagWizard
             return;
         }
 
+        // Confirm is a button step — ignore stray text there.
+        if (s.Step == GamertagWizardStep.Confirm) return;
+
         try
         {
-            switch (s.Step)
-            {
-                case GamertagWizardStep.Ea:     await HandlePlatformAsync(s, text, "EA",     v => s.Draft.Ea     = v, GamertagWizardStep.Steam);  break;
-                case GamertagWizardStep.Steam:  await HandlePlatformAsync(s, text, "Steam",  v => s.Draft.Steam  = v, GamertagWizardStep.Psn);    break;
-                case GamertagWizardStep.Psn:    await HandlePlatformAsync(s, text, "PSN",    v => s.Draft.Psn    = v, GamertagWizardStep.Xbox);   break;
-                case GamertagWizardStep.Xbox:   await HandlePlatformAsync(s, text, "Xbox",   v => s.Draft.Xbox   = v, GamertagWizardStep.Embark); break;
-                case GamertagWizardStep.Embark: await HandlePlatformAsync(s, text, "Embark", v => s.Draft.Embark = v, GamertagWizardStep.Bungie, requireDiscriminator: true); break;
-                case GamertagWizardStep.Bungie: await HandlePlatformAsync(s, text, "Bungie", v => s.Draft.Bungie = v, GamertagWizardStep.Confirm, requireDiscriminator: true); break;
-                // Confirm is a button step — ignore stray text.
-            }
+            await HandlePlatformTextAsync(s, text);
         }
         catch (Exception ex)
         {
@@ -194,15 +188,14 @@ public sealed partial class GamertagWizard
     }
 
     /// <summary>
-    /// Handles one platform step: interprets keep/skip/clear keywords, validates
-    /// (Embark/Bungie need a Name#1234 discriminator), stores the value, and
-    /// advances to <paramref name="next"/>.
+    /// Handles a typed reply on a platform step: interprets keep/skip/clear
+    /// keywords, validates (Embark/Bungie need a Name#1234 discriminator),
+    /// stores the value, and advances. Buttons are the primary path, but typing
+    /// stays supported.
     /// </summary>
-    private async Task HandlePlatformAsync(
-        GamertagWizardSession s, string text, string platform,
-        Action<string> set, GamertagWizardStep next,
-        bool requireDiscriminator = false)
+    private async Task HandlePlatformTextAsync(GamertagWizardSession s, string text)
     {
+        var step  = s.Step;
         var lower = text.ToLowerInvariant();
 
         if (lower is "keep" or "skip" or "next" or "leave")
@@ -211,22 +204,25 @@ public sealed partial class GamertagWizard
         }
         else if (lower is "clear" or "none" or "remove" or "delete" or "n/a")
         {
-            set(string.Empty);
+            SetField(s.Draft, step, string.Empty);
         }
         else
         {
-            if (requireDiscriminator && !DiscriminatorPattern.IsMatch(text))
+            if (RequiresDiscriminator(step) && !DiscriminatorPattern.IsMatch(text))
             {
                 await s.Dm.SendMessageAsync(embed: Form(
-                    $"⚠️ {platform} format",
-                    $"That doesn't look right. **{platform}** tags look like `Name#1234` (a name, then `#`, then 4 digits).\n\n" +
-                    "Try again, or type `skip`."));
+                    $"⚠️ {PlatformName(step)} format",
+                    $"That doesn't look right. **{PlatformName(step)}** tags look like `Name#1234` (a name, then `#`, then 4 digits).\n\n" +
+                    "Try again, or use the buttons above."));
                 return; // stay on this step
             }
-            set(text);
+            SetField(s.Draft, step, text);
         }
 
-        await AdvanceAsync(s, next);
+        // Leave the answered prompt visible (embed shows the result) with its
+        // buttons disabled, then move on.
+        await ResolvePromptByEditAsync(s, step);
+        await AdvanceAsync(s, NextStep(step));
     }
 
     private async Task AdvanceAsync(GamertagWizardSession s, GamertagWizardStep next)
@@ -238,48 +234,151 @@ public sealed partial class GamertagWizard
             await PromptStepAsync(s);
     }
 
-    // ─── Prompts ───────────────────────────────────────────────────────────
+    // ─── Step metadata helpers ─────────────────────────────────────────────
 
-    private static readonly (GamertagWizardStep Step, string Name, string Hint)[] PlatformMeta =
+    private static GamertagWizardStep NextStep(GamertagWizardStep step) => step switch
     {
-        (GamertagWizardStep.Ea,     "EA",     ""),
-        (GamertagWizardStep.Steam,  "Steam",  ""),
-        (GamertagWizardStep.Psn,    "PSN",    ""),
-        (GamertagWizardStep.Xbox,   "Xbox",   ""),
-        (GamertagWizardStep.Embark, "Embark", "e.g. `Guardian#7028`"),
-        (GamertagWizardStep.Bungie, "Bungie", "e.g. `Guardian#1234`"),
+        GamertagWizardStep.Ea     => GamertagWizardStep.Steam,
+        GamertagWizardStep.Steam  => GamertagWizardStep.Psn,
+        GamertagWizardStep.Psn    => GamertagWizardStep.Xbox,
+        GamertagWizardStep.Xbox   => GamertagWizardStep.Embark,
+        GamertagWizardStep.Embark => GamertagWizardStep.Bungie,
+        _                         => GamertagWizardStep.Confirm,
     };
+
+    private static bool RequiresDiscriminator(GamertagWizardStep step) =>
+        step is GamertagWizardStep.Embark or GamertagWizardStep.Bungie;
+
+    private static string PlatformName(GamertagWizardStep step) => step switch
+    {
+        GamertagWizardStep.Ea     => "EA",
+        GamertagWizardStep.Steam  => "Steam",
+        GamertagWizardStep.Psn    => "PSN",
+        GamertagWizardStep.Xbox   => "Xbox",
+        GamertagWizardStep.Embark => "Embark",
+        GamertagWizardStep.Bungie => "Bungie",
+        _                         => string.Empty,
+    };
+
+    private static string PlatformHint(GamertagWizardStep step) => step switch
+    {
+        GamertagWizardStep.Embark => "e.g. `Guardian#7028`",
+        GamertagWizardStep.Bungie => "e.g. `Guardian#1234`",
+        _                         => string.Empty,
+    };
+
+    private static string GetField(GamertagDraft d, GamertagWizardStep step) => step switch
+    {
+        GamertagWizardStep.Ea     => d.Ea,
+        GamertagWizardStep.Steam  => d.Steam,
+        GamertagWizardStep.Psn    => d.Psn,
+        GamertagWizardStep.Xbox   => d.Xbox,
+        GamertagWizardStep.Embark => d.Embark,
+        GamertagWizardStep.Bungie => d.Bungie,
+        _                         => string.Empty,
+    };
+
+    private static void SetField(GamertagDraft d, GamertagWizardStep step, string value)
+    {
+        switch (step)
+        {
+            case GamertagWizardStep.Ea:     d.Ea     = value; break;
+            case GamertagWizardStep.Steam:  d.Steam  = value; break;
+            case GamertagWizardStep.Psn:    d.Psn    = value; break;
+            case GamertagWizardStep.Xbox:   d.Xbox   = value; break;
+            case GamertagWizardStep.Embark: d.Embark = value; break;
+            case GamertagWizardStep.Bungie: d.Bungie = value; break;
+        }
+    }
+
+    private static int StepNumber(GamertagWizardStep step) => step switch
+    {
+        GamertagWizardStep.Ea     => 1,
+        GamertagWizardStep.Steam  => 2,
+        GamertagWizardStep.Psn    => 3,
+        GamertagWizardStep.Xbox   => 4,
+        GamertagWizardStep.Embark => 5,
+        GamertagWizardStep.Bungie => 6,
+        _                         => 6,
+    };
+
+    // ─── Prompts ───────────────────────────────────────────────────────────
 
     private async Task PromptStepAsync(GamertagWizardSession s)
     {
-        var meta = PlatformMeta.First(m => m.Step == s.Step);
-        var current = meta.Step switch
-        {
-            GamertagWizardStep.Ea     => s.Draft.Ea,
-            GamertagWizardStep.Steam  => s.Draft.Steam,
-            GamertagWizardStep.Psn    => s.Draft.Psn,
-            GamertagWizardStep.Xbox   => s.Draft.Xbox,
-            GamertagWizardStep.Embark => s.Draft.Embark,
-            GamertagWizardStep.Bungie => s.Draft.Bungie,
-            _                         => string.Empty,
-        };
-
-        var stepNum = Array.FindIndex(PlatformMeta, m => m.Step == s.Step) + 1;
-        var title   = $"🎮 {meta.Name} tag  ·  {stepNum}/6";
+        var step    = s.Step;
+        var name    = PlatformName(step);
+        var current = GetField(s.Draft, step);
+        var title   = $"🎮 {name} tag  ·  {StepNumber(step)}/6";
+        var hasValue = !string.IsNullOrWhiteSpace(current);
 
         string body;
-        if (!string.IsNullOrWhiteSpace(current))
+        var buttons = new ComponentBuilder();
+        if (hasValue)
         {
-            body = $"Current: **{current}**\n\nSend a new tag to change it, type `keep` to leave it, or `clear` to remove it.";
+            body = $"Current: **{current}**\n\nSend a new tag to change it, or use the buttons below.";
+            buttons.WithButton("Keep",  $"{Prefix}set:{step}:keep",  ButtonStyle.Primary)
+                   .WithButton("Clear", $"{Prefix}set:{step}:clear", ButtonStyle.Secondary)
+                   .WithButton("Cancel", $"{Prefix}cancel",          ButtonStyle.Danger);
         }
         else
         {
-            body = $"Send your **{meta.Name}** gamertag, or type `skip` if you don't have one.";
-            if (!string.IsNullOrEmpty(meta.Hint))
-                body += $"\n{meta.Hint}";
+            body = $"Send your **{name}** gamertag, or use the buttons below.";
+            var hint = PlatformHint(step);
+            if (!string.IsNullOrEmpty(hint)) body += $"\n{hint}";
+            buttons.WithButton("Skip",  $"{Prefix}set:{step}:skip", ButtonStyle.Primary)
+                   .WithButton("Cancel", $"{Prefix}cancel",         ButtonStyle.Danger);
         }
 
-        await s.Dm.SendMessageAsync(embed: Form(title, body));
+        s.LastPromptHadValue = hasValue;
+        s.LastPromptMessage  = await s.Dm.SendMessageAsync(embed: Form(title, body), components: buttons.Build());
+    }
+
+    /// <summary>
+    /// Resolves the current step's prompt after a typed reply: leaves the embed
+    /// in place (now showing the resulting value) and swaps the buttons for a
+    /// disabled set, so the answered prompt stays visible but inert.
+    /// </summary>
+    private async Task ResolvePromptByEditAsync(GamertagWizardSession s, GamertagWizardStep step)
+    {
+        var msg = s.LastPromptMessage;
+        var hadValue = s.LastPromptHadValue;
+        s.LastPromptMessage = null;
+        if (msg is null) return;
+
+        var embed   = BuildResolvedEmbed(step, GetField(s.Draft, step));
+        var buttons = BuildDisabledButtons(step, hadValue);
+        try { await msg.ModifyAsync(m => { m.Embed = embed; m.Components = buttons; }); }
+        catch (Exception ex) { _logger.LogDebug(ex, "Failed to resolve gamertag prompt for {User}", s.Draft.UserId); }
+    }
+
+    /// <summary>The answered-prompt embed: same title, now showing the final value (or "none").</summary>
+    private static Embed BuildResolvedEmbed(GamertagWizardStep step, string value)
+    {
+        var shown = string.IsNullOrWhiteSpace(value) ? "*(none)*" : $"**{value}**";
+        return new EmbedBuilder()
+            .WithColor(ResolvedColor)
+            .WithTitle($"✅ {PlatformName(step)} tag  ·  {StepNumber(step)}/6")
+            .WithDescription(shown)
+            .Build();
+    }
+
+    /// <summary>The same buttons the prompt showed, all disabled.</summary>
+    private static MessageComponent BuildDisabledButtons(GamertagWizardStep step, bool hadValue)
+    {
+        var b = new ComponentBuilder();
+        if (hadValue)
+        {
+            b.WithButton("Keep",  $"{Prefix}set:{step}:keep",  ButtonStyle.Primary,   disabled: true)
+             .WithButton("Clear", $"{Prefix}set:{step}:clear", ButtonStyle.Secondary, disabled: true)
+             .WithButton("Cancel", $"{Prefix}cancel",          ButtonStyle.Danger,    disabled: true);
+        }
+        else
+        {
+            b.WithButton("Skip",  $"{Prefix}set:{step}:skip", ButtonStyle.Primary, disabled: true)
+             .WithButton("Cancel", $"{Prefix}cancel",         ButtonStyle.Danger,  disabled: true);
+        }
+        return b.Build();
     }
 
     private async Task PromptConfirmAsync(GamertagWizardSession s)
@@ -330,13 +429,15 @@ public sealed partial class GamertagWizard
 
         s.LastActivityAt = DateTime.UtcNow;
 
-        var kind = component.Data.CustomId.Substring(Prefix.Length);
+        var parts = component.Data.CustomId.Split(':'); // gtwiz:<kind>[:<step>:<action>]
+        var kind  = parts.Length > 1 ? parts[1] : string.Empty;
         try
         {
             switch (kind)
             {
                 case "save":   await OnSaveAsync(s, component);   break;
                 case "cancel": await OnCancelAsync(s, component); break;
+                case "set":    await OnSetButtonAsync(s, component, parts); break;
                 default:       await component.DeferAsync();      break;
             }
         }
@@ -344,6 +445,68 @@ public sealed partial class GamertagWizard
         {
             _logger.LogError(ex, "Gamertag wizard button {CustomId} failed", component.Data.CustomId);
         }
+    }
+
+    /// <summary>
+    /// Handles a Keep / Skip / Clear button on a platform step. The CustomId
+    /// carries the step it belongs to, so a click on a stale earlier prompt
+    /// (step mismatch) is ignored rather than mis-applied.
+    /// </summary>
+    private async Task OnSetButtonAsync(GamertagWizardSession s, SocketMessageComponent c, string[] parts)
+    {
+        if (parts.Length < 4)
+        {
+            await c.DeferAsync();
+            return;
+        }
+
+        var stepStr = parts[2];
+        var action  = parts[3];
+
+        // Guard against a click on a previous step's (now stale) buttons.
+        if (!string.Equals(stepStr, s.Step.ToString(), StringComparison.Ordinal))
+        {
+            await c.DeferAsync();
+            return;
+        }
+
+        var step     = s.Step;
+        var hadValue = s.LastPromptHadValue;
+
+        switch (action)
+        {
+            case "keep":
+            case "skip":
+                // Leave the current value (possibly empty) untouched.
+                break;
+            case "clear":
+                SetField(s.Draft, step, string.Empty);
+                break;
+            default:
+                await c.DeferAsync();
+                return;
+        }
+
+        // The clicked message IS the current prompt — ack it in place: keep the
+        // embed (now showing the result) and disable its buttons. We handle it
+        // here, so clear LastPromptMessage to avoid resolving it twice.
+        s.LastPromptMessage = null;
+        var embed   = BuildResolvedEmbed(step, GetField(s.Draft, step));
+        var buttons = BuildDisabledButtons(step, hadValue);
+        try
+        {
+            await c.UpdateAsync(m =>
+            {
+                m.Embed      = embed;
+                m.Components = buttons;
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Set-button ack (UpdateAsync) failed for {User}", s.Draft.UserId);
+        }
+
+        await AdvanceAsync(s, NextStep(step));
     }
 
     private async Task OnSaveAsync(GamertagWizardSession s, SocketMessageComponent c)
@@ -411,6 +574,9 @@ public sealed partial class GamertagWizard
     // ─── Helpers ───────────────────────────────────────────────────────────
 
     private static readonly Color FormColor = new(0x5865F2);
+
+    /// <summary>Muted grey for an answered/resolved prompt, so it visibly recedes behind the active one.</summary>
+    private static readonly Color ResolvedColor = new(0x4E5058);
 
     /// <summary>Builds the consistent "form" embed used for every wizard prompt.</summary>
     private static Embed Form(string title, string? body = null)
