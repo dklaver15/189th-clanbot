@@ -487,12 +487,24 @@ public sealed partial class GamertagWizard
                 return;
         }
 
-        // The clicked message IS the current prompt — ack it in place: keep the
-        // embed (now showing the result) and disable its buttons. We handle it
-        // here, so clear LastPromptMessage to avoid resolving it twice.
-        s.LastPromptMessage = null;
+        // Build the resolved view of the clicked prompt now, before AdvanceAsync
+        // changes s.Step.
         var embed   = BuildResolvedEmbed(step, GetField(s.Draft, step));
         var buttons = BuildDisabledButtons(step, hadValue);
+
+        // Advance FIRST. Posting the next prompt as a brand-new message is what
+        // makes Discord's client scroll to the bottom, and it only does so while
+        // the member is still pinned there. If we resized the clicked message
+        // first (the old order), a short prompt — like a "Skip" step — could
+        // nudge the view a few pixels off the bottom, and the next message then
+        // wouldn't auto-scroll. Editing the now-older clicked message afterwards
+        // doesn't move the scroll position. AdvanceAsync also overwrites
+        // s.LastPromptMessage with the new prompt, so there's no double-resolve.
+        await AdvanceAsync(s, NextStep(step));
+
+        // Resolve the clicked message in place: its embed stays (now showing the
+        // result) with disabled buttons. c.UpdateAsync still targets the clicked
+        // message and is a valid first response to the interaction.
         try
         {
             await c.UpdateAsync(m =>
@@ -503,10 +515,8 @@ public sealed partial class GamertagWizard
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "Set-button ack (UpdateAsync) failed for {User}", s.Draft.UserId);
+            _logger.LogDebug(ex, "Set-button resolve (UpdateAsync) failed for {User}", s.Draft.UserId);
         }
-
-        await AdvanceAsync(s, NextStep(step));
     }
 
     private async Task OnSaveAsync(GamertagWizardSession s, SocketMessageComponent c)
