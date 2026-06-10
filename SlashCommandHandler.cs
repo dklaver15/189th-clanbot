@@ -211,15 +211,49 @@ public class SlashCommandHandler
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
-        // Mark any pending AWOL records as handled
+        // Close pending records AND clean up any HQ embed that was already
+        // posted. The OR catches both: pending records (NotificationSent=false,
+        // no message id) and posted records (NotificationSent=true with a
+        // stored message id). Mirrors the automatic recovery path in
+        // AwolCheckService so a manual clear leaves no stale notice behind.
         var awolRecords = await db.AwolRecords
             .Where(r => r.GuildId == command.GuildId.Value
                      && r.UserId == targetUser.Id
-                     && !r.NotificationSent)
+                     && (!r.NotificationSent || r.NotificationMessageId != null))
             .ToListAsync();
 
         foreach (var record in awolRecords)
         {
+            if (record.NotificationMessageId.HasValue
+                && record.NotificationChannelId.HasValue)
+            {
+                try
+                {
+                    var notifChannel = guild.GetTextChannel(record.NotificationChannelId.Value);
+                    if (notifChannel is not null)
+                    {
+                        await notifChannel.DeleteMessageAsync(record.NotificationMessageId.Value);
+                        _logger.LogInformation(
+                            "Deleted AWOL embed for {User} in #{Channel} on /clear-awol",
+                            targetUser.Username, notifChannel.Name);
+                    }
+                }
+                catch (Discord.Net.HttpException ex)
+                    when (ex.HttpCode == System.Net.HttpStatusCode.NotFound)
+                {
+                    // Already gone — nothing to do.
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "Failed to delete AWOL embed for {User} on /clear-awol (message {MessageId})",
+                        targetUser.Username, record.NotificationMessageId.Value);
+                }
+
+                record.NotificationChannelId = null;
+                record.NotificationMessageId = null;
+            }
+
             record.NotificationSent = true;
             record.NotificationSentAt = DateTime.UtcNow;
         }
