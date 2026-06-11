@@ -85,8 +85,9 @@ public sealed class PollPublisher
             }).ToList(),
             Duration         = (uint)Math.Clamp(d.DurationHours, MinDurationHours, MaxDurationHours),
             AllowMultiselect = d.AllowMultiselect,
-            // LayoutType left at its default (Discord only supports the default
-            // layout today) to avoid pinning an enum member name.
+            // Must be set explicitly: PollProperties.LayoutType defaults to 0, but
+            // Discord only accepts the Default(=1) layout and rejects layout_type:0.
+            LayoutType       = PollLayout.Default,
         };
 
         var posted = await channel.SendMessageAsync(poll: pollProps);

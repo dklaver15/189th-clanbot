@@ -83,7 +83,10 @@ public sealed class PollCommandHandler
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error handling /poll");
-            try { await command.FollowupAsync("Something went wrong creating the poll. Check the bot logs.", ephemeral: true); }
+            // Surface the actual reason in the ephemeral reply (officer-only, not
+            // public) so a failure is debuggable without pulling server logs.
+            var detail = ex.Message.Length > 300 ? ex.Message[..300] : ex.Message;
+            try { await command.FollowupAsync($"Something went wrong creating the poll:\n`{detail}`", ephemeral: true); }
             catch { /* already responded */ }
         }
     }
