@@ -5,6 +5,10 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
+// Disambiguate from Discord.Net's own Poll type (Discord namespace) under
+// `using Discord;`. PollProperties/PollMediaProperties below are Discord's.
+using Poll = ClanGuardBot.Models.Poll;
+
 namespace ClanGuardBot.Services;
 
 /// <summary>

@@ -2,6 +2,11 @@ using System.Text;
 using ClanGuardBot.Models;
 using Discord;
 
+// Discord.Net ships its own Poll/PollVote read-model types in the Discord
+// namespace, which collide with ours under `using Discord;`. Pin the bare names
+// to our EF models so the unqualified references below resolve unambiguously.
+using Poll = ClanGuardBot.Models.Poll;
+
 namespace ClanGuardBot.Services;
 
 /// <summary>

@@ -5,6 +5,11 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
+// Discord.Net's Discord.WebSocket.PollVote collides with our model under
+// `using Discord.WebSocket;`. Pin the bare names to our EF models.
+using Poll = ClanGuardBot.Models.Poll;
+using PollVote = ClanGuardBot.Models.PollVote;
+
 namespace ClanGuardBot.Services;
 
 /// <summary>
