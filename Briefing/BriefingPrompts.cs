@@ -28,7 +28,7 @@ internal static class BriefingPrompts
         ## Emoji discipline
         - One emoji at the start of each section header to make scanning easy. Use these exactly:
           🎖️ Spotlight, 🚨 AWOL Risks, 📈 Promotion Candidates, ⚠️ Risk Watch, 📋 Notable,
-          📨 Recruitment Sources, 📡 Recruit Leads, 🔻 Retention, 🎯 Recommended focus.
+          📨 Recruitment Sources, 📡 Recruit Leads, 🔻 Retention, 🗳️ Polls, 🎯 Recommended focus.
         - Inline emojis sparingly — at most one or two per section, only when they add a status signal
           (e.g. ✅ for "ready and active", ❌ for "no activity data on file"). Never decorative.
         - Tone is military/operational, not party-store. No 🎉, 🔥, 💯, hearts, or sparkles.
@@ -84,7 +84,14 @@ internal static class BriefingPrompts
            - If `same_week_churn` is high relative to total, call it instant churn.
            - If `reconciled_departures` > 0, add a one-clause caveat that those were detected after the
              fact (bot was offline at the time), so their exact timing is approximate.
-        10. ### 🎯 Recommended officer focus this week — one line. Pick the single highest-leverage action
+        10. ### 🗳️ Polls — poll engagement this week. Skip entirely if `polls` is absent. Lead with the
+           participation line: "P polls run, V distinct voters (avg A per poll)." Use `polls_created`,
+           `distinct_voters`, and `avg_voters_per_poll`. If `top_poll_question` is present, name it as the
+           standout: "Best turnout: \"<question>\" (`top_poll_voters` voters)." If `open_polls_now` > 0,
+           add a nudge that N poll(s) are still open and awaiting votes. If `avg_voters_per_poll` is low
+           relative to `active_member_count`, flag thin engagement as a signal worth a focus item. Keep
+           the native/anonymous split (`native_count` / `anonymous_count`) to a brief aside, only if notable.
+        11. ### 🎯 Recommended officer focus this week — one line. Pick the single highest-leverage action
            based on the snapshot (e.g. "Re-engage the 3 risk-watch members before next AWOL sweep,"
            "Review the 4 SGT+ promotion candidates — auto-promo can't handle those tiers," or on a
            high-churn week "Net membership -4 — prioritize re-engaging the 2 ranked members who left.").

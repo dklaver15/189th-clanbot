@@ -195,10 +195,18 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
                 null)
             : Task.FromResult<RetentionSnapshot?>(null);
 
+        // ── Poll participation ──
+        // Same external-helper + null-means-skip pattern. Null when no polls were
+        // created this week and none are open.
+        var pollsTask = SafeAsync<PollsSnapshot?>(
+            () => BriefingPollSection.CollectAsync(db, guild.Id, weekStart, weekEnd, ct),
+            "polls",
+            null);
+
         await Task.WhenAll(
             awolTask, promoTask, eventsTask, topLineTask,
             priorTopLineTask, spotlightTask, riskTask,
-            inviteTask, redditLeadsTask, retentionTask);
+            inviteTask, redditLeadsTask, retentionTask, pollsTask);
 
         var awolRisks = (await awolTask)
             .OrderByDescending(r => r.DaysSinceAwolAssigned)
@@ -225,6 +233,7 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
         var spotlight = await spotlightTask;
         var (recruitmentSources, topReferrers) = await inviteTask;
         var redditLeads = await redditLeadsTask;
+        var polls = await pollsTask;
 
         // NetMembershipChange needs the week's NewRecruits, only known now that
         // topLine has resolved. Correct the placeholder via a record `with`.
@@ -291,6 +300,7 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
             TopReferrers = topReferrers,
             RedditLeads = redditLeads,
             Retention = retention,
+            Polls = polls,
             Anomalies = anomalies
         };
 

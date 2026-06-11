@@ -41,6 +41,9 @@ public class BotDbContext : DbContext
     public DbSet<ClanEventSeries>     ClanEventSeries     => Set<ClanEventSeries>();
     public DbSet<EventRsvp>           EventRsvps          => Set<EventRsvp>();
     public DbSet<UserTimeZone>        UserTimeZones       => Set<UserTimeZone>();
+    public DbSet<Poll>                Polls               => Set<Poll>();
+    public DbSet<PollOption>          PollOptions         => Set<PollOption>();
+    public DbSet<PollVote>            PollVotes           => Set<PollVote>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -451,6 +454,30 @@ public class BotDbContext : DbContext
         modelBuilder.Entity<UserTimeZone>(entity =>
         {
             entity.HasIndex(e => e.UserId).IsUnique();
+        });
+
+        // ── Polls (/poll: native + anonymous hybrid) ──
+        modelBuilder.Entity<Poll>(entity =>
+        {
+            entity.HasIndex(e => e.MessageId).IsUnique();        // vote/button + gateway-event → poll lookup
+            entity.HasIndex(e => new { e.Status, e.ClosesAtUtc }); // close sweep: Open polls due to close
+            entity.HasIndex(e => new { e.GuildId, e.CreatedAt }); // analytics / listing
+        });
+
+        modelBuilder.Entity<PollOption>(entity =>
+        {
+            entity.HasIndex(e => new { e.PollId, e.Position }).IsUnique(); // stable display order
+            entity.HasIndex(e => new { e.PollId, e.AnswerId });            // native answer-id → option
+        });
+
+        modelBuilder.Entity<PollVote>(entity =>
+        {
+            // One row per (poll, user, option): re-clicking the same option is a
+            // toggle, not a duplicate. Single-select polls additionally keep only
+            // one row per (poll, user), enforced in the vote handler.
+            entity.HasIndex(e => new { e.PollId, e.UserId, e.PollOptionId }).IsUnique();
+            entity.HasIndex(e => e.PollId);                      // tally render
+            entity.HasIndex(e => new { e.PollId, e.UserId });    // a member's votes / participation
         });
     }
 }

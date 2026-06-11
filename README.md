@@ -59,6 +59,20 @@ All settings are in `appsettings.json` and can be overridden via environment var
 | `/awol-status`       | Everyone | Check your own activity stats |
 | `/awol-check @user`  | Officers+ | Check another user's activity |
 | `/clear-awol @user`  | Officers+ | Clear a user's AWOL status (removes role and pending notifications) |
+| `/poll`              | Everyone | Create a poll — native Discord poll by default, or `anonymous:true` for a hidden-vote poll |
+
+### Polls
+
+`/poll` posts a poll in the channel it's run in. It's a hybrid:
+
+- **Native (default):** a real Discord poll with the animated result UI. Votes are public.
+- **Anonymous (`anonymous:true`):** a custom embed with vote buttons where only the running totals are shown — never who voted for what. Carries the waving 189th flag banner by default.
+
+Options: `question`, `option1`–`option10` (a leading emoji like `🔥 Build a base` becomes the choice's emoji), `multiselect`, `hours` (1–768, default 24), `announce` (post a winner when it closes, default on), and `image` / `image_url` to override the banner (upload, or a Tenor/Giphy/direct link — same as event creation; anonymous polls only).
+
+Every vote is persisted (anonymous votes from our buttons, native votes captured off the gateway), so polls feed the weekly officer briefing's participation section instead of evaporating like MEE6 polls. The poll auto-closes at its deadline; the creator or a moderator can also close an anonymous poll early with its **Close poll** button.
+
+> Requires the **Guild Message Polls** gateway intent (already set in code) to capture native-poll votes.
 
 ## Deploy to Digital Ocean
 

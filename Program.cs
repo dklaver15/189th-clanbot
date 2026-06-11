@@ -40,6 +40,7 @@ try
                        | GatewayIntents.GuildPresences
                        | GatewayIntents.GuildBans  // a.k.a. GuildModeration (Discord renamed it server-side; Discord.NET 3.17 keeps the old enum name). Required for AuditLogCreated.
                        | GatewayIntents.DirectMessages  // required for the /event DM creation wizard to receive DM replies
+                       | GatewayIntents.GuildMessagePolls  // native /poll vote events (PollVoteAdded/Removed) for analytics capture
                        | GatewayIntents.MessageContent,
         AlwaysDownloadUsers = true,
         LogLevel            = LogSeverity.Info,
@@ -409,6 +410,19 @@ try
     builder.Services.AddHostedService<EventReminderService>();
     builder.Services.AddHostedService<EventRecurrenceScheduler>();
     builder.Services.AddHostedService<EventArchiveService>();
+
+    // /poll — the native + anonymous hybrid poll system. PollPublisher posts the
+    // poll (native Discord poll or our custom anonymous embed); PollCommandHandler
+    // owns the slash command; PollVoteInteractionHandler handles anonymous vote +
+    // close buttons; PollGatewayVoteHandler captures native poll votes off the
+    // gateway (needs GuildMessagePolls intent); PollClosingService closes + announces
+    // (shared by the Close button and the timed sweep); PollCloseService is the sweep.
+    builder.Services.AddSingleton<PollPublisher>();
+    builder.Services.AddSingleton<PollClosingService>();
+    builder.Services.AddSingleton<PollCommandHandler>();
+    builder.Services.AddSingleton<PollVoteInteractionHandler>();
+    builder.Services.AddSingleton<PollGatewayVoteHandler>();
+    builder.Services.AddHostedService<PollCloseService>();
 
     // ── Hosted Services ──────────────────────────────────────────────
     builder.Services.AddHostedService<DiscordBotService>();

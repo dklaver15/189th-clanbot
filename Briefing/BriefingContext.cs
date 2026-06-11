@@ -83,6 +83,14 @@ public sealed record BriefingContext
     /// </summary>
     public RetentionSnapshot? Retention { get; init; }
 
+    /// <summary>
+    /// Poll engagement snapshot for the briefing week. Null when no polls were
+    /// created in the window and none are currently open — the prompt treats null
+    /// as "skip the section," matching the RedditLeads / Retention convention.
+    /// Sourced from the Poll / PollVote tables via BriefingPollSection.
+    /// </summary>
+    public PollsSnapshot? Polls { get; init; }
+
     /// <summary>Free-form short notes for things that don't fit the other buckets.</summary>
     public IReadOnlyList<string> Anomalies { get; init; } = [];
 }
@@ -223,3 +231,32 @@ public sealed record RedditLeadsSnapshot(
 public sealed record RedditLeadSubredditBreakdown(
     string Subreddit,
     int SurfacedCount);
+
+/// <summary>
+/// Poll-engagement snapshot for the briefing week. All counts are scoped to polls
+/// CREATED in the window except <paramref name="OpenPollsNow"/>, which is a live
+/// figure (polls still accepting votes right now).
+/// </summary>
+/// <param name="PollsCreated">Polls started this week.</param>
+/// <param name="PollsClosed">Polls that closed this week.</param>
+/// <param name="NativeCount">Of this week's polls, how many were native Discord polls.</param>
+/// <param name="AnonymousCount">Of this week's polls, how many were anonymous (custom embed).</param>
+/// <param name="TotalVotesCast">Total votes across this week's polls (multiselect can exceed voter count).</param>
+/// <param name="DistinctVoters">Distinct members who voted on any poll this week.</param>
+/// <param name="AvgVotersPerPoll">Mean distinct voters per poll this week (1 dp).</param>
+/// <param name="OpenPollsNow">Polls currently still open (live, cross-week).</param>
+/// <param name="TopPollQuestion">The week's most-voted poll question, or null if nobody voted.</param>
+/// <param name="TopPollVoters">Distinct voters on that top poll.</param>
+/// <param name="TopPollKind">"native" or "anonymous" for the top poll, or null.</param>
+public sealed record PollsSnapshot(
+    int PollsCreated,
+    int PollsClosed,
+    int NativeCount,
+    int AnonymousCount,
+    int TotalVotesCast,
+    int DistinctVoters,
+    double AvgVotersPerPoll,
+    int OpenPollsNow,
+    string? TopPollQuestion,
+    int TopPollVoters,
+    string? TopPollKind);

@@ -55,6 +55,9 @@
   -->
   <ItemGroup>
     <Content Include="Assets\189th_logo.png" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Waving 189th flag banner: the default image attached to /poll embeds
+         (PollImage). Per-poll custom images/GIFs/Giphy links override it. -->
+    <Content Include="Assets\189th_banner.gif" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="PatrolWatch\" />

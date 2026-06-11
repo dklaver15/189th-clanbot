@@ -2,6 +2,7 @@ using ClanGuardBot.Handlers;
 using ClanGuardBot.Models;
 using ClanGuardBot.PatrolWatch;
 using ClanGuardBot.RedditLeads;
+using ClanGuardBot.Services;
 using Discord;
 using Discord.WebSocket;
 using Microsoft.Extensions.Hosting;
@@ -46,6 +47,9 @@ public class DiscordBotService : IHostedService
     private readonly EventCreationWizard _eventWizard;
     private readonly EventRsvpInteractionHandler _eventRsvpHandler;
     private readonly EventManagementHandler _eventMgmtHandler;
+    private readonly PollCommandHandler _pollCommandHandler;
+    private readonly PollVoteInteractionHandler _pollVoteHandler;
+    private readonly PollGatewayVoteHandler _pollGatewayVoteHandler;
     private readonly PromoteCommandHandler _promoteHandler;
     private readonly DemoteCommandHandler _demoteHandler;
     private readonly SetNickCommandHandler _setNickHandler;
@@ -107,6 +111,9 @@ public class DiscordBotService : IHostedService
         EventCreationWizard eventWizard,
         EventRsvpInteractionHandler eventRsvpHandler,
         EventManagementHandler eventMgmtHandler,
+        PollCommandHandler pollCommandHandler,
+        PollVoteInteractionHandler pollVoteHandler,
+        PollGatewayVoteHandler pollGatewayVoteHandler,
         PromoteCommandHandler promoteHandler,
         DemoteCommandHandler demoteHandler,
         SetNickCommandHandler setNickHandler,
@@ -167,6 +174,9 @@ public class DiscordBotService : IHostedService
         _eventWizard                 = eventWizard;
         _eventRsvpHandler            = eventRsvpHandler;
         _eventMgmtHandler            = eventMgmtHandler;
+        _pollCommandHandler          = pollCommandHandler;
+        _pollVoteHandler             = pollVoteHandler;
+        _pollGatewayVoteHandler      = pollGatewayVoteHandler;
         _promoteHandler              = promoteHandler;
         _demoteHandler               = demoteHandler;
         _setNickHandler              = setNickHandler;
@@ -247,6 +257,9 @@ public class DiscordBotService : IHostedService
         _eventWizard.Register(_client);
         _eventRsvpHandler.Register(_client);
         _eventMgmtHandler.Register(_client);
+        _pollCommandHandler.Register(_client);
+        _pollVoteHandler.Register(_client);
+        _pollGatewayVoteHandler.Register(_client);
         _promoteHandler.Register(_client);
         _demoteHandler.Register(_client);
         _setNickHandler.Register(_client);
@@ -366,6 +379,9 @@ public class DiscordBotService : IHostedService
                 // zone used to read each member's event-time input.
                 EventCommandHandler.BuildEventCommand(_config.EventCommandMinRank),
                 EventCommandHandler.BuildTimezoneCommand(),
+
+                // /poll — native + anonymous hybrid poll, open to all members.
+                PollCommandHandler.BuildCommand(),
 
                 new SlashCommandBuilder()
                     .WithName("promote")
