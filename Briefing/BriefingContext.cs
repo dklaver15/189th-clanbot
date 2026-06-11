@@ -248,6 +248,12 @@ public sealed record RedditLeadSubredditBreakdown(
 /// <param name="TopPollQuestion">The week's most-voted poll question, or null if nobody voted.</param>
 /// <param name="TopPollVoters">Distinct voters on that top poll.</param>
 /// <param name="TopPollKind">"native" or "anonymous" for the top poll, or null.</param>
+/// <param name="ChronicNonVoters">
+/// Rolling participation signal over a longer window than the briefing week
+/// (see <see cref="PollChronicNonVoters"/>). Null when there weren't enough
+/// polls in the window to make "chronic" meaningful, so a fresh feature or a
+/// quiet stretch doesn't flag the whole roster.
+/// </param>
 public sealed record PollsSnapshot(
     int PollsCreated,
     int PollsClosed,
@@ -259,4 +265,29 @@ public sealed record PollsSnapshot(
     int OpenPollsNow,
     string? TopPollQuestion,
     int TopPollVoters,
-    string? TopPollKind);
+    string? TopPollKind,
+    PollChronicNonVoters? ChronicNonVoters);
+
+/// <summary>
+/// Members who had the chance to vote but consistently don't. Computed over a
+/// rolling window: the eligible set is active members (non-bot, non-exempt,
+/// not AWOL) who joined before the window's first poll — so they could have
+/// voted in every poll in the window — and a chronic non-voter is one who voted
+/// in none of them. Counts only (and display names for the officer briefing) —
+/// never anyone's actual choice, which stays hidden for anonymous polls.
+/// </summary>
+/// <param name="WindowDays">Lookback window the figures cover.</param>
+/// <param name="PollsInWindow">Polls created in the window (the opportunity count).</param>
+/// <param name="EligibleMembers">Active members present for the whole window (the denominator).</param>
+/// <param name="Participants">Eligible members who voted in at least one poll.</param>
+/// <param name="NonVoters">Eligible members who voted in none — the chronic set.</param>
+/// <param name="ParticipationRatePct">Participants ÷ eligible, as a percentage.</param>
+/// <param name="Sample">Up to a capped number of chronic non-voter display names, longest-tenured first.</param>
+public sealed record PollChronicNonVoters(
+    int WindowDays,
+    int PollsInWindow,
+    int EligibleMembers,
+    int Participants,
+    int NonVoters,
+    double ParticipationRatePct,
+    IReadOnlyList<string> Sample);

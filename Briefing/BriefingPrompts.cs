@@ -84,13 +84,18 @@ internal static class BriefingPrompts
            - If `same_week_churn` is high relative to total, call it instant churn.
            - If `reconciled_departures` > 0, add a one-clause caveat that those were detected after the
              fact (bot was offline at the time), so their exact timing is approximate.
-        10. ### 🗳️ Polls — poll engagement this week. Skip entirely if `polls` is absent. Lead with the
-           participation line: "P polls run, V distinct voters (avg A per poll)." Use `polls_created`,
-           `distinct_voters`, and `avg_voters_per_poll`. If `top_poll_question` is present, name it as the
-           standout: "Best turnout: \"<question>\" (`top_poll_voters` voters)." If `open_polls_now` > 0,
-           add a nudge that N poll(s) are still open and awaiting votes. If `avg_voters_per_poll` is low
-           relative to `active_member_count`, flag thin engagement as a signal worth a focus item. Keep
-           the native/anonymous split (`native_count` / `anonymous_count`) to a brief aside, only if notable.
+        10. ### 🗳️ Polls — poll engagement. Skip entirely if `polls` is absent. If `polls_created` > 0,
+           lead with the weekly line: "P polls run, V distinct voters (avg A per poll)." Use
+           `polls_created`, `distinct_voters`, and `avg_voters_per_poll`. If `top_poll_question` is
+           present, name the standout: "Best turnout: \"<question>\" (`top_poll_voters` voters)." If
+           `open_polls_now` > 0, nudge that N poll(s) are still open. If `polls_created` is 0 but
+           `chronic_non_voters` is present, skip the weekly counts and lead straight with participation.
+           Then, if `chronic_non_voters` is present, add the participation read: "`participation_rate_pct`%
+           of `eligible_members` eligible members voted across `polls_in_window` polls in the last
+           `window_days`d." If `non_voters` is a large share of `eligible_members`, flag it and name a few
+           from `sample` as nudge candidates ("chronic non-voters incl. **A**, **B**, **C** — worth a direct
+           ping"). Frame this as an engagement opportunity, not a reprimand. Keep the native/anonymous split
+           (`native_count` / `anonymous_count`) to a brief aside, only if notable.
         11. ### 🎯 Recommended officer focus this week — one line. Pick the single highest-leverage action
            based on the snapshot (e.g. "Re-engage the 3 risk-watch members before next AWOL sweep,"
            "Review the 4 SGT+ promotion candidates — auto-promo can't handle those tiers," or on a

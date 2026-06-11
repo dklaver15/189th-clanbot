@@ -199,7 +199,8 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
         // Same external-helper + null-means-skip pattern. Null when no polls were
         // created this week and none are open.
         var pollsTask = SafeAsync<PollsSnapshot?>(
-            () => BriefingPollSection.CollectAsync(db, guild.Id, weekStart, weekEnd, ct),
+            () => BriefingPollSection.CollectAsync(
+                db, guild, weekStart, weekEnd, _config.GetExemptRolesList(), _config.AwolRoleName, ct),
             "polls",
             null);
 
