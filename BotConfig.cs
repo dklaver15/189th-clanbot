@@ -1004,10 +1004,12 @@ public class BotConfig
     public ulong HoneypotChannelId { get; set; } = 1511103621507322036;
 
     /// <summary>
-    /// Minimum rank exempt from the trap (matches a RankRoles entry,
-    /// case-insensitive). Members at this rank or above can post in the trap
-    /// without being actioned — a safety net for officers testing it. Server
-    /// Administrators are always exempt. Default MAJ.
+    /// DEPRECATED / NO LONGER CONSULTED. The honeypot now exempts only the
+    /// server owner (who Discord will not let a bot ban); HQ and Administrators
+    /// are intentionally NOT exempt, so a compromised officer account that posts
+    /// in the trap is banned like any other. Retained only so existing
+    /// appsettings.json files that still set this key continue to bind without
+    /// error. Safe to remove from config.
     /// </summary>
     public string HoneypotExemptMinRank { get; set; } = "MAJ";
 

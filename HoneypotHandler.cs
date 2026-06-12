@@ -62,11 +62,13 @@ namespace ClanGuardBot.Handlers;
 /// ── Exemptions ──
 /// The bot itself, other bots, webhooks, and system messages are never
 /// acted on (this is also why the auto-posted warning embed can't trip the
-/// trap). Server Administrators and members at
-/// <see cref="BotConfig.HoneypotExemptMinRank"/> or above are exempt — a
-/// curious officer poking the channel should never get banned. Exempt
-/// members are skipped entirely (no delete, no alert), same as the other
-/// security features.
+/// trap). The ONLY human exemption is the server owner, who Discord does not
+/// permit a bot to ban. Everyone else — including HQ and Administrators — is
+/// actioned, because the whole point of the trap is to catch compromised
+/// officer/admin accounts. (The bot can still only ban members below it in
+/// the role hierarchy, so its role must sit above all HQ roles; see
+/// EnforceAsync.) A hijacked owner is handled via the recovery runbook, not
+/// here.
 ///
 /// ── Warning embed + ban counter ──
 /// On Ready we ensure the warning embed exists in the honeypot channel:
@@ -257,12 +259,25 @@ public sealed class HoneypotHandler
             var member = userMsg.Author as SocketGuildUser
                          ?? guildChannel.Guild.GetUser(userMsg.Author.Id);
 
-            // Exempt staff/admins are never actioned.
-            if (member is not null && IsRankExempt(member))
+            // Only the server owner is exempt. EVERYONE else who posts in the
+            // trap is actioned — including HQ and Administrators — because a
+            // compromised officer/admin account is exactly the threat this trap
+            // exists to stop. The owner is skipped because Discord does not
+            // allow a bot to ban the server owner at all, so actioning them here
+            // would just be a guaranteed-failed ban; a hijacked owner is handled
+            // out-of-band via the server-recovery runbook.
+            //
+            // NOTE: the bot can still only ban members BELOW it in the role
+            // hierarchy (guarded in EnforceAsync). For HQ accounts to actually
+            // be bannable, the bot's role must sit ABOVE all HQ roles in the
+            // Discord role list — otherwise Enforce falls back to alert-only.
+            if (userMsg.Author.Id == guildChannel.Guild.OwnerId)
             {
-                _logger.LogInformation(
-                    "Honeypot: exempt member {User} ({Id}) posted in the trap; ignoring.",
-                    member.Username, member.Id);
+                _logger.LogWarning(
+                    "Honeypot: server owner {User} ({Id}) posted in the trap. A bot cannot ban the " +
+                    "server owner, so no action is taken. If this was not the owner testing, the " +
+                    "owner account may be compromised — see the server-recovery runbook.",
+                    userMsg.Author.Username, userMsg.Author.Id);
                 return;
             }
 
@@ -632,29 +647,6 @@ public sealed class HoneypotHandler
     }
 
     // ── Shared helpers ─────────────────────────────────────────────────
-
-    /// <summary>
-    /// Rank exemption: server Administrator, or a member at
-    /// <see cref="BotConfig.HoneypotExemptMinRank"/> or above. Same role-index
-    /// pattern as TokenGrabberScannerHandler / InviteLinkFilterHandler.
-    /// </summary>
-    private bool IsRankExempt(SocketGuildUser member)
-    {
-        if (member.GuildPermissions.Administrator) return true;
-
-        var minRank = _config.HoneypotExemptMinRank;
-        if (string.IsNullOrWhiteSpace(minRank)) return false;
-
-        var rankRoles = _config.GetRankRolesList();
-        var minIndex = rankRoles.FindIndex(r => r.Equals(minRank, StringComparison.OrdinalIgnoreCase));
-        if (minIndex < 0) return false;
-
-        return member.Roles.Any(role =>
-        {
-            var roleIndex = rankRoles.FindIndex(r => r.Equals(role.Name, StringComparison.OrdinalIgnoreCase));
-            return roleIndex >= minIndex;
-        });
-    }
 
     private SocketTextChannel? ResolveSecurityAlertsChannel(SocketGuild guild)
     {
