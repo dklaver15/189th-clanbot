@@ -455,7 +455,15 @@ public class DiscordBotService : IHostedService
                 // today appear in a separate section. Ephemeral, MAJ+ gated.
                 new SlashCommandBuilder()
                     .WithName("attendance")
-                    .WithDescription("Show today's clan event attendance, grouped by event (MAJ+ only)")
+                    .WithDescription("Show recent clan event attendance, grouped by event (MAJ+ only)")
+                    .AddOption(
+                        new SlashCommandOptionBuilder()
+                            .WithName("days")
+                            .WithDescription("How many days back to include (default 1, max 30)")
+                            .WithType(ApplicationCommandOptionType.Integer)
+                            .WithRequired(false)
+                            .WithMinValue(1)
+                            .WithMaxValue(30))
                     .Build(),
 
                 // /squads — randomize everyone currently in the events VC into

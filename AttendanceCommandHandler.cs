@@ -204,12 +204,20 @@ public class AttendanceCommandHandler
         var guildId = guild.Id;
         var now = DateTime.UtcNow;
 
-        // Rolling 24-hour window ending at "now". Avoids the surprise of a
-        // UTC day-rollover dropping the evening's events from view at midnight
-        // UTC (~7pm Central) just hours after they finished. "Last 24 hours"
-        // tracks the natural intuition of "what just happened" regardless of
-        // when the command is run.
-        var windowStart = now.AddHours(-24);
+        // Optional "days" option widens the lookback window. Defaults to 1 so
+        // the historical behavior (rolling 24 hours) is unchanged when the
+        // option is omitted. Discord enforces the 1..30 bounds declared on the
+        // option builder, but we clamp defensively in case the command is
+        // re-registered without them or invoked via a stale client.
+        var daysRaw = command.Data.Options.FirstOrDefault(o => o.Name == "days")?.Value;
+        var days = daysRaw is long daysVal ? (int)Math.Clamp(daysVal, 1, 30) : 1;
+
+        // Rolling window of `days * 24` hours ending at "now". Avoids the
+        // surprise of a UTC day-rollover dropping the evening's events from
+        // view at midnight UTC (~7pm Central) just hours after they finished.
+        // "Last N hours" tracks the natural intuition of "what just happened"
+        // regardless of when the command is run.
+        var windowStart = now.AddDays(-days);
 
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
@@ -296,7 +304,7 @@ public class AttendanceCommandHandler
             .OrderBy(a => a.RecordedAt)
             .ToListAsync();
 
-        var embed = BuildEmbed(guild, now, windowStart, windowEvents, windowAttendance, windowManualCredits);
+        var embed = BuildEmbed(guild, now, windowStart, days, windowEvents, windowAttendance, windowManualCredits);
 
         _logger.LogInformation(
             "/attendance invoked by {Caller}: {EventCount} event(s), {EventRowCount} event-attendance row(s), {MeetingRowCount} meeting-attendance row(s), {ManualCount} manual credit(s) in window",
@@ -315,12 +323,16 @@ public class AttendanceCommandHandler
         SocketGuild guild,
         DateTime now,
         DateTime windowStart,
+        int days,
         List<CalendarEvent> windowEvents,
         List<EventAttendance> windowAttendance,
         List<EventAttendance> windowManualCredits)
     {
+        // Human-readable window label, e.g. "Last 24 Hours" / "Last 2 Days".
+        var windowLabel = days == 1 ? "Last 24 Hours" : $"Last {days} Days";
+
         var builder = new EmbedBuilder()
-            .WithTitle("📋 Event Attendance — Last 24 Hours")
+            .WithTitle($"📋 Event Attendance — {windowLabel}")
             .WithColor(Color.Blue)
             .WithFooter($"Window: {windowStart:yyyy-MM-dd HH:mm} UTC → {now:yyyy-MM-dd HH:mm} UTC");
 
@@ -337,7 +349,7 @@ public class AttendanceCommandHandler
         if (windowEvents.Count == 0)
         {
             // Trivially small; well under any cap.
-            builder.AddField("Events", "_No clan events in the last 24 hours._");
+            builder.AddField("Events", $"_No clan events in the {windowLabel.ToLowerInvariant()}._");
         }
         else
         {
