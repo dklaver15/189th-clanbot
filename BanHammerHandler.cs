@@ -1,6 +1,7 @@
 using ClanGuardBot.Data;
 using ClanGuardBot.Models;
 using Discord;
+using Discord.Rest;
 using Discord.WebSocket;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
