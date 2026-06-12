@@ -25,8 +25,11 @@ public class PromotionService
     /// <summary>
     /// Rank progression chain. Key = target rank shorthand (lowercase),
     /// value = (previous rank role to remove, new rank role to add).
-    /// Ranks above CPL are included for manual /promote use only;
-    /// AutoPromotionService only progresses RCT → CPL.
+    /// AutoPromotionService auto-progresses the full enlisted ladder, RCT → CSM
+    /// (RCT → CPL on message/voice activity, CPL → CSM on event-attendance
+    /// points — see AutoPromotionService.DefaultTiers). Ranks beyond that — SMA
+    /// (a singular position) and the officer ranks — are included here for
+    /// manual /promote use only and are never auto-promoted.
     /// </summary>
     public static readonly Dictionary<string, (string OldRole, string NewRole)> RankMap =
         new(StringComparer.OrdinalIgnoreCase)
