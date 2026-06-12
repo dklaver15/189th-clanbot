@@ -1040,6 +1040,49 @@ public class BotConfig
     /// </summary>
     public string HoneypotThumbnailUrl { get; set; } = "";
 
+    // ─── Server protection: Cross-channel spam trap (behavioral) ─────
+    /// <summary>
+    /// Operating mode for the behavioral cross-channel spam trap (feature #8).
+    /// Unlike the honeypot, this does NOT rely on a trap channel: it watches the
+    /// same in-memory rolling message index the honeypot already maintains and
+    /// fires when a single non-bot account posts in many DISTINCT channels
+    /// within a few seconds — the signature of a compromised "self-bot" account
+    /// blasting the server. This catches the spam pattern directly even when the
+    /// account never happens to post in the honeypot channel. One of:
+    ///   "Off"        — disabled. The detector does not run. (The rolling index
+    ///                  still runs as long as the honeypot is enabled.)
+    ///   "AlertOnly"  — default. On a trip, post to #alerts + write an audit
+    ///                  row. No ban, no purge. Run here first to confirm the
+    ///                  threshold produces no false positives, THEN flip to
+    ///                  Enforce.
+    ///   "Enforce"    — ban the account and purge every message it posted
+    ///                  server-wide in the last HoneypotPurgeWindowMinutes
+    ///                  (the purge window is shared with the honeypot), then
+    ///                  write the audit row and alert.
+    /// The server owner is never banned (Discord forbids a bot banning the
+    /// owner); an owner that trips this trap is loudly alerted as a
+    /// likely-compromised account instead — see the server-recovery runbook.
+    /// The bot can still only ban members below it in the role hierarchy, same
+    /// caveat as the honeypot.
+    /// </summary>
+    public string SpamTrapMode { get; set; } = "AlertOnly";
+
+    /// <summary>
+    /// Sliding window, in seconds, over which DISTINCT channels are counted for
+    /// the cross-channel spam trap. Default 10. Clamped to a minimum of 1
+    /// internally.
+    /// </summary>
+    public int SpamTrapWindowSeconds { get; set; } = 10;
+
+    /// <summary>
+    /// Number of DISTINCT channels a single account must post in within
+    /// <see cref="SpamTrapWindowSeconds"/> to trip the spam trap. Default 5 —
+    /// far above what a human can do by hand, so legitimate fast cross-posting
+    /// (or an officer pasting into two or three channels) will not trip it.
+    /// Clamped to a minimum of 2 internally.
+    /// </summary>
+    public int SpamTrapChannelThreshold { get; set; } = 5;
+
     // ─── SQLite Backup Settings ──────────────────────────────────────
     /// <summary>
     /// Master switch for SqliteBackupService. When false, the service exits

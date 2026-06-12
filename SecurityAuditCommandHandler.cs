@@ -83,6 +83,8 @@ public sealed class SecurityAuditCommandHandler
         ("NicknameImpersonation", "Nickname Impersonation"),
         ("WebhookAudit",          "Webhook Audit"),
         ("TokenGrabberScanner",   "Token-Grabber Scanner"),
+        ("Honeypot",              "Honeypot Trap"),
+        ("SpamTrap",              "Cross-Channel Spam Trap"),
     };
 
     private readonly IServiceProvider _services;

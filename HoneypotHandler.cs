@@ -13,7 +13,10 @@ using Microsoft.Extensions.Options;
 namespace ClanGuardBot.Handlers;
 
 /// <summary>
-/// Server-protection feature #7: Honeypot trap channel.
+/// Server-protection features #7 (Honeypot trap channel) and #8 (behavioral
+/// cross-channel spam trap). Both detectors live here because they share one
+/// in-memory rolling message index and the same ban / purge / audit / alert
+/// machinery; only the *trigger* differs.
 ///
 /// ── What it does ──
 /// One channel (<see cref="BotConfig.HoneypotChannelId"/>) is set up so
@@ -22,6 +25,18 @@ namespace ClanGuardBot.Handlers;
 /// compromised "self-bot" accounts iterate over the channel list and
 /// blast their payload everywhere, so any user-authored message in this
 /// channel is almost certainly an automated account. We act on it.
+///
+/// ── The behavioral spam trap (feature #8) ──
+/// A compromised account often blasts most channels but never happens to hit
+/// the one honeypot channel. The honeypot alone is therefore probabilistic.
+/// The spam trap closes that gap by reading the SAME rolling index: if one
+/// non-bot account posts in <see cref="BotConfig.SpamTrapChannelThreshold"/>+
+/// DISTINCT channels within <see cref="BotConfig.SpamTrapWindowSeconds"/>
+/// seconds — something no human does by hand — it is treated exactly like a
+/// honeypot hit (ban + server-wide purge, or alert-only, per
+/// <see cref="BotConfig.SpamTrapMode"/>). It needs no trap channel and fires
+/// within the first few spam messages. Its actions are stamped Feature
+/// "SpamTrap" (vs "Honeypot") and do NOT move the honeypot embed counter.
 ///
 /// ── Modes (<see cref="BotConfig.HoneypotMode"/>) ──
 ///   "Off"        — feature disabled. No index, no trap, no warning post.
@@ -229,9 +244,13 @@ public sealed class HoneypotHandler
     {
         try
         {
-            var mode = (_config.HoneypotMode ?? ModeOff).Trim();
-            if (string.Equals(mode, ModeOff, StringComparison.OrdinalIgnoreCase))
-                return;
+            var honeypotMode = (_config.HoneypotMode ?? ModeOff).Trim();
+            var spamMode     = (_config.SpamTrapMode ?? ModeOff).Trim();
+            var honeypotOn = !string.Equals(honeypotMode, ModeOff, StringComparison.OrdinalIgnoreCase);
+            var spamOn     = !string.Equals(spamMode,     ModeOff, StringComparison.OrdinalIgnoreCase);
+
+            // Nothing to do if both detectors are off.
+            if (!honeypotOn && !spamOn) return;
 
             // Only index/act on real user messages in guild channels.
             if (message is not SocketUserMessage userMsg) return;
@@ -240,8 +259,9 @@ public sealed class HoneypotHandler
             if (userMsg.Author.IsBot) return;
             if (userMsg.Channel is not SocketGuildChannel guildChannel) return;
 
-            // Feed the rolling index BEFORE the trap so the offending message
-            // is itself eligible for the purge.
+            // Feed the rolling index BEFORE the traps so the offending message
+            // is itself eligible for the purge and counts toward the velocity
+            // window.
             RecordMessage(userMsg.Author.Id, guildChannel.Id, userMsg.Id);
 
             // Straggler sweep: a just-banned account that slipped a message
@@ -253,57 +273,43 @@ public sealed class HoneypotHandler
                 return;
             }
 
-            // Not the trap channel → indexing only, nothing else to do.
-            if (guildChannel.Id != _config.HoneypotChannelId) return;
-
             var member = userMsg.Author as SocketGuildUser
                          ?? guildChannel.Guild.GetUser(userMsg.Author.Id);
 
-            // Only the server owner is exempt. EVERYONE else who posts in the
-            // trap is actioned — including HQ and Administrators — because a
-            // compromised officer/admin account is exactly the threat this trap
-            // exists to stop. The owner is skipped because Discord does not
-            // allow a bot to ban the server owner at all, so actioning them here
-            // would just be a guaranteed-failed ban; a hijacked owner is handled
-            // out-of-band via the server-recovery runbook.
-            //
-            // NOTE: the bot can still only ban members BELOW it in the role
-            // hierarchy (guarded in EnforceAsync). For HQ accounts to actually
-            // be bannable, the bot's role must sit ABOVE all HQ roles in the
-            // Discord role list — otherwise Enforce falls back to alert-only.
-            if (userMsg.Author.Id == guildChannel.Guild.OwnerId)
+            // ── Behavioral cross-channel spam trap (feature #8) ──
+            // Checked first and on EVERY channel: a compromised account that
+            // blasts many channels is caught here without needing to hit the
+            // honeypot channel at all. If it trips (or is deduped from a prior
+            // trip) we're done — no need to also run the honeypot check.
+            if (spamOn && IsCrossChannelSpam(userMsg.Author.Id, out var distinctChannels))
             {
-                _logger.LogWarning(
-                    "Honeypot: server owner {User} ({Id}) posted in the trap. A bot cannot ban the " +
-                    "server owner, so no action is taken. If this was not the owner testing, the " +
-                    "owner account may be compromised — see the server-recovery runbook.",
-                    userMsg.Author.Username, userMsg.Author.Id);
+                var windowSecs = Math.Max(1, _config.SpamTrapWindowSeconds);
+                var threshold  = Math.Max(2, _config.SpamTrapChannelThreshold);
+                var ctx = new TrapHit(
+                    Feature:    "SpamTrap",
+                    AlertTitle: "🚨 Cross-Channel Spam Detected",
+                    Reason:     $"Cross-channel spam: posted in {distinctChannels} distinct channels within {windowSecs}s.",
+                    BumpHoneypotCounter: false,
+                    ChannelId:  guildChannel.Id,
+                    ExtraDetail: $"Posted in {distinctChannels} distinct channels within {windowSecs}s (threshold {threshold}).",
+                    AlertOnOwner: true);
+                await HandleTripAsync(userMsg, member, guildChannel.Guild, spamMode, ctx);
                 return;
             }
 
-            // Burst dedupe.
-            var now = DateTime.UtcNow;
-            if (_recentlyActioned.TryGetValue(userMsg.Author.Id, out var last)
-                && now - last < ActionCooldown)
-                return;
-            _recentlyActioned[userMsg.Author.Id] = now;
+            // ── Honeypot channel trap (feature #7) ──
+            if (!honeypotOn) return;
+            if (guildChannel.Id != _config.HoneypotChannelId) return;
 
-            _logger.LogWarning(
-                "Honeypot tripped by {User} ({Id}) in #{Channel} (mode {Mode}).",
-                userMsg.Author.Username, userMsg.Author.Id, guildChannel.Name, mode);
-
-            if (string.Equals(mode, ModeEnforce, StringComparison.OrdinalIgnoreCase))
-            {
-                await EnforceAsync(userMsg, member, guildChannel.Guild);
-            }
-            else
-            {
-                // AlertOnly: observe only. No delete, no ban, no counter move.
-                await WriteAuditAsync(guildChannel.Guild, userMsg.Author, member,
-                    action: "Alerted", purged: 0, channelsTouched: 0, error: null);
-                await PostAlertAsync(guildChannel.Guild, userMsg.Author, member,
-                    enforced: false, banned: false, purged: 0, error: null);
-            }
+            var honeypotCtx = new TrapHit(
+                Feature:    "Honeypot",
+                AlertTitle: "🍯 Honeypot Triggered",
+                Reason:     $"Honeypot: posted in trap channel #{_config.HoneypotChannelId}.",
+                BumpHoneypotCounter: true,
+                ChannelId:  _config.HoneypotChannelId,
+                ExtraDetail: null,
+                AlertOnOwner: false);
+            await HandleTripAsync(userMsg, member, guildChannel.Guild, honeypotMode, honeypotCtx);
         }
         catch (Exception ex)
         {
@@ -311,13 +317,110 @@ public sealed class HoneypotHandler
         }
     }
 
+    /// <summary>
+    /// Shared trip handler for both detectors. Applies the owner exemption,
+    /// burst dedupe, and then either enforces (ban + purge) or alert-only,
+    /// per <paramref name="mode"/>. The <paramref name="ctx"/> carries the
+    /// trap-specific labelling so audit rows and alerts are attributed to the
+    /// right feature.
+    /// </summary>
+    private async Task HandleTripAsync(
+        SocketUserMessage trigger, SocketGuildUser? member, SocketGuild guild, string mode, TrapHit ctx)
+    {
+        var author = trigger.Author;
+
+        // The server owner can never be banned by a bot. For the honeypot a
+        // curious owner poking the channel is just noise (log + drop). For the
+        // spam trap, an owner blasting many channels is a strong sign the owner
+        // account is compromised, so we alert loudly even though we can't ban.
+        if (author.Id == guild.OwnerId)
+        {
+            _logger.LogWarning(
+                "{Feature}: server owner {User} ({Id}) tripped the trap; a bot cannot ban the server " +
+                "owner. {Note}",
+                ctx.Feature, author.Username, author.Id,
+                ctx.AlertOnOwner
+                    ? "Alerting — owner account may be compromised; see the server-recovery runbook."
+                    : "No action taken.");
+
+            if (ctx.AlertOnOwner)
+            {
+                await WriteAuditAsync(guild, author, member, ctx,
+                    action: "BanSkippedOwner", purged: 0, channelsTouched: 0,
+                    error: "server owner — cannot be banned by a bot");
+                await PostAlertAsync(guild, author, member, ctx,
+                    enforced: true, banned: false, purged: 0,
+                    error: "server owner — cannot be banned by a bot");
+            }
+            return;
+        }
+
+        // Burst dedupe: one account's flood is actioned once, not per message.
+        // Shared across both detectors so a spam-trip and a honeypot-hit from
+        // the same account inside the cooldown don't double-fire.
+        var now = DateTime.UtcNow;
+        if (_recentlyActioned.TryGetValue(author.Id, out var last)
+            && now - last < ActionCooldown)
+            return;
+        _recentlyActioned[author.Id] = now;
+
+        _logger.LogWarning(
+            "{Feature} tripped by {User} ({Id}) (mode {Mode}). {Extra}",
+            ctx.Feature, author.Username, author.Id, mode, ctx.ExtraDetail ?? string.Empty);
+
+        if (string.Equals(mode, ModeEnforce, StringComparison.OrdinalIgnoreCase))
+        {
+            await EnforceAsync(trigger, member, guild, ctx);
+        }
+        else
+        {
+            // AlertOnly: observe only. No delete, no ban, no counter move.
+            await WriteAuditAsync(guild, author, member, ctx,
+                action: "Alerted", purged: 0, channelsTouched: 0, error: null);
+            await PostAlertAsync(guild, author, member, ctx,
+                enforced: false, banned: false, purged: 0, error: null);
+        }
+    }
+
+    /// <summary>
+    /// Behavioral detector: returns true when <paramref name="userId"/> has
+    /// posted in <see cref="BotConfig.SpamTrapChannelThreshold"/>+ DISTINCT
+    /// channels within the last <see cref="BotConfig.SpamTrapWindowSeconds"/>
+    /// seconds, read straight off the rolling index. Cheap: bounded to the
+    /// per-user list (≤ <see cref="MaxTrackedPerUser"/>) and short-circuits when
+    /// the list can't possibly meet the threshold.
+    /// </summary>
+    private bool IsCrossChannelSpam(ulong userId, out int distinctChannels)
+    {
+        distinctChannels = 0;
+
+        var threshold  = Math.Max(2, _config.SpamTrapChannelThreshold);
+        var windowSecs = Math.Max(1, _config.SpamTrapWindowSeconds);
+
+        if (!_recent.TryGetValue(userId, out var list)) return false;
+
+        var cutoff = DateTime.UtcNow - TimeSpan.FromSeconds(windowSecs);
+        lock (list)
+        {
+            // Total tracked < threshold ⇒ distinct-in-window can't reach it.
+            if (list.Count < threshold) return false;
+            distinctChannels = list
+                .Where(m => m.PostedUtc >= cutoff)
+                .Select(m => m.ChannelId)
+                .Distinct()
+                .Count();
+        }
+
+        return distinctChannels >= threshold;
+    }
+
     // ── Enforce: ban + cross-channel purge + counter + embed refresh ───
 
-    private async Task EnforceAsync(SocketUserMessage trigger, SocketGuildUser? member, SocketGuild guild)
+    private async Task EnforceAsync(SocketUserMessage trigger, SocketGuildUser? member, SocketGuild guild, TrapHit ctx)
     {
         var userId   = trigger.Author.Id;
         var username = trigger.Author.Username;
-        var reason   = $"Honeypot: posted in trap channel #{_config.HoneypotChannelId}.";
+        var reason   = ctx.Reason;
 
         // ── Role-hierarchy guard (mirrors AccountAgeGateHandler) ──
         if (member is not null)
@@ -327,11 +430,11 @@ public sealed class HoneypotHandler
             if (memberTop >= botTop)
             {
                 _logger.LogWarning(
-                    "Honeypot cannot ban {User} ({Id}) — member's top role is at/above the bot's. " +
-                    "Falling back to alert only.", username, userId);
-                await WriteAuditAsync(guild, trigger.Author, member,
+                    "{Feature} cannot ban {User} ({Id}) — member's top role is at/above the bot's. " +
+                    "Falling back to alert only.", ctx.Feature, username, userId);
+                await WriteAuditAsync(guild, trigger.Author, member, ctx,
                     action: "BanSkippedHierarchy", purged: 0, channelsTouched: 0, error: null);
-                await PostAlertAsync(guild, trigger.Author, member,
+                await PostAlertAsync(guild, trigger.Author, member, ctx,
                     enforced: true, banned: false, purged: 0, error: "bot role too low to ban");
                 return;
             }
@@ -354,30 +457,32 @@ public sealed class HoneypotHandler
                 reason: reason,
                 options: new RequestOptions { AuditLogReason = reason });
             banned = true;
-            _logger.LogWarning("Honeypot: banned {User} ({Id}); purged {Purged} message(s) across {Channels} channel(s).",
-                username, userId, purged, channelsTouched);
+            _logger.LogWarning("{Feature}: banned {User} ({Id}); purged {Purged} message(s) across {Channels} channel(s).",
+                ctx.Feature, username, userId, purged, channelsTouched);
         }
         catch (HttpException ex) when (ex.HttpCode == System.Net.HttpStatusCode.NotFound)
         {
             // A ban applies even to a departed user, so this is unusual; treat as success.
             banned = true;
-            _logger.LogInformation("Honeypot: {User} ({Id}) already gone; ban applied anyway.", username, userId);
+            _logger.LogInformation("{Feature}: {User} ({Id}) already gone; ban applied anyway.", ctx.Feature, username, userId);
         }
         catch (Exception ex)
         {
             banError = ex.Message;
-            _logger.LogError(ex, "Honeypot: failed to ban {User} ({Id}).", username, userId);
+            _logger.LogError(ex, "{Feature}: failed to ban {User} ({Id}).", ctx.Feature, username, userId);
         }
 
         // ── Counter + audit + alert + embed refresh ──
-        if (banned)
+        // Only the honeypot maintains the visible "bots caught" embed counter;
+        // a spam-trap ban is recorded in the audit log but does not move it.
+        if (banned && ctx.BumpHoneypotCounter)
             await IncrementCounterAndRefreshEmbedAsync(guild);
 
-        await WriteAuditAsync(guild, trigger.Author, member,
+        await WriteAuditAsync(guild, trigger.Author, member, ctx,
             action: banned ? "Banned" : "BanFailed",
             purged: purged, channelsTouched: channelsTouched, error: banError);
 
-        await PostAlertAsync(guild, trigger.Author, member,
+        await PostAlertAsync(guild, trigger.Author, member, ctx,
             enforced: true, banned: banned, purged: purged, error: banError);
     }
 
@@ -475,7 +580,7 @@ public sealed class HoneypotHandler
     // ── Audit + alert ──────────────────────────────────────────────────
 
     private async Task WriteAuditAsync(
-        SocketGuild guild, SocketUser author, SocketGuildUser? member,
+        SocketGuild guild, SocketUser author, SocketGuildUser? member, TrapHit ctx,
         string action, int purged, int channelsTouched, string? error)
     {
         try
@@ -485,6 +590,8 @@ public sealed class HoneypotHandler
 
             var details = new StringBuilder();
             details.Append($"AccountAgeDays={(DateTime.UtcNow - author.CreatedAt.UtcDateTime).TotalDays:F1}. ");
+            if (!string.IsNullOrWhiteSpace(ctx.ExtraDetail))
+                details.Append($"{ctx.ExtraDetail} ");
             if (action is "Banned" or "BanFailed")
                 details.Append($"PurgedMessages={purged}. ChannelsTouched={channelsTouched}. ");
             details.Append($"PurgeWindowMinutes={_config.HoneypotPurgeWindowMinutes}.");
@@ -492,12 +599,12 @@ public sealed class HoneypotHandler
             db.SecurityAuditRecords.Add(new SecurityAuditRecord
             {
                 GuildId      = guild.Id,
-                Feature      = "Honeypot",
+                Feature      = ctx.Feature,
                 Action       = action,
                 UserId       = author.Id,
                 Username     = author.Username,
                 DisplayName  = member?.DisplayName ?? author.Username,
-                ChannelId    = _config.HoneypotChannelId,
+                ChannelId    = ctx.ChannelId,
                 Details      = details.ToString(),
                 OccurredAt   = DateTime.UtcNow,
                 ErrorMessage = error,
@@ -507,20 +614,20 @@ public sealed class HoneypotHandler
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Honeypot: failed to write SecurityAuditRecord ({Action}).", action);
+            _logger.LogError(ex, "{Feature}: failed to write SecurityAuditRecord ({Action}).", ctx.Feature, action);
         }
     }
 
     private async Task PostAlertAsync(
-        SocketGuild guild, SocketUser author, SocketGuildUser? member,
+        SocketGuild guild, SocketUser author, SocketGuildUser? member, TrapHit ctx,
         bool enforced, bool banned, int purged, string? error)
     {
         var alerts = ResolveSecurityAlertsChannel(guild);
         if (alerts is null)
         {
             _logger.LogWarning(
-                "Honeypot: no resolvable alerts channel (SecurityAlertsChannelId={Id}, HqChannelName='{Hq}'). Alert dropped.",
-                _config.SecurityAlertsChannelId, _config.HqChannelName);
+                "{Feature}: no resolvable alerts channel (SecurityAlertsChannelId={Id}, HqChannelName='{Hq}'). Alert dropped.",
+                ctx.Feature, _config.SecurityAlertsChannelId, _config.HqChannelName);
             return;
         }
 
@@ -528,28 +635,35 @@ public sealed class HoneypotHandler
             ? "Observed (AlertOnly) — no action taken"
             : banned
                 ? $"Banned + purged {purged} message(s)"
-                : $"Ban FAILED ({error ?? "see logs"})";
+                : error is not null && error.Contains("owner", StringComparison.OrdinalIgnoreCase)
+                    ? "NOT actioned — server owner cannot be banned by a bot (possible compromise; see recovery runbook)"
+                    : $"Ban FAILED ({error ?? "see logs"})";
 
         var ageDays = (DateTime.UtcNow - author.CreatedAt.UtcDateTime).TotalDays;
 
-        var embed = new EmbedBuilder()
+        var builder = new EmbedBuilder()
             .WithColor(banned || !enforced ? Color.Orange : Color.Red)
-            .WithTitle("🍯 Honeypot Triggered")
+            .WithTitle(ctx.AlertTitle)
             .AddField("Account",
                 $"{author.Mention} (`{author.Username}` / `{author.Id}`)", inline: false)
-            .AddField("Outcome", outcome, inline: false)
+            .AddField("Outcome", outcome, inline: false);
+
+        if (!string.IsNullOrWhiteSpace(ctx.ExtraDetail))
+            builder.AddField("Detected", ctx.ExtraDetail, inline: false);
+
+        var embed = builder
             .AddField("Account age", $"{ageDays:F1} days", inline: true)
             .AddField("In server",
                 member?.JoinedAt is { } j ? $"{(DateTime.UtcNow - j.UtcDateTime).TotalDays:F1} days" : "left / unknown",
                 inline: true)
-            .WithFooter("ClanGuard • Honeypot")
+            .WithFooter($"ClanGuard • {ctx.Feature}")
             .WithCurrentTimestamp()
             .Build();
 
         try { await alerts.SendMessageAsync(embed: embed); }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Honeypot: failed to post alert to #{Channel}.", alerts.Name);
+            _logger.LogError(ex, "{Feature}: failed to post alert to #{Channel}.", ctx.Feature, alerts.Name);
         }
     }
 
@@ -679,4 +793,25 @@ public sealed class HoneypotHandler
     }
 
     private readonly record struct TrackedMessage(ulong ChannelId, ulong MessageId, DateTime PostedUtc);
+
+    /// <summary>
+    /// Trap-specific labelling threaded through the shared enforce / audit /
+    /// alert path so the honeypot (#7) and the behavioral spam trap (#8) can
+    /// reuse one code path while still being attributed correctly.
+    /// </summary>
+    /// <param name="Feature">SecurityAuditRecord.Feature stamp ("Honeypot" / "SpamTrap").</param>
+    /// <param name="AlertTitle">Title for the #alerts embed.</param>
+    /// <param name="Reason">Ban / audit reason string.</param>
+    /// <param name="BumpHoneypotCounter">Whether a ban increments the honeypot embed's "bots caught" counter.</param>
+    /// <param name="ChannelId">Channel to stamp on the audit row (the trap channel, or the triggering channel).</param>
+    /// <param name="ExtraDetail">Optional extra context for the audit row + alert (e.g. the spam channel count).</param>
+    /// <param name="AlertOnOwner">Whether to alert when the server owner trips the trap (true for the spam trap — a strong compromise signal).</param>
+    private sealed record TrapHit(
+        string Feature,
+        string AlertTitle,
+        string Reason,
+        bool BumpHoneypotCounter,
+        ulong? ChannelId,
+        string? ExtraDetail,
+        bool AlertOnOwner);
 }
