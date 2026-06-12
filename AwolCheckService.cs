@@ -515,9 +515,14 @@ public class AwolCheckService : BackgroundService
                 db, guild.Id, record.UserId, windowStart,
                 _config.MaxSingleSessionHours, ct);
 
+            // Color signals at-a-glance review priority: red = zero activity in
+            // the window (clear-cut kick candidate), yellow = some activity but
+            // still below threshold (borderline — may warrant a closer look).
+            var hasSomeActivity = messageCount > 0 || voiceSeconds > 0;
+
             var embed = new EmbedBuilder()
                 .WithTitle("⚠️ AWOL Member — Ready for Review")
-                .WithColor(Color.Red)
+                .WithColor(hasSomeActivity ? Color.Gold : Color.Red)
                 .WithTimestamp(DateTimeOffset.UtcNow)
                 // User field layout note: lead with the bold display name (so the
                 // reviewing officer sees "SSG.GRAVESTARR" at a glance), then the
