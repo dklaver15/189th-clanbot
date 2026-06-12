@@ -599,6 +599,8 @@ public class CommandsCommandHandler
             // Officer tier
             new("awol-check", "Check another user's activity stats",
                 "Officer+", officer),
+            new("banhammer", "Repost the Ban Hammer counter embed if it gets deleted",
+                "Officer+", officer),   // SyncWithHandlers: BanHammerHandler.HasElevatedPermissions
             new("clear-awol", "Clear a user's AWOL status",
                 "Officer+", officer),
             new("cleanup-calendar-dupes", "Reconcile calendar/GCal duplicate entries",

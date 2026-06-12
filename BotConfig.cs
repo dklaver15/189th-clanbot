@@ -1083,6 +1083,36 @@ public class BotConfig
     /// </summary>
     public int SpamTrapChannelThreshold { get; set; } = 5;
 
+    // ─── Ban Hammer: "days since last ban" counter ───────────────────
+    /// <summary>
+    /// Master switch for the Ban Hammer feature. When false, the handler does
+    /// nothing: no embed is posted, no ban events are counted, no refresh timer
+    /// runs. Default true.
+    /// </summary>
+    public bool BanHammerEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Channel the auto-updating "days since last ban" embed lives in. The bot
+    /// posts the embed here once on first Ready and thereafter edits that same
+    /// message in place (its ID is stored on
+    /// <see cref="BotState.BanHammerMessageId"/>). 0 disables the feature.
+    /// </summary>
+    public ulong BanHammerChannelId { get; set; } = 1515136067898970152;
+
+    /// <summary>
+    /// Banner image/gif shown on the Ban Hammer embed. Placeholder by default
+    /// until the server owner supplies the custom gif — set this to that URL
+    /// (a Discord CDN attachment link works well, same as HoneypotImageUrl).
+    /// Empty string hides the banner entirely.
+    /// </summary>
+    public string BanHammerImageUrl { get; set; } = "https://placehold.co/600x240/8B0000/FFFFFF/png?text=BAN+HAMMER";
+
+    /// <summary>
+    /// Thumbnail shown in the embed's corner. Empty (the default) falls back to
+    /// the guild icon (the 189th logo), matching the honeypot embed.
+    /// </summary>
+    public string BanHammerThumbnailUrl { get; set; } = "";
+
     // ─── SQLite Backup Settings ──────────────────────────────────────
     /// <summary>
     /// Master switch for SqliteBackupService. When false, the service exits

@@ -623,6 +623,39 @@ public class BotState
     /// hits and exempt-member posts do not count.
     /// </summary>
     public int HoneypotBanCount { get; set; }
+
+    /// <summary>
+    /// Discord message ID of the auto-posted "Ban Hammer" counter embed in the
+    /// configured channel (BotConfig.BanHammerChannelId). Set the first time
+    /// the embed is posted on Ready; consulted on later boots so the bot edits
+    /// the existing message (refreshing the day count) instead of posting a
+    /// duplicate. Null until first posted, or if the message was deleted (a
+    /// fresh one is posted and this is updated).
+    /// </summary>
+    public ulong? BanHammerMessageId { get; set; }
+
+    /// <summary>
+    /// UTC timestamp the "days since last ban" counter is measured from. Reset
+    /// to now whenever a human (non-bot) member is manually banned by a human
+    /// moderator. Set to the embed's first-post time on a fresh DB so the sign
+    /// starts at day 0. Bot bans and bans performed by ClanGuard itself (e.g.
+    /// the honeypot / spam trap) deliberately do NOT reset it — this counter
+    /// tracks people we ban, not bots we catch.
+    /// </summary>
+    public DateTime? BanHammerLastBanUtc { get; set; }
+
+    /// <summary>
+    /// Longest streak in whole days the clan has ever gone without a counted
+    /// ban — the "record peace" shown on the embed. Updated whenever a reset
+    /// ends a gap longer than the current record.
+    /// </summary>
+    public int BanHammerRecordDays { get; set; }
+
+    /// <summary>
+    /// Lifetime count of human bans that have reset the Ban Hammer counter.
+    /// Rendered as the embed's running total.
+    /// </summary>
+    public int BanHammerTotalBans { get; set; }
 }
 
 /// <summary>

@@ -36,6 +36,7 @@ public class DiscordBotService : IHostedService
     private readonly WebhookAuditCommandHandler _webhookAuditCommandHandler;
     private readonly TokenGrabberScannerHandler _tokenGrabberScannerHandler;
     private readonly HoneypotHandler _honeypotHandler;
+    private readonly BanHammerHandler _banHammerHandler;
     private readonly TicketReminderHandler _ticketReminderHandler;
     private readonly GuestReminderHandler _guestReminderHandler;
     private readonly OnboardingReminderHandler _onboardingReminderHandler;
@@ -100,6 +101,7 @@ public class DiscordBotService : IHostedService
         WebhookAuditCommandHandler webhookAuditCommandHandler,
         TokenGrabberScannerHandler tokenGrabberScannerHandler,
         HoneypotHandler honeypotHandler,
+        BanHammerHandler banHammerHandler,
         TicketReminderHandler ticketReminderHandler,
         GuestReminderHandler guestReminderHandler,
         OnboardingReminderHandler onboardingReminderHandler,
@@ -163,6 +165,7 @@ public class DiscordBotService : IHostedService
         _webhookAuditCommandHandler   = webhookAuditCommandHandler;
         _tokenGrabberScannerHandler   = tokenGrabberScannerHandler;
         _honeypotHandler             = honeypotHandler;
+        _banHammerHandler            = banHammerHandler;
         _ticketReminderHandler       = ticketReminderHandler;
         _guestReminderHandler        = guestReminderHandler;
         _onboardingReminderHandler   = onboardingReminderHandler;
@@ -231,6 +234,7 @@ public class DiscordBotService : IHostedService
         _webhookAuditCommandHandler.Register(_client);
         _tokenGrabberScannerHandler.Register(_client);
         _honeypotHandler.Register(_client);
+        _banHammerHandler.Register(_client);
         _ticketReminderHandler.Register(_client);
         _guestReminderHandler.Register(_client);
         _onboardingReminderHandler.Register(_client);
@@ -652,6 +656,12 @@ public class DiscordBotService : IHostedService
                 // tables, no external API calls. NOTE: keep
                 // CommandsCommandHandler.BuildCatalog in sync when changing /timeline.
                 TimelineCommandHandler.BuildCommand(),
+
+                // /banhammer — manual repost / self-heal for the "days since
+                // last ban" counter embed if it ever gets deleted. Officer+
+                // gated. NOTE: keep CommandsCommandHandler.BuildCatalog in sync
+                // when changing /banhammer.
+                BanHammerHandler.BuildCommand(),
             };
 
             foreach (var guild in _client.Guilds)

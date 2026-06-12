@@ -192,6 +192,13 @@ try
     // counter. Register() is called from DiscordBotService.
     builder.Services.AddSingleton<HoneypotHandler>();
 
+    // BanHammerHandler: the "days since last ban" counter. Subscribes to
+    // AuditLogCreated (resets the counter when a human bans another human) and
+    // Ready (posts/refreshes the persistent embed), plus a slow timer to climb
+    // the day count between bans. Gated by BotConfig.BanHammerEnabled /
+    // BanHammerChannelId. Register() is called from DiscordBotService.
+    builder.Services.AddSingleton<BanHammerHandler>();
+
     // OnboardingReminderHandler: registered before GamertagCommandHandler because
     // the gamertag handler depends on it to notify when a Guest saves gamertags.
     builder.Services.AddSingleton<OnboardingReminderHandler>();
