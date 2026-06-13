@@ -251,7 +251,7 @@ public sealed class BanHammerHandler
     /// </summary>
     private async Task<DateTime?> ResyncFromHistoryAsync(SocketGuild guild)
     {
-        var found = await FindLastQualifyingBanUtcAsync(guild);
+        var found = await FindLastQualifyingBanAsync(guild);
 
         await _embedLock.WaitAsync();
         try
@@ -260,8 +260,12 @@ public sealed class BanHammerHandler
             var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
             var state = await GetOrCreateBotStateAsync(db);
 
-            if (found is { } ts)
-                state.BanHammerLastBanUtc = ts;
+            if (found is { } hit)
+            {
+                state.BanHammerLastBanUtc    = hit.WhenUtc;
+                state.BanHammerLastBanTarget = hit.Target;
+                state.BanHammerLastBanReason = hit.Reason;
+            }
 
             state.BanHammerSeededFromHistory = true;
             await db.SaveChangesAsync();
@@ -271,7 +275,7 @@ public sealed class BanHammerHandler
             _embedLock.Release();
         }
 
-        return found;
+        return found?.WhenUtc;
     }
 
     private bool HasElevatedPermissions(SocketGuildUser user)
@@ -320,12 +324,15 @@ public sealed class BanHammerHandler
                 // reflects reality instead of starting at deploy time.
                 if (!state.BanHammerSeededFromHistory)
                 {
-                    var found = await FindLastQualifyingBanUtcAsync(channel.Guild);
-                    if (found is { } ts)
+                    var found = await FindLastQualifyingBanAsync(channel.Guild);
+                    if (found is { } hit)
                     {
-                        state.BanHammerLastBanUtc = ts;
+                        state.BanHammerLastBanUtc    = hit.WhenUtc;
+                        state.BanHammerLastBanTarget = hit.Target;
+                        state.BanHammerLastBanReason = hit.Reason;
                         _logger.LogInformation(
-                            "Ban Hammer: seeded last-ban date from audit history ({Date:u}).", ts);
+                            "Ban Hammer: seeded last ban from audit history ({Target}, {Date:u}).",
+                            hit.Target, hit.WhenUtc);
                     }
                     else if (state.BanHammerLastBanUtc is null)
                     {
@@ -433,7 +440,7 @@ public sealed class BanHammerHandler
                 return;
             }
 
-            await ResetCounterAsync(guild, entry.User);
+            await ResetCounterAsync(guild, entry.User, target.Username, entry.Reason);
         }
         catch (Exception ex)
         {
@@ -441,7 +448,8 @@ public sealed class BanHammerHandler
         }
     }
 
-    private async Task ResetCounterAsync(SocketGuild guild, SocketUser? executor)
+    private async Task ResetCounterAsync(
+        SocketGuild guild, SocketUser? executor, string targetName, string? reason)
     {
         await _embedLock.WaitAsync();
         try
@@ -459,14 +467,16 @@ public sealed class BanHammerHandler
                     state.BanHammerRecordDays = streakDays;
             }
 
-            state.BanHammerLastBanUtc = DateTime.UtcNow;
-            state.BanHammerTotalBans += 1;
+            state.BanHammerLastBanUtc    = DateTime.UtcNow;
+            state.BanHammerLastBanTarget = targetName;
+            state.BanHammerLastBanReason = string.IsNullOrWhiteSpace(reason) ? null : reason.Trim();
+            state.BanHammerTotalBans    += 1;
             await db.SaveChangesAsync();
 
             _logger.LogInformation(
-                "Ban Hammer: counter reset (total {Total}, record {Record}d) — ban by {Actor}.",
+                "Ban Hammer: counter reset (total {Total}, record {Record}d) — {Target} banned by {Actor}.",
                 state.BanHammerTotalBans, state.BanHammerRecordDays,
-                executor?.Username ?? "(unknown)");
+                targetName, executor?.Username ?? "(unknown)");
 
             await RenderAsync(guild, state);
         }
@@ -555,6 +565,16 @@ public sealed class BanHammerHandler
             .WithFooter("189th • Ban Hammer • resets on every ban")
             .WithCurrentTimestamp();
 
+        // Last victim — who got the hammer, and why (omitted until we have one).
+        if (!string.IsNullOrWhiteSpace(state.BanHammerLastBanTarget))
+        {
+            var reason = string.IsNullOrWhiteSpace(state.BanHammerLastBanReason)
+                ? "*no reason given*"
+                : Truncate(state.BanHammerLastBanReason, 500);
+            builder.AddField("🪦 Last victim",
+                $"**{state.BanHammerLastBanTarget}** — {reason}", inline: false);
+        }
+
         // Thumbnail: explicit override, else the guild icon (the 189th logo).
         var thumb = !string.IsNullOrWhiteSpace(_config.BanHammerThumbnailUrl)
             ? _config.BanHammerThumbnailUrl
@@ -592,6 +612,9 @@ public sealed class BanHammerHandler
         => Math.Max(0, (int)Math.Floor((DateTime.UtcNow - sinceUtc).TotalDays));
 
     private static string Plural(int n, string one, string many) => n == 1 ? one : many;
+
+    private static string Truncate(string s, int max)
+        => s.Length <= max ? s : s[..(max - 1)] + "…";
 
     /// <summary>
     /// Upgrades <c>entry.Data</c> to <see cref="BanAuditLogData"/>, re-fetching
@@ -631,7 +654,7 @@ public sealed class BanHammerHandler
     /// same target.IsBot / executor-is-bot filters the live counter uses, so a
     /// seed agrees with what live events would have recorded.
     /// </summary>
-    private async Task<DateTime?> FindLastQualifyingBanUtcAsync(SocketGuild guild)
+    private async Task<BanHistoryHit?> FindLastQualifyingBanAsync(SocketGuild guild)
     {
         // Cap the scan so a guild with a huge ban history can't spin forever.
         // Entries are newest-first, so the first qualifying hit is the answer.
@@ -658,7 +681,8 @@ public sealed class BanHammerHandler
                     if (ban.Target.IsBot)
                         continue;
 
-                    return entry.CreatedAt.UtcDateTime;
+                    var reason = string.IsNullOrWhiteSpace(entry.Reason) ? null : entry.Reason.Trim();
+                    return new BanHistoryHit(entry.CreatedAt.UtcDateTime, ban.Target.Username, reason);
                 }
 
                 if (scanned >= maxToScan)
@@ -672,6 +696,9 @@ public sealed class BanHammerHandler
 
         return null;
     }
+
+    /// <summary>A qualifying ban recovered from the audit log during a seed / resync.</summary>
+    private readonly record struct BanHistoryHit(DateTime WhenUtc, string Target, string? Reason);
 
     /// <summary>Singleton BotState load — same pattern the honeypot uses.</summary>
     private static async Task<BotState> GetOrCreateBotStateAsync(BotDbContext db)

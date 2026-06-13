@@ -666,6 +666,21 @@ public class BotState
     /// thereafter. A manual /banhammer resync re-runs the scan regardless.
     /// </summary>
     public bool BanHammerSeededFromHistory { get; set; }
+
+    /// <summary>
+    /// Username (snapshot) of the most recently banned person — the "last
+    /// victim" shown on the embed. Null until a ban is recorded or seeded.
+    /// Stored as a plain string because the banned user has left the guild, so
+    /// a live mention would not resolve.
+    /// </summary>
+    public string? BanHammerLastBanTarget { get; set; }
+
+    /// <summary>
+    /// Reason attached to the most recent ban (from the audit-log entry), or
+    /// null when none was given. Rendered alongside
+    /// <see cref="BanHammerLastBanTarget"/> on the embed.
+    /// </summary>
+    public string? BanHammerLastBanReason { get; set; }
 }
 
 /// <summary>
