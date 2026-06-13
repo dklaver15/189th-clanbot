@@ -254,7 +254,7 @@ public class CalendarOutboxWorker : BackgroundService
         // Overlap detection + organizer DM happens AFTER the create lands in
         // GCal — that way the message we send the organizer is truthful
         // ("the event is on the calendar; here are the conflicts").
-        await TrySendOverlapDmAsync(row, payload, calEvent.CalendarEventId, isReschedule: false);
+        await TrySendOverlapDmAsync(db, row, payload, calEvent.CalendarEventId, isReschedule: false);
     }
 
     private async Task HandleUpdateAsync(
@@ -312,7 +312,7 @@ public class CalendarOutboxWorker : BackgroundService
         if (Math.Abs((calEvent.StartUtc - payload.StartUtc).TotalMinutes) >= 1 ||
             Math.Abs((calEvent.EndUtc   - payload.EndUtc  ).TotalMinutes) >= 1)
         {
-            await TrySendOverlapDmAsync(row, payload, calEvent.CalendarEventId, isReschedule: true);
+            await TrySendOverlapDmAsync(db, row, payload, calEvent.CalendarEventId, isReschedule: true);
         }
     }
 
@@ -377,6 +377,7 @@ public class CalendarOutboxWorker : BackgroundService
     /// bad than failing the queue row over a Discord API hiccup.
     /// </summary>
     private async Task TrySendOverlapDmAsync(
+        BotDbContext db,
         CalendarOutbox row,
         CalendarOutboxPayload payload,
         string googleEventId,
@@ -390,6 +391,33 @@ public class CalendarOutboxWorker : BackgroundService
                     payload.StartUtc, payload.EndUtc))
                 .Where(e => e.Id != googleEventId)
                 .ToList();
+
+            if (overlaps.Count == 0) return;
+
+            // Drop "ghost" overlaps: events that were deleted in Discord and are
+            // sitting in their /sort rebind grace window (PendingCancelUntil),
+            // condemned to be removed from GCal by ResolveExpiredCancellationsAsync
+            // but not gone yet. GetOverlappingEventsAsync queries GCal live and
+            // can't see that they're already cancelled, so without this filter a
+            // delete-then-recreate inside the grace window fires a false-positive
+            // conflict DM against the very events being replaced.
+            var overlapIds = overlaps.Select(e => e.Id).ToList();
+            var now        = DateTime.UtcNow;
+            var condemnedIds = await db.CalendarEvents
+                .Where(c => c.PendingCancelUntil != null
+                         && c.PendingCancelUntil > now
+                         && c.DeleteOnCancelTimeout
+                         && overlapIds.Contains(c.CalendarEventId))
+                .Select(c => c.CalendarEventId)
+                .ToListAsync();
+
+            if (condemnedIds.Count > 0)
+            {
+                overlaps = overlaps.Where(e => !condemnedIds.Contains(e.Id)).ToList();
+                _logger.LogDebug(
+                    "Overlap check for '{Title}': ignored {Count} event(s) pending cancellation",
+                    payload.Title, condemnedIds.Count);
+            }
 
             if (overlaps.Count == 0) return;
 
