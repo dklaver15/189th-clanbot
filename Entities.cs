@@ -656,6 +656,16 @@ public class BotState
     /// Rendered as the embed's running total.
     /// </summary>
     public int BanHammerTotalBans { get; set; }
+
+    /// <summary>
+    /// Whether the Ban Hammer counter has been seeded from Discord's audit-log
+    /// ban history yet. False on a fresh column so the next boot back-dates
+    /// <see cref="BanHammerLastBanUtc"/> to the most recent real ban within the
+    /// audit log's ~45-day retention window, instead of starting the sign at
+    /// deploy time. Set true once seeded; the live ban events maintain it
+    /// thereafter. A manual /banhammer resync re-runs the scan regardless.
+    /// </summary>
+    public bool BanHammerSeededFromHistory { get; set; }
 }
 
 /// <summary>

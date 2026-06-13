@@ -88,6 +88,9 @@ public sealed class BanHammerHandler
         new SlashCommandBuilder()
             .WithName(CommandName)
             .WithDescription("Repost the Ban Hammer counter embed (Officer+ only)")
+            .AddOption("resync", ApplicationCommandOptionType.Boolean,
+                "Re-pull the last ban date from Discord's audit log before reposting",
+                isRequired: false)
             .Build();
 
     public void Register(DiscordSocketClient client)
@@ -148,6 +151,18 @@ public sealed class BanHammerHandler
                 return;
             }
 
+            var resync = command.Data.Options
+                .FirstOrDefault(o => o.Name == "resync")?.Value as bool? ?? false;
+
+            string resyncNote = "";
+            if (resync)
+            {
+                var found = await ResyncFromHistoryAsync(channel.Guild);
+                resyncNote = found is { } ts
+                    ? $"\nRe-pulled from audit log: last ban <t:{((DateTimeOffset)DateTime.SpecifyKind(ts, DateTimeKind.Utc)).ToUnixTimeSeconds()}:R>."
+                    : "\nNo ban found in the audit log's ~45-day window — counter left unchanged.";
+            }
+
             var posted = await RepostAsync(channel);
             if (posted is null)
             {
@@ -157,12 +172,12 @@ public sealed class BanHammerHandler
             }
 
             await command.FollowupAsync(
-                $"🔨 Ban Hammer reposted in {channel.Mention}: {posted.GetJumpUrl()}",
+                $"🔨 Ban Hammer reposted in {channel.Mention}: {posted.GetJumpUrl()}{resyncNote}",
                 ephemeral: true);
 
             _logger.LogInformation(
-                "Ban Hammer: {Caller} reposted the counter embed (message {MessageId}).",
-                caller.Username, posted.Id);
+                "Ban Hammer: {Caller} reposted the counter embed (message {MessageId}, resync={Resync}).",
+                caller.Username, posted.Id, resync);
         }
         catch (Exception ex)
         {
@@ -227,6 +242,38 @@ public sealed class BanHammerHandler
         }
     }
 
+    /// <summary>
+    /// Re-pulls the most recent qualifying ban from the audit log and, if one is
+    /// found, updates the counter's anchor date. Returns the found timestamp, or
+    /// null when nothing qualifying exists in the retention window (the date is
+    /// left untouched in that case). Marks the state seeded so the startup seed
+    /// won't second-guess a manual resync.
+    /// </summary>
+    private async Task<DateTime?> ResyncFromHistoryAsync(SocketGuild guild)
+    {
+        var found = await FindLastQualifyingBanUtcAsync(guild);
+
+        await _embedLock.WaitAsync();
+        try
+        {
+            using var scope = _services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+            var state = await GetOrCreateBotStateAsync(db);
+
+            if (found is { } ts)
+                state.BanHammerLastBanUtc = ts;
+
+            state.BanHammerSeededFromHistory = true;
+            await db.SaveChangesAsync();
+        }
+        finally
+        {
+            _embedLock.Release();
+        }
+
+        return found;
+    }
+
     private bool HasElevatedPermissions(SocketGuildUser user)
     {
         if (user.GuildPermissions.ManageRoles || user.GuildPermissions.Administrator)
@@ -268,9 +315,30 @@ public sealed class BanHammerHandler
                 var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
                 var state = await GetOrCreateBotStateAsync(db);
 
-                // Fresh DB: start the sign at day 0 from now rather than showing
-                // a meaningless "days since 0001-01-01".
-                if (state.BanHammerLastBanUtc is null)
+                // One-time seed: back-date the counter to the most recent real
+                // ban in Discord's audit log (≈45-day retention) so the sign
+                // reflects reality instead of starting at deploy time.
+                if (!state.BanHammerSeededFromHistory)
+                {
+                    var found = await FindLastQualifyingBanUtcAsync(channel.Guild);
+                    if (found is { } ts)
+                    {
+                        state.BanHammerLastBanUtc = ts;
+                        _logger.LogInformation(
+                            "Ban Hammer: seeded last-ban date from audit history ({Date:u}).", ts);
+                    }
+                    else if (state.BanHammerLastBanUtc is null)
+                    {
+                        // No qualifying ban in the audit window — start at day 0.
+                        state.BanHammerLastBanUtc = DateTime.UtcNow;
+                        _logger.LogInformation(
+                            "Ban Hammer: no ban found in audit history; starting counter at today.");
+                    }
+
+                    state.BanHammerSeededFromHistory = true;
+                    await db.SaveChangesAsync();
+                }
+                else if (state.BanHammerLastBanUtc is null)
                 {
                     state.BanHammerLastBanUtc = DateTime.UtcNow;
                     await db.SaveChangesAsync();
@@ -550,6 +618,56 @@ public sealed class BanHammerHandler
         {
             _logger.LogDebug(ex,
                 "Ban Hammer: REST fallback fetch failed for ban entry {EntryId}.", entry.Id);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Scans Discord's audit log (newest-first) for the most recent ban that
+    /// counts toward the sign — a real person, banned by someone other than
+    /// ClanGuard — and returns its UTC timestamp. Returns null if no qualifying
+    /// ban exists within the audit log's ≈45-day retention window. Mirrors the
+    /// same target.IsBot / executor-is-bot filters the live counter uses, so a
+    /// seed agrees with what live events would have recorded.
+    /// </summary>
+    private async Task<DateTime?> FindLastQualifyingBanUtcAsync(SocketGuild guild)
+    {
+        // Cap the scan so a guild with a huge ban history can't spin forever.
+        // Entries are newest-first, so the first qualifying hit is the answer.
+        const int maxToScan = 500;
+        var scanned = 0;
+
+        try
+        {
+            await foreach (var page in guild.GetAuditLogsAsync(limit: maxToScan, actionType: ActionType.Ban))
+            {
+                foreach (var entry in page)
+                {
+                    scanned++;
+
+                    // Skip bans performed by ClanGuard itself (honeypot / spam
+                    // trap / age gate) — same rule as the live counter.
+                    if (entry.User is not null && entry.User.Id == _client.CurrentUser.Id)
+                        continue;
+
+                    if (entry.Data is not BanAuditLogData ban || ban.Target is null)
+                        continue;
+
+                    // Exclude banned bot accounts — only real people count.
+                    if (ban.Target.IsBot)
+                        continue;
+
+                    return entry.CreatedAt.UtcDateTime;
+                }
+
+                if (scanned >= maxToScan)
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Ban Hammer: audit-log history scan failed.");
         }
 
         return null;
