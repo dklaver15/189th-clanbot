@@ -91,7 +91,9 @@ public sealed class UfcCommandHandler
 
         if (upcoming.Count == 0)
         {
-            await command.FollowupAsync("Couldn't find any upcoming UFC events right now.");
+            await command.FollowupAsync(_api.IsWarmedUp
+                ? "Couldn't find any upcoming UFC events right now."
+                : "Still loading UFC data (the first fetch takes a minute or two) — try again shortly.");
             return;
         }
 
@@ -114,7 +116,9 @@ public sealed class UfcCommandHandler
 
         if (ev is null)
         {
-            await command.FollowupAsync("Couldn't find a recent UFC event with results yet.");
+            await command.FollowupAsync(_api.IsWarmedUp
+                ? "Couldn't find a recent UFC event with results yet."
+                : "Still loading UFC data (the first fetch takes a minute or two) — try again shortly.");
             return;
         }
 

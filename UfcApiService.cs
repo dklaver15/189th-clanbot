@@ -66,10 +66,11 @@ public sealed class UfcApiService
     private readonly ILogger<UfcApiService> _logger;
     private readonly BotConfig _config;
 
-    private readonly SemaphoreSlim _refreshGate = new(1, 1);
     private readonly object _cacheLock = new();
     private List<UfcEvent> _events = new();
     private DateTime _eventsExpireUtc = DateTime.MinValue;
+    private Task? _refreshTask;
+    private volatile bool _loaded;
 
     public UfcApiService(
         IHttpClientFactory httpClientFactory,
@@ -87,53 +88,70 @@ public sealed class UfcApiService
         ? DefaultHost
         : _config.UfcApiHost.Trim();
 
+    /// <summary>
+    /// True once at least one scan has completed. Lets callers distinguish "still
+    /// warming up the cache" from "scanned and genuinely nothing found".
+    /// </summary>
+    public bool IsWarmedUp => _loaded;
+
     /// <summary>Upcoming events (soonest first), grouped from the scanned window.</summary>
-    public async Task<IReadOnlyList<UfcEvent>> GetUpcomingAsync(int max = 8, CancellationToken ct = default)
+    public Task<IReadOnlyList<UfcEvent>> GetUpcomingAsync(int max = 8, CancellationToken ct = default)
     {
         var nowUtc = DateTime.UtcNow;
-        return (await GetEventsAsync(ct))
+        IReadOnlyList<UfcEvent> result = Snapshot()
             .Where(e => e.StartUtc is { } s && s >= nowUtc.AddHours(-3)) // grace for an in-progress card
             .OrderBy(e => e.StartUtc)
             .Take(max)
             .ToList();
+        return Task.FromResult(result);
     }
 
     /// <summary>The most recently completed event with results, or null if none found.</summary>
-    public async Task<UfcEvent?> GetLatestEventResultsAsync(CancellationToken ct = default)
+    public Task<UfcEvent?> GetLatestEventResultsAsync(CancellationToken ct = default)
     {
         var nowUtc = DateTime.UtcNow;
-        return (await GetEventsAsync(ct))
+        var result = Snapshot()
             .Where(e => e.StartUtc is { } s && s <= nowUtc.AddHours(6) // grace for an in-progress card
                         && e.Fights.Any(f => f.Fighters.Any(x => x.Winner == true)))
             .OrderByDescending(e => e.StartUtc)
             .FirstOrDefault();
+        return Task.FromResult(result);
     }
 
     /// <summary>
-    /// Returns the cached window of events, refreshing it (one fetch at a time)
-    /// when stale. Shared by every surface so we only pay the scan once per TTL.
+    /// Returns the current cached events instantly (stale-while-revalidate) and
+    /// kicks off a background refresh if the cache is stale. Reads NEVER block on
+    /// the network — critical because slash-command handlers run on Discord's
+    /// gateway thread, and a slow inline scan there starves the heartbeat and
+    /// drops the connection. The throttled ~2-minute scan only ever runs on a
+    /// background task.
     /// </summary>
-    private async Task<IReadOnlyList<UfcEvent>> GetEventsAsync(CancellationToken ct)
+    private List<UfcEvent> Snapshot()
     {
-        if (!IsConfigured) return Array.Empty<UfcEvent>();
+        TriggerRefreshIfStale();
+        lock (_cacheLock)
+        {
+            return _events;
+        }
+    }
+
+    private void TriggerRefreshIfStale()
+    {
+        if (!IsConfigured) return;
 
         lock (_cacheLock)
         {
-            if (DateTime.UtcNow < _eventsExpireUtc)
-                return _events;
+            if (DateTime.UtcNow < _eventsExpireUtc) return;       // still fresh
+            if (_refreshTask is { IsCompleted: false }) return;   // already refreshing
+            _refreshTask = Task.Run(RefreshAsync);
         }
+    }
 
-        // Single-flight: if another caller is already refreshing, wait and reuse.
-        await _refreshGate.WaitAsync(ct);
+    private async Task RefreshAsync()
+    {
         try
         {
-            lock (_cacheLock)
-            {
-                if (DateTime.UtcNow < _eventsExpireUtc)
-                    return _events;
-            }
-
-            var fights = await ScanWindowAsync(ct);
+            var fights = await ScanWindowAsync(CancellationToken.None);
             var events = GroupIntoEvents(fights);
 
             lock (_cacheLock)
@@ -148,12 +166,16 @@ public sealed class UfcApiService
                     // Keep whatever we had; retry sooner than a full TTL.
                     _eventsExpireUtc = DateTime.UtcNow.Add(EmptyRetryTtl);
                 }
-                return _events;
+                _loaded = true;
             }
         }
-        finally
+        catch (Exception ex)
         {
-            _refreshGate.Release();
+            _logger.LogError(ex, "UfcApiService background refresh failed");
+            lock (_cacheLock)
+            {
+                _eventsExpireUtc = DateTime.UtcNow.Add(EmptyRetryTtl);
+            }
         }
     }
 
