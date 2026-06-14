@@ -74,6 +74,10 @@ public sealed class UfcFighter
     /// <summary>Pre-fight moneyline, when the betting subfeed is included.</summary>
     public int? Moneyline { get; set; }
 
+    /// <summary>Fighter photo URL from the data feed (API-Sports "logo"). Used as a
+    /// poster fallback when no Wikipedia event poster is found.</summary>
+    public string? Logo { get; set; }
+
     [JsonIgnore]
     public string FullName =>
         string.Join(" ", new[] { FirstName, LastName }

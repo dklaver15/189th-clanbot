@@ -34,8 +34,7 @@ public static class UfcEmbedBuilder
         eb.WithDescription("Grab your snacks — there's a card tomorrow. Hop in voice and watch with the clan! 🍿");
         eb.WithFooter("Watch legally on ESPN+ / UFC Fight Pass • times shown in your local zone");
 
-        if (!string.IsNullOrWhiteSpace(posterUrl))
-            eb.WithImageUrl(posterUrl);
+        ApplyImage(eb, ev, posterUrl, posterAsImage: true);
 
         return eb.Build();
     }
@@ -70,8 +69,7 @@ public static class UfcEmbedBuilder
         eb.WithFooter("Watch legally on ESPN+ / UFC Fight Pass • times shown in your local zone");
 
         // A poster for the nearest event gives the list a visual anchor.
-        if (!string.IsNullOrWhiteSpace(posterUrl))
-            eb.WithImageUrl(posterUrl);
+        ApplyImage(eb, upcoming[0], posterUrl, posterAsImage: true);
 
         return eb.Build();
     }
@@ -109,8 +107,7 @@ public static class UfcEmbedBuilder
 
         eb.WithFooter("Results via API-Sports");
 
-        if (!string.IsNullOrWhiteSpace(posterUrl))
-            eb.WithThumbnailUrl(posterUrl);
+        ApplyImage(eb, ev, posterUrl, posterAsImage: false);
 
         return eb.Build();
     }
@@ -119,6 +116,39 @@ public static class UfcEmbedBuilder
 
     private static string Name(UfcEvent ev) =>
         !string.IsNullOrWhiteSpace(ev.Name) ? ev.Name! : "UFC Event";
+
+    /// <summary>
+    /// Attaches the visual: the Wikipedia event poster when we have one (as a big
+    /// image, or a corner thumbnail for results), otherwise falls back to a
+    /// main-event fighter photo from the data feed — shown as a thumbnail since a
+    /// headshot looks better small than stretched full-width. Many events
+    /// (especially upcoming/oddly-named ones) have no Wikipedia article, so this
+    /// fallback keeps the embed from being image-less.
+    /// </summary>
+    private static void ApplyImage(EmbedBuilder eb, UfcEvent ev, string? posterUrl, bool posterAsImage)
+    {
+        if (!string.IsNullOrWhiteSpace(posterUrl))
+        {
+            if (posterAsImage) eb.WithImageUrl(posterUrl);
+            else eb.WithThumbnailUrl(posterUrl);
+            return;
+        }
+
+        if (FighterImage(ev) is { } fighterImg)
+            eb.WithThumbnailUrl(fighterImg);
+    }
+
+    /// <summary>A main-event fighter's photo URL from the feed, or null if none.</summary>
+    private static string? FighterImage(UfcEvent ev)
+    {
+        var main = ev.Fights
+            .OrderByDescending(f => f.Order ?? int.MinValue)
+            .FirstOrDefault();
+
+        return main?.Fighters
+            .Select(f => f.Logo)
+            .FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
+    }
 
     /// <summary>
     /// "Fighter A vs. Fighter B" for the main event — the bout with the highest

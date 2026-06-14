@@ -240,8 +240,8 @@ public sealed class UfcApiService
                         Order = fight.IsMain == true ? 1000 : 0,
                         Fighters = new List<UfcFighter>
                         {
-                            new() { FighterId = first.Id,  FirstName = first.Name,  Winner = first.Winner },
-                            new() { FighterId = second.Id, FirstName = second.Name, Winner = second.Winner },
+                            new() { FighterId = first.Id,  FirstName = first.Name,  Winner = first.Winner,  Logo = first.Logo },
+                            new() { FighterId = second.Id, FirstName = second.Name, Winner = second.Winner, Logo = second.Logo },
                         },
                     });
                 }
