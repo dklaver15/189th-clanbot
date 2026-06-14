@@ -11,21 +11,21 @@ namespace ClanGuardBot.Services;
 /// surfaces — <c>/ufc-schedule</c> (upcoming), <c>/ufc-results</c> (latest card),
 /// and the day-before <see cref="UfcReminderService"/> reminder.
 ///
-/// Why API-Sports and not SportsDataIO: SportsDataIO's free tier scrambles result
-/// fields and (as we saw live) ships synthetic event names like "UFC Freedom 250",
-/// which break poster lookups. API-Sports returns real, unscrambled cards on its
-/// free tier (100 calls/day) and carries the true event name in each fight's
-/// <c>slug</c> — real matchups and working Wikipedia posters from one provider.
+/// ── Why date scanning ──
+/// The free API-Sports plan locks the <c>season</c>, <c>next</c>, and <c>last</c>
+/// parameters (season is limited to 2022-2024; next/last are paid-only). The only
+/// free discovery parameter is <c>date</c>. So we scan a bounded window of dates
+/// around today, one <c>?date=YYYY-MM-DD</c> call each, and group the returned
+/// fights into events. To stay well under the 100-calls/day free cap, the whole
+/// window is fetched once and cached for <see cref="EventsTtl"/>; every surface
+/// reads that one cache. ~{back+forward+1} calls per refresh × a handful of
+/// refreshes/day.
 ///
 /// ── Shape ──
 /// API-Sports has no "event" object; it returns individual fights, each tagged
-/// with the card <c>slug</c>, a UTC <c>date</c>, <c>is_main</c>, weight class, and
-/// per-fighter winner flags. We pull a season of fights and group them by slug
-/// into <see cref="UfcEvent"/>s.
-///
-/// ── Calls / caching ──
-/// One request per season, cached ~10 min and shared by all three surfaces, so a
-/// weekly results post plus hourly reminder polls stay far under the daily cap.
+/// with the card <c>slug</c> (the event name), a UTC <c>date</c>, <c>is_main</c>,
+/// weight class, and per-fighter winner flags. We group fights by slug into
+/// <see cref="UfcEvent"/>s.
 ///
 /// ── Auth ──
 /// Direct API-Sports accounts use the <c>x-apisports-key</c> header against
@@ -37,7 +37,17 @@ public sealed class UfcApiService
     private const string DefaultHost = "v1.mma.api-sports.io";
     private const string KeyHeader = "x-apisports-key";
 
-    private static readonly TimeSpan SeasonTtl = TimeSpan.FromMinutes(10);
+    // Window scanned around today. UFC runs ~weekly, so ±~9 days reliably catches
+    // the most recent completed card and the next one or two upcoming.
+    private const int ScanDaysBack = 8;
+    private const int ScanDaysForward = 9;
+
+    // Cache the full window so hourly reminder polls + on-demand commands share
+    // one fetch. 6h keeps us comfortably under 100 calls/day (≈18 calls × 4/day).
+    private static readonly TimeSpan EventsTtl = TimeSpan.FromHours(6);
+    // After a fetch that came back empty (transient outage), retry sooner instead
+    // of serving "nothing" for a full TTL — and never clobber good cached data.
+    private static readonly TimeSpan EmptyRetryTtl = TimeSpan.FromMinutes(15);
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -48,8 +58,10 @@ public sealed class UfcApiService
     private readonly ILogger<UfcApiService> _logger;
     private readonly BotConfig _config;
 
+    private readonly SemaphoreSlim _refreshGate = new(1, 1);
     private readonly object _cacheLock = new();
-    private readonly Dictionary<int, (List<ApiSportsFight> Fights, DateTime AtUtc)> _seasonCache = new();
+    private List<UfcEvent> _events = new();
+    private DateTime _eventsExpireUtc = DateTime.MinValue;
 
     public UfcApiService(
         IHttpClientFactory httpClientFactory,
@@ -67,64 +79,95 @@ public sealed class UfcApiService
         ? DefaultHost
         : _config.UfcApiHost.Trim();
 
-    /// <summary>Upcoming events (soonest first), grouped from future-dated fights.</summary>
+    /// <summary>Upcoming events (soonest first), grouped from the scanned window.</summary>
     public async Task<IReadOnlyList<UfcEvent>> GetUpcomingAsync(int max = 8, CancellationToken ct = default)
     {
         var nowUtc = DateTime.UtcNow;
-        var fights = await GetFightsAroundAsync(nowUtc, ct);
-
-        var events = GroupIntoEvents(fights)
+        return (await GetEventsAsync(ct))
             .Where(e => e.StartUtc is { } s && s >= nowUtc.AddHours(-3)) // grace for an in-progress card
             .OrderBy(e => e.StartUtc)
             .Take(max)
             .ToList();
-
-        return events;
     }
 
-    /// <summary>The most recently completed event with its bouts, or null if none found.</summary>
+    /// <summary>The most recently completed event with results, or null if none found.</summary>
     public async Task<UfcEvent?> GetLatestEventResultsAsync(CancellationToken ct = default)
     {
         var nowUtc = DateTime.UtcNow;
-        var fights = await GetFightsAroundAsync(nowUtc, ct);
-
-        return GroupIntoEvents(fights)
+        return (await GetEventsAsync(ct))
             .Where(e => e.StartUtc is { } s && s <= nowUtc.AddHours(6) // grace for an in-progress card
                         && e.Fights.Any(f => f.Fighters.Any(x => x.Winner == true)))
             .OrderByDescending(e => e.StartUtc)
             .FirstOrDefault();
     }
 
-    private async Task<List<ApiSportsFight>> GetFightsAroundAsync(DateTime nowUtc, CancellationToken ct)
+    /// <summary>
+    /// Returns the cached window of events, refreshing it (one fetch at a time)
+    /// when stale. Shared by every surface so we only pay the scan once per TTL.
+    /// </summary>
+    private async Task<IReadOnlyList<UfcEvent>> GetEventsAsync(CancellationToken ct)
     {
-        var fights = new List<ApiSportsFight>(await GetSeasonFightsAsync(nowUtc.Year, ct));
-        if (nowUtc.Month == 12)
-            fights.AddRange(await GetSeasonFightsAsync(nowUtc.Year + 1, ct));
-        else if (nowUtc.Month == 1)
-            fights.AddRange(await GetSeasonFightsAsync(nowUtc.Year - 1, ct));
-        return fights;
+        if (!IsConfigured) return Array.Empty<UfcEvent>();
+
+        lock (_cacheLock)
+        {
+            if (DateTime.UtcNow < _eventsExpireUtc)
+                return _events;
+        }
+
+        // Single-flight: if another caller is already refreshing, wait and reuse.
+        await _refreshGate.WaitAsync(ct);
+        try
+        {
+            lock (_cacheLock)
+            {
+                if (DateTime.UtcNow < _eventsExpireUtc)
+                    return _events;
+            }
+
+            var fights = await ScanWindowAsync(ct);
+            var events = GroupIntoEvents(fights);
+
+            lock (_cacheLock)
+            {
+                if (events.Count > 0)
+                {
+                    _events = events;
+                    _eventsExpireUtc = DateTime.UtcNow.Add(EventsTtl);
+                }
+                else
+                {
+                    // Keep whatever we had; retry sooner than a full TTL.
+                    _eventsExpireUtc = DateTime.UtcNow.Add(EmptyRetryTtl);
+                }
+                return _events;
+            }
+        }
+        finally
+        {
+            _refreshGate.Release();
+        }
     }
 
-    private async Task<IReadOnlyList<ApiSportsFight>> GetSeasonFightsAsync(int season, CancellationToken ct)
+    private async Task<List<ApiSportsFight>> ScanWindowAsync(CancellationToken ct)
     {
-        if (!IsConfigured) return Array.Empty<ApiSportsFight>();
+        var today = DateTime.UtcNow.Date;
+        var all = new List<ApiSportsFight>();
 
-        lock (_cacheLock)
+        for (var offset = -ScanDaysBack; offset <= ScanDaysForward; offset++)
         {
-            if (_seasonCache.TryGetValue(season, out var hit) && DateTime.UtcNow - hit.AtUtc < SeasonTtl)
-                return hit.Fights;
+            var day = today.AddDays(offset);
+            var url = $"https://{Host}/fights?date={day:yyyy-MM-dd}";
+            var resp = await GetJsonAsync<ApiSportsResponse<ApiSportsFight>>(url, ct);
+            if (resp?.Response is { Count: > 0 } fights)
+                all.AddRange(fights);
         }
 
-        var url = $"https://{Host}/fights?season={season}";
-        var fights = await GetJsonAsync<ApiSportsResponse<ApiSportsFight>>(url, ct);
-        var list = fights?.Response ?? new List<ApiSportsFight>();
+        _logger.LogInformation(
+            "UfcApiService scanned {Days} days, found {Fights} fights",
+            ScanDaysBack + ScanDaysForward + 1, all.Count);
 
-        lock (_cacheLock)
-        {
-            _seasonCache[season] = (list, DateTime.UtcNow);
-        }
-
-        return list;
+        return all;
     }
 
     /// <summary>
@@ -171,7 +214,7 @@ public sealed class UfcApiService
             .ToList();
     }
 
-    private async Task<T?> GetJsonAsync<T>(string url, CancellationToken ct)
+    private async Task<T?> GetJsonAsync<T>(string url, CancellationToken ct) where T : class
     {
         try
         {
@@ -186,10 +229,15 @@ public sealed class UfcApiService
             if (!resp.IsSuccessStatusCode)
             {
                 _logger.LogWarning("API-Sports MMA returned {Status} for {Url}", (int)resp.StatusCode, Redact(url));
-                return default;
+                return null;
             }
 
             var json = await resp.Content.ReadAsStringAsync(ct);
+
+            // API-Sports always returns 200; failures surface in the "errors" field
+            // (e.g. plan restrictions). Surface them so config issues aren't silent.
+            LogApiErrors(json, url);
+
             return JsonSerializer.Deserialize<T>(json, JsonOpts);
         }
         catch (OperationCanceledException)
@@ -199,7 +247,28 @@ public sealed class UfcApiService
         catch (Exception ex)
         {
             _logger.LogError(ex, "API-Sports MMA fetch failed for {Url}", Redact(url));
-            return default;
+            return null;
+        }
+    }
+
+    private void LogApiErrors(string json, string url)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("errors", out var errors)) return;
+
+            // "errors" is [] when fine, or an object of {field: message} when not.
+            if (errors.ValueKind == JsonValueKind.Object && errors.EnumerateObject().Any())
+            {
+                var msg = string.Join("; ", errors.EnumerateObject()
+                    .Select(e => $"{e.Name}: {e.Value}"));
+                _logger.LogWarning("API-Sports MMA returned errors for {Url}: {Errors}", Redact(url), msg);
+            }
+        }
+        catch
+        {
+            // Best-effort diagnostics only.
         }
     }
 
