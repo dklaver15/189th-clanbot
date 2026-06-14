@@ -13,6 +13,10 @@ using Microsoft.Extensions.Options;
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Information()
+    // EF Core logs every executed SQL statement at Information, which buries the
+    // application's own log lines (and makes incident triage painful). Raise its
+    // floor to Warning so we keep EF errors but drop the per-query spam.
+    .MinimumLevel.Override("Microsoft.EntityFrameworkCore.Database.Command", Serilog.Events.LogEventLevel.Warning)
     .WriteTo.Console()
     .WriteTo.File("logs/clanguard-.log", rollingInterval: RollingInterval.Day, retainedFileCountLimit: 14)
     .CreateLogger();

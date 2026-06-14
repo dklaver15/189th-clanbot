@@ -573,12 +573,46 @@ public sealed class EventManagementHandler
             catch (Exception ex) { _logger.LogDebug(ex, "Cancel ack (UpdateAsync) failed for event {Id}", clanEventId); }
 
             var whole = scope == "series";
-            var count = await DoCancelAsync(clanEventId, whole);
-            var msg = whole
-                ? $"✅ Cancelled the series **{ev.Title}** ({count} upcoming occurrence{(count == 1 ? "" : "s")})."
-                : ev.SeriesId.HasValue
-                    ? $"✅ Cancelled this occurrence of **{ev.Title}**."
-                    : $"✅ Cancelled **{ev.Title}**.";
+
+            // Run the cancel inside a try/catch and report what ACTUALLY happened.
+            // Previously a thrown cancel left the "⏳ Cancelling…" holder on screen
+            // (looks done) with nothing saved, and a whole-series cancel that
+            // matched zero occurrences still claimed success. Both made a failed
+            // cancel indistinguishable from a real one. Now we tell the truth, and
+            // log it server-side so there's a durable audit trail.
+            string msg;
+            try
+            {
+                var count = await DoCancelAsync(clanEventId, whole);
+
+                if (whole && count == 0)
+                {
+                    msg = $"⚠️ Nothing was cancelled for **{ev.Title}** — it has no upcoming occurrences " +
+                          "(it may have already been cancelled). Run `/event list` to check.";
+                    _logger.LogWarning(
+                        "Cancel by {User} matched 0 upcoming occurrences for series of ClanEvent {Id} ('{Title}')",
+                        component.User.Id, clanEventId, ev.Title);
+                }
+                else
+                {
+                    msg = whole
+                        ? $"✅ Cancelled the series **{ev.Title}** ({count} upcoming occurrence{(count == 1 ? "" : "s")})."
+                        : ev.SeriesId.HasValue
+                            ? $"✅ Cancelled this occurrence of **{ev.Title}**."
+                            : $"✅ Cancelled **{ev.Title}**.";
+                    _logger.LogInformation(
+                        "Cancel by {User}: {Scope} for ClanEvent {Id} ('{Title}') — {Count} occurrence(s) cancelled",
+                        component.User.Id, whole ? "whole series" : "single occurrence", clanEventId, ev.Title, count);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Cancel FAILED for ClanEvent {Id} ('{Title}') requested by {User}",
+                    clanEventId, ev.Title, component.User.Id);
+                msg = $"❌ Couldn't cancel **{ev.Title}** — something went wrong and nothing was changed. " +
+                      "Please try again; if it keeps failing, let an admin know.";
+            }
+
             try { await component.ModifyOriginalResponseAsync(m => { m.Content = msg; m.Components = Empty(); m.Embed = null; }); }
             catch (Exception ex) { _logger.LogDebug(ex, "Failed to finalize cancel message for event {Id}", clanEventId); }
         }

@@ -83,4 +83,12 @@ public sealed class EventCreationSession
     public DateTime StartedAt { get; set; }
     public DateTime LastActivityAt { get; set; }
     public bool TimezoneKnown { get; set; }
+
+    /// <summary>
+    /// Set once the organizer has been shown the "this overlaps an existing
+    /// event" warning and chose to proceed anyway. Prevents the confirm step
+    /// from looping on the same warning, while still catching the common
+    /// mistake of creating a duplicate of an event that was never cancelled.
+    /// </summary>
+    public bool OverlapAcknowledged { get; set; }
 }

@@ -141,12 +141,19 @@ public sealed class RedditRssClient
 
         if (!response.IsSuccessStatusCode)
         {
-            // Reddit occasionally serves 503 from its CDN under load; treat
-            // every non-success as transient and let the caller's cycle
-            // try again on the next poll.
-            _logger.LogWarning(
-                "Reddit RSS for r/{Sub} returned {Status}; skipping this subreddit for the cycle",
-                subreddit, response.StatusCode);
+            // Reddit aggressively rate-limits the public RSS endpoint. A 429 is
+            // routine and self-heals on the next poll, so log it at Debug to keep
+            // it out of the warning stream (35 subs × every cycle was drowning
+            // the logs). Other non-success codes (503s under CDN load, etc.) are
+            // rarer and stay at Warning as a real operator signal.
+            if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+                _logger.LogDebug(
+                    "Reddit RSS for r/{Sub} returned 429 (rate-limited); skipping this subreddit for the cycle",
+                    subreddit);
+            else
+                _logger.LogWarning(
+                    "Reddit RSS for r/{Sub} returned {Status}; skipping this subreddit for the cycle",
+                    subreddit, response.StatusCode);
             return Array.Empty<RedditPost>();
         }
 

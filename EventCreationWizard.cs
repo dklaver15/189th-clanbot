@@ -583,6 +583,24 @@ public sealed class EventCreationWizard
 
     private async Task OnConfirmAsync(EventCreationSession s, SocketMessageComponent c)
     {
+        // Duplicate-event guard. If this draft overlaps an existing scheduled
+        // event and the organizer hasn't already been warned, surface the
+        // conflict and require a second, explicit confirm. This is the backstop
+        // for the common failure where someone believes they cancelled an old
+        // recurring event (but the cancel never actually completed) and creates a
+        // parallel series — which is exactly how duplicate calendar entries arise.
+        if (!s.OverlapAcknowledged)
+        {
+            var conflicts = await FindOverlappingScheduledAsync(s.Draft);
+            if (conflicts.Count > 0)
+            {
+                s.OverlapAcknowledged = true;          // a second confirm click now proceeds
+                s.LastActivityAt = DateTime.UtcNow;
+                await ShowOverlapWarningAsync(s, c, conflicts);
+                return;
+            }
+        }
+
         _sessions.TryRemove(s.Draft.OrganizerId, out _);
 
         // Acknowledge immediately and strip the buttons (also prevents a
@@ -623,6 +641,74 @@ public sealed class EventCreationWizard
         var postChannelId = _config.GetEventPostChannelId();
         var channelMention = postChannelId != 0 ? $"<#{postChannelId}>" : "the events channel";
         await FinalizeConfirmAsync(c, $"✅ **Event created!** It's been posted to {channelMention}.");
+    }
+
+    /// <summary>
+    /// Returns up to a handful of scheduled events whose time window overlaps the
+    /// draft's first occurrence. Used by the confirm step's duplicate guard. We
+    /// check the first occurrence only — for a recurring duplicate (e.g. a weekly
+    /// event recreated at the same weekday/time) the first occurrences collide,
+    /// which is enough to flag it.
+    /// </summary>
+    private async Task<List<ClanEvent>> FindOverlappingScheduledAsync(EventDraft d)
+    {
+        var start = d.StartUtc;
+        var end   = d.EndUtc;
+
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+        return await db.ClanEvents
+            .Where(e => e.GuildId == d.GuildId
+                     && e.Status == ClanEventStatus.Scheduled
+                     && e.StartUtc < end
+                     && e.EndUtc   > start)
+            .OrderBy(e => e.StartUtc)
+            .Take(5)
+            .ToListAsync();
+    }
+
+    /// <summary>
+    /// Replaces the confirm card with an overlap warning. The "Create anyway"
+    /// button reuses the existing confirm action (the session's
+    /// OverlapAcknowledged flag is now set, so it won't loop), and "Cancel"
+    /// reuses the normal cancel action.
+    /// </summary>
+    private async Task ShowOverlapWarningAsync(
+        EventCreationSession s, SocketMessageComponent c, List<ClanEvent> conflicts)
+    {
+        var lines = string.Join("\n", conflicts.Select(e =>
+            $"• **{e.Title}** — {EventTimeParser.Stamp(e.StartUtc, 'F')}"));
+
+        var embed = new EmbedBuilder()
+            .WithTitle("⚠️ This overlaps an existing event")
+            .WithColor(Color.Orange)
+            .WithDescription(
+                $"**{s.Draft.Title}** ({EventTimeParser.Stamp(s.Draft.StartUtc, 'F')}) overlaps:\n\n" +
+                lines +
+                "\n\nIf you meant to **change** an existing event, cancel this and use `/event edit` " +
+                "on the existing one instead — creating a new event leaves a duplicate on the calendar. " +
+                "If this is genuinely a separate event, go ahead and create it.")
+            .Build();
+
+        var buttons = new ComponentBuilder()
+            .WithButton("Create anyway", $"{Prefix}confirm", ButtonStyle.Danger)
+            .WithButton("Cancel",        $"{Prefix}cancel",  ButtonStyle.Secondary)
+            .Build();
+
+        try
+        {
+            await c.UpdateAsync(m =>
+            {
+                m.Content     = string.Empty;
+                m.Embed       = embed;
+                m.Components   = buttons;
+                m.Attachments = new List<FileAttachment>(); // drop the preview image
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to show overlap warning for {User}", s.Draft.OrganizerId);
+        }
     }
 
     /// <summary>
