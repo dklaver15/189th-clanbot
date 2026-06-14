@@ -12,6 +12,8 @@ services:
       - Claude__ApiKey=${ANTHROPIC_API_KEY}
       - BotConfig__BackupEncryptionPassphrase=${CLANGUARD_BACKUP_PASSPHRASE}
       - BotConfig__HeartbeatPingUrl=${CLANGUARD_HEARTBEAT_URL}
+      # -- UFC / MMA (SportsDataIO subscription key) --
+      - BotConfig__UfcApiKey=${CLANGUARD_UFC_API_KEY}
       # Cloudflare R2 credentials for the SQLite backup uploader.
       - BotConfig__BackupR2__AccessKeyId=${CLANGUARD_R2_ACCESS_KEY_ID}
       - BotConfig__BackupR2__SecretAccessKey=${CLANGUARD_R2_SECRET_ACCESS_KEY}

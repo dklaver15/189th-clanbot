@@ -51,6 +51,7 @@ public class DiscordBotService : IHostedService
     private readonly PollCommandHandler _pollCommandHandler;
     private readonly PollVoteInteractionHandler _pollVoteHandler;
     private readonly PollGatewayVoteHandler _pollGatewayVoteHandler;
+    private readonly UfcCommandHandler _ufcCommandHandler;
     private readonly PromoteCommandHandler _promoteHandler;
     private readonly DemoteCommandHandler _demoteHandler;
     private readonly SetNickCommandHandler _setNickHandler;
@@ -116,6 +117,7 @@ public class DiscordBotService : IHostedService
         PollCommandHandler pollCommandHandler,
         PollVoteInteractionHandler pollVoteHandler,
         PollGatewayVoteHandler pollGatewayVoteHandler,
+        UfcCommandHandler ufcCommandHandler,
         PromoteCommandHandler promoteHandler,
         DemoteCommandHandler demoteHandler,
         SetNickCommandHandler setNickHandler,
@@ -180,6 +182,7 @@ public class DiscordBotService : IHostedService
         _pollCommandHandler          = pollCommandHandler;
         _pollVoteHandler             = pollVoteHandler;
         _pollGatewayVoteHandler      = pollGatewayVoteHandler;
+        _ufcCommandHandler           = ufcCommandHandler;
         _promoteHandler              = promoteHandler;
         _demoteHandler               = demoteHandler;
         _setNickHandler              = setNickHandler;
@@ -264,6 +267,7 @@ public class DiscordBotService : IHostedService
         _pollCommandHandler.Register(_client);
         _pollVoteHandler.Register(_client);
         _pollGatewayVoteHandler.Register(_client);
+        _ufcCommandHandler.Register(_client);
         _promoteHandler.Register(_client);
         _demoteHandler.Register(_client);
         _setNickHandler.Register(_client);
@@ -386,6 +390,9 @@ public class DiscordBotService : IHostedService
 
                 // /poll — native + anonymous hybrid poll, open to all members.
                 PollCommandHandler.BuildCommand(),
+
+                UfcCommandHandler.BuildScheduleCommand(),
+                UfcCommandHandler.BuildResultsCommand(),
 
                 new SlashCommandBuilder()
                     .WithName("promote")

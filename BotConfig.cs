@@ -1113,6 +1113,54 @@ public class BotConfig
     /// </summary>
     public string BanHammerThumbnailUrl { get; set; } = "";
 
+    // ─── UFC / MMA Feed ──────────────────────────────────────────────
+    /// <summary>
+    /// Master switch for the UFC features. Controls the day-before
+    /// <see cref="Services.UfcReminderService"/> reminder loop. The
+    /// <c>/ufc-schedule</c> and <c>/ufc-results</c> commands work whenever a key
+    /// is set regardless of this flag; this gates only the automatic reminders.
+    /// Default false so nothing posts until a channel + key are configured.
+    /// </summary>
+    public bool UfcEnabled { get; set; } = false;
+
+    /// <summary>
+    /// SportsDataIO MMA subscription key (free trial at
+    /// https://sportsdata.io/cart/free-trial/mma). Sent in the
+    /// Ocp-Apim-Subscription-Key header. Empty disables all UFC data — commands
+    /// reply "not set up yet" and the reminder loop idles. Prefer supplying this
+    /// via environment (BotConfig__UfcApiKey=...) rather than committing it.
+    /// </summary>
+    public string UfcApiKey { get; set; } = string.Empty;
+
+    /// <summary>League code for the SportsDataIO schedule endpoint. Default "UFC".</summary>
+    public string UfcLeague { get; set; } = "UFC";
+
+    /// <summary>
+    /// Channel where day-before fight reminders are posted. Must be set (non-zero)
+    /// and <see cref="UfcEnabled"/> true for reminders to fire.
+    /// </summary>
+    public ulong UfcChannelId { get; set; } = default;
+
+    /// <summary>
+    /// How many hours before an event the reminder fires. Default 24 (the day
+    /// before). The reminder loop polls hourly, so the post lands within ~1h of
+    /// the event entering this window.
+    /// </summary>
+    public int UfcReminderLeadHours { get; set; } = 24;
+
+    /// <summary>
+    /// When true (default), event embeds try to attach the official event poster
+    /// resolved from Wikipedia. When false, only <see cref="UfcDefaultImageUrl"/>
+    /// is used.
+    /// </summary>
+    public bool UfcUseWikipediaPoster { get; set; } = true;
+
+    /// <summary>
+    /// Fallback banner image used when no Wikipedia poster is found (or poster
+    /// lookup is disabled). Empty means no image on the embed.
+    /// </summary>
+    public string UfcDefaultImageUrl { get; set; } = string.Empty;
+
     // ─── SQLite Backup Settings ──────────────────────────────────────
     /// <summary>
     /// Master switch for SqliteBackupService. When false, the service exits
