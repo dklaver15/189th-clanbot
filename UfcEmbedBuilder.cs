@@ -161,16 +161,28 @@ public static class UfcEmbedBuilder
             return $"{an} vs. {bn} — *pending*";
         }
 
-        var method = string.IsNullOrWhiteSpace(fight.ResultType) ? "decision" : fight.ResultType!;
-        var detail = "";
+        // Method (KO/TKO, decision, …) and finishing round aren't always
+        // available — the free results feed omits them — so show each only when
+        // present rather than inventing a default.
+        var method = string.IsNullOrWhiteSpace(fight.ResultType) ? null : fight.ResultType!.Trim();
+
+        string? roundPart = null;
         if (fight.ResultRound is { } round && round > 0)
         {
             var clock = fight.ResultClock is { } secs && secs >= 0
                 ? $", {secs / 60}:{secs % 60:00}"
                 : "";
-            detail = $" (R{round}{clock})";
+            roundPart = $"R{round}{clock}";
         }
 
-        return $"**{winner.FullName}** def. {loser.FullName} by {method}{detail}";
+        var tail = (method, roundPart) switch
+        {
+            (not null, not null) => $" by {method} ({roundPart})",
+            (not null, null)     => $" by {method}",
+            (null, not null)     => $" ({roundPart})",
+            _                    => "",
+        };
+
+        return $"**{winner.FullName}** def. {loser.FullName}{tail}";
     }
 }

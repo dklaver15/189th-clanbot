@@ -41,6 +41,16 @@ public sealed class UfcEvent
 
     public bool? Active { get; set; }
 
+    /// <summary>
+    /// When set, used directly as the event's UTC start instead of parsing the
+    /// Eastern <see cref="DateTime"/>/<see cref="Day"/> strings. The results path
+    /// (API-Sports, whose dates are already UTC) sets this so it can reuse the
+    /// same embed builder as the SportsDataIO schedule path. Null for the
+    /// SportsDataIO path. See <see cref="Services.UfcApiService.ToUtc"/>.
+    /// </summary>
+    [JsonIgnore]
+    public DateTime? StartUtcOverride { get; set; }
+
     public List<UfcFight> Fights { get; set; } = new();
 }
 

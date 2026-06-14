@@ -205,6 +205,9 @@ public sealed class UfcApiService
     /// </summary>
     public static DateTime? ToUtc(UfcEvent ev)
     {
+        // The results path (API-Sports) supplies an already-UTC value directly.
+        if (ev.StartUtcOverride is { } pre) return pre;
+
         var raw = !string.IsNullOrWhiteSpace(ev.DateTime) ? ev.DateTime : ev.Day;
         if (string.IsNullOrWhiteSpace(raw)) return null;
 

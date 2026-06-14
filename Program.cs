@@ -442,6 +442,7 @@ try
     // UfcReminderService posts the day-before fight reminder. All keyed off
     // BotConfig.Ufc* — idle until a key + channel are set.
     builder.Services.AddSingleton<UfcApiService>();
+    builder.Services.AddSingleton<UfcResultsService>();
     builder.Services.AddSingleton<UfcEventPosterService>();
     builder.Services.AddSingleton<UfcCommandHandler>();
     builder.Services.AddHostedService<UfcReminderService>();

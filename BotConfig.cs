@@ -1136,6 +1136,21 @@ public class BotConfig
     public string UfcLeague { get; set; } = "UFC";
 
     /// <summary>
+    /// API-Sports MMA key (free tier at https://api-sports.io) used for
+    /// <c>/ufc-results</c>. A separate provider from SportsDataIO because
+    /// SportsDataIO's free tier scrambles result fields — API-Sports returns
+    /// real outcomes for free. Empty ⇒ /ufc-results replies "not set up yet".
+    /// Supply via environment (BotConfig__UfcResultsApiKey=...).
+    /// </summary>
+    public string UfcResultsApiKey { get; set; } = string.Empty;
+
+    /// <summary>
+    /// API-Sports MMA host. Default "v1.mma.api-sports.io" (direct accounts with
+    /// the x-apisports-key header). Override only if routing through RapidAPI.
+    /// </summary>
+    public string UfcResultsApiHost { get; set; } = "v1.mma.api-sports.io";
+
+    /// <summary>
     /// Channel where day-before fight reminders are posted. Must be set (non-zero)
     /// and <see cref="UfcEnabled"/> true for reminders to fire.
     /// </summary>

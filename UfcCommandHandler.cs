@@ -20,15 +20,18 @@ public sealed class UfcCommandHandler
     public const string ResultsCommandName  = "ufc-results";
 
     private readonly UfcApiService _api;
+    private readonly UfcResultsService _results;
     private readonly UfcEventPosterService _posters;
     private readonly ILogger<UfcCommandHandler> _logger;
 
     public UfcCommandHandler(
         UfcApiService api,
+        UfcResultsService results,
         UfcEventPosterService posters,
         ILogger<UfcCommandHandler> logger)
     {
         _api = api;
+        _results = results;
         _posters = posters;
         _logger = logger;
     }
@@ -71,14 +74,6 @@ public sealed class UfcCommandHandler
     {
         await command.DeferAsync();
 
-        if (!_api.IsConfigured)
-        {
-            await command.FollowupAsync(
-                "UFC data isn't set up yet — an officer needs to add a SportsDataIO API key to the bot config.",
-                ephemeral: true);
-            return;
-        }
-
         if (command.Data.Name == ScheduleCommandName)
             await HandleScheduleAsync(command);
         else
@@ -87,6 +82,14 @@ public sealed class UfcCommandHandler
 
     private async Task HandleScheduleAsync(SocketSlashCommand command)
     {
+        if (!_api.IsConfigured)
+        {
+            await command.FollowupAsync(
+                "UFC schedule isn't set up yet — an officer needs to add a SportsDataIO API key to the bot config.",
+                ephemeral: true);
+            return;
+        }
+
         var upcoming = await _api.GetUpcomingAsync(max: 8);
 
         if (upcoming.Count == 0)
@@ -102,7 +105,15 @@ public sealed class UfcCommandHandler
 
     private async Task HandleResultsAsync(SocketSlashCommand command)
     {
-        var ev = await _api.GetMostRecentEventAsync();
+        if (!_results.IsConfigured)
+        {
+            await command.FollowupAsync(
+                "UFC results aren't set up yet — an officer needs to add an API-Sports MMA key to the bot config.",
+                ephemeral: true);
+            return;
+        }
+
+        var ev = await _results.GetLatestEventResultsAsync();
 
         if (ev is null)
         {
