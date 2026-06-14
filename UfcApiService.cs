@@ -259,7 +259,9 @@ public sealed class UfcApiService
             http.Timeout = TimeSpan.FromSeconds(15);
 
             using var req = new HttpRequestMessage(HttpMethod.Get, url);
-            req.Headers.Add(KeyHeader, _config.UfcApiKey);
+            // Trim defensively — a stray space/newline from a .env file would
+            // otherwise be sent as part of the key and rejected by the API.
+            req.Headers.Add(KeyHeader, _config.UfcApiKey.Trim());
             req.Headers.UserAgent.ParseAdd("ClanGuardBot/1.0 (Discord bot for the 189th clan)");
 
             using var resp = await http.SendAsync(req, ct);
