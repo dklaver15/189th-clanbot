@@ -45,9 +45,17 @@ public sealed class UfcApiService
     // Cache the full window so hourly reminder polls + on-demand commands share
     // one fetch. 6h keeps us comfortably under 100 calls/day (≈18 calls × 4/day).
     private static readonly TimeSpan EventsTtl = TimeSpan.FromHours(6);
-    // After a fetch that came back empty (transient outage), retry sooner instead
-    // of serving "nothing" for a full TTL — and never clobber good cached data.
-    private static readonly TimeSpan EmptyRetryTtl = TimeSpan.FromMinutes(15);
+    // After a fetch that came back empty — transient outage, or the daily quota is
+    // exhausted — retry on this cadence instead of serving "nothing" for a full
+    // TTL. Long enough not to hammer the API while quota-limited (resets 00:00 UTC),
+    // and we never clobber good cached data on an empty result.
+    private static readonly TimeSpan EmptyRetryTtl = TimeSpan.FromMinutes(30);
+
+    // Pace the per-day scan to respect the free plan's per-minute rate limit
+    // (10 req/min). ~7s between calls ⇒ ≈8.5/min, safely under. A scan therefore
+    // takes ~2 min, but it runs in the background and is cached for 6h, so users
+    // hit a warm cache and never wait on it.
+    private static readonly TimeSpan ThrottleDelay = TimeSpan.FromSeconds(7);
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -154,8 +162,15 @@ public sealed class UfcApiService
         var today = DateTime.UtcNow.Date;
         var all = new List<ApiSportsFight>();
 
+        var first = true;
         for (var offset = -ScanDaysBack; offset <= ScanDaysForward; offset++)
         {
+            // Throttle between calls (not before the first) to stay under the
+            // per-minute rate limit.
+            if (!first)
+                await Task.Delay(ThrottleDelay, ct);
+            first = false;
+
             var day = today.AddDays(offset);
             var url = $"https://{Host}/fights?date={day:yyyy-MM-dd}";
             var resp = await GetJsonAsync<ApiSportsResponse<ApiSportsFight>>(url, ct);
