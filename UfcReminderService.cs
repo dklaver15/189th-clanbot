@@ -10,7 +10,7 @@ namespace ClanGuardBot.Services;
 
 /// <summary>
 /// Posts a "fight night is coming" reminder to the configured channel the day
-/// before a UFC event. Polls the SportsDataIO schedule hourly; when an event
+/// before a UFC event. Polls the API-Sports schedule hourly; when an event
 /// falls inside the lead window (<see cref="BotConfig.UfcReminderLeadHours"/>,
 /// default 24h) and hasn't been announced yet, it posts the reminder embed —
 /// official poster included — and records the event so a restart or the next
@@ -122,13 +122,12 @@ public sealed class UfcReminderService : BackgroundService
 
         foreach (var ev in upcoming)
         {
-            var startUtc = UfcApiService.ToUtc(ev);
-            if (startUtc is not { } start) continue;
+            if (ev.StartUtc is not { } start) continue;
 
             var hoursUntil = (start - nowUtc).TotalHours;
             if (hoursUntil <= 0 || hoursUntil > leadHours) continue;
 
-            var key = ev.EventId.ToString();
+            var key = string.IsNullOrWhiteSpace(ev.Key) ? (ev.Name ?? start.ToString("o")) : ev.Key;
             if (_announced.ContainsKey(key)) continue;
 
             var poster = await _posters.GetPosterUrlAsync(ev.Name, ct);
@@ -138,9 +137,7 @@ public sealed class UfcReminderService : BackgroundService
             _announced[key] = start;
             changed = true;
 
-            _logger.LogInformation(
-                "UfcReminderService announced event {EventId} ({Name})",
-                ev.EventId, ev.Name);
+            _logger.LogInformation("UfcReminderService announced event {Name}", ev.Name);
         }
 
         if (PruneOld(nowUtc) || changed)

@@ -1124,31 +1124,23 @@ public class BotConfig
     public bool UfcEnabled { get; set; } = false;
 
     /// <summary>
-    /// SportsDataIO MMA subscription key (free trial at
-    /// https://sportsdata.io/cart/free-trial/mma). Sent in the
-    /// Ocp-Apim-Subscription-Key header. Empty disables all UFC data — commands
+    /// API-Sports MMA key (free tier at https://api-sports.io — 100 calls/day).
+    /// Powers everything UFC: schedule, results, and the day-before reminder.
+    /// Sent in the x-apisports-key header. Empty disables all UFC data — commands
     /// reply "not set up yet" and the reminder loop idles. Prefer supplying this
     /// via environment (BotConfig__UfcApiKey=...) rather than committing it.
+    ///
+    /// (We use API-Sports rather than SportsDataIO: SportsDataIO's free tier
+    /// scrambles result fields and ships synthetic event names, which broke both
+    /// results and poster lookups. API-Sports returns real, unscrambled cards.)
     /// </summary>
     public string UfcApiKey { get; set; } = string.Empty;
-
-    /// <summary>League code for the SportsDataIO schedule endpoint. Default "UFC".</summary>
-    public string UfcLeague { get; set; } = "UFC";
-
-    /// <summary>
-    /// API-Sports MMA key (free tier at https://api-sports.io) used for
-    /// <c>/ufc-results</c>. A separate provider from SportsDataIO because
-    /// SportsDataIO's free tier scrambles result fields — API-Sports returns
-    /// real outcomes for free. Empty ⇒ /ufc-results replies "not set up yet".
-    /// Supply via environment (BotConfig__UfcResultsApiKey=...).
-    /// </summary>
-    public string UfcResultsApiKey { get; set; } = string.Empty;
 
     /// <summary>
     /// API-Sports MMA host. Default "v1.mma.api-sports.io" (direct accounts with
     /// the x-apisports-key header). Override only if routing through RapidAPI.
     /// </summary>
-    public string UfcResultsApiHost { get; set; } = "v1.mma.api-sports.io";
+    public string UfcApiHost { get; set; } = "v1.mma.api-sports.io";
 
     /// <summary>
     /// Channel where day-before fight reminders are posted. Must be set (non-zero)

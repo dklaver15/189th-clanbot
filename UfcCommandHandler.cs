@@ -8,7 +8,7 @@ namespace ClanGuardBot.Handlers;
 /// <summary>
 /// The <c>/ufc-schedule</c> and <c>/ufc-results</c> slash commands — open to all
 /// members. Schedule lists upcoming UFC events; results shows the most recent
-/// card's outcomes. Both pull from <see cref="UfcApiService"/> (SportsDataIO)
+/// card's outcomes. Both pull from <see cref="UfcApiService"/> (API-Sports)
 /// and attach an official event poster via <see cref="UfcEventPosterService"/>.
 ///
 /// Replies are public (not ephemeral) so the whole channel sees them — these are
@@ -20,18 +20,15 @@ public sealed class UfcCommandHandler
     public const string ResultsCommandName  = "ufc-results";
 
     private readonly UfcApiService _api;
-    private readonly UfcResultsService _results;
     private readonly UfcEventPosterService _posters;
     private readonly ILogger<UfcCommandHandler> _logger;
 
     public UfcCommandHandler(
         UfcApiService api,
-        UfcResultsService results,
         UfcEventPosterService posters,
         ILogger<UfcCommandHandler> logger)
     {
         _api = api;
-        _results = results;
         _posters = posters;
         _logger = logger;
     }
@@ -85,7 +82,7 @@ public sealed class UfcCommandHandler
         if (!_api.IsConfigured)
         {
             await command.FollowupAsync(
-                "UFC schedule isn't set up yet — an officer needs to add a SportsDataIO API key to the bot config.",
+                "UFC data isn't set up yet — an officer needs to add an API-Sports MMA key to the bot config.",
                 ephemeral: true);
             return;
         }
@@ -105,15 +102,15 @@ public sealed class UfcCommandHandler
 
     private async Task HandleResultsAsync(SocketSlashCommand command)
     {
-        if (!_results.IsConfigured)
+        if (!_api.IsConfigured)
         {
             await command.FollowupAsync(
-                "UFC results aren't set up yet — an officer needs to add an API-Sports MMA key to the bot config.",
+                "UFC data isn't set up yet — an officer needs to add an API-Sports MMA key to the bot config.",
                 ephemeral: true);
             return;
         }
 
-        var ev = await _results.GetLatestEventResultsAsync();
+        var ev = await _api.GetLatestEventResultsAsync();
 
         if (ev is null)
         {

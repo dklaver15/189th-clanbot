@@ -19,7 +19,7 @@ public static class UfcEmbedBuilder
 
     public static Embed BuildReminderEmbed(UfcEvent ev, string? posterUrl)
     {
-        var startUtc = UfcApiService.ToUtc(ev);
+        var startUtc = ev.StartUtc;
 
         var eb = new EmbedBuilder()
             .WithTitle($"🥊 Fight Night Incoming: {Name(ev)}")
@@ -56,7 +56,7 @@ public static class UfcEmbedBuilder
 
         foreach (var ev in upcoming.Take(8))
         {
-            var startUtc = UfcApiService.ToUtc(ev);
+            var startUtc = ev.StartUtc;
             var when = startUtc is { } s
                 ? $"{EventTimeParser.Stamp(s, 'F')} • {EventTimeParser.Stamp(s, 'R')}"
                 : "Date TBA";
@@ -84,7 +84,7 @@ public static class UfcEmbedBuilder
             .WithTitle($"🏆 Results: {Name(ev)}")
             .WithColor(UfcRed);
 
-        var startUtc = UfcApiService.ToUtc(ev);
+        var startUtc = ev.StartUtc;
         if (startUtc is { } s)
             eb.WithDescription(EventTimeParser.Stamp(s, 'F'));
 
@@ -107,7 +107,7 @@ public static class UfcEmbedBuilder
             }
         }
 
-        eb.WithFooter("Results via SportsDataIO");
+        eb.WithFooter("Results via API-Sports");
 
         if (!string.IsNullOrWhiteSpace(posterUrl))
             eb.WithThumbnailUrl(posterUrl);
@@ -118,9 +118,7 @@ public static class UfcEmbedBuilder
     // ─── Helpers ───────────────────────────────────────────────────────────
 
     private static string Name(UfcEvent ev) =>
-        !string.IsNullOrWhiteSpace(ev.Name) ? ev.Name!
-        : !string.IsNullOrWhiteSpace(ev.ShortName) ? ev.ShortName!
-        : "UFC Event";
+        !string.IsNullOrWhiteSpace(ev.Name) ? ev.Name! : "UFC Event";
 
     /// <summary>
     /// "Fighter A vs. Fighter B" for the main event — the bout with the highest

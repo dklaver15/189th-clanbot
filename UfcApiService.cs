@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Text.Json;
 using ClanGuardBot.Models;
 using Microsoft.Extensions.Logging;
@@ -7,36 +6,38 @@ using Microsoft.Extensions.Options;
 namespace ClanGuardBot.Services;
 
 /// <summary>
-/// Thin client over the SportsDataIO MMA "Scores" feed. Two operations the bot
-/// needs: the season <b>Schedule</b> (a list of events) and a single
-/// <b>Event</b> (the full fight card with results once they're in).
+/// The single source of UFC data for the bot, backed by the API-Sports MMA feed
+/// (<see href="https://api-sports.io/documentation/mma/v1"/>). Powers all three
+/// surfaces — <c>/ufc-schedule</c> (upcoming), <c>/ufc-results</c> (latest card),
+/// and the day-before <see cref="UfcReminderService"/> reminder.
 ///
-/// ── Why a shared singleton with a cache ──
-/// Both the <c>/ufc-schedule</c> / <c>/ufc-results</c> commands and the
-/// day-before <see cref="UfcReminderService"/> read the same data. SportsDataIO
-/// free-trial keys are call-metered, so every read goes through a short
-/// in-memory cache (schedule ~15 min, event ~5 min). A slash command and a
-/// reminder tick landing seconds apart share one upstream call.
+/// Why API-Sports and not SportsDataIO: SportsDataIO's free tier scrambles result
+/// fields and (as we saw live) ships synthetic event names like "UFC Freedom 250",
+/// which break poster lookups. API-Sports returns real, unscrambled cards on its
+/// free tier (100 calls/day) and carries the true event name in each fight's
+/// <c>slug</c> — real matchups and working Wikipedia posters from one provider.
 ///
-/// ── Key handling ──
-/// The subscription key is sent in the <c>Ocp-Apim-Subscription-Key</c> header
-/// (not the query string) so it never lands in a logged URL. If
-/// <see cref="BotConfig.UfcApiKey"/> is empty the service reports
-/// <see cref="IsConfigured"/> = false and every call returns empty — callers
-/// surface a friendly "not set up yet" message instead of erroring.
+/// ── Shape ──
+/// API-Sports has no "event" object; it returns individual fights, each tagged
+/// with the card <c>slug</c>, a UTC <c>date</c>, <c>is_main</c>, weight class, and
+/// per-fighter winner flags. We pull a season of fights and group them by slug
+/// into <see cref="UfcEvent"/>s.
 ///
-/// ── Time zone ──
-/// SportsDataIO timestamps are US Eastern with no offset. <see cref="ToUtc"/>
-/// converts them to UTC so Discord's &lt;t:unix&gt; markdown localizes per
-/// viewer. Events with no time-of-day (only a Day) fall back to the Day value.
+/// ── Calls / caching ──
+/// One request per season, cached ~10 min and shared by all three surfaces, so a
+/// weekly results post plus hourly reminder polls stay far under the daily cap.
+///
+/// ── Auth ──
+/// Direct API-Sports accounts use the <c>x-apisports-key</c> header against
+/// <c>v1.mma.api-sports.io</c>. Key empty ⇒ <see cref="IsConfigured"/> false and
+/// callers say "not set up yet".
 /// </summary>
 public sealed class UfcApiService
 {
-    private const string BaseUrl = "https://api.sportsdata.io/v3/mma/scores/json";
-    private const string KeyHeader = "Ocp-Apim-Subscription-Key";
+    private const string DefaultHost = "v1.mma.api-sports.io";
+    private const string KeyHeader = "x-apisports-key";
 
-    private static readonly TimeSpan ScheduleTtl = TimeSpan.FromMinutes(15);
-    private static readonly TimeSpan EventTtl    = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan SeasonTtl = TimeSpan.FromMinutes(10);
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -47,10 +48,8 @@ public sealed class UfcApiService
     private readonly ILogger<UfcApiService> _logger;
     private readonly BotConfig _config;
 
-    private readonly ConcurrentDictionary<string, CacheEntry<IReadOnlyList<UfcEvent>>> _scheduleCache = new();
-    private readonly ConcurrentDictionary<int, CacheEntry<UfcEvent?>> _eventCache = new();
-
-    private static readonly TimeZoneInfo Eastern = ResolveEastern();
+    private readonly object _cacheLock = new();
+    private readonly Dictionary<int, (List<ApiSportsFight> Fights, DateTime AtUtc)> _seasonCache = new();
 
     public UfcApiService(
         IHttpClientFactory httpClientFactory,
@@ -64,98 +63,112 @@ public sealed class UfcApiService
 
     public bool IsConfigured => !string.IsNullOrWhiteSpace(_config.UfcApiKey);
 
-    /// <summary>The configured league code (default "UFC").</summary>
-    private string League => string.IsNullOrWhiteSpace(_config.UfcLeague) ? "UFC" : _config.UfcLeague.Trim();
+    private string Host => string.IsNullOrWhiteSpace(_config.UfcApiHost)
+        ? DefaultHost
+        : _config.UfcApiHost.Trim();
 
-    /// <summary>
-    /// Returns the full schedule for a season (the year, e.g. 2026), newest
-    /// caching honored. Empty list on any failure or when unconfigured.
-    /// </summary>
-    public async Task<IReadOnlyList<UfcEvent>> GetSeasonScheduleAsync(int season, CancellationToken ct = default)
-    {
-        if (!IsConfigured) return Array.Empty<UfcEvent>();
-
-        var cacheKey = $"{League}:{season}";
-        if (_scheduleCache.TryGetValue(cacheKey, out var hit) && !hit.IsStale)
-            return hit.Value;
-
-        var url = $"{BaseUrl}/Schedule/{League}/{season}";
-        var events = await GetJsonAsync<List<UfcEvent>>(url, ct) ?? new List<UfcEvent>();
-        IReadOnlyList<UfcEvent> result = events;
-        _scheduleCache[cacheKey] = new CacheEntry<IReadOnlyList<UfcEvent>>(result, ScheduleTtl);
-        return result;
-    }
-
-    /// <summary>
-    /// Returns a single event with its full fight card and results, or null on
-    /// failure / when unconfigured.
-    /// </summary>
-    public async Task<UfcEvent?> GetEventAsync(int eventId, CancellationToken ct = default)
-    {
-        if (!IsConfigured) return null;
-
-        if (_eventCache.TryGetValue(eventId, out var hit) && !hit.IsStale)
-            return hit.Value;
-
-        var url = $"{BaseUrl}/Event/{eventId}";
-        var ev = await GetJsonAsync<UfcEvent>(url, ct);
-        _eventCache[eventId] = new CacheEntry<UfcEvent?>(ev, EventTtl);
-        return ev;
-    }
-
-    /// <summary>
-    /// Convenience: events across the current season (and the next, near the
-    /// year boundary) whose start is in the future, soonest first.
-    /// </summary>
-    public async Task<IReadOnlyList<UfcEvent>> GetUpcomingAsync(int max = 5, CancellationToken ct = default)
+    /// <summary>Upcoming events (soonest first), grouped from future-dated fights.</summary>
+    public async Task<IReadOnlyList<UfcEvent>> GetUpcomingAsync(int max = 8, CancellationToken ct = default)
     {
         var nowUtc = DateTime.UtcNow;
-        var events = await GetSeasonsAroundAsync(nowUtc, ct);
+        var fights = await GetFightsAroundAsync(nowUtc, ct);
 
-        return events
-            .Select(e => (ev: e, start: ToUtc(e)))
-            .Where(x => x.start is { } s && s >= nowUtc.AddHours(-3)) // small grace so an in-progress card still shows
-            .OrderBy(x => x.start)
+        var events = GroupIntoEvents(fights)
+            .Where(e => e.StartUtc is { } s && s >= nowUtc.AddHours(-3)) // grace for an in-progress card
+            .OrderBy(e => e.StartUtc)
             .Take(max)
-            .Select(x => x.ev)
             .ToList();
-    }
-
-    /// <summary>
-    /// Convenience: the most recently started event (the one whose results you'd
-    /// want from <c>/ufc-results</c>), fetched in full detail.
-    /// </summary>
-    public async Task<UfcEvent?> GetMostRecentEventAsync(CancellationToken ct = default)
-    {
-        var nowUtc = DateTime.UtcNow;
-        var events = await GetSeasonsAroundAsync(nowUtc, ct);
-
-        var recent = events
-            .Select(e => (ev: e, start: ToUtc(e)))
-            .Where(x => x.start is { } s && s <= nowUtc)
-            .OrderByDescending(x => x.start)
-            .Select(x => x.ev)
-            .FirstOrDefault();
-
-        if (recent is null) return null;
-
-        // The schedule feed carries fights but not always full result detail;
-        // the Event endpoint is authoritative for outcomes.
-        return await GetEventAsync(recent.EventId, ct) ?? recent;
-    }
-
-    private async Task<List<UfcEvent>> GetSeasonsAroundAsync(DateTime nowUtc, CancellationToken ct)
-    {
-        var events = new List<UfcEvent>(await GetSeasonScheduleAsync(nowUtc.Year, ct));
-
-        // Near the turn of the year, pull the neighbor season so "upcoming" and
-        // "most recent" don't fall off a cliff on Dec 31 / Jan 1.
-        if (nowUtc.Month == 12)
-            events.AddRange(await GetSeasonScheduleAsync(nowUtc.Year + 1, ct));
-        else if (nowUtc.Month == 1)
-            events.AddRange(await GetSeasonScheduleAsync(nowUtc.Year - 1, ct));
 
         return events;
+    }
+
+    /// <summary>The most recently completed event with its bouts, or null if none found.</summary>
+    public async Task<UfcEvent?> GetLatestEventResultsAsync(CancellationToken ct = default)
+    {
+        var nowUtc = DateTime.UtcNow;
+        var fights = await GetFightsAroundAsync(nowUtc, ct);
+
+        return GroupIntoEvents(fights)
+            .Where(e => e.StartUtc is { } s && s <= nowUtc.AddHours(6) // grace for an in-progress card
+                        && e.Fights.Any(f => f.Fighters.Any(x => x.Winner == true)))
+            .OrderByDescending(e => e.StartUtc)
+            .FirstOrDefault();
+    }
+
+    private async Task<List<ApiSportsFight>> GetFightsAroundAsync(DateTime nowUtc, CancellationToken ct)
+    {
+        var fights = new List<ApiSportsFight>(await GetSeasonFightsAsync(nowUtc.Year, ct));
+        if (nowUtc.Month == 12)
+            fights.AddRange(await GetSeasonFightsAsync(nowUtc.Year + 1, ct));
+        else if (nowUtc.Month == 1)
+            fights.AddRange(await GetSeasonFightsAsync(nowUtc.Year - 1, ct));
+        return fights;
+    }
+
+    private async Task<IReadOnlyList<ApiSportsFight>> GetSeasonFightsAsync(int season, CancellationToken ct)
+    {
+        if (!IsConfigured) return Array.Empty<ApiSportsFight>();
+
+        lock (_cacheLock)
+        {
+            if (_seasonCache.TryGetValue(season, out var hit) && DateTime.UtcNow - hit.AtUtc < SeasonTtl)
+                return hit.Fights;
+        }
+
+        var url = $"https://{Host}/fights?season={season}";
+        var fights = await GetJsonAsync<ApiSportsResponse<ApiSportsFight>>(url, ct);
+        var list = fights?.Response ?? new List<ApiSportsFight>();
+
+        lock (_cacheLock)
+        {
+            _seasonCache[season] = (list, DateTime.UtcNow);
+        }
+
+        return list;
+    }
+
+    /// <summary>
+    /// Groups raw fights into events by card slug. Winner is listed first in each
+    /// bout; the main event (is_main) gets a high Order so the embed sorts it on top.
+    /// </summary>
+    private static List<UfcEvent> GroupIntoEvents(IReadOnlyList<ApiSportsFight> fights)
+    {
+        return fights
+            .Where(f => f.Fighters?.First is not null && f.Fighters?.Second is not null)
+            .Select(f => (fight: f, start: ParseUtc(f)))
+            .GroupBy(x => !string.IsNullOrWhiteSpace(x.fight.Slug)
+                ? x.fight.Slug!.Trim()
+                : (x.start?.ToString("yyyy-MM-dd") ?? "Unknown"))
+            .Select(g =>
+            {
+                var ev = new UfcEvent
+                {
+                    Key = g.Key,
+                    Name = g.Key,
+                    StartUtc = g.Min(x => x.start),
+                    Status = g.Any(x => x.fight.IsFinished) ? "Final" : "Scheduled",
+                };
+
+                foreach (var (fight, _) in g)
+                {
+                    var first = fight.Fighters!.First!;
+                    var second = fight.Fighters!.Second!;
+                    ev.Fights.Add(new UfcFight
+                    {
+                        FightId = fight.Id,
+                        WeightClass = fight.Category,
+                        Order = fight.IsMain == true ? 1000 : 0,
+                        Fighters = new List<UfcFighter>
+                        {
+                            new() { FighterId = first.Id,  FirstName = first.Name,  Winner = first.Winner },
+                            new() { FighterId = second.Id, FirstName = second.Name, Winner = second.Winner },
+                        },
+                    });
+                }
+
+                return ev;
+            })
+            .ToList();
     }
 
     private async Task<T?> GetJsonAsync<T>(string url, CancellationToken ct)
@@ -172,9 +185,7 @@ public sealed class UfcApiService
             using var resp = await http.SendAsync(req, ct);
             if (!resp.IsSuccessStatusCode)
             {
-                _logger.LogWarning(
-                    "SportsDataIO returned {Status} for {Url}",
-                    (int)resp.StatusCode, Redact(url));
+                _logger.LogWarning("API-Sports MMA returned {Status} for {Url}", (int)resp.StatusCode, Redact(url));
                 return default;
             }
 
@@ -187,7 +198,7 @@ public sealed class UfcApiService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "SportsDataIO fetch failed for {Url}", Redact(url));
+            _logger.LogError(ex, "API-Sports MMA fetch failed for {Url}", Redact(url));
             return default;
         }
     }
@@ -198,46 +209,16 @@ public sealed class UfcApiService
         return q >= 0 ? url[..q] : url;
     }
 
-    /// <summary>
-    /// Parses an event's Eastern start time into UTC. Prefers the time-of-day
-    /// <see cref="UfcEvent.DateTime"/>; falls back to <see cref="UfcEvent.Day"/>.
-    /// Returns null if neither parses.
-    /// </summary>
-    public static DateTime? ToUtc(UfcEvent ev)
+    private static DateTime? ParseUtc(ApiSportsFight f)
     {
-        // The results path (API-Sports) supplies an already-UTC value directly.
-        if (ev.StartUtcOverride is { } pre) return pre;
+        if (f.Timestamp is { } ts && ts > 0)
+            return DateTimeOffset.FromUnixTimeSeconds(ts).UtcDateTime;
 
-        var raw = !string.IsNullOrWhiteSpace(ev.DateTime) ? ev.DateTime : ev.Day;
-        if (string.IsNullOrWhiteSpace(raw)) return null;
+        if (!string.IsNullOrWhiteSpace(f.Date) &&
+            DateTimeOffset.TryParse(f.Date, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal, out var dto))
+            return dto.UtcDateTime;
 
-        if (!DateTime.TryParse(raw, System.Globalization.CultureInfo.InvariantCulture,
-                System.Globalization.DateTimeStyles.None, out var local))
-            return null;
-
-        var unspecified = DateTime.SpecifyKind(local, DateTimeKind.Unspecified);
-        return TimeZoneInfo.ConvertTimeToUtc(unspecified, Eastern);
-    }
-
-    private static TimeZoneInfo ResolveEastern()
-    {
-        if (TimeZoneInfo.TryFindSystemTimeZoneById("America/New_York", out var tz) && tz is not null)
-            return tz;
-        // Windows fallback id, just in case this ever runs off Linux.
-        if (TimeZoneInfo.TryFindSystemTimeZoneById("Eastern Standard Time", out var win) && win is not null)
-            return win;
-        return TimeZoneInfo.Utc;
-    }
-
-    private readonly struct CacheEntry<T>
-    {
-        public T Value { get; }
-        private readonly DateTime _expiresUtc;
-        public CacheEntry(T value, TimeSpan ttl)
-        {
-            Value = value;
-            _expiresUtc = DateTime.UtcNow.Add(ttl);
-        }
-        public bool IsStale => DateTime.UtcNow >= _expiresUtc;
+        return null;
     }
 }

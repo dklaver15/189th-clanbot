@@ -7,8 +7,8 @@ using Microsoft.Extensions.Options;
 namespace ClanGuardBot.Services;
 
 /// <summary>
-/// Resolves an "official picture" for a UFC event embed. SportsDataIO's scores
-/// feed doesn't ship event posters, so we look the event up on Wikipedia via
+/// Resolves an "official picture" for a UFC event embed. The data feed doesn't
+/// ship event posters, so we look the event up on Wikipedia via
 /// the keyless MediaWiki API and use the page's lead image — for a UFC event
 /// that's almost always the official promotional poster.
 ///
@@ -67,14 +67,110 @@ public sealed class UfcEventPosterService
         return resolved ?? fallback;
     }
 
-    private async Task<string?> LookupAsync(string title, CancellationToken ct)
+    /// <summary>
+    /// Resolves a poster by trying, in order: (1) the exact event name as a page
+    /// title, (2) the part before the colon (so "UFC 311: A vs. B" → "UFC 311",
+    /// which is the real article title), and (3) a fuzzy MediaWiki search,
+    /// accepting only a top hit whose title starts with "UFC" so we never attach
+    /// a wildly unrelated image. Returns null if nothing matches.
+    /// </summary>
+    private async Task<string?> LookupAsync(string eventName, CancellationToken ct)
+    {
+        // 1. Exact title (redirects followed — most real cards have a redirect
+        //    from the full "UFC NNN: A vs. B" name to the article).
+        var byTitle = await TryTitleAsync(eventName, ct);
+        if (byTitle is not null) return byTitle;
+
+        // 2. The portion before the colon — turns "UFC 311: Makhachev vs. Moicano"
+        //    into "UFC 311", the actual article title for numbered events.
+        var colon = eventName.IndexOf(':');
+        if (colon > 0)
+        {
+            var head = eventName[..colon].Trim();
+            if (head.Length > 0 && !head.Equals(eventName, StringComparison.OrdinalIgnoreCase))
+            {
+                var byHead = await TryTitleAsync(head, ct);
+                if (byHead is not null) return byHead;
+            }
+        }
+
+        // 3. Fuzzy search as a last resort, guarded to UFC-titled results.
+        return await TrySearchAsync(eventName, ct);
+    }
+
+    private async Task<string?> TryTitleAsync(string title, CancellationToken ct)
+    {
+        var url = $"{ApiBase}?action=query&format=json&redirects=1" +
+                  "&prop=pageimages&piprop=original|thumbnail&pithumbsize=600" +
+                  $"&titles={Uri.EscapeDataString(title)}";
+
+        var root = await FetchJsonAsync(url, ct);
+        if (root is not { } el) return null;
+
+        if (!el.TryGetProperty("query", out var query) ||
+            !query.TryGetProperty("pages", out var pages) ||
+            pages.ValueKind != JsonValueKind.Object)
+            return null;
+
+        foreach (var page in pages.EnumerateObject())
+        {
+            if (page.Value.TryGetProperty("missing", out _)) continue;
+            if (ExtractImage(page.Value) is { } img) return img;
+        }
+
+        return null;
+    }
+
+    private async Task<string?> TrySearchAsync(string queryText, CancellationToken ct)
+    {
+        var url = $"{ApiBase}?action=query&format=json&generator=search" +
+                  $"&gsrsearch={Uri.EscapeDataString(queryText)}&gsrlimit=3&gsrnamespace=0" +
+                  "&prop=pageimages&piprop=original|thumbnail&pithumbsize=600";
+
+        var root = await FetchJsonAsync(url, ct);
+        if (root is not { } el) return null;
+
+        if (!el.TryGetProperty("query", out var query) ||
+            !query.TryGetProperty("pages", out var pages) ||
+            pages.ValueKind != JsonValueKind.Object)
+            return null;
+
+        // generator results are keyed by pageid (unordered); "index" carries the
+        // search rank. Take the best-ranked page that's a UFC article with an image.
+        var ranked = pages.EnumerateObject()
+            .Select(p => p.Value)
+            .OrderBy(v => v.TryGetProperty("index", out var i) && i.TryGetInt32(out var n) ? n : int.MaxValue);
+
+        foreach (var page in ranked)
+        {
+            var title = page.TryGetProperty("title", out var t) ? t.GetString() : null;
+            if (title is null || !title.StartsWith("UFC", StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (ExtractImage(page) is { } img) return img;
+        }
+
+        return null;
+    }
+
+    private static string? ExtractImage(JsonElement page)
+    {
+        if (page.TryGetProperty("original", out var original) &&
+            original.TryGetProperty("source", out var origSrc) &&
+            origSrc.ValueKind == JsonValueKind.String)
+            return origSrc.GetString();
+
+        if (page.TryGetProperty("thumbnail", out var thumb) &&
+            thumb.TryGetProperty("source", out var thumbSrc) &&
+            thumbSrc.ValueKind == JsonValueKind.String)
+            return thumbSrc.GetString();
+
+        return null;
+    }
+
+    private async Task<JsonElement?> FetchJsonAsync(string url, CancellationToken ct)
     {
         try
         {
-            var url = $"{ApiBase}?action=query&format=json&redirects=1" +
-                      "&prop=pageimages&piprop=original|thumbnail&pithumbsize=600" +
-                      $"&titles={Uri.EscapeDataString(title)}";
-
             var http = _httpClientFactory.CreateClient();
             http.Timeout = TimeSpan.FromSeconds(10);
 
@@ -87,29 +183,8 @@ public sealed class UfcEventPosterService
 
             var json = await resp.Content.ReadAsStringAsync(ct);
             using var doc = JsonDocument.Parse(json);
-
-            if (!doc.RootElement.TryGetProperty("query", out var query) ||
-                !query.TryGetProperty("pages", out var pages) ||
-                pages.ValueKind != JsonValueKind.Object)
-                return null;
-
-            foreach (var page in pages.EnumerateObject())
-            {
-                // pageid "-1" / "missing" means no article matched.
-                if (page.Value.TryGetProperty("missing", out _)) continue;
-
-                if (page.Value.TryGetProperty("original", out var original) &&
-                    original.TryGetProperty("source", out var origSrc) &&
-                    origSrc.ValueKind == JsonValueKind.String)
-                    return origSrc.GetString();
-
-                if (page.Value.TryGetProperty("thumbnail", out var thumb) &&
-                    thumb.TryGetProperty("source", out var thumbSrc) &&
-                    thumbSrc.ValueKind == JsonValueKind.String)
-                    return thumbSrc.GetString();
-            }
-
-            return null;
+            // Clone so the element stays valid after the JsonDocument is disposed.
+            return doc.RootElement.Clone();
         }
         catch (OperationCanceledException)
         {
@@ -117,7 +192,7 @@ public sealed class UfcEventPosterService
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "Wikipedia poster lookup failed for {Title}", title);
+            _logger.LogDebug(ex, "Wikipedia poster lookup failed for {Url}", url);
             return null;
         }
     }

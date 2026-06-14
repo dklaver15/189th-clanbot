@@ -3,53 +3,29 @@ using System.Text.Json.Serialization;
 namespace ClanGuardBot.Models;
 
 /// <summary>
-/// DTOs for the SportsDataIO MMA "Scores" feed
-/// (<see href="https://sportsdata.io/developers/api-documentation/mma"/>).
-///
-/// These mirror the documented JSON shape of the <c>Schedule</c> and
-/// <c>Event</c> endpoints. We deserialize with
-/// <c>PropertyNameCaseInsensitive = true</c> and every field is nullable, so a
-/// minor schema drift (a renamed or dropped field) degrades to a blank in the
-/// embed rather than throwing — the bot keeps working, you just lose that one
-/// value until the DTO is updated.
-///
-/// ── Time zone ──
-/// SportsDataIO returns all dates/times in <b>US Eastern</b> with no offset
-/// suffix (e.g. <c>2026-07-12T22:00:00</c>). <see cref="Services.UfcApiService"/>
-/// parses them as Eastern and converts to UTC before they reach Discord, so the
-/// &lt;t:unix&gt; markdown renders in each viewer's own zone.
+/// The normalized render model for UFC events, built from API-Sports MMA data by
+/// <see cref="Services.UfcApiService"/> and consumed by
+/// <see cref="Services.UfcEmbedBuilder"/>. One shape powers schedule, results,
+/// and the day-before reminder. API-Sports dates are already UTC, so
+/// <see cref="StartUtc"/> is stored directly — Discord's &lt;t:unix&gt; markdown
+/// then localizes per viewer.
 /// </summary>
 public sealed class UfcEvent
 {
-    public int EventId { get; set; }
-    public int? LeagueId { get; set; }
+    /// <summary>
+    /// Stable identity for the event, used to dedupe reminders across restarts.
+    /// The API-Sports card slug (the event name) — distinct per card.
+    /// </summary>
+    public string Key { get; set; } = string.Empty;
 
-    /// <summary>Full event name, e.g. "UFC 300: Pereira vs. Hill".</summary>
+    /// <summary>Card name, e.g. "UFC Fight Night: Holloway vs. The Korean Zombie".</summary>
     public string? Name { get; set; }
 
-    public string? ShortName { get; set; }
-    public int? Season { get; set; }
+    /// <summary>Event start in UTC, or null if unknown.</summary>
+    public DateTime? StartUtc { get; set; }
 
-    /// <summary>Event date (Eastern), e.g. "2026-07-12T00:00:00".</summary>
-    public string? Day { get; set; }
-
-    /// <summary>Scheduled start (Eastern), e.g. "2026-07-12T22:00:00". May be null.</summary>
-    public string? DateTime { get; set; }
-
-    /// <summary>"Scheduled", "Final", "Canceled", etc.</summary>
+    /// <summary>"Final", "Scheduled", etc.</summary>
     public string? Status { get; set; }
-
-    public bool? Active { get; set; }
-
-    /// <summary>
-    /// When set, used directly as the event's UTC start instead of parsing the
-    /// Eastern <see cref="DateTime"/>/<see cref="Day"/> strings. The results path
-    /// (API-Sports, whose dates are already UTC) sets this so it can reuse the
-    /// same embed builder as the SportsDataIO schedule path. Null for the
-    /// SportsDataIO path. See <see cref="Services.UfcApiService.ToUtc"/>.
-    /// </summary>
-    [JsonIgnore]
-    public DateTime? StartUtcOverride { get; set; }
 
     public List<UfcFight> Fights { get; set; } = new();
 }

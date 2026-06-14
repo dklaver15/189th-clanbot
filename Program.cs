@@ -436,13 +436,12 @@ try
     builder.Services.AddHostedService<PollCloseService>();
 
     // ── UFC / MMA ────────────────────────────────────────────────────
-    // UfcApiService talks to SportsDataIO (shared cache); UfcEventPosterService
+    // UfcApiService is the single API-Sports MMA client (shared cache); UfcEventPosterService
     // resolves official event posters from Wikipedia; UfcCommandHandler owns
     // /ufc-schedule + /ufc-results (Register() called from DiscordBotService);
     // UfcReminderService posts the day-before fight reminder. All keyed off
     // BotConfig.Ufc* — idle until a key + channel are set.
     builder.Services.AddSingleton<UfcApiService>();
-    builder.Services.AddSingleton<UfcResultsService>();
     builder.Services.AddSingleton<UfcEventPosterService>();
     builder.Services.AddSingleton<UfcCommandHandler>();
     builder.Services.AddHostedService<UfcReminderService>();
