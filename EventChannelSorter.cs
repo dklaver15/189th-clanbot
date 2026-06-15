@@ -6,7 +6,6 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using System.Collections.Concurrent;
 
 namespace ClanGuardBot.Services;
 
@@ -25,24 +24,23 @@ namespace ClanGuardBot.Services;
 /// </summary>
 public sealed class EventChannelSorter
 {
-    // One sort at a time per channel, so a manual /sort and an auto-sort can't
-    // interleave their delete/repost passes.
-    private static readonly ConcurrentDictionary<ulong, SemaphoreSlim> _locks = new();
-
     private readonly IServiceProvider _services;
     private readonly DiscordSocketClient _client;
     private readonly BotConfig _config;
+    private readonly EventChannelGate _gate;
     private readonly ILogger<EventChannelSorter> _logger;
 
     public EventChannelSorter(
         IServiceProvider services,
         DiscordSocketClient client,
         IOptions<BotConfig> config,
+        EventChannelGate gate,
         ILogger<EventChannelSorter> logger)
     {
         _services = services;
         _client   = client;
         _config   = config.Value;
+        _gate     = gate;
         _logger   = logger;
     }
 
@@ -59,9 +57,9 @@ public sealed class EventChannelSorter
             return 0;
         }
 
-        var gate = _locks.GetOrAdd(channelId, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync();
-        try
+        // Shared per-channel gate: a sort and the self-healing repost sweep
+        // (ClanEventReconciliationService) must never run at the same time.
+        using var hold = await _gate.AcquireAsync(channelId);
         {
             using var scope = _services.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
@@ -130,10 +128,6 @@ public sealed class EventChannelSorter
 
             _logger.LogInformation("Sorted {Count} event post(s) in channel {Channel}", events.Count, channelId);
             return events.Count;
-        }
-        finally
-        {
-            gate.Release();
         }
     }
 }

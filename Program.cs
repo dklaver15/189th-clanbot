@@ -411,6 +411,7 @@ try
     //     MessageReceived + ButtonExecuted).
     //   • EventCommandHandler — /event + /timezone slash commands.
     builder.Services.AddSingleton<EventTimeParser>();
+    builder.Services.AddSingleton<EventChannelGate>(); // shared per-channel lock (sorter + reconciliation)
     builder.Services.AddSingleton<EventChannelSorter>();
     builder.Services.AddSingleton<EventPublisher>();
     builder.Services.AddSingleton<IEventPublisher>(sp => sp.GetRequiredService<EventPublisher>());
@@ -421,6 +422,7 @@ try
     builder.Services.AddHostedService<EventReminderService>();
     builder.Services.AddHostedService<EventRecurrenceScheduler>();
     builder.Services.AddHostedService<EventArchiveService>();
+    builder.Services.AddHostedService<ClanEventReconciliationService>(); // self-heals lost #events posts
 
     // /poll — the native + anonymous hybrid poll system. PollPublisher posts the
     // poll (native Discord poll or our custom anonymous embed); PollCommandHandler
