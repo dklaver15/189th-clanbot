@@ -25,7 +25,6 @@ namespace ClanGuardBot.Handlers;
 ///   audit, roster export, and SQLite backup (from BotState)
 /// • Calendar outbox — pending count, oldest pending row age, most recent
 ///   LastError if any rows are still retrying
-/// • Apollo pipeline — last captured #events message, unprocessed log rows
 /// • Discord status monitor — last successful poll, dedupe-table counts
 ///   (total tracked vs. actually live-posted), age of last live post
 /// • Operational queues — AWOL records pending notification, pending officer
@@ -172,14 +171,6 @@ public class HealthCommandHandler
             .Select(r => r.LastError)
             .FirstOrDefault();
 
-        // ── Apollo pipeline ──
-        var apolloLastCaptureUtc = await db.ApolloMessageLogs
-            .OrderByDescending(l => l.CapturedAt)
-            .Select(l => (DateTime?)l.CapturedAt)
-            .FirstOrDefaultAsync();
-        var apolloUnprocessed = await db.ApolloMessageLogs
-            .CountAsync(l => l.ProcessedAt == null);
-
         // ── Discord status monitor ──
         // Liveness comes from BotState (stamped on every successful poll).
         // Counts come from the dedupe table — total tracked vs. actually
@@ -267,14 +258,6 @@ public class HealthCommandHandler
         if (!string.IsNullOrEmpty(outboxLatestError))
             outboxLine += $"\n⚠️ Latest error: `{Truncate(outboxLatestError, 200)}`";
         embed.AddField("📤 Calendar outbox", outboxLine, inline: false);
-
-        // Apollo
-        var apolloLine = apolloLastCaptureUtc.HasValue
-            ? $"Last capture: **{FormatDuration(now - apolloLastCaptureUtc.Value)}** ago"
-            : "No captures recorded";
-        if (apolloUnprocessed > 0)
-            apolloLine += $"\nUnprocessed log rows: **{apolloUnprocessed}**";
-        embed.AddField("📨 Apollo pipeline", apolloLine, inline: false);
 
         // Discord status monitor
         // Three-line shape:
