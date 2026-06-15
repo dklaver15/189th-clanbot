@@ -101,8 +101,28 @@ public sealed class EventPublisher : IEventPublisher
             .Occurrences(series, DateTime.UtcNow.AddMinutes(-1), horizonEnd, _config.EventRecurrenceMaxBackfill)
             .ToList();
 
+        // A series whose first occurrence is beyond the horizon would otherwise
+        // post NOTHING on creation, leaving the organizer with an invisible event
+        // until the scheduler's rolling window catches up (potentially weeks
+        // later) — and the wizard would still claim it was "posted to #events".
+        // Always materialize at least the first upcoming occurrence so the event
+        // is visible immediately; the scheduler tops up the rest as they enter the
+        // horizon. (Scan to a far future and take 1 to find that first occurrence.)
         if (occurrences.Count == 0)
-            _logger.LogWarning("Series {SeriesId} '{Title}' produced no occurrences in the horizon", series.Id, series.Title);
+        {
+            occurrences = ClanEventRecurrence
+                .Occurrences(series, DateTime.UtcNow.AddMinutes(-1), DateTime.UtcNow.AddYears(50), 1)
+                .ToList();
+
+            if (occurrences.Count == 0)
+                _logger.LogWarning(
+                    "Series {SeriesId} '{Title}' produced no occurrences at all (check UntilUtc / MaxOccurrences)",
+                    series.Id, series.Title);
+            else
+                _logger.LogInformation(
+                    "Series {SeriesId} '{Title}' first occurrence {Start:o} is beyond the {Horizon}d horizon; posting it now so the event is visible immediately",
+                    series.Id, series.Title, occurrences[0].StartUtc, _config.EventRecurrenceHorizonDays);
+        }
 
         foreach (var (startUtc, endUtc) in occurrences)
             await CreateOccurrenceAsync(d.GuildId, series.Id,
