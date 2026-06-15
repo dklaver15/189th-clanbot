@@ -174,6 +174,7 @@ public class CleanupCalendarDupesCommandHandler
         int ContentReboundHealed,
         int OrphansFound,
         int OrphansDeleted,
+        int OwnedSkipped,
         List<string> Errors,
         List<string> DupeDetail,
         List<string> ContentDetail,
@@ -188,6 +189,24 @@ public class CleanupCalendarDupesCommandHandler
 
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+        // ── In-house ownership guard ──────────────────────────────────
+        //
+        // CalendarEvents owned by a ClanEvent (the in-house event system) are
+        // managed exclusively by ClanGuard's own create/edit/cancel/archive
+        // lifecycle and must NEVER be deleted or re-bound here. This command was
+        // built for Apollo-sourced rows; deleting an owned row out from under a
+        // live ClanEvent orphans it (its #events post + reminders survive while
+        // the calendar hub vanishes). Mirrors the same guard in
+        // ApolloEventHandler / ApolloReconciliationService. The proper way to
+        // collapse duplicate in-house events is /event cancel on the unwanted
+        // series, not this command — so we exclude owned rows from every pass.
+        var clanOwnedCalIds = new HashSet<int>(
+            await db.ClanEvents
+                .Where(e => e.GuildId == guildId)
+                .Select(e => e.CalendarEventId)
+                .ToListAsync());
+        int ownedSkipped = 0;
 
         // ── Pass 1: in-DB duplicates ──────────────────────────────────
         //
@@ -211,6 +230,10 @@ public class CleanupCalendarDupesCommandHandler
                          && c.Source == "Clan"
                          && dupeMessageIds.Contains(c.DiscordMessageId))
                 .ToListAsync();
+
+        // Drop any in-house ClanEvent-owned rows from consideration (see guard above).
+        var dupeOwned = dupeRows.RemoveAll(c => clanOwnedCalIds.Contains(c.Id));
+        ownedSkipped += dupeOwned;
 
         int dbRowsRemoved        = 0;
         int gcalDeletedFromDupes = 0;
@@ -289,6 +312,11 @@ public class CleanupCalendarDupesCommandHandler
                      && c.DiscordMessageId != 0
                      && c.StartUtc > DateTime.UtcNow)
             .ToListAsync();
+
+        // Drop any in-house ClanEvent-owned rows so they're never kept, dropped,
+        // or re-bound here (see ownership guard above). This is what prevents the
+        // command from orphaning a live recurring/one-off in-house event.
+        ownedSkipped += clanFuture.RemoveAll(c => clanOwnedCalIds.Contains(c.Id));
 
         var contentGroupsList = clanFuture
             .GroupBy(c => ContentKey(c.Title, c.StartUtc, c.EndUtc))
@@ -431,6 +459,7 @@ public class CleanupCalendarDupesCommandHandler
             ContentReboundHealed:       contentReboundHealed,
             OrphansFound:               orphans.Count,
             OrphansDeleted:             orphansDeleted,
+            OwnedSkipped:               ownedSkipped,
             Errors:                     errors,
             DupeDetail:                 dupeDetail,
             ContentDetail:              contentDetail,
@@ -485,6 +514,14 @@ public class CleanupCalendarDupesCommandHandler
                 sb.AppendLine(line);
             if (r.OrphanDetail.Count > 10)
                 sb.AppendLine($"... and {r.OrphanDetail.Count - 10} more");
+        }
+
+        if (r.OwnedSkipped > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine($"🛡️ **Skipped {r.OwnedSkipped} in-house event row(s)** owned by a ClanEvent — " +
+                          "these are managed by ClanGuard's own lifecycle. To remove duplicate in-house " +
+                          "events, cancel the unwanted series/event with `/event cancel` instead.");
         }
 
         if (r.Errors.Count > 0)
