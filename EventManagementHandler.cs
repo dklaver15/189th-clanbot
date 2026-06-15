@@ -2048,6 +2048,9 @@ public sealed class EventManagementHandler
         }
 
         ev.HostId = hostId;
+        // Push the new host to Google Calendar too (rebuilds the "Host:" line in
+        // the event body), not just the Discord post.
+        await ApplyCalendarUpdateAsync(db, ev);
         await db.SaveChangesAsync();
         await UpdatePostAsync(db, ev);
 
@@ -2177,7 +2180,7 @@ public sealed class EventManagementHandler
     // ─── Shared helpers ────────────────────────────────────────────────────
 
     /// <summary>Patches the CalendarEvent fields from the ClanEvent and enqueues a GCal Update.</summary>
-    private static async Task ApplyCalendarUpdateAsync(BotDbContext db, ClanEvent ev)
+    private async Task ApplyCalendarUpdateAsync(BotDbContext db, ClanEvent ev)
     {
         var cal = await db.CalendarEvents.FirstOrDefaultAsync(c => c.Id == ev.CalendarEventId);
         if (cal is null) return;
@@ -2194,15 +2197,42 @@ public sealed class EventManagementHandler
             CalendarEventId = cal.Id,
             PayloadJson     = JsonConvert.SerializeObject(new CalendarOutboxPayload
             {
-                Title       = ev.Title,
-                StartUtc    = ev.StartUtc,
-                EndUtc      = ev.EndUtc,
-                Description = ev.Description,
-                Source      = "Clan",
+                Title         = ev.Title,
+                StartUtc      = ev.StartUtc,
+                EndUtc        = ev.EndUtc,
+                Description   = ev.Description,
+                // Carried so the worker can rebuild the "Created by:" / "Host:"
+                // header on update instead of stripping it. HostName resolves the
+                // effective host (explicit host, else the creator).
+                OrganizerName = ev.OrganizerName,
+                OrganizerId   = ev.OrganizerId,
+                HostName      = ResolveHostName(ev),
+                Source        = "Clan",
             }),
             NextAttemptAt = DateTime.UtcNow,
             CreatedAt     = DateTime.UtcNow,
         });
+    }
+
+    /// <summary>
+    /// Resolves the display name of an event's effective host for the calendar
+    /// body — the explicitly-set host, or the creator when none is set (mirrors
+    /// the embed's <c>HostId ?? OrganizerId</c> fallback). Prefers the live guild
+    /// display name; falls back to the stored organizer name when the host can't
+    /// be resolved (e.g. they've left the guild).
+    /// </summary>
+    private string ResolveHostName(ClanEvent ev)
+    {
+        var hostId = ev.HostId ?? ev.OrganizerId;
+
+        var guildName = _client.GetGuild(ev.GuildId)?.GetUser(hostId)?.DisplayName;
+        if (!string.IsNullOrWhiteSpace(guildName)) return guildName;
+
+        if (hostId == ev.OrganizerId && !string.IsNullOrWhiteSpace(ev.OrganizerName))
+            return ev.OrganizerName;
+
+        var user = _client.GetUser(hostId);
+        return user?.GlobalName ?? user?.Username ?? ev.OrganizerName;
     }
 
     /// <summary>

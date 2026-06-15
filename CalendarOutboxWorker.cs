@@ -222,7 +222,9 @@ public class CalendarOutboxWorker : BackgroundService
                 payload.Title,
                 payload.StartUtc,
                 payload.EndUtc,
-                description: payload.Description);
+                description: payload.Description,
+                creatorName: payload.OrganizerName,
+                hostName:    payload.HostName);
 
             if (updated is null)
                 throw new InvalidOperationException(
@@ -240,6 +242,7 @@ public class CalendarOutboxWorker : BackgroundService
             endUtc:      payload.EndUtc,
             description: payload.Description,
             creatorName: payload.OrganizerName,
+            hostName:    payload.HostName,
             source:      payload.Source);
 
         calEvent.CalendarEventId = created.Id;
@@ -293,7 +296,9 @@ public class CalendarOutboxWorker : BackgroundService
             payload.Title,
             payload.StartUtc,
             payload.EndUtc,
-            description: payload.Description);
+            description: payload.Description,
+            creatorName: payload.OrganizerName,
+            hostName:    payload.HostName);
 
         if (updated is null)
             throw new InvalidOperationException(
@@ -497,6 +502,16 @@ public class CalendarOutboxPayload
     public string Description { get; set; } = string.Empty;
     public string OrganizerName { get; set; } = string.Empty;
     public ulong? OrganizerId { get; set; }
+
+    /// <summary>
+    /// Display name of the event host (the person actually running it, which may
+    /// differ from the creator). Rendered as a "Host:" line in the GCal event body.
+    /// For Clan events this is the resolved host name (falling back to the creator
+    /// when no separate host is set); empty for sources without a host concept
+    /// (e.g. Apollo), which omits the line.
+    /// </summary>
+    public string HostName { get; set; } = string.Empty;
+
     public string Source { get; set; } = "Clan";
 
     /// <summary>For Delete operations: the GCal event ID to remove. Required

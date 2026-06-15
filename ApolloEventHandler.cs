@@ -375,6 +375,30 @@ public class ApolloEventHandler
 
             if (record is null) return;
 
+            // Owning-ClanEvent guard (mirrors ApolloReconciliationService's
+            // candidate filter). The in-house event system (EventPublisher)
+            // writes CalendarEvents with the SAME Source="Clan" value and posts
+            // its RSVP message to GetEventPostChannelId() — which falls back to
+            // the Apollo EventsTextChannelId when EventPostChannelId is unset.
+            // That means an in-house event's message can share this channel and
+            // match here purely by DiscordMessageId. When such a message is
+            // deleted — e.g. as collateral of an Apollo /sort repost sweep, or a
+            // manual delete — this handler would otherwise drop the Google
+            // Calendar entry and the hub row, orphaning the ClanEvent + outbox
+            // and silently removing the event from the calendar with no rebind.
+            // A CalendarEvent owned by a ClanEvent is managed exclusively by
+            // ClanGuard's own create/edit/cancel/archive lifecycle and must
+            // never be deleted by Apollo message-deletion handling. Apollo-
+            // sourced events never have an owning ClanEvent, so this is a no-op
+            // for genuine Apollo deletions.
+            if (await db.ClanEvents.AnyAsync(e => e.CalendarEventId == record.Id))
+            {
+                _logger.LogInformation(
+                    "Apollo message {MessageId} deleted, but CalendarEvent Id={Id} '{Title}' is owned by an in-house ClanEvent; leaving it to ClanGuard's own lifecycle (no calendar delete)",
+                    messageId, record.Id, record.Title);
+                return;
+            }
+
             // Post-event deletion → routine channel cleanup. Leave the
             // calendar entry and DB row alone; both are historical record.
             if (record.EndUtc <= DateTime.UtcNow)

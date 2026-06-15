@@ -50,6 +50,7 @@ public class GoogleCalendarService
     /// <param name="endUtc">End time in UTC.</param>
     /// <param name="description">Optional body text.</param>
     /// <param name="creatorName">Display name of the person who triggered creation (prepended to description).</param>
+    /// <param name="hostName">Display name of the host (prepended as a "Host:" line); empty omits the line.</param>
     /// <param name="source">"Clan" or "CompDiv" — controls the calendar color.</param>
     public async Task<Event> CreateEventAsync(
         string title,
@@ -57,11 +58,10 @@ public class GoogleCalendarService
         DateTime endUtc,
         string description = "",
         string creatorName = "",
+        string hostName = "",
         string source = "Clan")
     {
-        var body = string.IsNullOrWhiteSpace(creatorName)
-            ? description
-            : $"Created by: {creatorName}\n\n{description}".TrimEnd();
+        var body = BuildBody(creatorName, hostName, description);
 
         // Google Calendar color IDs: 7 = Peacock (teal) for clan, 11 = Tomato (red) for comp
         var colorId = source == "CompDiv" ? "11" : "7";
@@ -100,13 +100,18 @@ public class GoogleCalendarService
     /// <summary>
     /// Updates the title and time of an existing calendar event.
     /// Returns the updated Event, or null on failure.
+    /// When <paramref name="description"/> is non-null, the body is rebuilt with
+    /// the same "Created by:" / "Host:" header as creation, so an edit (or a host
+    /// change) keeps those lines instead of stripping them.
     /// </summary>
     public async Task<Event?> UpdateEventAsync(
         string calendarEventId,
         string title,
         DateTime startUtc,
         DateTime endUtc,
-        string? description = null)
+        string? description = null,
+        string creatorName = "",
+        string hostName = "")
     {
         try
         {
@@ -119,7 +124,7 @@ public class GoogleCalendarService
             existing.End     = new EventDateTime { DateTimeRaw = Rfc3339(endUtc),   TimeZone = "UTC" };
 
             if (description is not null)
-                existing.Description = description;
+                existing.Description = BuildBody(creatorName, hostName, description);
 
             var result = await _calendar.Events
                 .Update(existing, _config.GoogleCalendarId, calendarEventId)
@@ -261,6 +266,22 @@ public class GoogleCalendarService
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Builds the calendar event body: an optional "Created by:" line and an
+    /// optional "Host:" line, a blank line, then the description. Either header
+    /// line is omitted when its name is blank. Shared by create and update so
+    /// the body stays consistent across an event's lifetime.
+    /// </summary>
+    internal static string BuildBody(string creatorName, string hostName, string description)
+    {
+        var header = new List<string>();
+        if (!string.IsNullOrWhiteSpace(creatorName)) header.Add($"Created by: {creatorName}");
+        if (!string.IsNullOrWhiteSpace(hostName))    header.Add($"Host: {hostName}");
+
+        var prefix = header.Count > 0 ? string.Join("\n", header) + "\n\n" : string.Empty;
+        return (prefix + (description ?? string.Empty)).TrimEnd();
+    }
 
     private static string Rfc3339(DateTime utc) =>
         utc.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");

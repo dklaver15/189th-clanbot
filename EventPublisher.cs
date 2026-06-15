@@ -277,6 +277,9 @@ public sealed class EventPublisher : IEventPublisher
             Description   = description ?? string.Empty,
             OrganizerName = organizerName,
             OrganizerId   = organizerId,
+            // No separate host at creation — the creator is the effective host.
+            // A later "Set Host" enqueues an Update that overwrites this line.
+            HostName      = organizerName,
             Source        = "Clan",
         };
         db.CalendarOutbox.Add(new CalendarOutbox
