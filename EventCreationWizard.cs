@@ -121,14 +121,23 @@ public sealed class EventCreationWizard
 
         try
         {
-            // We never ask for a timezone during creation (like Apollo). If the
-            // user set one via /timezone we use it; otherwise their input is
-            // interpreted in EventDefaultTimeZone. The confirm card shows the
-            // time in the creator's own local Discord clock (via <t:unix>) and
-            // names the zone it was read in, so a wrong assumption is visible —
-            // and /timezone sets a personal override that sticks.
-            session.Step = WizardStep.Title;
-            await dm.SendMessageAsync(embed: Form("🎯 New event", "What's the **title** of the event?"));
+            // Ask for a timezone only when the organizer hasn't set one. With a
+            // known zone we skip straight to the title (fast path, asked just
+            // once ever); without one we must NOT silently assume
+            // EventDefaultTimeZone — that's exactly how an Eastern organizer
+            // typing "8pm" ended up an hour off (read as Central). Their pick is
+            // saved as a personal default, so the question never repeats. Both the
+            // button and typed paths advance to the Title step.
+            if (session.TimezoneKnown)
+            {
+                session.Step = WizardStep.Title;
+                await dm.SendMessageAsync(embed: Form("🎯 New event", "What's the **title** of the event?"));
+            }
+            else
+            {
+                session.Step = WizardStep.Timezone;
+                await PromptTimezoneAsync(session);
+            }
             return true;
         }
         catch (Exception ex)
