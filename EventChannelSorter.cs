@@ -97,15 +97,21 @@ public sealed class EventChannelSorter
                 var (imgBytes, imgName) = await EventImage.ResolveAsync(db, ev);
                 var embed = EventEmbedBuilder.BuildEmbed(ev, rsvps, imgName);
 
+                // Sort re-posts every event at once, so fire them as silent
+                // messages — they appear normally but raise no push/desktop/unread
+                // ping, even for members with "All Messages" on this channel.
+                // Without this a single /sort would notify the whole channel N
+                // times. (Event embeds carry mentions only in fields, which never
+                // ping anyway; the suppressed vector is the per-message alert.)
                 IUserMessage posted;
                 if (imgBytes is { Length: > 0 } && !string.IsNullOrWhiteSpace(imgName))
                 {
                     using var fa = new FileAttachment(new MemoryStream(imgBytes), imgName);
-                    posted = await channel.SendFileAsync(fa, embed: embed);
+                    posted = await channel.SendFileAsync(fa, embed: embed, flags: MessageFlags.SuppressNotification);
                 }
                 else
                 {
-                    posted = await channel.SendMessageAsync(embed: embed);
+                    posted = await channel.SendMessageAsync(embed: embed, flags: MessageFlags.SuppressNotification);
                 }
 
                 ev.MessageId = posted.Id;
