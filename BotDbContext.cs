@@ -435,7 +435,14 @@ public class BotDbContext : DbContext
         {
             entity.HasIndex(e => new { e.GuildId, e.StartUtc });             // list + recurrence/reminder scans
             entity.HasIndex(e => new { e.Status, e.StartUtc });              // reminder worker: Scheduled & future
-            entity.HasIndex(e => e.MessageId).IsUnique();                    // RSVP button → event lookup
+            // Filtered unique index: a real Discord post has a unique MessageId,
+            // but recurring-series occurrences are now materialized WITHOUT a post
+            // (MessageId = 0) until they become the next-up occurrence, so many 0s
+            // must be allowed to coexist. Mirrors CalendarEvents.DiscordMessageId.
+            entity.HasIndex(e => e.MessageId)
+                  .IsUnique()
+                  .HasFilter("\"MessageId\" <> 0")
+                  .HasDatabaseName("IX_ClanEvents_MessageId_Unique");        // RSVP button → event lookup
             entity.HasIndex(e => e.CalendarEventId);                         // map back to the hub row
             entity.HasIndex(e => new { e.SeriesId, e.StartUtc }).IsUnique(); // recurrence idempotency (NULLs distinct)
         });

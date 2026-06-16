@@ -89,7 +89,11 @@ public sealed class EventArchiveService : BackgroundService
         {
             if (ct.IsCancellationRequested) break;
 
-            await DeletePostAsync(ev);
+            // Unposted recurring occurrences (MessageId == 0) that elapsed without
+            // ever becoming the next-up post have no message to delete — just retire
+            // the row so they aren't reconsidered.
+            if (ev.MessageId != 0)
+                await DeletePostAsync(ev);
             ev.Status = ClanEventStatus.Archived; // keep the row + CalendarEvent + GCal entry
             await db.SaveChangesAsync(ct);        // persist per-item: a crash mid-loop won't re-delete already-archived posts
             archived++;

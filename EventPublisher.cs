@@ -130,6 +130,8 @@ public sealed class EventPublisher : IEventPublisher
                 attachImageBytes: series.ImageBytes, imageFileName: series.ImageFileName,
                 maxParticipants: series.MaxParticipants);
 
+        await PromoteNextAsync(series.Id); // post the first/next occurrence to #events
+
         _logger.LogInformation(
             "Created series {SeriesId} '{Title}' ({Freq}); materialized {Count} occurrence(s)",
             series.Id, series.Title, freq, occurrences.Count);
@@ -194,6 +196,8 @@ public sealed class EventPublisher : IEventPublisher
                 attachImageBytes: series.ImageBytes, imageFileName: series.ImageFileName,
                 maxParticipants: series.MaxParticipants);
 
+        await PromoteNextAsync(series.Id); // post the first/next occurrence to #events
+
         _logger.LogInformation(
             "Created custom-date series {SeriesId} '{Title}'; materialized {Count} occurrence(s)",
             series.Id, series.Title, starts.Count);
@@ -222,40 +226,53 @@ public sealed class EventPublisher : IEventPublisher
         }
 
         var postChannelId = _config.GetEventPostChannelId();
-        if (_client.GetChannel(postChannelId) is not IMessageChannel channel)
+        var channel = _client.GetChannel(postChannelId) as IMessageChannel;
+
+        // Recurring-series occurrences are materialized WITHOUT a Discord post —
+        // only the next-up occurrence is shown in #events (posted later by
+        // PromoteNextAsync). The rest still get a CalendarEvent + GCal entry, so
+        // the Google Calendar carries the full schedule. One-offs always post now.
+        var postNow = seriesId is null;
+
+        if (postNow && channel is null)
         {
             _logger.LogError("Event post channel {Channel} is not a reachable message channel; cannot post event '{Title}'",
                 postChannelId, title);
             return;
         }
 
-        // 1) Post the embed (no buttons) to obtain a real, unique message id.
-        var preview = new ClanEvent
+        // 1) For a one-off, post first to get a real, unique message id. Series
+        //    occurrences start unposted (MessageId = 0; the filtered unique index
+        //    on MessageId allows many zeros to coexist).
+        ulong messageId = 0;
+        IUserMessage? posted = null;
+        if (postNow)
         {
-            GuildId = guildId, SeriesId = seriesId, Title = title, Description = description,
-            OrganizerId = organizerId, OrganizerName = organizerName,
-            StartUtc = startUtc, EndUtc = endUtc, Status = ClanEventStatus.Scheduled,
-            MaxParticipants = maxParticipants,
-        };
-        var previewEmbed = EventEmbedBuilder.BuildEmbed(preview, Array.Empty<EventRsvp>(), imageFileName);
-        IUserMessage posted;
-        if (attachImageBytes is { Length: > 0 } && !string.IsNullOrWhiteSpace(imageFileName))
-        {
-            using var fa = new FileAttachment(new MemoryStream(attachImageBytes), imageFileName);
-            posted = await channel.SendFileAsync(fa, embed: previewEmbed);
+            var preview = new ClanEvent
+            {
+                GuildId = guildId, SeriesId = seriesId, Title = title, Description = description,
+                OrganizerId = organizerId, OrganizerName = organizerName,
+                StartUtc = startUtc, EndUtc = endUtc, Status = ClanEventStatus.Scheduled,
+                MaxParticipants = maxParticipants,
+            };
+            var previewEmbed = EventEmbedBuilder.BuildEmbed(preview, Array.Empty<EventRsvp>(), imageFileName);
+            if (attachImageBytes is { Length: > 0 } && !string.IsNullOrWhiteSpace(imageFileName))
+            {
+                using var fa = new FileAttachment(new MemoryStream(attachImageBytes), imageFileName);
+                posted = await channel!.SendFileAsync(fa, embed: previewEmbed);
+            }
+            else
+            {
+                posted = await channel!.SendMessageAsync(embed: previewEmbed);
+            }
+            messageId = posted.Id;
         }
-        else
-        {
-            posted = await channel.SendMessageAsync(embed: previewEmbed);
-        }
-        var messageId = posted.Id;
 
         // 2) Persist the CalendarEvent hub row, the ClanEvent, and the outbox row
         //    ATOMICALLY. Without the transaction, a failure after the first save
         //    would leave an orphaned CalendarEvent (no owning ClanEvent, no outbox
         //    row) that nothing syncs or cleans up. On any failure we roll back and
-        //    delete the message we just posted, so a botched create leaves neither
-        //    a half-written DB nor a dangling backing-less #events post.
+        //    delete the message we just posted (if any).
         ClanEvent clanEvent;
         int calEventId;
         try
@@ -265,7 +282,7 @@ public sealed class EventPublisher : IEventPublisher
             var calEvent = new CalendarEvent
             {
                 GuildId          = guildId,
-                DiscordMessageId = messageId,   // unique, satisfies the filtered index
+                DiscordMessageId = messageId,   // 0 for an unposted series occurrence
                 CalendarEventId  = string.Empty, // stamped by CalendarOutboxWorker on GCal success
                 Title            = title,
                 StartUtc         = startUtc,
@@ -284,8 +301,8 @@ public sealed class EventPublisher : IEventPublisher
                 GuildId          = guildId,
                 SeriesId         = seriesId,
                 CalendarEventId  = calEvent.Id,
-                ChannelId        = channel.Id,
-                MessageId        = messageId,
+                ChannelId        = postChannelId,
+                MessageId        = messageId,   // 0 until the occurrence is posted
                 Title            = title,
                 Description      = description ?? string.Empty,
                 OrganizerId      = organizerId,
@@ -329,37 +346,144 @@ public sealed class EventPublisher : IEventPublisher
         }
         catch (Exception ex)
         {
-            // Rollback is automatic on dispose. Remove the now-orphaned post so we
-            // don't leave a backing-less embed in #events, then let the caller
-            // (wizard / scheduler) surface the failure.
             _logger.LogError(ex,
-                "Persisting event '{Title}' failed after posting msg {MessageId}; rolled back, removing the orphaned post",
-                title, messageId);
-            try { await posted.DeleteAsync(); }
-            catch (Exception delEx)
+                "Persisting event '{Title}' {Start:o} failed; rolled back{PostNote}",
+                title, startUtc, posted is null ? "" : ", removing the orphaned post");
+            if (posted is not null)
             {
-                _logger.LogWarning(delEx,
-                    "Couldn't delete orphaned post {MessageId} after a failed create", messageId);
+                try { await posted.DeleteAsync(); }
+                catch (Exception delEx) { _logger.LogWarning(delEx, "Couldn't delete orphaned post {MessageId}", messageId); }
             }
             throw;
         }
 
-        // 3) Attach the RSVP buttons now that we have ClanEvent.Id.
-        try
+        // 3) Attach the RSVP buttons on the one-off post now that we have ClanEvent.Id.
+        if (postNow && posted is not null)
         {
-            var locked = DateTime.UtcNow >= startUtc;
-            var components = EventEmbedBuilder.BuildComponents(clanEvent.Id, _config.EventRsvpEnabled, locked);
-            await posted.ModifyAsync(m => m.Components = components);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex,
-                "Event '{Title}' posted (msg {MessageId}) but attaching RSVP buttons failed", title, messageId);
+            try
+            {
+                var locked = DateTime.UtcNow >= startUtc;
+                var components = EventEmbedBuilder.BuildComponents(clanEvent.Id, _config.EventRsvpEnabled, locked);
+                await posted.ModifyAsync(m => m.Components = components);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Event '{Title}' posted (msg {MessageId}) but attaching RSVP buttons failed", title, messageId);
+            }
         }
 
         _logger.LogInformation(
-            "Posted event '{Title}' {Start:o}–{End:o} UTC (ClanEvent {ClanId}, CalendarEvent {CalId}, msg {MessageId}, GCal create queued)",
-            title, startUtc, endUtc, clanEvent.Id, calEventId, messageId);
+            "Materialized event '{Title}' {Start:o}–{End:o} UTC (ClanEvent {ClanId}, CalendarEvent {CalId}, posted={Posted}, GCal create queued)",
+            title, startUtc, endUtc, clanEvent.Id, calEventId, postNow);
+    }
+
+    /// <summary>
+    /// Posts the soonest upcoming, not-yet-posted occurrence of a series to
+    /// #events, so a recurring series always shows exactly its next occurrence.
+    /// Idempotent: a no-op when the next occurrence is already posted, or there is
+    /// none upcoming. Called after every materialization (creation, scheduler
+    /// top-up, edit) and naturally promotes the following occurrence once the
+    /// current one has passed and been archived.
+    /// </summary>
+    public async Task PromoteNextAsync(int seriesId)
+    {
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+        var now = DateTime.UtcNow;
+        var upcoming = await db.ClanEvents
+            .Where(e => e.SeriesId == seriesId
+                     && e.Status == ClanEventStatus.Scheduled
+                     && e.StartUtc > now)
+            .OrderBy(e => e.StartUtc)
+            .ToListAsync();
+
+        if (upcoming.Count == 0) return;
+
+        var postChannelId = _config.GetEventPostChannelId();
+        if (_client.GetChannel(postChannelId) is not IMessageChannel channel)
+        {
+            _logger.LogWarning(
+                "PromoteNext: event post channel {Channel} not reachable; will retry next tick", postChannelId);
+            return;
+        }
+
+        // Post the soonest upcoming occurrence if it isn't already up.
+        var next = upcoming[0];
+        if (next.MessageId == 0)
+            await PostOccurrenceAsync(db, channel, next);
+
+        // Enforce "next only": un-post any OTHER still-posted upcoming occurrences
+        // (existing series from before this feature, or extras left by an edit).
+        // RSVP rows are kept, so they reappear when that occurrence later becomes
+        // the next-up and is re-posted.
+        foreach (var extra in upcoming.Skip(1).Where(e => e.MessageId != 0))
+            await UnpostOccurrenceAsync(db, channel, extra);
+    }
+
+    /// <summary>
+    /// Removes an occurrence's #events post and clears its MessageId so it no
+    /// longer shows, without touching its RSVP rows or its CalendarEvent / Google
+    /// Calendar entry. Reversible: PromoteNext re-posts it when it becomes next-up.
+    /// </summary>
+    private async Task UnpostOccurrenceAsync(BotDbContext db, IMessageChannel channel, ClanEvent ev)
+    {
+        var oldMsg = ev.MessageId;
+        try { await channel.DeleteMessageAsync(ev.MessageId); }
+        catch (Exception ex) { _logger.LogDebug(ex, "Un-post: couldn't delete message {Msg} for event {Id}", oldMsg, ev.Id); }
+
+        ev.MessageId = 0;
+        var cal = await db.CalendarEvents.FirstOrDefaultAsync(c => c.Id == ev.CalendarEventId);
+        if (cal is not null) cal.DiscordMessageId = 0;
+        await db.SaveChangesAsync();
+
+        _logger.LogInformation(
+            "Un-posted extra upcoming occurrence {Id} '{Title}' (msg {Msg}) — keeping only the next in #events",
+            ev.Id, ev.Title, oldMsg);
+    }
+
+    /// <summary>
+    /// Posts an existing, unposted (<see cref="ClanEvent.MessageId"/> = 0) occurrence:
+    /// renders the embed from current state, sends it, and re-points the ClanEvent
+    /// and its CalendarEvent at the new message, then attaches the RSVP buttons.
+    /// </summary>
+    private async Task PostOccurrenceAsync(BotDbContext db, IMessageChannel channel, ClanEvent ev)
+    {
+        var rsvps = await db.EventRsvps.Where(r => r.ClanEventId == ev.Id).ToListAsync();
+        var (imgBytes, imgName) = await EventImage.ResolveAsync(db, ev);
+        var embed = EventEmbedBuilder.BuildEmbed(ev, rsvps, imgName);
+
+        IUserMessage posted;
+        if (imgBytes is { Length: > 0 } && !string.IsNullOrWhiteSpace(imgName))
+        {
+            using var fa = new FileAttachment(new MemoryStream(imgBytes), imgName);
+            posted = await channel.SendFileAsync(fa, embed: embed);
+        }
+        else
+        {
+            posted = await channel.SendMessageAsync(embed: embed);
+        }
+
+        ev.MessageId = posted.Id;
+        var cal = await db.CalendarEvents.FirstOrDefaultAsync(c => c.Id == ev.CalendarEventId);
+        if (cal is not null) cal.DiscordMessageId = posted.Id;
+        await db.SaveChangesAsync();
+
+        try
+        {
+            var locked = DateTime.UtcNow >= ev.StartUtc;
+            await posted.ModifyAsync(m =>
+                m.Components = EventEmbedBuilder.BuildComponents(ev.Id, _config.EventRsvpEnabled, locked));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Posted next occurrence {Id} but attaching RSVP buttons failed", ev.Id);
+        }
+
+        _logger.LogInformation(
+            "Posted next occurrence of series {SeriesId}: ClanEvent {Id} '{Title}' (msg {Msg})",
+            ev.SeriesId, ev.Id, ev.Title, posted.Id);
     }
 
     private TimeZoneInfo ResolveZone(string? ianaId)
@@ -385,6 +509,11 @@ public sealed class EventPublisher : IEventPublisher
                 startUtc, endUtc,
                 attachImageBytes: series.ImageBytes, imageFileName: series.ImageFileName,
                 maxParticipants: series.MaxParticipants);
+
+        // Show only the next occurrence in #events: post the soonest upcoming one
+        // if it isn't already up (this is also what promotes the following
+        // occurrence once the current passes and is archived).
+        await PromoteNextAsync(series.Id);
     }
 
     public async Task MaterializeDatesAsync(ClanEventSeries series, IEnumerable<DateTime> startsUtc)
@@ -396,5 +525,7 @@ public sealed class EventPublisher : IEventPublisher
                 startUtc, startUtc + duration,
                 attachImageBytes: series.ImageBytes, imageFileName: series.ImageFileName,
                 maxParticipants: series.MaxParticipants);
+
+        await PromoteNextAsync(series.Id);
     }
 }

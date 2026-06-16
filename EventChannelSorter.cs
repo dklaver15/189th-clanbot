@@ -67,6 +67,7 @@ public sealed class EventChannelSorter
             var events = await db.ClanEvents
                 .Where(e => e.GuildId == guildId
                          && e.Status == ClanEventStatus.Scheduled
+                         && e.MessageId != 0   // only posted occurrences have a message to reorder
                          && e.ChannelId == channelId)
                 .OrderBy(e => e.StartUtc)
                 .ToListAsync();

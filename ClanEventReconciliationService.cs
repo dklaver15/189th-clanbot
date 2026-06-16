@@ -96,6 +96,8 @@ public sealed class ClanEventReconciliationService : BackgroundService
         var now = DateTime.UtcNow;
         var events = await db.ClanEvents
             .Where(e => e.Status == ClanEventStatus.Scheduled
+                     && e.MessageId != 0   // only heal occurrences that were actually posted;
+                                           // unposted series occurrences aren't ghosts
                      && e.ChannelId == channelId
                      && e.EndUtc > now)
             .OrderBy(e => e.StartUtc)

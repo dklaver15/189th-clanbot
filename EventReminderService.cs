@@ -85,9 +85,12 @@ public sealed class EventReminderService : BackgroundService
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
-        // Only events whose soonest reminder could be due right now.
+        // Only events whose soonest reminder could be due right now. MessageId != 0
+        // excludes unposted recurring-series occurrences (we only remind for the
+        // one that's actually shown in #events).
         var candidates = await db.ClanEvents
             .Where(e => e.Status == ClanEventStatus.Scheduled
+                     && e.MessageId != 0
                      && e.StartUtc > now
                      && e.StartUtc <= window)
             .ToListAsync(ct);
