@@ -105,7 +105,7 @@ public static class UfcEmbedBuilder
             }
         }
 
-        eb.WithFooter("Results via API-Sports");
+        eb.WithFooter("Results via ESPN");
 
         ApplyImage(eb, ev, posterUrl, posterAsImage: false);
 

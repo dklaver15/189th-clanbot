@@ -1,61 +1,55 @@
+using System.Globalization;
 using System.Text.Json;
 using ClanGuardBot.Models;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 
 namespace ClanGuardBot.Services;
 
 /// <summary>
-/// The single source of UFC data for the bot, backed by the API-Sports MMA feed
-/// (<see href="https://api-sports.io/documentation/mma/v1"/>). Powers all three
-/// surfaces — <c>/ufc-schedule</c> (upcoming), <c>/ufc-results</c> (latest card),
-/// and the day-before <see cref="UfcReminderService"/> reminder.
+/// The single source of UFC data for the bot, backed by ESPN's public MMA
+/// scoreboard feed (the same endpoint espn.com/the ESPN app use). Powers all
+/// three surfaces — <c>/ufc-schedule</c> (upcoming), <c>/ufc-results</c> (latest
+/// card), and the day-before <see cref="UfcReminderService"/> reminder.
 ///
-/// ── Why date scanning ──
-/// The free API-Sports plan locks the <c>season</c>, <c>next</c>, and <c>last</c>
-/// parameters (season is limited to 2022-2024; next/last are paid-only). The only
-/// free discovery parameter is <c>date</c>. So we scan a bounded window of dates
-/// around today, one <c>?date=YYYY-MM-DD</c> call each, and group the returned
-/// fights into events. To stay well under the 100-calls/day free cap, the whole
-/// window is fetched once and cached for <see cref="EventsTtl"/>; every surface
-/// reads that one cache. ~{back+forward+1} calls per refresh × a handful of
-/// refreshes/day.
+/// ── Why ESPN ──
+/// Replaced API-Sports MMA, whose free plan only exposes a ~3-day date window
+/// (every out-of-window <c>?date=</c> call returned a plan-restriction error,
+/// which silently dried the feature up and burned the 100-calls/day quota). ESPN's
+/// scoreboard takes a full date RANGE in one request, requires no API key, and has
+/// no documented quota. Caveat: it's undocumented/unofficial, so the response
+/// shape could change without notice — the parser is defensive (nullable DTOs,
+/// graceful fallbacks) to fail soft if it does.
 ///
 /// ── Shape ──
-/// API-Sports has no "event" object; it returns individual fights, each tagged
-/// with the card <c>slug</c> (the event name), a UTC <c>date</c>, <c>is_main</c>,
-/// weight class, and per-fighter winner flags. We group fights by slug into
-/// <see cref="UfcEvent"/>s.
+/// ESPN returns <c>events[]</c>, each already an event with a <c>name</c>, UTC
+/// <c>date</c>, a status, and <c>competitions[]</c> — one per bout, in card order
+/// (earliest prelim first, main event LAST), each with a weight class
+/// (<c>type.abbreviation</c>), round/clock on the bout status, and a per-competitor
+/// <c>winner</c> flag. We map straight into <see cref="UfcEvent"/>; the bout index
+/// becomes <see cref="UfcFight.Order"/> so the embed's "highest Order = main event"
+/// lookup picks the right bout.
 ///
-/// ── Auth ──
-/// Direct API-Sports accounts use the <c>x-apisports-key</c> header against
-/// <c>v1.mma.api-sports.io</c>. Key empty ⇒ <see cref="IsConfigured"/> false and
-/// callers say "not set up yet".
+/// ── No auth ──
+/// ESPN needs no key, so <see cref="IsConfigured"/> is always true; the master
+/// switch is <see cref="BotConfig.UfcEnabled"/>, checked by the reminder service.
 /// </summary>
 public sealed class UfcApiService
 {
-    private const string DefaultHost = "v1.mma.api-sports.io";
-    private const string KeyHeader = "x-apisports-key";
+    private const string ScoreboardBase = "https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard";
 
-    // Window scanned around today. UFC runs ~weekly, so ±~9 days reliably catches
+    // Window fetched around today. UFC runs ~weekly, so ±~9 days reliably catches
     // the most recent completed card and the next one or two upcoming.
     private const int ScanDaysBack = 8;
     private const int ScanDaysForward = 9;
 
-    // Cache the full window so hourly reminder polls + on-demand commands share
-    // one fetch. 6h keeps us comfortably under 100 calls/day (≈18 calls × 4/day).
+    // Cache the whole window so hourly reminder polls + on-demand commands share
+    // one fetch. ESPN has no quota, but a 6h TTL keeps the feed fresh without
+    // hammering and means every surface reads a warm cache.
     private static readonly TimeSpan EventsTtl = TimeSpan.FromHours(6);
-    // After a fetch that came back empty — transient outage, or the daily quota is
-    // exhausted — retry on this cadence instead of serving "nothing" for a full
-    // TTL. Long enough not to hammer the API while quota-limited (resets 00:00 UTC),
-    // and we never clobber good cached data on an empty result.
+    // After a fetch that came back empty (transient outage), retry sooner than a
+    // full TTL instead of serving "nothing" for 6h. We never clobber good cached
+    // data on an empty result.
     private static readonly TimeSpan EmptyRetryTtl = TimeSpan.FromMinutes(30);
-
-    // Pace the per-day scan to respect the free plan's per-minute rate limit
-    // (10 req/min). ~7s between calls ⇒ ≈8.5/min, safely under. A scan therefore
-    // takes ~2 min, but it runs in the background and is cached for 6h, so users
-    // hit a warm cache and never wait on it.
-    private static readonly TimeSpan ThrottleDelay = TimeSpan.FromSeconds(7);
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -64,7 +58,6 @@ public sealed class UfcApiService
 
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<UfcApiService> _logger;
-    private readonly BotConfig _config;
 
     private readonly object _cacheLock = new();
     private List<UfcEvent> _events = new();
@@ -74,27 +67,22 @@ public sealed class UfcApiService
 
     public UfcApiService(
         IHttpClientFactory httpClientFactory,
-        ILogger<UfcApiService> logger,
-        IOptions<BotConfig> config)
+        ILogger<UfcApiService> logger)
     {
         _httpClientFactory = httpClientFactory;
         _logger = logger;
-        _config = config.Value;
     }
 
-    public bool IsConfigured => !string.IsNullOrWhiteSpace(_config.UfcApiKey);
-
-    private string Host => string.IsNullOrWhiteSpace(_config.UfcApiHost)
-        ? DefaultHost
-        : _config.UfcApiHost.Trim();
+    /// <summary>ESPN needs no API key, so the data source is always available.</summary>
+    public bool IsConfigured => true;
 
     /// <summary>
-    /// True once at least one scan has completed. Lets callers distinguish "still
-    /// warming up the cache" from "scanned and genuinely nothing found".
+    /// True once at least one fetch has completed. Lets callers distinguish "still
+    /// warming up the cache" from "fetched and genuinely nothing found".
     /// </summary>
     public bool IsWarmedUp => _loaded;
 
-    /// <summary>Upcoming events (soonest first), grouped from the scanned window.</summary>
+    /// <summary>Upcoming events (soonest first), from the cached window.</summary>
     public Task<IReadOnlyList<UfcEvent>> GetUpcomingAsync(int max = 8, CancellationToken ct = default)
     {
         var nowUtc = DateTime.UtcNow;
@@ -122,9 +110,8 @@ public sealed class UfcApiService
     /// Returns the current cached events instantly (stale-while-revalidate) and
     /// kicks off a background refresh if the cache is stale. Reads NEVER block on
     /// the network — critical because slash-command handlers run on Discord's
-    /// gateway thread, and a slow inline scan there starves the heartbeat and
-    /// drops the connection. The throttled ~2-minute scan only ever runs on a
-    /// background task.
+    /// gateway thread, and a slow inline fetch there starves the heartbeat and
+    /// drops the connection.
     /// </summary>
     private List<UfcEvent> Snapshot()
     {
@@ -137,8 +124,6 @@ public sealed class UfcApiService
 
     private void TriggerRefreshIfStale()
     {
-        if (!IsConfigured) return;
-
         lock (_cacheLock)
         {
             if (DateTime.UtcNow < _eventsExpireUtc) return;       // still fresh
@@ -151,8 +136,7 @@ public sealed class UfcApiService
     {
         try
         {
-            var fights = await ScanWindowAsync(CancellationToken.None);
-            var events = GroupIntoEvents(fights);
+            var events = await FetchEventsAsync(CancellationToken.None);
 
             lock (_cacheLock)
             {
@@ -179,76 +163,93 @@ public sealed class UfcApiService
         }
     }
 
-    private async Task<List<ApiSportsFight>> ScanWindowAsync(CancellationToken ct)
+    /// <summary>
+    /// Fetches the whole [today-ScanDaysBack, today+ScanDaysForward] window from
+    /// ESPN in a single request and maps it to <see cref="UfcEvent"/>s.
+    /// </summary>
+    private async Task<List<UfcEvent>> FetchEventsAsync(CancellationToken ct)
     {
-        var today = DateTime.UtcNow.Date;
-        var all = new List<ApiSportsFight>();
+        var from = DateTime.UtcNow.Date.AddDays(-ScanDaysBack);
+        var to   = DateTime.UtcNow.Date.AddDays(ScanDaysForward);
+        var url  = $"{ScoreboardBase}?dates={from:yyyyMMdd}-{to:yyyyMMdd}";
 
-        var first = true;
-        for (var offset = -ScanDaysBack; offset <= ScanDaysForward; offset++)
+        var board = await GetJsonAsync<EspnScoreboard>(url, ct);
+        var events = board?.Events ?? new List<EspnEvent>();
+
+        var mapped = new List<UfcEvent>(events.Count);
+        foreach (var e in events)
         {
-            // Throttle between calls (not before the first) to stay under the
-            // per-minute rate limit.
-            if (!first)
-                await Task.Delay(ThrottleDelay, ct);
-            first = false;
-
-            var day = today.AddDays(offset);
-            var url = $"https://{Host}/fights?date={day:yyyy-MM-dd}";
-            var resp = await GetJsonAsync<ApiSportsResponse<ApiSportsFight>>(url, ct);
-            if (resp?.Response is { Count: > 0 } fights)
-                all.AddRange(fights);
+            var ev = MapEvent(e);
+            if (ev is not null) mapped.Add(ev);
         }
 
         _logger.LogInformation(
-            "UfcApiService scanned {Days} days, found {Fights} fights",
-            ScanDaysBack + ScanDaysForward + 1, all.Count);
+            "UfcApiService (ESPN) fetched {Count} event(s) for {From:yyyy-MM-dd}..{To:yyyy-MM-dd}",
+            mapped.Count, from, to);
 
-        return all;
+        return mapped;
     }
 
-    /// <summary>
-    /// Groups raw fights into events by card slug. Winner is listed first in each
-    /// bout; the main event (is_main) gets a high Order so the embed sorts it on top.
-    /// </summary>
-    private static List<UfcEvent> GroupIntoEvents(IReadOnlyList<ApiSportsFight> fights)
+    private static UfcEvent? MapEvent(EspnEvent e)
     {
-        return fights
-            .Where(f => f.Fighters?.First is not null && f.Fighters?.Second is not null)
-            .Select(f => (fight: f, start: ParseUtc(f)))
-            .GroupBy(x => !string.IsNullOrWhiteSpace(x.fight.Slug)
-                ? x.fight.Slug!.Trim()
-                : (x.start?.ToString("yyyy-MM-dd") ?? "Unknown"))
-            .Select(g =>
+        if (string.IsNullOrWhiteSpace(e.Id)) return null;
+
+        var ev = new UfcEvent
+        {
+            Key      = e.Id!,                       // stable ESPN id → reminder dedupe key
+            Name     = e.Name,
+            StartUtc = ParseUtc(e.Date),
+            Status   = e.Status?.Type?.Description,  // "Final" / "Scheduled"
+        };
+
+        var comps = e.Competitions ?? new List<EspnCompetition>();
+        for (var i = 0; i < comps.Count; i++)
+        {
+            var c = comps[i];
+            var completed = c.Status?.Type?.Completed == true;
+
+            var fight = new UfcFight
             {
-                var ev = new UfcEvent
-                {
-                    Key = g.Key,
-                    Name = g.Key,
-                    StartUtc = g.Min(x => x.start),
-                    Status = g.Any(x => x.fight.IsFinished) ? "Final" : "Scheduled",
-                };
+                // ESPN lists earliest prelim first, main event LAST — so the bout
+                // index doubles as card order (higher = later = closer to main).
+                Order       = i + 1,
+                WeightClass = c.Type?.Abbreviation ?? c.Type?.Text,
+                Status      = c.Status?.Type?.Description,
+                ResultRound = completed ? c.Status?.Period : null,
+                ResultClock = completed && c.Status?.Clock is { } clk && clk >= 0
+                    ? (int)Math.Round(clk)
+                    : null,
+                // Finish method (KO/Decision/…) isn't cleanly exposed on the
+                // scoreboard feed; the embed shows the matchup + round/clock and
+                // omits the method gracefully when it's absent.
+            };
 
-                foreach (var (fight, _) in g)
+            foreach (var p in c.Competitors ?? new List<EspnCompetitor>())
+            {
+                var name = p.Athlete?.DisplayName ?? p.Athlete?.FullName;
+                fight.Fighters.Add(new UfcFighter
                 {
-                    var first = fight.Fighters!.First!;
-                    var second = fight.Fighters!.Second!;
-                    ev.Fights.Add(new UfcFight
-                    {
-                        FightId = fight.Id,
-                        WeightClass = fight.Category,
-                        Order = fight.IsMain == true ? 1000 : 0,
-                        Fighters = new List<UfcFighter>
-                        {
-                            new() { FighterId = first.Id,  FirstName = first.Name,  Winner = first.Winner,  Logo = first.Logo },
-                            new() { FighterId = second.Id, FirstName = second.Name, Winner = second.Winner, Logo = second.Logo },
-                        },
-                    });
-                }
+                    // Whole display name in FirstName; FullName joins to it. Splitting
+                    // is unreliable for multi-word names (e.g. "Édgar Cháirez").
+                    FirstName = name,
+                    Winner    = p.Winner,
+                    Logo      = p.Athlete?.Headshot?.Href,
+                });
+            }
 
-                return ev;
-            })
-            .ToList();
+            ev.Fights.Add(fight);
+        }
+
+        return ev;
+    }
+
+    private static DateTime? ParseUtc(string? iso)
+    {
+        if (string.IsNullOrWhiteSpace(iso)) return null;
+        if (DateTimeOffset.TryParse(iso, CultureInfo.InvariantCulture,
+                DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var dto))
+            return dto.UtcDateTime;
+        return null;
     }
 
     private async Task<T?> GetJsonAsync<T>(string url, CancellationToken ct) where T : class
@@ -259,24 +260,16 @@ public sealed class UfcApiService
             http.Timeout = TimeSpan.FromSeconds(15);
 
             using var req = new HttpRequestMessage(HttpMethod.Get, url);
-            // Trim defensively — a stray space/newline from a .env file would
-            // otherwise be sent as part of the key and rejected by the API.
-            req.Headers.Add(KeyHeader, _config.UfcApiKey.Trim());
             req.Headers.UserAgent.ParseAdd("ClanGuardBot/1.0 (Discord bot for the 189th clan)");
 
             using var resp = await http.SendAsync(req, ct);
             if (!resp.IsSuccessStatusCode)
             {
-                _logger.LogWarning("API-Sports MMA returned {Status} for {Url}", (int)resp.StatusCode, Redact(url));
+                _logger.LogWarning("ESPN MMA API returned {Status} for {Url}", (int)resp.StatusCode, url);
                 return null;
             }
 
             var json = await resp.Content.ReadAsStringAsync(ct);
-
-            // API-Sports always returns 200; failures surface in the "errors" field
-            // (e.g. plan restrictions). Surface them so config issues aren't silent.
-            LogApiErrors(json, url);
-
             return JsonSerializer.Deserialize<T>(json, JsonOpts);
         }
         catch (OperationCanceledException)
@@ -285,48 +278,70 @@ public sealed class UfcApiService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "API-Sports MMA fetch failed for {Url}", Redact(url));
+            _logger.LogError(ex, "ESPN MMA API fetch failed for {Url}", url);
             return null;
         }
     }
 
-    private void LogApiErrors(string json, string url)
-    {
-        try
-        {
-            using var doc = JsonDocument.Parse(json);
-            if (!doc.RootElement.TryGetProperty("errors", out var errors)) return;
+    // ─── ESPN scoreboard DTOs (defensive: everything nullable) ───────────────
 
-            // "errors" is [] when fine, or an object of {field: message} when not.
-            if (errors.ValueKind == JsonValueKind.Object && errors.EnumerateObject().Any())
-            {
-                var msg = string.Join("; ", errors.EnumerateObject()
-                    .Select(e => $"{e.Name}: {e.Value}"));
-                _logger.LogWarning("API-Sports MMA returned errors for {Url}: {Errors}", Redact(url), msg);
-            }
-        }
-        catch
-        {
-            // Best-effort diagnostics only.
-        }
+    private sealed class EspnScoreboard
+    {
+        public List<EspnEvent>? Events { get; set; }
     }
 
-    private static string Redact(string url)
+    private sealed class EspnEvent
     {
-        var q = url.IndexOf('?');
-        return q >= 0 ? url[..q] : url;
+        public string? Id { get; set; }
+        public string? Name { get; set; }
+        public string? Date { get; set; }
+        public EspnStatus? Status { get; set; }
+        public List<EspnCompetition>? Competitions { get; set; }
     }
 
-    private static DateTime? ParseUtc(ApiSportsFight f)
+    private sealed class EspnCompetition
     {
-        if (f.Timestamp is { } ts && ts > 0)
-            return DateTimeOffset.FromUnixTimeSeconds(ts).UtcDateTime;
+        /// <summary>Weight class lives here (e.g. abbreviation "Welterweight").</summary>
+        public EspnWeightType? Type { get; set; }
+        public EspnStatus? Status { get; set; }
+        public List<EspnCompetitor>? Competitors { get; set; }
+    }
 
-        if (!string.IsNullOrWhiteSpace(f.Date) &&
-            DateTimeOffset.TryParse(f.Date, System.Globalization.CultureInfo.InvariantCulture,
-                System.Globalization.DateTimeStyles.AssumeUniversal, out var dto))
-            return dto.UtcDateTime;
+    private sealed class EspnWeightType
+    {
+        public string? Abbreviation { get; set; }
+        public string? Text { get; set; }
+    }
 
-        return null;
+    private sealed class EspnCompetitor
+    {
+        public bool? Winner { get; set; }
+        public EspnAthlete? Athlete { get; set; }
+    }
+
+    private sealed class EspnAthlete
+    {
+        public string? DisplayName { get; set; }
+        public string? FullName { get; set; }
+        public EspnImage? Headshot { get; set; }
+    }
+
+    private sealed class EspnImage
+    {
+        public string? Href { get; set; }
+    }
+
+    private sealed class EspnStatus
+    {
+        public double? Clock { get; set; }
+        public int? Period { get; set; }
+        public EspnStatusType? Type { get; set; }
+    }
+
+    private sealed class EspnStatusType
+    {
+        public string? Name { get; set; }         // STATUS_FINAL / STATUS_SCHEDULED
+        public string? Description { get; set; }   // "Final" / "Scheduled"
+        public bool? Completed { get; set; }
     }
 }
