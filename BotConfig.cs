@@ -1117,30 +1117,12 @@ public class BotConfig
     /// <summary>
     /// Master switch for the UFC features. Controls the day-before
     /// <see cref="Services.UfcReminderService"/> reminder loop. The
-    /// <c>/ufc-schedule</c> and <c>/ufc-results</c> commands work whenever a key
-    /// is set regardless of this flag; this gates only the automatic reminders.
-    /// Default false so nothing posts until a channel + key are configured.
+    /// <c>/ufc-schedule</c> and <c>/ufc-results</c> commands work regardless of
+    /// this flag; this gates only the automatic reminders. Default false so nothing
+    /// posts until a channel is configured. UFC data comes from ESPN's keyless
+    /// public MMA feed, so no API key is required.
     /// </summary>
     public bool UfcEnabled { get; set; } = false;
-
-    /// <summary>
-    /// API-Sports MMA key (free tier at https://api-sports.io — 100 calls/day).
-    /// Powers everything UFC: schedule, results, and the day-before reminder.
-    /// Sent in the x-apisports-key header. Empty disables all UFC data — commands
-    /// reply "not set up yet" and the reminder loop idles. Prefer supplying this
-    /// via environment (BotConfig__UfcApiKey=...) rather than committing it.
-    ///
-    /// (We use API-Sports rather than SportsDataIO: SportsDataIO's free tier
-    /// scrambles result fields and ships synthetic event names, which broke both
-    /// results and poster lookups. API-Sports returns real, unscrambled cards.)
-    /// </summary>
-    public string UfcApiKey { get; set; } = string.Empty;
-
-    /// <summary>
-    /// API-Sports MMA host. Default "v1.mma.api-sports.io" (direct accounts with
-    /// the x-apisports-key header). Override only if routing through RapidAPI.
-    /// </summary>
-    public string UfcApiHost { get; set; } = "v1.mma.api-sports.io";
 
     /// <summary>
     /// Channel where day-before fight reminders are posted. Must be set (non-zero)
