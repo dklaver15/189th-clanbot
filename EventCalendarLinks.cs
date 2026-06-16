@@ -17,15 +17,48 @@ namespace ClanGuardBot.Services;
 /// </summary>
 public static class EventCalendarLinks
 {
-    /// <summary>Google Calendar "TEMPLATE" deep link — opens a prefilled event the user can save.</summary>
+    /// <summary>
+    /// Google Calendar "TEMPLATE" deep link — opens a prefilled event the user can
+    /// save. Capped to stay under Discord's 512-char link-button URL limit: a long
+    /// event description would otherwise URL-encode past that limit and make the
+    /// whole "Add to Calendar" response invalid (the interaction just fails). The
+    /// title and time always fit; only the optional details are truncated, and the
+    /// full description is still in the attached .ics anyway.
+    /// </summary>
     public static string GoogleUrl(ClanEvent ev)
     {
+        // Discord caps link-button URLs at 512; keep margin.
+        const int MaxUrlLen = 500;
+
         var sb = new StringBuilder("https://calendar.google.com/calendar/render?action=TEMPLATE");
         sb.Append("&text=").Append(Uri.EscapeDataString(ev.Title ?? string.Empty));
         sb.Append("&dates=").Append(Utc(ev.StartUtc)).Append('/').Append(Utc(ev.EndUtc));
+
         if (!string.IsNullOrWhiteSpace(ev.Description))
-            sb.Append("&details=").Append(Uri.EscapeDataString(ev.Description));
+        {
+            var encoded = Uri.EscapeDataString(ev.Description);
+            var budget  = MaxUrlLen - sb.Length - "&details=".Length;
+            if (budget > 0)
+                sb.Append("&details=").Append(SafeTruncateEscaped(encoded, budget));
+            // If title+dates already use the budget, skip details entirely.
+        }
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Truncates a percent-encoded string to at most <paramref name="max"/> chars
+    /// without splitting a "%XX" triplet (which would yield an invalid URL).
+    /// </summary>
+    private static string SafeTruncateEscaped(string s, int max)
+    {
+        if (max <= 0) return string.Empty;
+        if (s.Length <= max) return s;
+
+        var cut = max;
+        // If the cut lands inside a "%XX" escape, back up to before the '%'.
+        if (cut >= 1 && s[cut - 1] == '%') cut -= 1;
+        else if (cut >= 2 && s[cut - 2] == '%') cut -= 2;
+        return s[..cut];
     }
 
     /// <summary>UTF-8 bytes of the .ics document for attaching to a Discord message.</summary>
