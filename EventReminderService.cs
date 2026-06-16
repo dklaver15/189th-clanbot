@@ -168,21 +168,34 @@ public sealed class EventReminderService : BackgroundService
         var content = string.IsNullOrWhiteSpace(mentions) ? null : mentions;
         var allowed = new AllowedMentions { AllowedTypes = AllowedMentionTypes.Users };
 
-        try
+        // Send with a single retry. A transient Discord blip shouldn't cost a
+        // member their reminder, but we cap at one retry so a permanent failure
+        // (e.g. the channel was deleted) can't spin — and the caller marks the
+        // lead sent regardless, so this never loops across polls.
+        for (var attempt = 1; attempt <= 2; attempt++)
         {
-            if (hasImage)
+            try
             {
-                using var fa = new FileAttachment(new MemoryStream(ev.ImageBytes!), ev.ImageFileName);
-                await channel.SendFileAsync(fa, text: content, embed: embed, allowedMentions: allowed);
+                if (hasImage)
+                {
+                    using var fa = new FileAttachment(new MemoryStream(ev.ImageBytes!), ev.ImageFileName);
+                    await channel.SendFileAsync(fa, text: content, embed: embed, allowedMentions: allowed);
+                }
+                else
+                {
+                    await channel.SendMessageAsync(text: content, embed: embed, allowedMentions: allowed);
+                }
+                return; // delivered
             }
-            else
+            catch (Exception ex) when (attempt == 1)
             {
-                await channel.SendMessageAsync(text: content, embed: embed, allowedMentions: allowed);
+                _logger.LogDebug(ex, "Reminder for '{Title}' failed (attempt 1); retrying in 2s", ev.Title);
+                await Task.Delay(TimeSpan.FromSeconds(2));
             }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to post reminder for '{Title}'", ev.Title);
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to post reminder for '{Title}' after retry", ev.Title);
+            }
         }
     }
 

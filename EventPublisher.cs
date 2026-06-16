@@ -250,68 +250,99 @@ public sealed class EventPublisher : IEventPublisher
         }
         var messageId = posted.Id;
 
-        // 2) Persist the CalendarEvent hub row, the ClanEvent, and the outbox row.
-        var calEvent = new CalendarEvent
+        // 2) Persist the CalendarEvent hub row, the ClanEvent, and the outbox row
+        //    ATOMICALLY. Without the transaction, a failure after the first save
+        //    would leave an orphaned CalendarEvent (no owning ClanEvent, no outbox
+        //    row) that nothing syncs or cleans up. On any failure we roll back and
+        //    delete the message we just posted, so a botched create leaves neither
+        //    a half-written DB nor a dangling backing-less #events post.
+        ClanEvent clanEvent;
+        int calEventId;
+        try
         {
-            GuildId          = guildId,
-            DiscordMessageId = messageId,   // unique, satisfies the filtered index
-            CalendarEventId  = string.Empty, // stamped by CalendarOutboxWorker on GCal success
-            Title            = title,
-            StartUtc         = startUtc,
-            EndUtc           = endUtc,
-            Description      = description ?? string.Empty,
-            Source           = "Clan",      // AttendanceCountingSources="Clan" → counts for promotion
-            ContentHash      = string.Empty, // Clan events never go through /sort rebind
-            CreatedAt        = DateTime.UtcNow,
-        };
-        db.CalendarEvents.Add(calEvent);
-        await db.SaveChangesAsync(); // materialize calEvent.Id
+            await using var tx = await db.Database.BeginTransactionAsync();
 
-        var clanEvent = new ClanEvent
-        {
-            GuildId          = guildId,
-            SeriesId         = seriesId,
-            CalendarEventId  = calEvent.Id,
-            ChannelId        = channel.Id,
-            MessageId        = messageId,
-            Title            = title,
-            Description      = description ?? string.Empty,
-            OrganizerId      = organizerId,
-            OrganizerName    = organizerName,
-            StartUtc         = startUtc,
-            EndUtc           = endUtc,
-            Status           = ClanEventStatus.Scheduled,
-            RemindersSentCsv = string.Empty,
-            CreatedAt        = DateTime.UtcNow,
-            ImageFileName    = imageFileName,
-            ImageBytes       = seriesId == null ? attachImageBytes : null,
-            MaxParticipants  = maxParticipants,
-        };
-        db.ClanEvents.Add(clanEvent);
+            var calEvent = new CalendarEvent
+            {
+                GuildId          = guildId,
+                DiscordMessageId = messageId,   // unique, satisfies the filtered index
+                CalendarEventId  = string.Empty, // stamped by CalendarOutboxWorker on GCal success
+                Title            = title,
+                StartUtc         = startUtc,
+                EndUtc           = endUtc,
+                Description      = description ?? string.Empty,
+                Source           = "Clan",      // AttendanceCountingSources="Clan" → counts for promotion
+                ContentHash      = string.Empty, // Clan events never go through /sort rebind
+                CreatedAt        = DateTime.UtcNow,
+            };
+            db.CalendarEvents.Add(calEvent);
+            await db.SaveChangesAsync(); // materialize calEvent.Id
+            calEventId = calEvent.Id;
 
-        var payload = new CalendarOutboxPayload
+            clanEvent = new ClanEvent
+            {
+                GuildId          = guildId,
+                SeriesId         = seriesId,
+                CalendarEventId  = calEvent.Id,
+                ChannelId        = channel.Id,
+                MessageId        = messageId,
+                Title            = title,
+                Description      = description ?? string.Empty,
+                OrganizerId      = organizerId,
+                OrganizerName    = organizerName,
+                StartUtc         = startUtc,
+                EndUtc           = endUtc,
+                Status           = ClanEventStatus.Scheduled,
+                RemindersSentCsv = string.Empty,
+                CreatedAt        = DateTime.UtcNow,
+                ImageFileName    = imageFileName,
+                ImageBytes       = seriesId == null ? attachImageBytes : null,
+                MaxParticipants  = maxParticipants,
+            };
+            db.ClanEvents.Add(clanEvent);
+
+            var payload = new CalendarOutboxPayload
+            {
+                Title         = title,
+                StartUtc      = startUtc,
+                EndUtc        = endUtc,
+                Description   = description ?? string.Empty,
+                OrganizerName = organizerName,
+                OrganizerId   = organizerId,
+                // No separate host at creation — the creator is the effective host.
+                // A later "Set Host" enqueues an Update that overwrites this line.
+                HostName      = organizerName,
+                Source        = "Clan",
+            };
+            db.CalendarOutbox.Add(new CalendarOutbox
+            {
+                GuildId         = guildId,
+                Operation       = CalendarOutboxOperation.Create,
+                CalendarEventId = calEvent.Id,
+                PayloadJson     = JsonConvert.SerializeObject(payload),
+                NextAttemptAt   = DateTime.UtcNow,
+                CreatedAt       = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync(); // materialize clanEvent.Id
+
+            await tx.CommitAsync();
+        }
+        catch (Exception ex)
         {
-            Title         = title,
-            StartUtc      = startUtc,
-            EndUtc        = endUtc,
-            Description   = description ?? string.Empty,
-            OrganizerName = organizerName,
-            OrganizerId   = organizerId,
-            // No separate host at creation — the creator is the effective host.
-            // A later "Set Host" enqueues an Update that overwrites this line.
-            HostName      = organizerName,
-            Source        = "Clan",
-        };
-        db.CalendarOutbox.Add(new CalendarOutbox
-        {
-            GuildId         = guildId,
-            Operation       = CalendarOutboxOperation.Create,
-            CalendarEventId = calEvent.Id,
-            PayloadJson     = JsonConvert.SerializeObject(payload),
-            NextAttemptAt   = DateTime.UtcNow,
-            CreatedAt       = DateTime.UtcNow,
-        });
-        await db.SaveChangesAsync(); // materialize clanEvent.Id
+            // Rollback is automatic on dispose. Remove the now-orphaned post so we
+            // don't leave a backing-less embed in #events, then let the caller
+            // (wizard / scheduler) surface the failure.
+            _logger.LogError(ex,
+                "Persisting event '{Title}' failed after posting msg {MessageId}; rolled back, removing the orphaned post",
+                title, messageId);
+            try { await posted.DeleteAsync(); }
+            catch (Exception delEx)
+            {
+                _logger.LogWarning(delEx,
+                    "Couldn't delete orphaned post {MessageId} after a failed create", messageId);
+            }
+            throw;
+        }
 
         // 3) Attach the RSVP buttons now that we have ClanEvent.Id.
         try
@@ -328,7 +359,7 @@ public sealed class EventPublisher : IEventPublisher
 
         _logger.LogInformation(
             "Posted event '{Title}' {Start:o}–{End:o} UTC (ClanEvent {ClanId}, CalendarEvent {CalId}, msg {MessageId}, GCal create queued)",
-            title, startUtc, endUtc, clanEvent.Id, calEvent.Id, messageId);
+            title, startUtc, endUtc, clanEvent.Id, calEventId, messageId);
     }
 
     private TimeZoneInfo ResolveZone(string? ianaId)

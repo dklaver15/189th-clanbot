@@ -84,16 +84,19 @@ public sealed class EventArchiveService : BackgroundService
 
         if (due.Count == 0) return;
 
+        var archived = 0;
         foreach (var ev in due)
         {
             if (ct.IsCancellationRequested) break;
 
             await DeletePostAsync(ev);
             ev.Status = ClanEventStatus.Archived; // keep the row + CalendarEvent + GCal entry
+            await db.SaveChangesAsync(ct);        // persist per-item: a crash mid-loop won't re-delete already-archived posts
+            archived++;
         }
 
-        await db.SaveChangesAsync(ct);
-        _logger.LogInformation("Auto-archived {Count} event post(s)", due.Count);
+        if (archived > 0)
+            _logger.LogInformation("Auto-archived {Count} event post(s)", archived);
     }
 
     private async Task DeletePostAsync(ClanEvent ev)
