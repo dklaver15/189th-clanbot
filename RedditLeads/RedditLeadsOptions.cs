@@ -24,6 +24,18 @@ public sealed class RedditLeadsOptions
     public int PollingIntervalMinutes { get; set; } = 60;
 
     /// <summary>
+    /// Seconds to wait between subreddit requests within a cycle. Reddit now
+    /// rate-limits anonymous RSS from datacenter IPs hard — observed limit is
+    /// roughly ONE request per ~40s, with back-to-back requests returning 429.
+    /// Firing all subs back-to-back means only the first one succeeds and the
+    /// rest are silently 429'd (which is how leads dried up). At the default 45s,
+    /// 35 subs take ~26 min — comfortably inside a 60-min cycle — and every sub
+    /// gets polled successfully. Lower only if Reddit relaxes; raise if 429s
+    /// persist in the cycle summary.
+    /// </summary>
+    public int RequestSpacingSeconds { get; set; } = 45;
+
+    /// <summary>
     /// HTTP User-Agent string. Reddit's edge network blocks generic UAs
     /// (curl, python-requests, empty). Format Reddit prefers:
     /// "platform:appname:version (by /u/yourusername)". This is set on

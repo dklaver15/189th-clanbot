@@ -109,6 +109,10 @@ public sealed class RedditLeadService : BackgroundService
     private readonly RedditLeadsOptions _options;
     private readonly ILogger<RedditLeadService> _logger;
 
+    /// <summary>Round-robin start position, advanced each cycle so the cap and any
+    /// rate-limiting don't always starve the same tail-end subs.</summary>
+    private int _cycleStartOffset;
+
     public RedditLeadService(
         IServiceProvider services,
         DiscordSocketClient client,
@@ -172,15 +176,29 @@ public sealed class RedditLeadService : BackgroundService
 
     private async Task RunCycleAsync(CancellationToken ct)
     {
-        var subs = _options.GetSubredditsList();
+        var allSubs = _options.GetSubredditsList();
+        if (allSubs.Count == 0) return;
+
+        // Rotate the starting position each cycle so the cap (and any lingering
+        // rate-limiting) doesn't always starve the same tail-end subs — over
+        // successive cycles every sub gets first crack.
+        var offset = _cycleStartOffset % allSubs.Count;
+        _cycleStartOffset = (_cycleStartOffset + 1) % allSubs.Count;
+        var subs = allSubs.Skip(offset).Concat(allSubs.Take(offset)).ToList();
+
         var freshFloor = DateTime.UtcNow.AddHours(-_options.MaxPostAgeHours);
         var cap = _options.MaxLeadsPerCycle;
+        var spacing = TimeSpan.FromSeconds(Math.Max(0, _options.RequestSpacingSeconds));
 
         var totalSurfaced = 0;
+        var rateLimited = 0;
         var capHit = false;
+        var first = true;
 
         foreach (var sub in subs)
         {
+            if (ct.IsCancellationRequested) break;
+
             var remaining = cap - totalSurfaced;
             if (remaining <= 0)
             {
@@ -188,9 +206,20 @@ public sealed class RedditLeadService : BackgroundService
                 break;
             }
 
+            // Space requests so we stay under Reddit's per-IP RSS limit (~1 req
+            // per ~40s from a datacenter IP). No delay before the first request.
+            if (!first && spacing > TimeSpan.Zero)
+            {
+                try { await Task.Delay(spacing, ct); }
+                catch (OperationCanceledException) { break; }
+            }
+            first = false;
+
             try
             {
-                totalSurfaced += await ProcessSubredditAsync(sub, freshFloor, remaining, ct);
+                var (surfaced, limited) = await ProcessSubredditAsync(sub, freshFloor, remaining, ct);
+                totalSurfaced += surfaced;
+                if (limited) rateLimited++;
             }
             catch (Exception ex)
             {
@@ -208,24 +237,34 @@ public sealed class RedditLeadService : BackgroundService
                 cap);
         }
 
+        // Surface rate-limiting at Warning (the per-sub 429s are Debug). If this is
+        // most of the list cycle after cycle, leads will dry up — raise spacing.
+        if (rateLimited > 0)
+            _logger.LogWarning(
+                "RedditLead cycle: {Limited}/{Total} subreddit(s) rate-limited by Reddit (429) even after retry. If this is most of the list, raise RedditLeads:RequestSpacingSeconds.",
+                rateLimited, subs.Count);
+
         if (totalSurfaced > 0)
             _logger.LogInformation("RedditLead cycle: {Count} new lead(s) surfaced across all subs", totalSurfaced);
     }
 
-    private async Task<int> ProcessSubredditAsync(
+    private async Task<(int Surfaced, bool RateLimited)> ProcessSubredditAsync(
         string sub,
         DateTime freshFloor,
         int remainingCapacity,
         CancellationToken ct)
     {
-        if (remainingCapacity <= 0) return 0;
+        if (remainingCapacity <= 0) return (0, false);
 
-        var posts = await _reddit.GetNewPostsAsync(sub, ListingLimit, ct);
-        if (posts.Count == 0) return 0;
+        var fetch = await _reddit.GetNewPostsAsync(sub, ListingLimit, ct);
+        if (fetch.Outcome == RedditFetchOutcome.RateLimited) return (0, true);
+
+        var posts = fetch.Posts;
+        if (posts.Count == 0) return (0, false);
 
         // Step 1: cheap recency filter before any DB work.
         var recent = posts.Where(p => p.CreatedUtc >= freshFloor).ToList();
-        if (recent.Count == 0) return 0;
+        if (recent.Count == 0) return (0, false);
 
         // Step 2: bulk dedupe — one query per subreddit instead of one per post.
         // Note this is intentionally racy with concurrent inserts elsewhere; the
@@ -244,7 +283,7 @@ public sealed class RedditLeadService : BackgroundService
         }
 
         var fresh = recent.Where(p => !alreadySeen.Contains(p.Id)).ToList();
-        if (fresh.Count == 0) return 0;
+        if (fresh.Count == 0) return (0, false);
 
         var surfaced = 0;
         foreach (var post in fresh)
@@ -266,7 +305,7 @@ public sealed class RedditLeadService : BackgroundService
                 _logger.LogError(ex, "Error processing post {PostId} from r/{Sub}", post.Id, sub);
             }
         }
-        return surfaced;
+        return (surfaced, false);
     }
 
     private async Task<bool> TryProcessPostAsync(RedditPost post, CancellationToken ct)

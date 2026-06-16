@@ -87,6 +87,7 @@ public sealed class RedditRssClient
     private static readonly Regex WhitespaceCollapser = new(@"\s+",     RegexOptions.Compiled);
 
     private readonly HttpClient _httpClient;
+    private readonly RedditLeadsOptions _options;
     private readonly ILogger<RedditRssClient> _logger;
 
     public RedditRssClient(
@@ -95,18 +96,15 @@ public sealed class RedditRssClient
         ILogger<RedditRssClient> logger)
     {
         _httpClient = httpClient;
+        _options    = options.Value; // RequestSpacingSeconds drives the 429 retry delay
         _logger     = logger;
-        // Options is injected for parity with the previous OAuth-based client
-        // and to keep the DI registration shape symmetric. Not currently
-        // consumed at runtime — UserAgent is wired on the typed HttpClient.
-        _ = options;
     }
 
     /// <summary>
     /// Newest N posts from a subreddit. Limit is clamped to [1, 100] to
     /// match Reddit's listing cap.
     /// </summary>
-    public async Task<IReadOnlyList<RedditPost>> GetNewPostsAsync(
+    public async Task<RedditFetchResult> GetNewPostsAsync(
         string subreddit,
         int limit,
         CancellationToken ct)
@@ -114,71 +112,88 @@ public sealed class RedditRssClient
         var url = string.Format(FeedUrlPattern, subreddit, Math.Clamp(limit, 1, 100));
         var requestedUri = new Uri(url);
 
-        using var response = await _httpClient.GetAsync(url, ct);
-
-        // Dead-sub redirect detection. Reddit returns 302 → /subreddits/search.rss
-        // when /r/{sub}/new.rss doesn't resolve (banned, deleted, privatized,
-        // renamed). The default HttpClientHandler follows that redirect silently
-        // and we end up scraping a stream of *other* subs that match the search
-        // query. The redirected feed has entries that read like "/r/COD_LFG -
-        // Looking for Group!" with the linked sub's about text in the body —
-        // they pass keyword matching and surface as false-positive leads.
-        //
-        // RequestMessage.RequestUri on the response reflects the FINAL URI after
-        // auto-redirects, so we can detect the mismatch without flipping the
-        // handler's AllowAutoRedirect (which would require DI surgery). On
-        // mismatch we treat it like any other transient failure: warn and skip
-        // the cycle. A persistent warning is the operator's signal to remove
-        // the sub from RedditLeadsOptions.Subreddits.
-        var finalUri = response.RequestMessage?.RequestUri;
-        if (finalUri is not null && !RequestUriResolvedAsExpected(requestedUri, finalUri))
+        // One retry on 429. With the service's inter-request spacing a 429 should
+        // be rare, but a single backoff retry rides out a transient one within
+        // the same cycle instead of waiting a full hour.
+        for (var attempt = 1; attempt <= 2; attempt++)
         {
-            _logger.LogWarning(
-                "Reddit RSS for r/{Sub} redirected to {FinalUri} — subreddit is likely deleted, banned, privatized, or renamed. Skipping cycle. Remove from rotation if this persists.",
-                subreddit, finalUri);
-            return Array.Empty<RedditPost>();
-        }
+            using var response = await _httpClient.GetAsync(url, ct);
 
-        if (!response.IsSuccessStatusCode)
-        {
-            // Reddit aggressively rate-limits the public RSS endpoint. A 429 is
-            // routine and self-heals on the next poll, so log it at Debug to keep
-            // it out of the warning stream (35 subs × every cycle was drowning
-            // the logs). Other non-success codes (503s under CDN load, etc.) are
-            // rarer and stay at Warning as a real operator signal.
+            // Dead-sub redirect detection. Reddit returns 302 → /subreddits/search.rss
+            // when /r/{sub}/new.rss doesn't resolve (banned, deleted, privatized,
+            // renamed). The default HttpClientHandler follows that redirect silently
+            // and we end up scraping a stream of *other* subs that match the search
+            // query. The redirected feed has entries that read like "/r/COD_LFG -
+            // Looking for Group!" with the linked sub's about text in the body —
+            // they pass keyword matching and surface as false-positive leads.
+            //
+            // RequestMessage.RequestUri on the response reflects the FINAL URI after
+            // auto-redirects, so we can detect the mismatch without flipping the
+            // handler's AllowAutoRedirect (which would require DI surgery). On
+            // mismatch we warn and skip. A persistent warning is the operator's
+            // signal to remove the sub from RedditLeadsOptions.Subreddits.
+            var finalUri = response.RequestMessage?.RequestUri;
+            if (finalUri is not null && !RequestUriResolvedAsExpected(requestedUri, finalUri))
+            {
+                _logger.LogWarning(
+                    "Reddit RSS for r/{Sub} redirected to {FinalUri} — subreddit is likely deleted, banned, privatized, or renamed. Skipping. Remove from rotation if this persists.",
+                    subreddit, finalUri);
+                return RedditFetchResult.Skipped;
+            }
+
             if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
-                _logger.LogDebug(
-                    "Reddit RSS for r/{Sub} returned 429 (rate-limited); skipping this subreddit for the cycle",
-                    subreddit);
-            else
+            {
+                // Routine for anonymous RSS from a datacenter IP. Retry once after
+                // a spacing delay; if it's still limited, report RateLimited so the
+                // service can tally it for the cycle summary (kept at Debug per-sub
+                // so 35 subs don't drown the logs — the summary is the signal).
+                if (attempt == 1)
+                {
+                    _logger.LogDebug(
+                        "Reddit RSS for r/{Sub} returned 429; retrying once in {Delay}s", subreddit, _options.RequestSpacingSeconds);
+                    try { await Task.Delay(TimeSpan.FromSeconds(_options.RequestSpacingSeconds), ct); }
+                    catch (OperationCanceledException) { return RedditFetchResult.RateLimited; }
+                    continue;
+                }
+
+                _logger.LogDebug("Reddit RSS for r/{Sub} still 429 after retry; rate-limited this cycle", subreddit);
+                return RedditFetchResult.RateLimited;
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                // 503s under CDN load, etc. — rarer, stays at Warning.
                 _logger.LogWarning(
                     "Reddit RSS for r/{Sub} returned {Status}; skipping this subreddit for the cycle",
                     subreddit, response.StatusCode);
-            return Array.Empty<RedditPost>();
+                return RedditFetchResult.Skipped;
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(ct);
+            XDocument doc;
+            try
+            {
+                doc = await XDocument.LoadAsync(stream, LoadOptions.None, ct);
+            }
+            catch (System.Xml.XmlException ex)
+            {
+                _logger.LogWarning(ex, "Failed to parse RSS feed for r/{Sub}; skipping cycle", subreddit);
+                return RedditFetchResult.Skipped;
+            }
+
+            var entries = doc.Root?.Elements(Atom + "entry");
+            if (entries is null) return RedditFetchResult.Ok(Array.Empty<RedditPost>());
+
+            var posts = new List<RedditPost>();
+            foreach (var entry in entries)
+            {
+                var post = ParseEntry(entry, subreddit);
+                if (post is not null) posts.Add(post);
+            }
+            return RedditFetchResult.Ok(posts);
         }
 
-        await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        XDocument doc;
-        try
-        {
-            doc = await XDocument.LoadAsync(stream, LoadOptions.None, ct);
-        }
-        catch (System.Xml.XmlException ex)
-        {
-            _logger.LogWarning(ex, "Failed to parse RSS feed for r/{Sub}; skipping cycle", subreddit);
-            return Array.Empty<RedditPost>();
-        }
-
-        var entries = doc.Root?.Elements(Atom + "entry");
-        if (entries is null) return Array.Empty<RedditPost>();
-
-        var posts = new List<RedditPost>();
-        foreach (var entry in entries)
-        {
-            var post = ParseEntry(entry, subreddit);
-            if (post is not null) posts.Add(post);
-        }
-        return posts;
+        return RedditFetchResult.RateLimited; // loop always returns earlier; satisfies the compiler
     }
 
     /// <summary>
@@ -333,6 +348,19 @@ public sealed class RedditRssClient
         stripped     = WhitespaceCollapser.Replace(stripped, " ").Trim();
         return stripped;
     }
+}
+
+/// <summary>Outcome of a single subreddit RSS fetch — lets the service tell a
+/// real "no new posts" apart from a 429 so it can tally rate-limited subs.</summary>
+public enum RedditFetchOutcome { Ok, RateLimited, Skipped }
+
+/// <summary>Result of <see cref="RedditRssClient.GetNewPostsAsync"/>: an outcome
+/// plus the posts (empty unless <see cref="RedditFetchOutcome.Ok"/>).</summary>
+public sealed record RedditFetchResult(RedditFetchOutcome Outcome, IReadOnlyList<RedditPost> Posts)
+{
+    public static RedditFetchResult Ok(IReadOnlyList<RedditPost> posts) => new(RedditFetchOutcome.Ok, posts);
+    public static readonly RedditFetchResult RateLimited = new(RedditFetchOutcome.RateLimited, Array.Empty<RedditPost>());
+    public static readonly RedditFetchResult Skipped     = new(RedditFetchOutcome.Skipped, Array.Empty<RedditPost>());
 }
 
 /// <summary>
