@@ -55,7 +55,7 @@ public static class EventEmbedBuilder
     // width), and the wrapped lines are pure vertical gap between Host and the
     // rosters — exactly the bloat we're avoiding. Tune the count if a 2-line gap
     // appears (lower it) or the embed looks narrow with no image (raise it).
-    private static readonly string WidthSpacer = new('\u2800', 64);
+    private static readonly string WidthSpacer = new('\u2800', 50);
 
     public static Embed BuildEmbed(
         ClanEvent ev,
