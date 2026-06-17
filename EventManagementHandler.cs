@@ -133,6 +133,56 @@ public sealed class EventManagementHandler
         client.SelectMenuExecuted += OnSelectAsync;
         client.ButtonExecuted     += OnButtonAsync;
         client.MessageReceived    += OnEditDmAsync;
+        client.UserLeft           += OnUserLeftAsync;
+    }
+
+    /// <summary>
+    /// When a member leaves the guild, pull their RSVPs from every still-upcoming
+    /// scheduled event, re-render those posts, and promote waitlisters into any
+    /// "Going" slot they freed. Past/ended events keep their roster as history, and
+    /// unposted recurring occurrences just lose the stale RSVP row (no post to edit).
+    /// </summary>
+    private async Task OnUserLeftAsync(SocketGuild guild, SocketUser user)
+    {
+        try
+        {
+            using var scope = _services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+            var userRsvps = await db.EventRsvps.Where(r => r.UserId == user.Id).ToListAsync();
+            if (userRsvps.Count == 0) return;
+
+            var now = DateTime.UtcNow;
+            var eventIds = userRsvps.Select(r => r.ClanEventId).Distinct().ToList();
+            var events = await db.ClanEvents
+                .Where(e => eventIds.Contains(e.Id)
+                         && e.GuildId == guild.Id
+                         && e.Status == ClanEventStatus.Scheduled
+                         && e.EndUtc > now)
+                .ToListAsync();
+            if (events.Count == 0) return;
+
+            var affected = events.Select(e => e.Id).ToHashSet();
+            db.EventRsvps.RemoveRange(userRsvps.Where(r => affected.Contains(r.ClanEventId)));
+            await db.SaveChangesAsync();
+
+            foreach (var ev in events)
+            {
+                var rsvps = await db.EventRsvps.Where(r => r.ClanEventId == ev.Id).ToListAsync();
+                var promoted = EventWaitlist.Rebalance(rsvps, ev.MaxParticipants);
+                if (db.ChangeTracker.HasChanges()) await db.SaveChangesAsync();
+
+                await UpdatePostAsync(db, ev);
+                foreach (var uid in promoted) await EventWaitlist.NotifyPromotedAsync(_client, ev, uid);
+            }
+
+            _logger.LogInformation(
+                "Cleared RSVPs for departed member {User} from {Count} upcoming event(s)", user.Id, events.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to clear RSVPs for departed member {User}", user.Id);
+        }
     }
 
     // ─── Entry points (called by EventCommandHandler) ──────────────────────
