@@ -39,6 +39,7 @@ public class BotDbContext : DbContext
     // ── In-house events ──
     public DbSet<ClanEvent>           ClanEvents          => Set<ClanEvent>();
     public DbSet<ClanEventSeries>     ClanEventSeries     => Set<ClanEventSeries>();
+    public DbSet<ClanEventTemplate>   ClanEventTemplates  => Set<ClanEventTemplate>();
     public DbSet<EventRsvp>           EventRsvps          => Set<EventRsvp>();
     public DbSet<UserTimeZone>        UserTimeZones       => Set<UserTimeZone>();
     public DbSet<Poll>                Polls               => Set<Poll>();
@@ -456,6 +457,13 @@ public class BotDbContext : DbContext
         modelBuilder.Entity<ClanEventSeries>(entity =>
         {
             entity.HasIndex(e => new { e.GuildId, e.Active });
+        });
+
+        modelBuilder.Entity<ClanEventTemplate>(entity =>
+        {
+            // Listing/picking is always scoped to the guild. Name uniqueness is
+            // enforced case-insensitively in the save flow (see ClanEventTemplate.Name).
+            entity.HasIndex(e => e.GuildId);
         });
 
         modelBuilder.Entity<UserTimeZone>(entity =>

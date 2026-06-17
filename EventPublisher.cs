@@ -50,7 +50,7 @@ public sealed class EventPublisher : IEventPublisher
         CreateOccurrenceAsync(d.GuildId, seriesId: null,
             d.Title, d.Description, d.OrganizerId, d.OrganizerName, d.StartUtc, d.EndUtc,
             attachImageBytes: d.ImageBytes, imageFileName: d.ImageFileName,
-            maxParticipants: d.MaxParticipants);
+            maxParticipants: d.MaxParticipants, hostId: d.HostId);
 
     public async Task PublishSeriesAsync(EventDraft d)
     {
@@ -213,7 +213,7 @@ public sealed class EventPublisher : IEventPublisher
         string title, string description, ulong organizerId, string organizerName,
         DateTime startUtc, DateTime endUtc,
         byte[]? attachImageBytes = null, string? imageFileName = null,
-        int? maxParticipants = null)
+        int? maxParticipants = null, ulong? hostId = null)
     {
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
@@ -251,7 +251,7 @@ public sealed class EventPublisher : IEventPublisher
             var preview = new ClanEvent
             {
                 GuildId = guildId, SeriesId = seriesId, Title = title, Description = description,
-                OrganizerId = organizerId, OrganizerName = organizerName,
+                OrganizerId = organizerId, OrganizerName = organizerName, HostId = hostId,
                 StartUtc = startUtc, EndUtc = endUtc, Status = ClanEventStatus.Scheduled,
                 MaxParticipants = maxParticipants,
             };
@@ -315,8 +315,19 @@ public sealed class EventPublisher : IEventPublisher
                 ImageFileName    = imageFileName,
                 ImageBytes       = seriesId == null ? attachImageBytes : null,
                 MaxParticipants  = maxParticipants,
+                HostId           = hostId,
             };
             db.ClanEvents.Add(clanEvent);
+
+            // Resolve the host's display name for the GCal "Host:" line. With no
+            // explicit host the creator is the effective host (the wizard's
+            // behaviour); the template "use" flow may pass an explicit hostId.
+            var hostName = organizerName;
+            if (hostId is ulong hid)
+                hostName = _client.GetGuild(guildId)?.GetUser(hid)?.DisplayName
+                        ?? _client.GetUser(hid)?.GlobalName
+                        ?? _client.GetUser(hid)?.Username
+                        ?? organizerName;
 
             var payload = new CalendarOutboxPayload
             {
@@ -326,9 +337,10 @@ public sealed class EventPublisher : IEventPublisher
                 Description   = description ?? string.Empty,
                 OrganizerName = organizerName,
                 OrganizerId   = organizerId,
-                // No separate host at creation — the creator is the effective host.
-                // A later "Set Host" enqueues an Update that overwrites this line.
-                HostName      = organizerName,
+                // The creator is the effective host unless an explicit host was
+                // supplied (template use). A later "Set Host" enqueues an Update
+                // that overwrites this line.
+                HostName      = hostName,
                 Source        = "Clan",
             };
             db.CalendarOutbox.Add(new CalendarOutbox

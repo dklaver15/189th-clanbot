@@ -3,6 +3,7 @@ using System;
 using ClanGuardBot.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -10,9 +11,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace ClanGuardBot.Migrations
 {
     [DbContext(typeof(BotDbContext))]
-    partial class BotDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260617023234_AddClanEventTemplates")]
+    partial class AddClanEventTemplates
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "8.0.11");
@@ -1301,6 +1304,139 @@ namespace ClanGuardBot.Migrations
                     b.ToTable("PatrolWatchOptOuts");
                 });
 
+            modelBuilder.Entity("ClanGuardBot.Models.Poll", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("AllowMultiselect")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("AnnounceOnClose")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<ulong>("ChannelId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime?>("ClosedAtUtc")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("ClosesAtUtc")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<ulong>("CreatorId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("CreatorName")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<ulong>("GuildId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<byte[]>("ImageBytes")
+                        .HasColumnType("BLOB");
+
+                    b.Property<string>("ImageFileName")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Kind")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<ulong>("MessageId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Question")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("ResultsAnnounced")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<ulong?>("ResultsMessageId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("MessageId")
+                        .IsUnique();
+
+                    b.HasIndex("GuildId", "CreatedAt");
+
+                    b.HasIndex("Status", "ClosesAtUtc");
+
+                    b.ToTable("Polls");
+                });
+
+            modelBuilder.Entity("ClanGuardBot.Models.PollOption", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("AnswerId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Emoji")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Label")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("PollId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("Position")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PollId", "AnswerId");
+
+                    b.HasIndex("PollId", "Position")
+                        .IsUnique();
+
+                    b.ToTable("PollOptions");
+                });
+
+            modelBuilder.Entity("ClanGuardBot.Models.PollVote", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("PollId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("PollOptionId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<ulong>("UserId")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PollId");
+
+                    b.HasIndex("PollId", "UserId");
+
+                    b.HasIndex("PollId", "UserId", "PollOptionId")
+                        .IsUnique();
+
+                    b.ToTable("PollVotes");
+                });
+
             modelBuilder.Entity("ClanGuardBot.Models.RankChange", b =>
                 {
                     b.Property<int>("Id")
@@ -1651,139 +1787,6 @@ namespace ClanGuardBot.Migrations
                         .IsUnique();
 
                     b.ToTable("WebhookSnapshots");
-                });
-
-            modelBuilder.Entity("ClanGuardBot.Models.Poll", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("INTEGER");
-
-                    b.Property<bool>("AllowMultiselect")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<bool>("AnnounceOnClose")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<ulong>("ChannelId")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<DateTime?>("ClosedAtUtc")
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTime>("ClosesAtUtc")
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("TEXT");
-
-                    b.Property<ulong>("CreatorId")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("CreatorName")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<ulong>("GuildId")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<byte[]>("ImageBytes")
-                        .HasColumnType("BLOB");
-
-                    b.Property<string>("ImageFileName")
-                        .HasColumnType("TEXT");
-
-                    b.Property<int>("Kind")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<ulong>("MessageId")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("Question")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<bool>("ResultsAnnounced")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<ulong?>("ResultsMessageId")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<int>("Status")
-                        .HasColumnType("INTEGER");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("MessageId")
-                        .IsUnique();
-
-                    b.HasIndex("GuildId", "CreatedAt");
-
-                    b.HasIndex("Status", "ClosesAtUtc");
-
-                    b.ToTable("Polls");
-                });
-
-            modelBuilder.Entity("ClanGuardBot.Models.PollOption", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("INTEGER");
-
-                    b.Property<int>("AnswerId")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("Emoji")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Label")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<int>("PollId")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<int>("Position")
-                        .HasColumnType("INTEGER");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("PollId", "AnswerId");
-
-                    b.HasIndex("PollId", "Position")
-                        .IsUnique();
-
-                    b.ToTable("PollOptions");
-                });
-
-            modelBuilder.Entity("ClanGuardBot.Models.PollVote", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("INTEGER");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("TEXT");
-
-                    b.Property<int>("PollId")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<int>("PollOptionId")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<ulong>("UserId")
-                        .HasColumnType("INTEGER");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("PollId");
-
-                    b.HasIndex("PollId", "UserId");
-
-                    b.HasIndex("PollId", "UserId", "PollOptionId")
-                        .IsUnique();
-
-                    b.ToTable("PollVotes");
                 });
 #pragma warning restore 612, 618
         }

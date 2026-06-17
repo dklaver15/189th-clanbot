@@ -67,6 +67,14 @@ public sealed class EventDraft
     /// <summary>Optional Going cap; null = unlimited. For a series this becomes
     /// the series-wide cap that every occurrence inherits.</summary>
     public int? MaxParticipants { get; set; }
+
+    /// <summary>
+    /// Optional host (the person actually running it), set at creation by the
+    /// template "use" flow. Null = no explicit host (the embed falls back to the
+    /// organizer). The DM wizard leaves this null — it sets a host post-creation
+    /// via the "Set Host" button, which has guild context for a member picker.
+    /// </summary>
+    public ulong? HostId { get; set; }
 }
 
 /// <summary>

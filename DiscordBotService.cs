@@ -48,6 +48,7 @@ public class DiscordBotService : IHostedService
     private readonly EventCreationWizard _eventWizard;
     private readonly EventRsvpInteractionHandler _eventRsvpHandler;
     private readonly EventManagementHandler _eventMgmtHandler;
+    private readonly EventTemplateHandler _eventTemplateHandler;
     private readonly PollCommandHandler _pollCommandHandler;
     private readonly PollVoteInteractionHandler _pollVoteHandler;
     private readonly PollGatewayVoteHandler _pollGatewayVoteHandler;
@@ -114,6 +115,7 @@ public class DiscordBotService : IHostedService
         EventCreationWizard eventWizard,
         EventRsvpInteractionHandler eventRsvpHandler,
         EventManagementHandler eventMgmtHandler,
+        EventTemplateHandler eventTemplateHandler,
         PollCommandHandler pollCommandHandler,
         PollVoteInteractionHandler pollVoteHandler,
         PollGatewayVoteHandler pollGatewayVoteHandler,
@@ -179,6 +181,7 @@ public class DiscordBotService : IHostedService
         _eventWizard                 = eventWizard;
         _eventRsvpHandler            = eventRsvpHandler;
         _eventMgmtHandler            = eventMgmtHandler;
+        _eventTemplateHandler        = eventTemplateHandler;
         _pollCommandHandler          = pollCommandHandler;
         _pollVoteHandler             = pollVoteHandler;
         _pollGatewayVoteHandler      = pollGatewayVoteHandler;
@@ -264,6 +267,7 @@ public class DiscordBotService : IHostedService
         _eventWizard.Register(_client);
         _eventRsvpHandler.Register(_client);
         _eventMgmtHandler.Register(_client);
+        _eventTemplateHandler.Register(_client);
         _pollCommandHandler.Register(_client);
         _pollVoteHandler.Register(_client);
         _pollGatewayVoteHandler.Register(_client);
@@ -385,7 +389,7 @@ public class DiscordBotService : IHostedService
                 // In-house event creation (Apollo replacement). /event opens a
                 // DM wizard (gated by EventCommandMinRank); /timezone sets the
                 // zone used to read each member's event-time input.
-                EventCommandHandler.BuildEventCommand(_config.EventCommandMinRank),
+                EventCommandHandler.BuildEventCommand(_config.EventCommandMinRank, _config.EventTemplateManageMinRank),
                 EventCommandHandler.BuildTimezoneCommand(),
 
                 // /poll — native + anonymous hybrid poll, open to all members.

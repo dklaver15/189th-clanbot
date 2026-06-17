@@ -416,6 +416,7 @@ try
     builder.Services.AddSingleton<EventPublisher>();
     builder.Services.AddSingleton<IEventPublisher>(sp => sp.GetRequiredService<EventPublisher>());
     builder.Services.AddSingleton<EventCreationWizard>();
+    builder.Services.AddSingleton<EventTemplateHandler>();
     builder.Services.AddSingleton<EventCommandHandler>();
     builder.Services.AddSingleton<EventManagementHandler>();
     builder.Services.AddSingleton<EventRsvpInteractionHandler>();

@@ -267,6 +267,17 @@ public class BotConfig
     public string EventCommandMinRank { get; set; } = "2ndLT";
 
     /// <summary>
+    /// Minimum rank required to SAVE or DELETE reusable event templates via
+    /// /event template save | delete. Using a template (/event template use) and
+    /// listing templates follow the lower <see cref="EventCommandMinRank"/> gate,
+    /// since using one only creates an ordinary event. Default "CPT" — templates
+    /// are a shared, server-wide resource, so curating them is left to senior
+    /// officers while any event-creator can build from them. Must match a rank
+    /// name in RankRoles (case-insensitive).
+    /// </summary>
+    public string EventTemplateManageMinRank { get; set; } = "CPT";
+
+    /// <summary>
     /// Channel that ClanGuard-created event embeds are posted to. 0 falls back
     /// to EventsTextChannelId. Kept separate from EventsTextChannelId on purpose:
     /// that key is the channel the Apollo capture/backfill/reconciliation

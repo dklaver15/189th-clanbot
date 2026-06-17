@@ -29,6 +29,7 @@ public sealed class EventCommandHandler
     private readonly EventCreationWizard _wizard;
     private readonly EventTimeParser _timeParser;
     private readonly EventManagementHandler _management;
+    private readonly EventTemplateHandler _templates;
 
     public EventCommandHandler(
         IServiceProvider services,
@@ -36,7 +37,8 @@ public sealed class EventCommandHandler
         IOptions<BotConfig> config,
         EventCreationWizard wizard,
         EventTimeParser timeParser,
-        EventManagementHandler management)
+        EventManagementHandler management,
+        EventTemplateHandler templates)
     {
         _services   = services;
         _logger     = logger;
@@ -44,6 +46,7 @@ public sealed class EventCommandHandler
         _wizard     = wizard;
         _timeParser = timeParser;
         _management = management;
+        _templates  = templates;
     }
 
     public void Register(DiscordSocketClient client)
@@ -51,7 +54,7 @@ public sealed class EventCommandHandler
         client.SlashCommandExecuted += OnSlashCommandAsync;
     }
 
-    public static SlashCommandProperties BuildEventCommand(string minRank) =>
+    public static SlashCommandProperties BuildEventCommand(string minRank, string templateManageRank = "CPT") =>
         new SlashCommandBuilder()
             .WithName(EventCommandName)
             .WithDescription("Create, edit, or cancel a clan event")
@@ -78,6 +81,26 @@ public sealed class EventCommandHandler
                 .AddOption("image", ApplicationCommandOptionType.Attachment, "PNG/JPG/GIF/WebP, max 8 MB", isRequired: false)
                 .AddOption("url", ApplicationCommandOptionType.String, "Link to a GIF/image (Tenor, Giphy, or direct)", isRequired: false)
                 .AddOption("clear", ApplicationCommandOptionType.Boolean, "Remove the current image instead", isRequired: false))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("template")
+                .WithDescription("Reusable event presets — save common events once, then spin them up fast")
+                .WithType(ApplicationCommandOptionType.SubCommandGroup)
+                .AddOption(new SlashCommandOptionBuilder()
+                    .WithName("use")
+                    .WithDescription("Create an event from a saved template — you just pick the time and host")
+                    .WithType(ApplicationCommandOptionType.SubCommand))
+                .AddOption(new SlashCommandOptionBuilder()
+                    .WithName("list")
+                    .WithDescription("Show the saved event templates")
+                    .WithType(ApplicationCommandOptionType.SubCommand))
+                .AddOption(new SlashCommandOptionBuilder()
+                    .WithName("save")
+                    .WithDescription($"Save a new event template ({templateManageRank}+ only)")
+                    .WithType(ApplicationCommandOptionType.SubCommand))
+                .AddOption(new SlashCommandOptionBuilder()
+                    .WithName("delete")
+                    .WithDescription($"Delete an event template ({templateManageRank}+ only)")
+                    .WithType(ApplicationCommandOptionType.SubCommand)))
             .Build();
 
     public static SlashCommandProperties BuildTimezoneCommand() =>
@@ -117,7 +140,8 @@ public sealed class EventCommandHandler
         // Dispatch by subcommand. Each branch owns its own defer/respond — do
         // NOT defer here, or edit/cancel (which defer in the management handler)
         // would double-acknowledge.
-        var sub = command.Data.Options.FirstOrDefault()?.Name ?? "create";
+        var top = command.Data.Options.FirstOrDefault();
+        var sub = top?.Name ?? "create";
         switch (sub)
         {
             case "create": await HandleCreateAsync(command);          break;
@@ -125,6 +149,12 @@ public sealed class EventCommandHandler
             case "cancel": await _management.StartCancelAsync(command); break;
             case "sort":   await _management.StartSortAsync(command);   break;
             case "image":  await _management.StartImageAsync(command);  break;
+            case "template":
+                // SubCommandGroup: the nested option is the actual subcommand
+                // (save | list | use | delete).
+                var tplSub = top?.Options?.FirstOrDefault()?.Name ?? "list";
+                await _templates.HandleTemplateAsync(command, tplSub);
+                break;
             default:       await command.RespondAsync("Unknown subcommand.", ephemeral: true); break;
         }
     }
