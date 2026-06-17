@@ -64,6 +64,35 @@ public sealed class EventTemplateHandler
 
     private readonly ConcurrentDictionary<ulong, SaveSession> _saveSessions = new();
 
+    // ── Edit DM sessions (numbered field menu; staged, applied on "done") ──
+    private enum EditField { Menu, Name, Title, Duration, Description, Image, MaxParticipants }
+
+    private sealed class EditSession
+    {
+        public ulong UserId;
+        public IDMChannel Dm = null!;
+        public ulong GuildId;
+        public int TemplateId;
+        public EditField Step = EditField.Menu;
+        public DateTime LastActivityAt;
+
+        // Working copy, pre-loaded from the template.
+        public string Name = string.Empty;
+        public string Title = string.Empty;
+        public int DurationMinutes;
+        public string Description = string.Empty;
+        public int? MaxParticipants;
+
+        // Image is staged separately: only touched if the user changes it.
+        public bool HasImage;      // did the template have a banner when we started
+        public bool ImageChanged;  // did the user stage an image change this session
+        public bool ImageCleared;  // ...and was it a removal
+        public byte[]? ImageBytes;
+        public string? ImageFileName;
+    }
+
+    private readonly ConcurrentDictionary<ulong, EditSession> _editSessions = new();
+
     public EventTemplateHandler(
         IServiceProvider services,
         DiscordSocketClient client,
@@ -84,6 +113,7 @@ public sealed class EventTemplateHandler
     public void Register(DiscordSocketClient client)
     {
         client.MessageReceived    += OnSaveDmAsync;
+        client.MessageReceived    += OnEditDmAsync;
         client.ButtonExecuted     += OnButtonAsync;
         client.SelectMenuExecuted += OnSelectAsync;
         client.ModalSubmitted     += OnModalAsync;
@@ -112,6 +142,7 @@ public sealed class EventTemplateHandler
             case "save":   await StartSaveAsync(command, guildUser);   break;
             case "list":   await ShowListAsync(command, guildUser);    break;
             case "use":    await StartUseAsync(command, guildUser);    break;
+            case "edit":   await StartEditAsync(command, guildUser);   break;
             case "delete": await StartDeleteAsync(command, guildUser); break;
             default:       await command.FollowupAsync("Unknown template subcommand.", ephemeral: true); break;
         }
@@ -652,7 +683,8 @@ public sealed class EventTemplateHandler
 
         try
         {
-            if (cid == $"{Prefix}use:pick")  { await OnUsePickAsync(component);  return; }
+            if (cid == $"{Prefix}use:pick")  { await OnUsePickAsync(component);    return; }
+            if (cid == $"{Prefix}edit:pick") { await OnEditPickAsync(component);   return; }
             if (cid == $"{Prefix}del:pick")  { await OnDeletePickAsync(component); return; }
 
             // Host chosen via the member picker. evttpl:usehost:<templateId>:<ticks>
@@ -910,6 +942,445 @@ public sealed class EventTemplateHandler
         catch (Exception ex) { _logger.LogDebug(ex, "Failed to finalize template use message"); }
     }
 
+    // ─── /event template edit ─────────────────────────────────────────────
+
+    private async Task StartEditAsync(SocketSlashCommand command, SocketGuildUser user)
+    {
+        if (!HasManagePermission(user))
+        {
+            await command.FollowupAsync(
+                $"❌ Editing templates is restricted to **{_config.EventTemplateManageMinRank} and above**.", ephemeral: true);
+            return;
+        }
+
+        List<ClanEventTemplate> templates;
+        using (var scope = _services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+            templates = await db.ClanEventTemplates
+                .Where(t => t.GuildId == command.GuildId!.Value)
+                .OrderBy(t => t.Name)
+                .Take(25)
+                .ToListAsync();
+        }
+
+        if (templates.Count == 0)
+        {
+            await command.FollowupAsync("There are no templates to edit yet.", ephemeral: true);
+            return;
+        }
+
+        var menu = new SelectMenuBuilder()
+            .WithCustomId($"{Prefix}edit:pick")
+            .WithPlaceholder("Choose a template to edit")
+            .WithMinValues(1).WithMaxValues(1);
+
+        foreach (var t in templates)
+            menu.AddOption(Truncate(t.Name, 100), t.Id.ToString(), Truncate(t.Title, 100));
+
+        await command.FollowupAsync("Which template would you like to edit?",
+            components: new ComponentBuilder().WithSelectMenu(menu).Build(), ephemeral: true);
+    }
+
+    private async Task OnEditPickAsync(SocketMessageComponent component)
+    {
+        if (component.User is not SocketGuildUser gu || !HasManagePermission(gu))
+        {
+            await component.UpdateAsync(m => { m.Content = "You don't have permission to edit templates."; m.Components = Empty(); });
+            return;
+        }
+        if (!int.TryParse(component.Data.Values.FirstOrDefault(), out var templateId))
+        {
+            await component.UpdateAsync(m => { m.Content = "Couldn't read that selection."; m.Components = Empty(); });
+            return;
+        }
+
+        ClanEventTemplate? t;
+        using (var scope = _services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+            t = await db.ClanEventTemplates.FirstOrDefaultAsync(x => x.Id == templateId);
+        }
+        if (t is null || t.GuildId != gu.Guild.Id)
+        {
+            await component.UpdateAsync(m => { m.Content = "That template no longer exists."; m.Components = Empty(); });
+            return;
+        }
+
+        IDMChannel dm;
+        try { dm = await component.User.CreateDMChannelAsync(); }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Couldn't open DM for template edit ({User})", component.User.Id);
+            await component.UpdateAsync(m =>
+            {
+                m.Content = "I couldn't DM you — enable Direct Messages from server members and try again.";
+                m.Components = Empty();
+            });
+            return;
+        }
+
+        // Only one DM flow at a time — drop any in-progress save session.
+        _saveSessions.TryRemove(component.User.Id, out _);
+
+        var session = new EditSession
+        {
+            UserId          = component.User.Id,
+            Dm              = dm,
+            GuildId         = gu.Guild.Id,
+            TemplateId      = t.Id,
+            Step            = EditField.Menu,
+            LastActivityAt  = DateTime.UtcNow,
+            Name            = t.Name,
+            Title           = t.Title,
+            DurationMinutes = t.DurationMinutes,
+            Description     = t.Description ?? string.Empty,
+            MaxParticipants = t.MaxParticipants,
+            HasImage        = !string.IsNullOrWhiteSpace(t.ImageFileName),
+        };
+        _editSessions[component.User.Id] = session;
+
+        try
+        {
+            await SendEditMenuAsync(session);
+            await component.UpdateAsync(m => { m.Content = "📬 I've sent you a DM to edit this template."; m.Components = Empty(); });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Couldn't send template edit menu ({User})", component.User.Id);
+            _editSessions.TryRemove(component.User.Id, out _);
+            await component.UpdateAsync(m =>
+            {
+                m.Content = "I couldn't DM you — enable Direct Messages from server members and try again.";
+                m.Components = Empty();
+            });
+        }
+    }
+
+    private async Task SendEditMenuAsync(EditSession s)
+    {
+        s.Step = EditField.Menu;
+
+        var imageState = s.ImageChanged
+            ? (s.ImageCleared ? "Will be removed" : "New image staged")
+            : (s.HasImage ? "Set" : "None");
+
+        var embed = new EmbedBuilder()
+            .WithColor(FormColor)
+            .WithTitle("✏️ Edit template")
+            .WithDescription("Type a **number** to change that field. Type **done** to save, or **cancel** to discard.")
+            .AddField("1 · Template name", FormBox(s.Name))
+            .AddField("2 · Event title", FormBox(s.Title))
+            .AddField("3 · Default length", FormBox(FormatDuration(s.DurationMinutes)), inline: true)
+            .AddField("4 · Attendee limit", FormBox(s.MaxParticipants is int c ? $"{c} max" : "No limit"), inline: true)
+            .AddField("5 · Banner image", FormBox(imageState), inline: true)
+            .AddField("6 · Description", FormBox(string.IsNullOrWhiteSpace(s.Description) ? "—" : s.Description))
+            .WithFooter("Reply in this DM • \"done\" to save • \"cancel\" to discard • times out in 15 min");
+
+        await s.Dm.SendMessageAsync(embed: embed.Build());
+    }
+
+    private async Task OnEditDmAsync(SocketMessage message)
+    {
+        if (message.Author.IsBot) return;
+        if (message is not SocketUserMessage) return;
+        if (message.Channel is not IDMChannel) return;
+        if (!_editSessions.TryGetValue(message.Author.Id, out var s)) return;
+
+        if (IsExpired(s))
+        {
+            _editSessions.TryRemove(message.Author.Id, out _);
+            try { await s.Dm.SendMessageAsync(embed: Form("⌛ Template edit timed out",
+                "That edit expired from inactivity — **nothing was changed**. Run `/event template edit` to retry.")); } catch { }
+            return;
+        }
+
+        s.LastActivityAt = DateTime.UtcNow;
+        var text = message.Content.Trim();
+
+        if (text.Equals("cancel", StringComparison.OrdinalIgnoreCase))
+        {
+            _editSessions.TryRemove(message.Author.Id, out _);
+            try { await s.Dm.SendMessageAsync(embed: Form("Cancelled", "No changes were saved.")); } catch { }
+            return;
+        }
+
+        try
+        {
+            switch (s.Step)
+            {
+                case EditField.Menu:            await HandleEditMenuAsync(s, text);            break;
+                case EditField.Name:            await HandleEditNameAsync(s, text);            break;
+                case EditField.Title:           await HandleEditTitleAsync(s, text);           break;
+                case EditField.Duration:        await HandleEditDurationAsync(s, text);        break;
+                case EditField.Description:     await HandleEditDescriptionAsync(s, text);     break;
+                case EditField.Image:           await HandleEditImageAsync(s, message, text);  break;
+                case EditField.MaxParticipants: await HandleEditMaxParticipantsAsync(s, text); break;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Template edit step {Step} failed for {User}", s.Step, message.Author.Id);
+            _editSessions.TryRemove(message.Author.Id, out _);
+            try { await s.Dm.SendMessageAsync(embed: Form("Something went wrong", "Run `/event template edit` to start over.")); } catch { }
+        }
+    }
+
+    private async Task HandleEditMenuAsync(EditSession s, string text)
+    {
+        if (text.Equals("done", StringComparison.OrdinalIgnoreCase))
+        {
+            await SaveEditAsync(s);
+            return;
+        }
+
+        switch (text)
+        {
+            case "1":
+                s.Step = EditField.Name;
+                await s.Dm.SendMessageAsync(embed: Form("🧩 Template name", "Send the new name, or type `keep` to leave it unchanged."));
+                break;
+            case "2":
+                s.Step = EditField.Title;
+                await s.Dm.SendMessageAsync(embed: Form("🎯 Event title", "Send the new title, or type `keep` to leave it unchanged."));
+                break;
+            case "3":
+                s.Step = EditField.Duration;
+                await s.Dm.SendMessageAsync(embed: Form("⏱️ Default length", "Send the new length (e.g. `2 hours`, `90 minutes`), or `keep`."));
+                break;
+            case "4":
+                s.Step = EditField.MaxParticipants;
+                await s.Dm.SendMessageAsync(embed: Form("👥 Attendee limit", "Send a new max number, `none` for no limit, or `keep`."));
+                break;
+            case "5":
+                s.Step = EditField.Image;
+                await s.Dm.SendMessageAsync(embed: Form("🖼️ Banner image",
+                    "Drag a new image in or paste a link to replace it, type `remove` to clear it, or `keep` to leave it as-is."));
+                break;
+            case "6":
+                s.Step = EditField.Description;
+                await s.Dm.SendMessageAsync(embed: Form("📝 Description", "Send the new description, `none` to clear it, or `keep`."));
+                break;
+            default:
+                await s.Dm.SendMessageAsync(embed: Form("Pick a field", "Type a number from **1–6**, **done** to save, or **cancel**."));
+                break;
+        }
+    }
+
+    private async Task HandleEditNameAsync(EditSession s, string text)
+    {
+        if (text.Equals("keep", StringComparison.OrdinalIgnoreCase)) { await SendEditMenuAsync(s); return; }
+        if (string.IsNullOrWhiteSpace(text) || text.Length > 80)
+        {
+            await s.Dm.SendMessageAsync(embed: Form("🧩 Template name", "Give a name under 80 characters, or type `keep`."));
+            return;
+        }
+
+        if (!text.Equals(s.Name, StringComparison.OrdinalIgnoreCase))
+        {
+            using var scope = _services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+            var dupe = await db.ClanEventTemplates
+                .Where(t => t.GuildId == s.GuildId && t.Id != s.TemplateId)
+                .AnyAsync(t => t.Name.ToLower() == text.ToLower());
+            if (dupe)
+            {
+                await s.Dm.SendMessageAsync(embed: Form("🧩 That name's taken",
+                    $"Another template is already called **{text}**. Pick a different name, or type `keep`."));
+                return;
+            }
+        }
+
+        s.Name = text;
+        await SendEditMenuAsync(s);
+    }
+
+    private async Task HandleEditTitleAsync(EditSession s, string text)
+    {
+        if (text.Equals("keep", StringComparison.OrdinalIgnoreCase)) { await SendEditMenuAsync(s); return; }
+        if (string.IsNullOrWhiteSpace(text) || text.Length > 100)
+        {
+            await s.Dm.SendMessageAsync(embed: Form("🎯 Event title", "Give a title under 100 characters, or type `keep`."));
+            return;
+        }
+        s.Title = text;
+        await SendEditMenuAsync(s);
+    }
+
+    private async Task HandleEditDurationAsync(EditSession s, string text)
+    {
+        if (text.Equals("keep", StringComparison.OrdinalIgnoreCase)) { await SendEditMenuAsync(s); return; }
+        var minutes = ParseDurationMinutes(text);
+        if (minutes is null or <= 0)
+        {
+            await s.Dm.SendMessageAsync(embed: Form("⏱️ Need a length", "Try `2 hours`, `90 minutes`, or `1h 30m` — or type `keep`."));
+            return;
+        }
+        s.DurationMinutes = minutes.Value;
+        await SendEditMenuAsync(s);
+    }
+
+    private async Task HandleEditDescriptionAsync(EditSession s, string text)
+    {
+        if (text.Equals("keep", StringComparison.OrdinalIgnoreCase)) { await SendEditMenuAsync(s); return; }
+        s.Description = text.Equals("none", StringComparison.OrdinalIgnoreCase)
+                     || text.Equals("skip", StringComparison.OrdinalIgnoreCase)
+            ? string.Empty
+            : text;
+        await SendEditMenuAsync(s);
+    }
+
+    private async Task HandleEditMaxParticipantsAsync(EditSession s, string text)
+    {
+        text = text.Trim();
+        if (text.Equals("keep", StringComparison.OrdinalIgnoreCase)) { await SendEditMenuAsync(s); return; }
+
+        if (text.Equals("none", StringComparison.OrdinalIgnoreCase)
+         || text.Equals("unlimited", StringComparison.OrdinalIgnoreCase)
+         || text == "0")
+        {
+            s.MaxParticipants = null;
+        }
+        else if (int.TryParse(text, out var n) && n > 0)
+        {
+            s.MaxParticipants = n;
+        }
+        else
+        {
+            await s.Dm.SendMessageAsync(embed: Form("👥 Need a number", "Give a whole number above 0, `none` for no limit, or `keep`."));
+            return;
+        }
+        await SendEditMenuAsync(s);
+    }
+
+    private async Task HandleEditImageAsync(EditSession s, SocketMessage message, string text)
+    {
+        if (text.Equals("keep", StringComparison.OrdinalIgnoreCase)) { await SendEditMenuAsync(s); return; }
+
+        if (text.Equals("remove", StringComparison.OrdinalIgnoreCase)
+         || text.Equals("none", StringComparison.OrdinalIgnoreCase)
+         || text.Equals("clear", StringComparison.OrdinalIgnoreCase))
+        {
+            s.ImageChanged = true;
+            s.ImageCleared = true;
+            s.ImageBytes = null;
+            s.ImageFileName = null;
+            await SendEditMenuAsync(s);
+            return;
+        }
+
+        var att = message.Attachments.FirstOrDefault();
+        if (att is null)
+        {
+            if (text.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+             || text.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                await s.Dm.SendMessageAsync("⏳ Fetching that image…");
+                var res = await EventImageFetcher.FromUrlAsync(text);
+                if (!res.Ok)
+                {
+                    await s.Dm.SendMessageAsync(embed: Form("🖼️ Couldn't use that link",
+                        $"{res.Error} Try another link, drag the file in, type `remove`, or `keep`."));
+                    return;
+                }
+                s.ImageChanged = true;
+                s.ImageCleared = false;
+                s.ImageFileName = res.FileName;
+                s.ImageBytes    = EventImage.Downscale(res.Bytes!, res.FileName);
+                await SendEditMenuAsync(s);
+                return;
+            }
+
+            await s.Dm.SendMessageAsync(embed: Form("🖼️ Banner image",
+                "Drag an image in, paste a link, type `remove` to clear it, or `keep`."));
+            return;
+        }
+
+        var looksImage = (att.ContentType?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) ?? false)
+                      || EventImage.IsAllowedExtension(att.Filename);
+        if (!looksImage)
+        {
+            await s.Dm.SendMessageAsync(embed: Form("🖼️ Not an image", "That doesn't look like a PNG/JPG/GIF/WebP. Try another, or type `keep`."));
+            return;
+        }
+        if (att.Size > EventImage.MaxBytes)
+        {
+            await s.Dm.SendMessageAsync(embed: Form("🖼️ Image too large",
+                $"Max is {EventImage.MaxBytes / (1024 * 1024)} MB — try a smaller one, or type `keep`."));
+            return;
+        }
+
+        byte[] bytes;
+        try { bytes = await Http.GetByteArrayAsync(att.Url); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to download template edit image for {User}", s.UserId);
+            await s.Dm.SendMessageAsync(embed: Form("🖼️ Download failed", "Couldn't download that image. Try again, or type `keep`."));
+            return;
+        }
+        if (bytes.Length > EventImage.MaxBytes)
+        {
+            await s.Dm.SendMessageAsync(embed: Form("🖼️ Image too large",
+                $"Max is {EventImage.MaxBytes / (1024 * 1024)} MB — try a smaller one, or type `keep`."));
+            return;
+        }
+
+        var imgName = EventImage.Sanitize(att.Filename);
+        s.ImageChanged = true;
+        s.ImageCleared = false;
+        s.ImageFileName = imgName;
+        s.ImageBytes    = EventImage.Downscale(bytes, imgName);
+        await SendEditMenuAsync(s);
+    }
+
+    private async Task SaveEditAsync(EditSession s)
+    {
+        _editSessions.TryRemove(s.UserId, out _);
+
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+        var t = await db.ClanEventTemplates.FirstOrDefaultAsync(x => x.Id == s.TemplateId);
+        if (t is null || t.GuildId != s.GuildId)
+        {
+            try { await s.Dm.SendMessageAsync(embed: Form("Gone", "That template no longer exists — nothing was saved.")); } catch { }
+            return;
+        }
+
+        // Re-check name uniqueness at save time (another officer may have taken it).
+        if (!t.Name.Equals(s.Name, StringComparison.OrdinalIgnoreCase))
+        {
+            var dupe = await db.ClanEventTemplates
+                .Where(x => x.GuildId == s.GuildId && x.Id != s.TemplateId)
+                .AnyAsync(x => x.Name.ToLower() == s.Name.ToLower());
+            if (dupe)
+            {
+                try { await s.Dm.SendMessageAsync(embed: Form("🧩 That name's taken",
+                    $"Another template is now called **{s.Name}** — nothing was saved. Run `/event template edit` again.")); } catch { }
+                return;
+            }
+        }
+
+        t.Name            = s.Name;
+        t.Title           = s.Title;
+        t.DurationMinutes = s.DurationMinutes;
+        t.Description     = s.Description;
+        t.MaxParticipants = s.MaxParticipants;
+        if (s.ImageChanged)
+        {
+            t.ImageBytes    = s.ImageCleared ? null : s.ImageBytes;
+            t.ImageFileName = s.ImageCleared ? null : s.ImageFileName;
+        }
+        await db.SaveChangesAsync();
+
+        try
+        {
+            await s.Dm.SendMessageAsync(embed: Form("✅ Template saved",
+                $"Updated **{t.Name}**. Events made from it going forward will use the new details — events already created are unchanged."));
+        }
+        catch { }
+    }
+
     // ─── Permission gates (mirror EventCommandHandler.HasEventPermission) ─────
 
     private bool HasUsePermission(SocketGuildUser user)   => HasRankAtLeast(user, _config.EventCommandMinRank);
@@ -972,6 +1443,14 @@ public sealed class EventTemplateHandler
         return m == 0 ? $"{h}h" : $"{h}h {m}m";
     }
 
+    /// <summary>Apollo-style grey value box (a code fence renders monospace and boxed).</summary>
+    private static string FormBox(string value)
+    {
+        var v = string.IsNullOrWhiteSpace(value) ? "—" : value;
+        if (v.Length > 1000) v = v[..1000] + "…";
+        return $"```\n{v}\n```";
+    }
+
     private static Embed Form(string title, string? body = null)
     {
         var eb = new EmbedBuilder()
@@ -988,6 +1467,7 @@ public sealed class EventTemplateHandler
         string.IsNullOrEmpty(s) ? s : (s.Length <= max ? s : s[..(max - 1)] + "…");
 
     private static bool IsExpired(SaveSession s) => DateTime.UtcNow - s.LastActivityAt > IdleTimeout;
+    private static bool IsExpired(EditSession s) => DateTime.UtcNow - s.LastActivityAt > IdleTimeout;
 
     private async Task SafeSend(SaveSession s, Embed embed)
     {
@@ -1010,6 +1490,20 @@ public sealed class EventTemplateHandler
                             "I didn't hear back, so I've cancelled this setup and **nothing was saved**. Run `/event template save` when you're ready."));
                     }
                     catch (Exception ex) { _logger.LogDebug(ex, "Failed to send template timeout DM to {User}", kv.Key); }
+                }
+            }
+
+            foreach (var kv in _editSessions)
+            {
+                if (!IsExpired(kv.Value)) continue;
+                if (_editSessions.TryRemove(kv.Key, out var s))
+                {
+                    try
+                    {
+                        await s.Dm.SendMessageAsync(embed: Form("⌛ Template edit timed out",
+                            "I didn't hear back, so I've cancelled this edit and **nothing was changed**. Run `/event template edit` when you're ready."));
+                    }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to send template edit timeout DM to {User}", kv.Key); }
                 }
             }
         }
