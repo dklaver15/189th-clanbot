@@ -134,6 +134,59 @@ public sealed class EventManagementHandler
         client.ButtonExecuted     += OnButtonAsync;
         client.MessageReceived    += OnEditDmAsync;
         client.UserLeft           += OnUserLeftAsync;
+        client.GuildMemberUpdated += OnGuildMemberUpdatedAsync;
+    }
+
+    /// <summary>
+    /// When a member's display name (nickname / global name) changes, re-render any
+    /// upcoming posted events where they appear — in a roster or as the host — so the
+    /// snapshotted names stay current. Names are resolved at render time (we render
+    /// profile links, not live mentions), so without this a rename wouldn't show
+    /// until the post was rebuilt for some other reason. Filtered to actual
+    /// display-name changes (not the far more frequent role/avatar updates) and to
+    /// the events that actually show the member, to keep it cheap.
+    /// </summary>
+    private async Task OnGuildMemberUpdatedAsync(Cacheable<SocketGuildUser, ulong> before, SocketGuildUser after)
+    {
+        // Only act on a real display-name change. If "before" isn't cached we can't
+        // tell, so skip (AlwaysDownloadUsers keeps it warm, so genuine renames are
+        // caught; a rare miss self-heals on the next render).
+        if (before.Value is not { } prev || prev.DisplayName == after.DisplayName) return;
+
+        try
+        {
+            using var scope = _services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+            var now = DateTime.UtcNow;
+            var rsvpEventIds = await db.EventRsvps
+                .Where(r => r.UserId == after.Id)
+                .Select(r => r.ClanEventId)
+                .ToListAsync();
+
+            var events = await db.ClanEvents
+                .Where(e => e.GuildId == after.Guild.Id
+                         && e.Status == ClanEventStatus.Scheduled
+                         && e.EndUtc > now
+                         && e.MessageId != 0   // only posted occurrences have a message to update
+                         && (rsvpEventIds.Contains(e.Id)
+                             || e.HostId == after.Id
+                             || (e.HostId == null && e.OrganizerId == after.Id)))
+                .ToListAsync();
+
+            if (events.Count == 0) return;
+
+            foreach (var ev in events)
+                await UpdatePostAsync(db, ev);
+
+            _logger.LogInformation(
+                "Re-rendered {Count} event(s) after {User} changed display name '{Old}' → '{New}'",
+                events.Count, after.Id, prev.DisplayName, after.DisplayName);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to refresh events after display-name change for {User}", after.Id);
+        }
     }
 
     /// <summary>
