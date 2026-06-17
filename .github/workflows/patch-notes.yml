@@ -1,16 +1,26 @@
 name: Patch Notes
 
-# Summarize the commits in each push to main into one plain-language paragraph
-# (via the Anthropic API) and post it as "patch notes" to a Discord channel
-# through a webhook. Runs independently of deploy.yml — patch notes never gate
-# a deploy, and a failed deploy never suppresses patch notes.
+# Summarize the commits in a release into one plain-language paragraph (via the
+# Anthropic API) and post it as "patch notes" to a Discord channel through a
+# webhook.
+#
+# ── Timing: posts only AFTER a SUCCESSFUL deploy ──
+# This runs via workflow_run when "Deploy to Droplet" (deploy.yml) completes,
+# and only when that deploy succeeded. The droplet takes ~8 minutes to rebuild
+# and restart, so triggering on push would announce features to members before
+# they're actually live. Gating on the deploy's success means notes go out only
+# once the new code is running — and a FAILED deploy posts nothing, so members
+# are never told about features that didn't ship. Those commits aren't lost:
+# the next successful deploy's notes cover everything since the last one that
+# actually went live (see the range resolution step).
 #
 # Can also be triggered manually (Actions tab → Patch Notes → Run workflow) to
-# summarize an arbitrary commit range against the CURRENT workflow — handy for
-# back-filling a range that was missed, or testing without pushing.
+# summarize an arbitrary commit range — handy for back-filling a missed range
+# or testing without deploying.
 on:
-  push:
-    branches: [main]
+  workflow_run:
+    workflows: ["Deploy to Droplet"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       from:
@@ -22,37 +32,82 @@ on:
         required: false
         default: ""
 
-# Serialize runs so quick back-to-back pushes post their notes in order rather
-# than racing. cancel-in-progress is false, so an in-progress run is never
-# killed — a newer push queues and waits for it to finish.
-# Caveat: GitHub keeps only ONE run pending per group, so if 3+ pushes land
+# Serialize runs so back-to-back deploys post their notes in order rather than
+# racing. cancel-in-progress is false, so an in-progress run is never killed —
+# a newer run queues and waits for it to finish.
+# Caveat: GitHub keeps only ONE run pending per group, so if 3+ deploys finish
 # within a single run's lifetime, only the newest queued one survives and the
-# middle push's notes are skipped. Fine for the occasional double-push.
+# middle deploy's notes are skipped. Fine for the occasional double-deploy.
 concurrency:
   group: patch-notes-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
   contents: read
+  actions: read   # list Deploy workflow runs to find the previous live commit
 
 jobs:
   patch-notes:
     runs-on: ubuntu-latest
+    # Manual runs always proceed; automatic runs only after a deploy SUCCEEDED.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     steps:
       - name: Check out full history
         uses: actions/checkout@v4
         with:
+          # Check out the exact commit that was deployed (workflow_run runs in
+          # the context of the default branch otherwise). Falls back to the
+          # dispatch-selected ref for manual runs.
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
           # Need the BEFORE..AFTER range to exist locally for git log.
           fetch-depth: 0
+
+      - name: Resolve commit range
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          API: ${{ github.api_url }}
+          REPO: ${{ github.repository }}
+          # workflow_run context (empty on manual runs)
+          WF_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          WF_ID: ${{ github.event.workflow_run.workflow_id }}
+          WF_RUN_ID: ${{ github.event.workflow_run.id }}
+          # manual dispatch inputs (empty on automatic runs)
+          IN_FROM: ${{ github.event.inputs.from }}
+          IN_TO: ${{ github.event.inputs.to }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # Manual: range comes straight from the inputs (either may be blank).
+            BEFORE="$IN_FROM"
+            AFTER="$IN_TO"
+          else
+            # Automatic: head is the commit this deploy shipped. The base is the
+            # head of the PREVIOUS successful Deploy run — i.e. what was live
+            # before. This is robust to failed deploys: their commits stay
+            # un-announced until they ride out on the next successful deploy.
+            AFTER="$WF_HEAD_SHA"
+            RUNS="$(curl -sS \
+              -H "authorization: Bearer $GH_TOKEN" \
+              -H "accept: application/vnd.github+json" \
+              "${API}/repos/${REPO}/actions/workflows/${WF_ID}/runs?branch=main&status=success&per_page=20")"
+            BEFORE="$(printf '%s' "$RUNS" | jq -r --arg cur "$WF_RUN_ID" \
+              '[.workflow_runs[] | select((.id|tostring) != $cur)][0].head_sha // ""')"
+          fi
+
+          echo "Resolved range: BEFORE='${BEFORE}' AFTER='${AFTER}'"
+          {
+            echo "BEFORE=${BEFORE}"
+            echo "AFTER=${AFTER}"
+          } >> "$GITHUB_ENV"
 
       - name: Summarize commits and post patch notes
         env:
           EVENT_NAME: ${{ github.event_name }}
-          # Push: before/after/compare come from the event.
-          # Manual (workflow_dispatch): from/to come from the inputs.
-          BEFORE: ${{ github.event.inputs.from || github.event.before }}
-          AFTER: ${{ github.event.inputs.to || github.event.after }}
-          COMPARE: ${{ github.event.compare }}
+          # BEFORE / AFTER are resolved by the previous step (via $GITHUB_ENV).
+          # COMPARE is built from them below (workflow_run has no compare URL).
+          COMPARE: ""
           SERVER_URL: ${{ github.server_url }}
           REPO: ${{ github.repository }}
           # ANTHROPIC_API_KEY already exists as a repo secret (used by deploy.yml).
@@ -73,11 +128,11 @@ jobs:
           fi
 
           # --- Opt-out: [skip patchnotes] in the head commit's SUBJECT line ---
-          # Push only — a manual run is an explicit request, so it never auto-skips.
-          # Only the subject (%s, first line) is checked — not the body — so a
-          # commit whose body merely mentions the token (e.g. the commit that
-          # documents this feature) doesn't accidentally opt itself out.
-          if [ "$EVENT_NAME" = "push" ]; then
+          # Automatic runs only — a manual run is an explicit request, so it
+          # never auto-skips. Only the subject (%s, first line) is checked — not
+          # the body — so a commit whose body merely mentions the token (e.g. the
+          # commit that documents this feature) doesn't accidentally opt itself out.
+          if [ "$EVENT_NAME" != "workflow_dispatch" ]; then
             HEAD_SUBJECT="$(git log -1 --pretty=%s "$AFTER")"
             shopt -s nocasematch
             if [[ "$HEAD_SUBJECT" == *"[skip patchnotes]"* ]]; then
