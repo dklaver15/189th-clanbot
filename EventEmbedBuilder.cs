@@ -78,18 +78,21 @@ public static class EventEmbedBuilder
         if (!string.IsNullOrWhiteSpace(ev.Description))
             eb.WithDescription(ev.Description);
 
-        // Full-width blank line between the Ends/Organizer row and the RSVP
-        // rosters: adds visual separation, forces the three rosters onto a fresh
-        // row as clean side-by-side columns, and (via WidthSpacer) widens the
-        // embed toward Discord's max on desktop.
+        // Full-width blank line separating the Host row from the RSVP rosters, and
+        // (via WidthSpacer) widening the embed toward Discord's max on desktop.
         eb.AddField("\u200b", WidthSpacer, inline: false);
 
+        // Rosters are full-width, NOT inline columns. The 3-column layout only
+        // applied on desktop and forced long rank-nicknames to wrap mid-word, while
+        // mobile already stacked them (so any truncation cut names that had room).
+        // Stacking everywhere gives every name the full line on both desktop and
+        // mobile \u2014 no wrapping, no truncation.
         var goingLabel = ev.MaxParticipants is int cap
             ? $"{GoingEmote} Going ({going.Count}/{cap})"
             : $"{GoingEmote} Going ({going.Count})";
-        eb.AddField(goingLabel,                       Names(going,   resolveName), inline: true);
-        eb.AddField($"{MaybeEmote} Maybe ({maybe.Count})",        Names(maybe,   resolveName), inline: true);
-        eb.AddField($"{DeclineEmote} Declined ({decline.Count})", Names(decline, resolveName), inline: true);
+        eb.AddField(goingLabel,                       Names(going,   resolveName), inline: false);
+        eb.AddField($"{MaybeEmote} Maybe ({maybe.Count})",        Names(maybe,   resolveName), inline: false);
+        eb.AddField($"{DeclineEmote} Declined ({decline.Count})", Names(decline, resolveName), inline: false);
 
         // Waitlist sits on its own full-width row below the trio, in signup
         // order. Shown only when someone's actually waitlisted, so uncapped
@@ -151,22 +154,16 @@ public static class EventEmbedBuilder
         return cb.Build();
     }
 
-    /// <summary>Roster names are capped to this many characters so they don't wrap
-    /// mid-word in the narrow 3-column inline layout. Tune if names still wrap (lower)
-    /// or get cut too aggressively (raise). The Host field is NOT capped — it has the
-    /// whole row.</summary>
-    private const int MaxRosterNameLen = 16;
-
     private static string Names(IReadOnlyCollection<EventRsvp> rsvps, Func<ulong, string?>? resolveName)
     {
         if (rsvps.Count == 0) return "—";
 
         // Apollo-style: each name on its own line inside a blockquote (the "> "
         // prefix draws the vertical bar). Consecutive quoted lines merge into one
-        // continuous quote. Names are capped (MaxRosterNameLen) so they don't wrap in
-        // the narrow columns; the list itself is also cut at a line boundary to stay
-        // under the 1024-char embed-field cap.
-        var labels = rsvps.Select(r => Label(r.UserId, resolveName, MaxRosterNameLen)).ToList();
+        // continuous quote. Full names — no per-name cap, since the fields are now
+        // full-width and nothing wraps; the list is still cut at a line boundary to
+        // stay under the 1024-char embed-field cap.
+        var labels = rsvps.Select(r => Label(r.UserId, resolveName)).ToList();
         var lines = new List<string>();
         var len = 0;
         var shown = 0;
