@@ -192,17 +192,28 @@ public static class EventEmbedBuilder
         var name = resolveName?.Invoke(userId);
         if (string.IsNullOrWhiteSpace(name)) return $"<@{userId}>";
 
-        // The name is the masked-link text. We do NOT backslash-escape — Discord
-        // renders escapes literally inside link text (the backslash shows). But a
-        // raw ']' in the name would close the link text early, which a hostile
-        // nickname like "x](https://evil.com)" could exploit to repoint the link at
-        // an arbitrary URL. So swap the square brackets for full-width look-alikes
-        // (［ ］): visually ~identical (clan tags like "[HQ]" still read right) but
-        // inert to the link parser, so the URL is always the intended profile link.
-        // Parens and underscores in link TEXT are harmless, so they pass through.
-        var safe = name.Replace('[', '［').Replace(']', '］');
-        return $"[{safe}](https://discord.com/users/{userId})";
+        // Plain, markdown-escaped text. Compact (so big rosters truncate far less
+        // than profile links would) and clean: in NORMAL text a backslash escape is
+        // consumed by Discord, so a clan tag like "[HQ]" shows as a real "[HQ]" with
+        // no visible slashes. Escaping the markdown chars — crucially '[' — also
+        // stops a hostile nickname like "x](https://evil.com)" from rendering as a
+        // masked link.
+        return EscapePlain(name);
     }
+
+    /// <summary>
+    /// Escapes a display name for plain-text rendering in an embed field: the inline
+    /// markdown characters, plus '[' so a name can't form a "[text](url)" masked
+    /// link. Backslash is escaped first so we never double-escape what we add.
+    /// </summary>
+    private static string EscapePlain(string s) => s
+        .Replace("\\", "\\\\")
+        .Replace("[", "\\[")
+        .Replace("*", "\\*")
+        .Replace("_", "\\_")
+        .Replace("~", "\\~")
+        .Replace("`", "\\`")
+        .Replace("|", "\\|");
 
     /// <summary>
     /// Builds a server-side display-name resolver for <see cref="BuildEmbed"/>:
