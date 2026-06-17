@@ -192,13 +192,16 @@ public static class EventEmbedBuilder
         var name = resolveName?.Invoke(userId);
         if (string.IsNullOrWhiteSpace(name)) return $"<@{userId}>";
 
-        // The name goes into the masked-link text verbatim — deliberately NOT
-        // backslash-escaped. Discord renders escapes LITERALLY inside link text
-        // (the backslashes show up, e.g. "GravelyGhost \[HQ\]"), and its markdown
-        // parser already handles the balanced brackets in clan tags like "[HQ]".
-        // A single underscore mid-name doesn't italicize without a matching pair,
-        // so names like "Cynister_Girl" render fine too.
-        return $"[{name}](https://discord.com/users/{userId})";
+        // The name is the masked-link text. We do NOT backslash-escape — Discord
+        // renders escapes literally inside link text (the backslash shows). But a
+        // raw ']' in the name would close the link text early, which a hostile
+        // nickname like "x](https://evil.com)" could exploit to repoint the link at
+        // an arbitrary URL. So swap the square brackets for full-width look-alikes
+        // (［ ］): visually ~identical (clan tags like "[HQ]" still read right) but
+        // inert to the link parser, so the URL is always the intended profile link.
+        // Parens and underscores in link TEXT are harmless, so they pass through.
+        var safe = name.Replace('[', '［').Replace(']', '］');
+        return $"[{safe}](https://discord.com/users/{userId})";
     }
 
     /// <summary>
