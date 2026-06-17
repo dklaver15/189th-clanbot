@@ -19,6 +19,7 @@ public class DiscordBotService : IHostedService
 {
     private readonly DiscordSocketClient _client;
     private readonly ActivityTrackingHandler _activityHandler;
+    private readonly AfkExemptionHandler _afkExemptionHandler;
     private readonly GamertagCommandHandler _gamertagHandler;
     private readonly GamertagWizard _gamertagWizard;
     private readonly GamertagSetupCommandHandler _gamertagSetupHandler;
@@ -86,6 +87,7 @@ public class DiscordBotService : IHostedService
     public DiscordBotService(
         DiscordSocketClient client,
         ActivityTrackingHandler activityHandler,
+        AfkExemptionHandler afkExemptionHandler,
         GamertagCommandHandler gamertagHandler,
         GamertagWizard gamertagWizard,
         GamertagSetupCommandHandler gamertagSetupHandler,
@@ -152,6 +154,7 @@ public class DiscordBotService : IHostedService
     {
         _client                      = client;
         _activityHandler             = activityHandler;
+        _afkExemptionHandler         = afkExemptionHandler;
         _gamertagHandler             = gamertagHandler;
         _gamertagWizard              = gamertagWizard;
         _gamertagSetupHandler        = gamertagSetupHandler;
@@ -223,6 +226,7 @@ public class DiscordBotService : IHostedService
         _client.Ready  += OnReadyAsync;
 
         _activityHandler.Register(_client);
+        _afkExemptionHandler.Register(_client);
         _gamertagHandler.Register(_client);
         _gamertagWizard.Register(_client);
         _gamertagSetupHandler.Register(_client);

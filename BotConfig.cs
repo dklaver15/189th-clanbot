@@ -29,6 +29,16 @@ public class BotConfig
     /// </summary>
     public string HqChannelName { get; set; } = "hq";
 
+    /// <summary>
+    /// Discord user IDs that should never be left in the guild's AFK channel.
+    /// When Discord's inactivity timeout moves one of these users into the AFK
+    /// channel, the bot immediately moves them back to the channel they were in.
+    /// Discord has no native per-user AFK exemption, so this emulates one.
+    /// Note: the timeout re-fires, so the user is pulled back roughly every
+    /// inactivity interval rather than being exempted invisibly.
+    /// </summary>
+    public List<ulong> AfkExemptUserIds { get; set; } = new();
+
     /// <summary>Rolling window in days for activity tracking.</summary>
     public int WindowDays { get; set; } = 28;
 

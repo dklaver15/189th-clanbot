@@ -70,6 +70,7 @@ try
 
     // ── Handlers (singleton so event registrations persist) ──────────
     builder.Services.AddSingleton<ActivityTrackingHandler>();
+    builder.Services.AddSingleton<AfkExemptionHandler>();
     builder.Services.AddSingleton<SlashCommandHandler>();
     builder.Services.AddSingleton<RankTrackingHandler>();
 
