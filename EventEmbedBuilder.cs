@@ -151,15 +151,22 @@ public static class EventEmbedBuilder
         return cb.Build();
     }
 
+    /// <summary>Roster names are capped to this many characters so they don't wrap
+    /// mid-word in the narrow 3-column inline layout. Tune if names still wrap (lower)
+    /// or get cut too aggressively (raise). The Host field is NOT capped — it has the
+    /// whole row.</summary>
+    private const int MaxRosterNameLen = 16;
+
     private static string Names(IReadOnlyCollection<EventRsvp> rsvps, Func<ulong, string?>? resolveName)
     {
         if (rsvps.Count == 0) return "—";
 
         // Apollo-style: each name on its own line inside a blockquote (the "> "
         // prefix draws the vertical bar). Consecutive quoted lines merge into one
-        // continuous quote. Truncate at a line boundary so we never cut a name in
-        // half, and stay under the 1024-char embed-field cap.
-        var labels = rsvps.Select(r => Label(r.UserId, resolveName)).ToList();
+        // continuous quote. Names are capped (MaxRosterNameLen) so they don't wrap in
+        // the narrow columns; the list itself is also cut at a line boundary to stay
+        // under the 1024-char embed-field cap.
+        var labels = rsvps.Select(r => Label(r.UserId, resolveName, MaxRosterNameLen)).ToList();
         var lines = new List<string>();
         var len = 0;
         var shown = 0;
@@ -178,19 +185,22 @@ public static class EventEmbedBuilder
     }
 
     /// <summary>
-    /// Renders one user for a roster/host field. Prefers a server-side-resolved
-    /// display name rendered as a clickable profile link
-    /// (<c>[name](https://discord.com/users/id)</c>) — this shows the correct name
-    /// on EVERY client, unlike a bare <c>&lt;@id&gt;</c> mention, which mobile only
-    /// resolves from its lazily-loaded member cache (so uncached members render as
-    /// a raw "&lt;@123…&gt;" on phones). Falls back to a mention only when the user
-    /// can't be resolved at all (e.g. they left the guild), which desktop still
-    /// renders. The link opens the member's profile; it is not a ping.
+    /// Renders one user for a roster/host field: a server-side-resolved display name
+    /// as plain, markdown-escaped text — correct on EVERY client, unlike a bare
+    /// <c>&lt;@id&gt;</c> mention which mobile only resolves from its lazily-loaded
+    /// member cache (uncached members render as a raw "&lt;@123…&gt;" on phones).
+    /// Falls back to a mention only when the user can't be resolved at all (e.g. they
+    /// left the guild), which desktop still renders. <paramref name="maxLen"/> &gt; 0
+    /// caps the name so it doesn't wrap in the narrow roster columns; 0 = no cap.
     /// </summary>
-    private static string Label(ulong userId, Func<ulong, string?>? resolveName)
+    private static string Label(ulong userId, Func<ulong, string?>? resolveName, int maxLen = 0)
     {
         var name = resolveName?.Invoke(userId);
         if (string.IsNullOrWhiteSpace(name)) return $"<@{userId}>";
+
+        // Cap the VISIBLE name before escaping (so the ellipsis count is right).
+        if (maxLen > 0 && name.Length > maxLen)
+            name = name[..(maxLen - 1)].TrimEnd() + "…";
 
         // Plain, markdown-escaped text. Compact (so big rosters truncate far less
         // than profile links would) and clean: in NORMAL text a backslash escape is
