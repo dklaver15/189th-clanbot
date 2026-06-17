@@ -1,5 +1,6 @@
 using ClanGuardBot.Models;
 using Discord;
+using Discord.WebSocket;
 
 namespace ClanGuardBot.Services;
 
@@ -56,7 +57,11 @@ public static class EventEmbedBuilder
     // appears (lower it) or the embed looks narrow with no image (raise it).
     private static readonly string WidthSpacer = new('\u2800', 64);
 
-    public static Embed BuildEmbed(ClanEvent ev, IReadOnlyCollection<EventRsvp> rsvps, string? imageFileName = null)
+    public static Embed BuildEmbed(
+        ClanEvent ev,
+        IReadOnlyCollection<EventRsvp> rsvps,
+        string? imageFileName = null,
+        Func<ulong, string?>? resolveName = null)
     {
         var going   = rsvps.Where(r => r.Status == EventRsvpStatus.Going).OrderBy(r => r.UpdatedAt).ToList();
         var maybe   = rsvps.Where(r => r.Status == EventRsvpStatus.Maybe).ToList();
@@ -68,7 +73,7 @@ public static class EventEmbedBuilder
             .WithColor(ev.Status == ClanEventStatus.Cancelled ? Color.DarkGrey : Blurple)
             .AddField("Time",
                 $"{EventTimeParser.Stamp(ev.StartUtc, 'F')} - {EventTimeParser.Stamp(ev.EndUtc, 't')}\n🕐 {EventTimeParser.Stamp(ev.StartUtc, 'R')}")
-            .AddField("Host", $"<@{ev.HostId ?? ev.OrganizerId}>", inline: true);
+            .AddField("Host", Label(ev.HostId ?? ev.OrganizerId, resolveName), inline: true);
 
         if (!string.IsNullOrWhiteSpace(ev.Description))
             eb.WithDescription(ev.Description);
@@ -82,15 +87,15 @@ public static class EventEmbedBuilder
         var goingLabel = ev.MaxParticipants is int cap
             ? $"{GoingEmote} Going ({going.Count}/{cap})"
             : $"{GoingEmote} Going ({going.Count})";
-        eb.AddField(goingLabel,                       Names(going),   inline: true);
-        eb.AddField($"{MaybeEmote} Maybe ({maybe.Count})",        Names(maybe),   inline: true);
-        eb.AddField($"{DeclineEmote} Declined ({decline.Count})", Names(decline), inline: true);
+        eb.AddField(goingLabel,                       Names(going,   resolveName), inline: true);
+        eb.AddField($"{MaybeEmote} Maybe ({maybe.Count})",        Names(maybe,   resolveName), inline: true);
+        eb.AddField($"{DeclineEmote} Declined ({decline.Count})", Names(decline, resolveName), inline: true);
 
         // Waitlist sits on its own full-width row below the trio, in signup
         // order. Shown only when someone's actually waitlisted, so uncapped
         // events stay uncluttered.
         if (waitlist.Count > 0)
-            eb.AddField($"🕓 Waitlist ({waitlist.Count})", Names(waitlist), inline: false);
+            eb.AddField($"🕓 Waitlist ({waitlist.Count})", Names(waitlist, resolveName), inline: false);
 
         // Footer: "Created by <name>" (the creator — officers often create on
         // someone else's behalf), plus a recurring/cancelled note. A footer is
@@ -146,29 +151,74 @@ public static class EventEmbedBuilder
         return cb.Build();
     }
 
-    private static string Names(IReadOnlyCollection<EventRsvp> rsvps)
+    private static string Names(IReadOnlyCollection<EventRsvp> rsvps, Func<ulong, string?>? resolveName)
     {
         if (rsvps.Count == 0) return "—";
 
-        // Apollo-style: each mention on its own line inside a blockquote (the
-        // "> " prefix draws the vertical bar). Consecutive quoted lines merge
-        // into one continuous quote. Truncate at a line boundary so we never cut
-        // a mention in half, and stay under the 1024-char embed-field cap.
-        var mentions = rsvps.Select(r => $"<@{r.UserId}>").ToList();
+        // Apollo-style: each name on its own line inside a blockquote (the "> "
+        // prefix draws the vertical bar). Consecutive quoted lines merge into one
+        // continuous quote. Truncate at a line boundary so we never cut a name in
+        // half, and stay under the 1024-char embed-field cap.
+        var labels = rsvps.Select(r => Label(r.UserId, resolveName)).ToList();
         var lines = new List<string>();
         var len = 0;
         var shown = 0;
-        foreach (var m in mentions)
+        foreach (var label in labels)
         {
-            var add = m.Length + 3; // "> " prefix + newline
+            var add = label.Length + 3; // "> " prefix + newline
             if (len + add > 980) break;
-            lines.Add($"> {m}");
+            lines.Add($"> {label}");
             len += add;
             shown++;
         }
-        if (shown < mentions.Count)
-            lines.Add($"> …and {mentions.Count - shown} more");
+        if (shown < labels.Count)
+            lines.Add($"> …and {labels.Count - shown} more");
 
         return string.Join("\n", lines);
+    }
+
+    /// <summary>
+    /// Renders one user for a roster/host field. Prefers a server-side-resolved
+    /// display name rendered as a clickable profile link
+    /// (<c>[name](https://discord.com/users/id)</c>) — this shows the correct name
+    /// on EVERY client, unlike a bare <c>&lt;@id&gt;</c> mention, which mobile only
+    /// resolves from its lazily-loaded member cache (so uncached members render as
+    /// a raw "&lt;@123…&gt;" on phones). Falls back to a mention only when the user
+    /// can't be resolved at all (e.g. they left the guild), which desktop still
+    /// renders. The link opens the member's profile; it is not a ping.
+    /// </summary>
+    private static string Label(ulong userId, Func<ulong, string?>? resolveName)
+    {
+        var name = resolveName?.Invoke(userId);
+        if (string.IsNullOrWhiteSpace(name)) return $"<@{userId}>";
+        return $"[{EscapeLinkText(name)}](https://discord.com/users/{userId})";
+    }
+
+    /// <summary>
+    /// Escapes a display name for use as masked-link text: brackets (which would
+    /// otherwise close the link text early — clan tags like "[HQ]" are common) and
+    /// the markdown characters that would format inside link text.
+    /// </summary>
+    private static string EscapeLinkText(string s) => s
+        .Replace("\\", "\\\\")
+        .Replace("[", "\\[").Replace("]", "\\]")
+        .Replace("*", "\\*").Replace("_", "\\_")
+        .Replace("~", "\\~").Replace("`", "\\`");
+
+    /// <summary>
+    /// Builds a server-side display-name resolver for <see cref="BuildEmbed"/>:
+    /// guild nickname first, then global name / username, else null (caller falls
+    /// back to a mention). Pass this from any render site that has the client.
+    /// </summary>
+    public static Func<ulong, string?> GuildNameResolver(DiscordSocketClient client, ulong guildId)
+    {
+        var guild = client.GetGuild(guildId);
+        return id =>
+        {
+            var gu = guild?.GetUser(id);
+            if (gu is not null) return gu.DisplayName;
+            var u = client.GetUser(id);
+            return u?.GlobalName ?? u?.Username;
+        };
     }
 }

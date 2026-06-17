@@ -159,7 +159,8 @@ public sealed class ClanEventReconciliationService : BackgroundService
     {
         var rsvps = await db.EventRsvps.Where(r => r.ClanEventId == ev.Id).ToListAsync(ct);
         var (imgBytes, imgName) = await EventImage.ResolveAsync(db, ev);
-        var embed = EventEmbedBuilder.BuildEmbed(ev, rsvps, imgName);
+        var embed = EventEmbedBuilder.BuildEmbed(ev, rsvps, imgName,
+            EventEmbedBuilder.GuildNameResolver(_client, ev.GuildId));
 
         IUserMessage posted;
         if (imgBytes is { Length: > 0 } && !string.IsNullOrWhiteSpace(imgName))

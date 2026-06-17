@@ -94,7 +94,8 @@ public sealed class EventChannelSorter
             {
                 var rsvps = rsvpsByEvent.TryGetValue(ev.Id, out var list) ? list : Array.Empty<EventRsvp>();
                 var (imgBytes, imgName) = await EventImage.ResolveAsync(db, ev);
-                var embed = EventEmbedBuilder.BuildEmbed(ev, rsvps, imgName);
+                var embed = EventEmbedBuilder.BuildEmbed(ev, rsvps, imgName,
+                    EventEmbedBuilder.GuildNameResolver(_client, ev.GuildId));
 
                 // Sort re-posts every event at once, so fire them as silent
                 // messages — they appear normally but raise no push/desktop/unread

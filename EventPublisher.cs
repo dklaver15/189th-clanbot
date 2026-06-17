@@ -255,7 +255,8 @@ public sealed class EventPublisher : IEventPublisher
                 StartUtc = startUtc, EndUtc = endUtc, Status = ClanEventStatus.Scheduled,
                 MaxParticipants = maxParticipants,
             };
-            var previewEmbed = EventEmbedBuilder.BuildEmbed(preview, Array.Empty<EventRsvp>(), imageFileName);
+            var previewEmbed = EventEmbedBuilder.BuildEmbed(preview, Array.Empty<EventRsvp>(), imageFileName,
+                EventEmbedBuilder.GuildNameResolver(_client, guildId));
             if (attachImageBytes is { Length: > 0 } && !string.IsNullOrWhiteSpace(imageFileName))
             {
                 using var fa = new FileAttachment(new MemoryStream(attachImageBytes), imageFileName);
@@ -464,7 +465,8 @@ public sealed class EventPublisher : IEventPublisher
     {
         var rsvps = await db.EventRsvps.Where(r => r.ClanEventId == ev.Id).ToListAsync();
         var (imgBytes, imgName) = await EventImage.ResolveAsync(db, ev);
-        var embed = EventEmbedBuilder.BuildEmbed(ev, rsvps, imgName);
+        var embed = EventEmbedBuilder.BuildEmbed(ev, rsvps, imgName,
+            EventEmbedBuilder.GuildNameResolver(_client, ev.GuildId));
 
         IUserMessage posted;
         if (imgBytes is { Length: > 0 } && !string.IsNullOrWhiteSpace(imgName))

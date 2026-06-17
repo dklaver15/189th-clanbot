@@ -104,7 +104,8 @@ public sealed class EventRsvpInteractionHandler
                 var current = await db.EventRsvps.Where(r => r.ClanEventId == clanEventId).ToListAsync();
                 await component.UpdateAsync(m =>
                 {
-                    m.Embed      = EventEmbedBuilder.BuildEmbed(ev, current, ev.ImageFileName);
+                    m.Embed      = EventEmbedBuilder.BuildEmbed(ev, current, ev.ImageFileName,
+                        EventEmbedBuilder.GuildNameResolver(_client, ev.GuildId));
                     m.Components = EventEmbedBuilder.BuildComponents(ev.Id, _config.EventRsvpEnabled, locked: true);
                 });
                 return;
@@ -145,7 +146,8 @@ public sealed class EventRsvpInteractionHandler
 
             await component.UpdateAsync(m =>
             {
-                m.Embed      = EventEmbedBuilder.BuildEmbed(ev, rsvps, ev.ImageFileName);
+                m.Embed      = EventEmbedBuilder.BuildEmbed(ev, rsvps, ev.ImageFileName,
+                    EventEmbedBuilder.GuildNameResolver(_client, ev.GuildId));
                 m.Components = EventEmbedBuilder.BuildComponents(ev.Id, _config.EventRsvpEnabled, locked: false);
             });
 
