@@ -479,7 +479,7 @@ public sealed class EventManagementHandler
         // One-off.
         if (isCancel)
         {
-            await DoCancelAsync(clanEventId, wholeSeries: false);
+            await DoCancelAsync(clanEventId, wholeSeries: false, component.User.Id);
             await component.UpdateAsync(m => { m.Content = $"✅ Cancelled **{ev.Title}**."; m.Components = Empty(); });
         }
         else
@@ -694,7 +694,7 @@ public sealed class EventManagementHandler
             string msg;
             try
             {
-                var count = await DoCancelAsync(clanEventId, whole);
+                var count = await DoCancelAsync(clanEventId, whole, component.User.Id);
 
                 if (whole && count == 0)
                 {
@@ -1942,7 +1942,7 @@ public sealed class EventManagementHandler
             .WithTitle("❌ Event Cancelled")
             .WithDescription(
                 $"The **{title}** event you RSVP'd to — {EventTimeParser.Stamp(oldStartUtc, 'F')} — has been " +
-                $"**cancelled** as part of a schedule change.\n\nWatch the events channel for the next one.")
+                $"**cancelled**.\n\nThanks for signing up; keep an eye on the events channel for what's next.")
             .Build();
 
         var sent = await DmAllAsync(guildId, userIds, embed);
@@ -2402,7 +2402,7 @@ public sealed class EventManagementHandler
     // ─── Cancel core ───────────────────────────────────────────────────────
 
     /// <summary>Cancels one occurrence or a whole series. Returns the number of occurrences cancelled.</summary>
-    private async Task<int> DoCancelAsync(int clanEventId, bool wholeSeries)
+    private async Task<int> DoCancelAsync(int clanEventId, bool wholeSeries, ulong? cancelledBy = null)
     {
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
@@ -2427,6 +2427,20 @@ public sealed class EventManagementHandler
             targets = new List<ClanEvent> { ev };
         }
 
+        // Capture who to notify BEFORE cancelling. Only posted occurrences carry
+        // RSVPs; the person doing the cancelling is skipped.
+        var notify = new List<(ClanEvent Ev, List<ulong> UserIds)>();
+        foreach (var t in targets)
+        {
+            if (t.MessageId == 0) continue;
+            var uids = await db.EventRsvps
+                .Where(r => r.ClanEventId == t.Id && (cancelledBy == null || r.UserId != cancelledBy))
+                .Select(r => r.UserId)
+                .Distinct()
+                .ToListAsync();
+            if (uids.Count > 0) notify.Add((t, uids));
+        }
+
         foreach (var t in targets)
             await CancelOccurrenceAsync(db, t);
 
@@ -2434,6 +2448,9 @@ public sealed class EventManagementHandler
 
         foreach (var t in targets)
             await UpdatePostAsync(db, t);
+
+        foreach (var (t, uids) in notify)
+            await NotifyOccurrenceCancelledAsync(t.Title, t.GuildId, t.StartUtc, uids);
 
         return targets.Count;
     }
