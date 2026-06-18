@@ -1694,6 +1694,12 @@ public sealed class EventManagementHandler
         var promoted = new List<(ClanEvent Ev, ulong UserId)>();
         string summary;
 
+        // Staged reschedule notification (sent after the DB scope closes, like the
+        // waitlist-promotion DMs). Set only when a single event's start time moved.
+        ClanEvent? rescheduledEv = null;
+        DateTime rescheduleOldStart = default;
+        List<ulong> rescheduleNotifyIds = new();
+
         using (var scope = _services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
@@ -1746,7 +1752,8 @@ public sealed class EventManagementHandler
                 var ev = await db.ClanEvents.FirstOrDefaultAsync(x => x.Id == s.ClanEventId);
                 if (ev is null || ev.Status != ClanEventStatus.Scheduled) { await s.Dm.SendMessageAsync(embed: EditForm("Gone", "That event is no longer available.")); return; }
 
-                var startMoved = ev.StartUtc != s.StartUtc;
+                var startMoved  = ev.StartUtc != s.StartUtc;
+                var oldStartUtc = ev.StartUtc;
                 ev.Title           = s.Title;
                 ev.StartUtc        = s.StartUtc;
                 ev.EndUtc          = s.EndUtc;
@@ -1776,6 +1783,12 @@ public sealed class EventManagementHandler
                 {
                     try { _sorter.RequestSortIfNeeded(ev.GuildId); }
                     catch (Exception ex) { _logger.LogDebug(ex, "Auto-sort request after time edit failed"); }
+
+                    // Stage a "this moved" DM to everyone who responded (sent below,
+                    // outside the DB scope). The editor doesn't need telling.
+                    rescheduledEv       = ev;
+                    rescheduleOldStart  = oldStartUtc;
+                    rescheduleNotifyIds = rsvps.Select(r => r.UserId).Where(id => id != s.UserId).Distinct().ToList();
                 }
 
                 summary = $"**{s.Title}**";
@@ -1784,6 +1797,9 @@ public sealed class EventManagementHandler
 
         foreach (var (ev, uid) in promoted)
             await EventWaitlist.NotifyPromotedAsync(_client, ev, uid);
+
+        if (rescheduledEv is not null)
+            await NotifyRescheduleAsync(rescheduledEv, rescheduleOldStart, rescheduleNotifyIds);
 
         string? scheduleNote = null;
         if (s.ScheduleChanged)
@@ -1798,6 +1814,51 @@ public sealed class EventManagementHandler
 
         var note = string.IsNullOrWhiteSpace(scheduleNote) ? "" : "\n\n" + scheduleNote;
         await s.Dm.SendMessageAsync(embed: EditForm("✅ Saved", $"Updated {summary}.{note}"));
+    }
+
+    /// <summary>
+    /// Best-effort DM to everyone who RSVP'd, telling them an event's start time
+    /// moved (old → new). Gated by EventRescheduleNotifyEnabled. Swallows per-user
+    /// failures (closed DMs) — the updated post + board are the source of truth.
+    /// </summary>
+    private async Task NotifyRescheduleAsync(ClanEvent ev, DateTime oldStartUtc, IReadOnlyCollection<ulong> userIds)
+    {
+        if (!_config.EventRescheduleNotifyEnabled || userIds.Count == 0) return;
+
+        var jump  = $"https://discord.com/channels/{ev.GuildId}/{ev.ChannelId}/{ev.MessageId}";
+        var embed = new EmbedBuilder()
+            .WithColor(new Color(0xFAA61A))
+            .WithTitle("🔄 Event Rescheduled")
+            .WithDescription(
+                $"**{ev.Title}** has been moved to a new time.\n\n" +
+                $"🕒 **New:** {EventTimeParser.Stamp(ev.StartUtc, 'F')} ({EventTimeParser.Stamp(ev.StartUtc, 'R')})\n" +
+                $"Was: ~~{EventTimeParser.Stamp(oldStartUtc, 'F')}~~\n\n" +
+                $"Your RSVP carried over — open the event to update it if the new time changes things for you.\n" +
+                $"[Jump to the event]({jump})")
+            .Build();
+
+        var sent = 0;
+        foreach (var uid in userIds)
+        {
+            try
+            {
+                IUser? user = _client.GetGuild(ev.GuildId)?.GetUser(uid);
+                user ??= _client.GetUser(uid);
+                user ??= await _client.Rest.GetUserAsync(uid);
+                if (user is null) continue;
+
+                var dm = await user.CreateDMChannelAsync();
+                await dm.SendMessageAsync(embed: embed);
+                sent++;
+            }
+            catch
+            {
+                // best-effort — the member may have DMs closed
+            }
+        }
+
+        _logger.LogInformation(
+            "Reschedule DMs for event {Id} '{Title}': delivered {Sent}/{Total}", ev.Id, ev.Title, sent, userIds.Count);
     }
 
     // ─── Repeat-schedule application ────────────────────────────────────────

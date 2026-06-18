@@ -310,6 +310,12 @@ public class BotConfig
     /// </summary>
     public bool EventBoardEnabled { get; set; } = true;
 
+    /// <summary>
+    /// When true, editing an event's start time DMs everyone who RSVP'd to that
+    /// event to let them know it moved. Default true.
+    /// </summary>
+    public bool EventRescheduleNotifyEnabled { get; set; } = true;
+
     /// <summary>Default event length when the creator doesn't specify an end/duration.</summary>
     public double EventDefaultDurationHours { get; set; } = 2.0;
 
