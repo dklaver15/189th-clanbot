@@ -302,6 +302,14 @@ public class BotConfig
     /// <summary>Master switch for the cosmetic RSVP buttons on event posts.</summary>
     public bool EventRsvpEnabled { get; set; } = true;
 
+    /// <summary>
+    /// Master switch for the pinned "Upcoming Events" board maintained by
+    /// <see cref="Services.UpcomingEventsBoardService"/>. When false the service
+    /// stops creating/updating the board (an existing pinned board is left in
+    /// place, just no longer refreshed).
+    /// </summary>
+    public bool EventBoardEnabled { get; set; } = true;
+
     /// <summary>Default event length when the creator doesn't specify an end/duration.</summary>
     public double EventDefaultDurationHours { get; set; } = 2.0;
 

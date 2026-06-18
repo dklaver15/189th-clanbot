@@ -343,6 +343,13 @@ public sealed class EventManagementHandler
         }
 
         var count = await _sorter.SortAsync(command.GuildId.Value);
+
+        // The re-post changed every event's MessageId; refresh the pinned board so
+        // its jump links point at the new posts. Non-fatal — a board hiccup must
+        // never fail the sort the officer just ran.
+        try { await _services.GetRequiredService<UpcomingEventsBoardService>().RefreshAsync(); }
+        catch (Exception ex) { _logger.LogDebug(ex, "Board refresh after /event sort failed"); }
+
         await command.FollowupAsync(
             count <= 1 ? "Nothing to sort — there's at most one upcoming event." : $"✅ Re-posted {count} events in chronological order.",
             ephemeral: true);

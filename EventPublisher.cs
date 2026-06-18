@@ -46,11 +46,25 @@ public sealed class EventPublisher : IEventPublisher
         _logger   = logger;
     }
 
-    public Task PublishOneOffAsync(EventDraft d) =>
-        CreateOccurrenceAsync(d.GuildId, seriesId: null,
+    /// <summary>
+    /// Refresh the pinned "Upcoming Events" board after a publish. Resolved on
+    /// demand (it's a singleton) to avoid a constructor cycle; never throws into
+    /// the publish path.
+    /// </summary>
+    private async Task RefreshBoardSafeAsync()
+    {
+        try { await _services.GetRequiredService<UpcomingEventsBoardService>().RefreshAsync(); }
+        catch (Exception ex) { _logger.LogDebug(ex, "Upcoming-events board refresh after publish failed"); }
+    }
+
+    public async Task PublishOneOffAsync(EventDraft d)
+    {
+        await CreateOccurrenceAsync(d.GuildId, seriesId: null,
             d.Title, d.Description, d.OrganizerId, d.OrganizerName, d.StartUtc, d.EndUtc,
             attachImageBytes: d.ImageBytes, imageFileName: d.ImageFileName,
             maxParticipants: d.MaxParticipants, hostId: d.HostId);
+        await RefreshBoardSafeAsync();
+    }
 
     public async Task PublishSeriesAsync(EventDraft d)
     {
@@ -135,6 +149,8 @@ public sealed class EventPublisher : IEventPublisher
         _logger.LogInformation(
             "Created series {SeriesId} '{Title}' ({Freq}); materialized {Count} occurrence(s)",
             series.Id, series.Title, freq, occurrences.Count);
+
+        await RefreshBoardSafeAsync();
     }
 
     /// <summary>
@@ -201,6 +217,8 @@ public sealed class EventPublisher : IEventPublisher
         _logger.LogInformation(
             "Created custom-date series {SeriesId} '{Title}'; materialized {Count} occurrence(s)",
             series.Id, series.Title, starts.Count);
+
+        await RefreshBoardSafeAsync();
     }
 
     /// <summary>

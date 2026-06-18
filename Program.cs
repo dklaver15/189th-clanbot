@@ -425,6 +425,8 @@ try
     builder.Services.AddHostedService<EventRecurrenceScheduler>();
     builder.Services.AddHostedService<EventArchiveService>();
     builder.Services.AddHostedService<ClanEventReconciliationService>(); // self-heals lost #events posts
+    builder.Services.AddSingleton<UpcomingEventsBoardService>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<UpcomingEventsBoardService>()); // pinned upcoming-events board
 
     // /poll — the native + anonymous hybrid poll system. PollPublisher posts the
     // poll (native Discord poll or our custom anonymous embed); PollCommandHandler
