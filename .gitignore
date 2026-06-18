@@ -18,3 +18,7 @@ clanguard.db
 *.db-wal
 Archive.zip
 *.zip
+*.xlsx
+*.xlsx#
+*.pdf
+*.pptx
