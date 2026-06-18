@@ -57,6 +57,17 @@ public sealed class EventPublisher : IEventPublisher
         catch (Exception ex) { _logger.LogDebug(ex, "Upcoming-events board refresh after publish failed"); }
     }
 
+    /// <summary>
+    /// Request a debounced auto-sort after a new post (the channel only re-posts if
+    /// it's actually out of chronological order). Fire-and-forget; resolved on
+    /// demand to avoid a constructor cycle; never throws into the publish path.
+    /// </summary>
+    private void RequestAutoSort(ulong guildId)
+    {
+        try { _services.GetRequiredService<EventChannelSorter>().RequestSortIfNeeded(guildId); }
+        catch (Exception ex) { _logger.LogDebug(ex, "Auto-sort request after publish failed"); }
+    }
+
     public async Task PublishOneOffAsync(EventDraft d)
     {
         await CreateOccurrenceAsync(d.GuildId, seriesId: null,
@@ -64,6 +75,7 @@ public sealed class EventPublisher : IEventPublisher
             attachImageBytes: d.ImageBytes, imageFileName: d.ImageFileName,
             maxParticipants: d.MaxParticipants, hostId: d.HostId);
         await RefreshBoardSafeAsync();
+        RequestAutoSort(d.GuildId);
     }
 
     public async Task PublishSeriesAsync(EventDraft d)
@@ -516,6 +528,10 @@ public sealed class EventPublisher : IEventPublisher
         _logger.LogInformation(
             "Posted next occurrence of series {SeriesId}: ClanEvent {Id} '{Title}' (msg {Msg})",
             ev.SeriesId, ev.Id, ev.Title, posted.Id);
+
+        // A new occurrence just landed in #events — it may slot before existing
+        // posts, so request a debounced auto-sort (no-op if already in order).
+        RequestAutoSort(ev.GuildId);
     }
 
     private TimeZoneInfo ResolveZone(string? ianaId)

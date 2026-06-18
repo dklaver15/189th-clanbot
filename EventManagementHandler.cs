@@ -1769,6 +1769,15 @@ public sealed class EventManagementHandler
                 if (pending is not null) await RerenderImageAsync(db, ev, pending);
                 else                     await UpdatePostAsync(db, ev);
 
+                // A time edit updates the post in place (same message, same channel
+                // position), so a now-earlier/later event can be left out of order.
+                // Request a debounced auto-sort — a no-op if it's still in order.
+                if (startMoved)
+                {
+                    try { _sorter.RequestSortIfNeeded(ev.GuildId); }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Auto-sort request after time edit failed"); }
+                }
+
                 summary = $"**{s.Title}**";
             }
         }

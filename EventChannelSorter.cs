@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using ClanGuardBot.Data;
 using ClanGuardBot.Models;
 using Discord;
@@ -30,6 +31,11 @@ public sealed class EventChannelSorter
     private readonly EventChannelGate _gate;
     private readonly ILogger<EventChannelSorter> _logger;
 
+    // Per-guild debounce for auto-sort: a burst of new posts coalesces into a
+    // single "sort if needed" a few seconds after the last post settles.
+    private readonly ConcurrentDictionary<ulong, CancellationTokenSource> _pendingSorts = new();
+    private static readonly TimeSpan SortDebounce = TimeSpan.FromSeconds(6);
+
     public EventChannelSorter(
         IServiceProvider services,
         DiscordSocketClient client,
@@ -48,7 +54,7 @@ public sealed class EventChannelSorter
     /// Re-posts every scheduled event in the current post channel in
     /// chronological order. Returns the number of events re-posted.
     /// </summary>
-    public async Task<int> SortAsync(ulong guildId)
+    public async Task<int> SortAsync(ulong guildId, bool force = true)
     {
         var channelId = _config.GetEventPostChannelId();
         if (_client.GetChannel(channelId) is not IMessageChannel channel)
@@ -73,6 +79,15 @@ public sealed class EventChannelSorter
                 .ToListAsync();
 
             if (events.Count <= 1) return events.Count; // nothing to reorder
+
+            // Auto-sort (force == false) only reposts when the channel is genuinely
+            // out of chronological order. Most new events are the latest, so this
+            // skips the costly delete/re-post — and the extra search-ghosts it makes.
+            if (!force && IsAlreadyOrdered(events))
+            {
+                _logger.LogDebug("Auto-sort: #events already chronological; skipping repost");
+                return events.Count;
+            }
 
             var ids = events.Select(e => e.Id).ToList();
             var rsvpsByEvent = (await db.EventRsvps.Where(r => ids.Contains(r.ClanEventId)).ToListAsync())
@@ -131,5 +146,62 @@ public sealed class EventChannelSorter
             _logger.LogInformation("Sorted {Count} event post(s) in channel {Channel}", events.Count, channelId);
             return events.Count;
         }
+    }
+
+    /// <summary>
+    /// Fire-and-forget request to auto-sort the event channel, debounced per guild.
+    /// A burst of new posts coalesces into a single check a few seconds after the
+    /// last one; the check itself (<see cref="SortAsync"/> with force=false) skips
+    /// the re-post unless the channel is genuinely out of order. Safe to call from
+    /// any posting path.
+    /// </summary>
+    public void RequestSortIfNeeded(ulong guildId)
+    {
+        var cts = new CancellationTokenSource();
+        _pendingSorts.AddOrUpdate(guildId, cts, (_, prev) =>
+        {
+            try { prev.Cancel(); } catch { /* already being torn down */ }
+            return cts;
+        });
+        _ = RunDebouncedSortAsync(guildId, cts);
+    }
+
+    private async Task RunDebouncedSortAsync(ulong guildId, CancellationTokenSource cts)
+    {
+        try
+        {
+            try { await Task.Delay(SortDebounce, cts.Token); }
+            catch (OperationCanceledException) { return; } // a newer post superseded this one
+
+            await SortAsync(guildId, force: false);
+
+            // A re-post changes message IDs; keep the pinned board's jump links fresh.
+            try { await _services.GetRequiredService<UpcomingEventsBoardService>().RefreshAsync(); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Board refresh after auto-sort failed"); }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Auto-sort (debounced) failed for guild {Guild}", guildId);
+        }
+        finally
+        {
+            _pendingSorts.TryRemove(new KeyValuePair<ulong, CancellationTokenSource>(guildId, cts));
+            cts.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// True if the events (already loaded in start-time order) are also in ascending
+    /// message-ID order — i.e. their channel positions already match chronological
+    /// order, so no re-post is needed. Ties on start time are broken by message ID
+    /// so equal-time events never count as "out of order".
+    /// </summary>
+    private static bool IsAlreadyOrdered(List<ClanEvent> eventsByStart)
+    {
+        var desired = eventsByStart.OrderBy(e => e.StartUtc).ThenBy(e => e.MessageId).ToList();
+        for (var i = 1; i < desired.Count; i++)
+            if (desired[i].MessageId < desired[i - 1].MessageId)
+                return false;
+        return true;
     }
 }
