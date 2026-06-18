@@ -12,42 +12,50 @@ using Microsoft.Extensions.Options;
 namespace ClanGuardBot.Services;
 
 /// <summary>
-/// Maintains a single, pinned "Upcoming Events" board in the event post channel:
-/// one bot message, EDITED in place (never deleted, never moved), listing every
-/// upcoming event with its start time and a jump link to its RSVP post. It gives
-/// members one stable place to find events instead of scrolling/searching the
-/// cluttered channel.
+/// Maintains a single "Upcoming Events" board in the event post channel as a
+/// STICKY message — the bot keeps it as the newest message so it's the first
+/// thing members see when they open the channel. It lists every upcoming event
+/// with its start time and a jump link to that event's RSVP post.
 ///
-/// ── Why it survives /sort ──
-/// <see cref="EventChannelSorter"/> only deletes messages whose IDs live in the
-/// ClanEvents table; the board is not a ClanEvent, so a sort can never delete or
-/// reorder it. A sort DOES change every event's MessageId, so the jump links go
-/// stale — <see cref="EventManagementHandler"/> calls <see cref="RefreshAsync"/>
-/// right after a sort to rewrite them.
+/// ── Sticky, not pinned ──
+/// Discord can't hold a message at the visual top of a channel, and pinning only
+/// puts it in the pin list (and spams a "pinned a message" notice on every
+/// re-post). So the board rides the BOTTOM instead: whenever a newer message
+/// appears, it's re-posted underneath and the previous copy deleted. It is
+/// intentionally NOT pinned; a legacy pinned board is unpinned on sight. Re-posts
+/// are silent and debounced (a burst of chatter coalesces into one), and skipped
+/// entirely when the board is already newest — then it's only edited in place if
+/// its contents changed.
 ///
-/// ── Persistence-free (pin discovery) ──
-/// The board is found by scanning the channel's pins for a bot-authored message
-/// whose embed title is <see cref="BoardTitle"/> — no DB column or config to
-/// store a message id, nothing to migrate. If it was manually unpinned it's
-/// recovered from recent history (and re-pinned) rather than duplicated; if it
-/// was deleted, a fresh one is posted and pinned. A 60s self-heal poll keeps it
-/// current even for changes that don't call RefreshAsync directly
-/// (cancellations, auto-archive, series promotion).
+/// ── Triggers ──
+/// • a gateway MessageReceived in the channel (debounced ~3s) — covers member
+///   chatter, reminders, event posts, anything;
+/// • the event create / sort hooks, which call <see cref="RefreshAsync"/> directly;
+/// • a 60s self-heal poll as a safety net (e.g. if the board is deleted).
+///
+/// ── Survives /sort ──
+/// EventChannelSorter only deletes messages tracked in the ClanEvents table; the
+/// board isn't one, so a sort never touches it — it just re-sticks afterwards.
 /// </summary>
 public sealed class UpcomingEventsBoardService : BackgroundService
 {
     public const string BoardTitle = "📅 Upcoming Events";
     private const string BoardFooter = "Auto-updated • tap a title to open the event and RSVP";
     private const int MaxDescription = 3900; // headroom under Discord's 4096 embed-description cap
+    private const int BoardScanLimit = 50;   // recent messages scanned to locate the board
 
     private static readonly TimeSpan StartupGrace = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan StickDebounce = TimeSpan.FromSeconds(3);
 
     private readonly IServiceProvider _services;
     private readonly DiscordSocketClient _client;
     private readonly BotConfig _config;
     private readonly ILogger<UpcomingEventsBoardService> _logger;
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
+
+    private readonly object _stickGate = new();
+    private CancellationTokenSource? _pendingStick;
 
     public UpcomingEventsBoardService(
         IServiceProvider services,
@@ -66,8 +74,11 @@ public sealed class UpcomingEventsBoardService : BackgroundService
         try { await Task.Delay(StartupGrace, stoppingToken); }
         catch (OperationCanceledException) { return; }
 
+        // Re-stick promptly whenever something newer lands in the channel.
+        _client.MessageReceived += OnMessageReceivedAsync;
+
         _logger.LogInformation(
-            "UpcomingEventsBoardService started; self-heal poll every {Seconds}s (enabled={Enabled})",
+            "UpcomingEventsBoardService started; sticky board, self-heal poll every {Seconds}s (enabled={Enabled})",
             (int)PollInterval.TotalSeconds, _config.EventBoardEnabled);
 
         while (!stoppingToken.IsCancellationRequested)
@@ -78,15 +89,60 @@ public sealed class UpcomingEventsBoardService : BackgroundService
             try { await Task.Delay(PollInterval, stoppingToken); }
             catch (OperationCanceledException) { break; }
         }
+
+        _client.MessageReceived -= OnMessageReceivedAsync;
+    }
+
+    private Task OnMessageReceivedAsync(SocketMessage message)
+    {
+        if (!_config.EventBoardEnabled) return Task.CompletedTask;
+        if (message.Channel.Id != _config.GetEventPostChannelId()) return Task.CompletedTask;
+
+        // Ignore the board's own (re)posts so re-sticking never feeds itself a loop.
+        if (message.Author.Id == _client.CurrentUser?.Id
+            && message is IUserMessage um && IsBoardMessage(um))
+            return Task.CompletedTask;
+
+        DebounceRestick();
+        return Task.CompletedTask;
+    }
+
+    private void DebounceRestick()
+    {
+        CancellationTokenSource cts;
+        lock (_stickGate)
+        {
+            _pendingStick?.Cancel();
+            cts = _pendingStick = new CancellationTokenSource();
+        }
+        _ = RunDebouncedRestickAsync(cts);
+    }
+
+    private async Task RunDebouncedRestickAsync(CancellationTokenSource cts)
+    {
+        try
+        {
+            try { await Task.Delay(StickDebounce, cts.Token); }
+            catch (OperationCanceledException) { return; } // a newer message superseded this re-stick
+
+            await RefreshAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Board re-stick (debounced) failed");
+        }
+        finally
+        {
+            lock (_stickGate) { if (_pendingStick == cts) _pendingStick = null; }
+            cts.Dispose();
+        }
     }
 
     /// <summary>
-    /// Rebuilds the board from the DB and edits the pinned message in place
-    /// (creating + pinning it if missing). Safe to call from anywhere; serialized
-    /// so concurrent triggers (the poll plus a /sort or a create) can't race into
-    /// two boards. Never throws to its caller's critical path — callers should
-    /// still wrap in try/catch, but internal Discord hiccups are logged and
-    /// swallowed by the poll loop.
+    /// Ensures the board is the newest message in the channel and up to date. If
+    /// it's already newest, edits it in place only when the contents changed;
+    /// otherwise re-posts it at the bottom (silent, un-pinned) and deletes any
+    /// previous copies. Serialized so concurrent triggers can't double-post.
     /// </summary>
     public async Task RefreshAsync(CancellationToken ct = default)
     {
@@ -127,32 +183,43 @@ public sealed class UpcomingEventsBoardService : BackgroundService
                 .WithFooter(BoardFooter)
                 .Build();
 
-            var board = await FindBoardAsync(channel, ct);
+            // Locate the board (and any stray duplicates) in recent history, and
+            // find the newest message id of any kind so we know if it's on top.
+            var recent = (await channel.GetMessagesAsync(BoardScanLimit).FlattenAsync()).ToList();
+            var boards = recent.OfType<IUserMessage>().Where(IsBoardMessage).ToList();
+            var newestId = recent.Count > 0 ? recent.Max(m => m.Id) : 0UL;
+            var boardIsNewest = boards.Count == 1 && boards[0].Id == newestId;
 
-            // Missing → post a fresh board and pin it.
-            if (board is null)
+            if (boardIsNewest)
             {
-                var posted = await channel.SendMessageAsync(embed: embed, flags: MessageFlags.SuppressNotification);
-                try { await posted.PinAsync(); }
-                catch (Exception ex) { _logger.LogWarning(ex, "Board: posted board {Msg} but pinning failed", posted.Id); }
-                _logger.LogInformation("Board: created upcoming-events board {Msg} in channel {Channel}", posted.Id, channelId);
+                var board = boards[0];
+
+                // Converge to "no pin" if a legacy pinned board is still around.
+                if (board.IsPinned)
+                {
+                    try { await board.UnpinAsync(); }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Board: unpin failed for {Msg}", board.Id); }
+                }
+
+                var current = board.Embeds.FirstOrDefault();
+                if (current is not null && current.Title == BoardTitle && current.Description == description)
+                    return; // already newest and unchanged — nothing to do
+
+                await board.ModifyAsync(m => m.Embed = embed);
                 return;
             }
 
-            // Recover from a manual unpin so it stays in the pin list.
-            if (!board.IsPinned)
+            // Board is missing, buried under newer messages, or duplicated → post a
+            // fresh one at the bottom (silent, un-pinned) and remove older copies.
+            var posted = await channel.SendMessageAsync(embed: embed, flags: MessageFlags.SuppressNotification);
+            foreach (var old in boards)
             {
-                try { await board.PinAsync(); }
-                catch (Exception ex) { _logger.LogDebug(ex, "Board: re-pin failed for {Msg}", board.Id); }
+                try { await old.DeleteAsync(); }
+                catch (Exception ex) { _logger.LogDebug(ex, "Board: couldn't delete old board {Msg}", old.Id); }
             }
 
-            // Edit only when the content actually changed — avoids needless edits
-            // and rate-limit churn on every 60s poll.
-            var current = board.Embeds.FirstOrDefault();
-            if (current is not null && current.Title == BoardTitle && current.Description == description)
-                return;
-
-            await board.ModifyAsync(m => m.Embed = embed);
+            _logger.LogInformation(
+                "Board: (re)posted sticky upcoming-events board {Msg} in channel {Channel}", posted.Id, channelId);
         }
         finally
         {
@@ -160,21 +227,8 @@ public sealed class UpcomingEventsBoardService : BackgroundService
         }
     }
 
-    private async Task<IUserMessage?> FindBoardAsync(SocketTextChannel channel, CancellationToken ct)
-    {
-        // The board lives in the channel's pins (that's the whole point) — look there first.
-        var pins = await channel.GetPinnedMessagesAsync();
-        var board = pins.OfType<IUserMessage>().FirstOrDefault(IsBoardMessage);
-        if (board is not null) return board;
-
-        // Fallback: it exists but was manually unpinned — recover it from recent
-        // history instead of posting a duplicate. (Re-pin happens in RefreshAsync.)
-        var recent = await channel.GetMessagesAsync(50).FlattenAsync();
-        return recent.OfType<IUserMessage>().FirstOrDefault(IsBoardMessage);
-    }
-
     private bool IsBoardMessage(IUserMessage m) =>
-        m.Author.Id == _client.CurrentUser.Id
+        m.Author.Id == _client.CurrentUser!.Id
         && m.Embeds.Any(e => string.Equals(e.Title, BoardTitle, StringComparison.Ordinal));
 
     private static string BuildDescription(IReadOnlyList<ClanEvent> events, ulong guildId, ulong channelId)
