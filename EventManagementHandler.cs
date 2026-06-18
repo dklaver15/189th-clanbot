@@ -1801,6 +1801,13 @@ public sealed class EventManagementHandler
         if (rescheduledEv is not null)
             await NotifyRescheduleAsync(rescheduledEv, rescheduleOldStart, rescheduleNotifyIds);
 
+        // Snapshot the series' posted occurrences + their RSVPs BEFORE the schedule
+        // change, so we can DM those people if the change moves or cancels the
+        // occurrence they signed up for (regeneration cancels rows + loses RSVPs).
+        var (schedSnap, schedSeriesId) = s.ScheduleChanged
+            ? await SnapshotSeriesPostedAsync(s.ClanEventId, s.UserId)
+            : (new List<OccSnapshot>(), (int?)null);
+
         string? scheduleNote = null;
         if (s.ScheduleChanged)
         {
@@ -1809,6 +1816,12 @@ public sealed class EventManagementHandler
             {
                 _logger.LogError(ex, "Applying schedule change failed for event {Id}", s.ClanEventId);
                 scheduleNote = "…but the repeat-schedule change hit a snag — check the events channel.";
+            }
+
+            if (schedSnap.Count > 0)
+            {
+                try { await NotifySeriesScheduleChangeAsync(schedSnap, schedSeriesId); }
+                catch (Exception ex) { _logger.LogDebug(ex, "Series reschedule/cancel DMs failed"); }
             }
         }
 
@@ -1837,12 +1850,116 @@ public sealed class EventManagementHandler
                 $"[Jump to the event]({jump})")
             .Build();
 
+        var sent = await DmAllAsync(ev.GuildId, userIds, embed);
+        _logger.LogInformation(
+            "Reschedule DMs for event {Id} '{Title}': delivered {Sent}/{Total}", ev.Id, ev.Title, sent, userIds.Count);
+    }
+
+    /// <summary>
+    /// Series-level schedule change: for each occurrence people had RSVP'd to, DM
+    /// them if it moved to a new date (reschedule → the series' new next-up) or was
+    /// dropped with no replacement (cancellation). Occurrences that survived the
+    /// change untouched are skipped. The snapshot is taken BEFORE the change; this
+    /// reads the result.
+    /// </summary>
+    private async Task NotifySeriesScheduleChangeAsync(IReadOnlyList<OccSnapshot> snaps, int? seriesId)
+    {
+        if (!_config.EventRescheduleNotifyEnabled || snaps.Count == 0 || seriesId is null) return;
+
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+        var now = DateTime.UtcNow;
+
+        // The series' new next-up posted occurrence — what a moved RSVP points to.
+        var newNext = await db.ClanEvents
+            .Where(e => e.SeriesId == seriesId && e.Status == ClanEventStatus.Scheduled
+                     && e.MessageId != 0 && e.StartUtc > now)
+            .OrderBy(e => e.StartUtc)
+            .FirstOrDefaultAsync();
+
+        foreach (var snap in snaps)
+        {
+            // Preserve-matching kept this occurrence (still scheduled) → nothing moved.
+            if (await db.ClanEvents.AnyAsync(e => e.Id == snap.Id && e.Status == ClanEventStatus.Scheduled))
+                continue;
+
+            if (newNext is not null)
+                await NotifyRescheduleAsync(newNext, snap.StartUtc, snap.UserIds);
+            else
+                await NotifyOccurrenceCancelledAsync(snap.Title, snap.GuildId, snap.StartUtc, snap.UserIds);
+        }
+    }
+
+    /// <summary>
+    /// Snapshot every posted, upcoming occurrence of the clicked event's series
+    /// with the user ids that RSVP'd (minus the editor). Empty for a one-off (no
+    /// series). Taken before a schedule change so RSVPs aren't lost when
+    /// occurrences are cancelled/regenerated.
+    /// </summary>
+    private async Task<(List<OccSnapshot> Snap, int? SeriesId)> SnapshotSeriesPostedAsync(int clickedEventId, ulong editorId)
+    {
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+        var now = DateTime.UtcNow;
+
+        var clicked = await db.ClanEvents.FirstOrDefaultAsync(e => e.Id == clickedEventId);
+        if (clicked?.SeriesId is not int seriesId) return (new List<OccSnapshot>(), null);
+
+        var posted = await db.ClanEvents
+            .Where(e => e.SeriesId == seriesId && e.Status == ClanEventStatus.Scheduled
+                     && e.MessageId != 0 && e.StartUtc > now)
+            .ToListAsync();
+
+        var snaps = new List<OccSnapshot>();
+        foreach (var occ in posted)
+        {
+            var uids = await db.EventRsvps
+                .Where(r => r.ClanEventId == occ.Id && r.UserId != editorId)
+                .Select(r => r.UserId)
+                .Distinct()
+                .ToListAsync();
+            if (uids.Count == 0) continue;
+            snaps.Add(new OccSnapshot(occ.Id, occ.StartUtc, occ.Title, occ.GuildId, occ.ChannelId, uids));
+        }
+
+        return (snaps, seriesId);
+    }
+
+    private sealed record OccSnapshot(
+        int Id, DateTime StartUtc, string Title, ulong GuildId, ulong ChannelId, IReadOnlyList<ulong> UserIds);
+
+    /// <summary>
+    /// Best-effort DM telling RSVPs their occurrence was cancelled outright by a
+    /// schedule change (no replacement date to point at).
+    /// </summary>
+    private async Task NotifyOccurrenceCancelledAsync(
+        string title, ulong guildId, DateTime oldStartUtc, IReadOnlyCollection<ulong> userIds)
+    {
+        if (!_config.EventRescheduleNotifyEnabled || userIds.Count == 0) return;
+
+        var embed = new EmbedBuilder()
+            .WithColor(new Color(0xED4245))
+            .WithTitle("❌ Event Cancelled")
+            .WithDescription(
+                $"The **{title}** event you RSVP'd to — {EventTimeParser.Stamp(oldStartUtc, 'F')} — has been " +
+                $"**cancelled** as part of a schedule change.\n\nWatch the events channel for the next one.")
+            .Build();
+
+        var sent = await DmAllAsync(guildId, userIds, embed);
+        _logger.LogInformation(
+            "Cancellation DMs for '{Title}' ({Old:o}): delivered {Sent}/{Total}", title, oldStartUtc, sent, userIds.Count);
+    }
+
+    /// <summary>Resolve each user id and DM the embed; swallows per-user failures
+    /// (closed DMs). Returns the number delivered.</summary>
+    private async Task<int> DmAllAsync(ulong guildId, IReadOnlyCollection<ulong> userIds, Embed embed)
+    {
         var sent = 0;
         foreach (var uid in userIds)
         {
             try
             {
-                IUser? user = _client.GetGuild(ev.GuildId)?.GetUser(uid);
+                IUser? user = _client.GetGuild(guildId)?.GetUser(uid);
                 user ??= _client.GetUser(uid);
                 user ??= await _client.Rest.GetUserAsync(uid);
                 if (user is null) continue;
@@ -1856,9 +1973,7 @@ public sealed class EventManagementHandler
                 // best-effort — the member may have DMs closed
             }
         }
-
-        _logger.LogInformation(
-            "Reschedule DMs for event {Id} '{Title}': delivered {Sent}/{Total}", ev.Id, ev.Title, sent, userIds.Count);
+        return sent;
     }
 
     // ─── Repeat-schedule application ────────────────────────────────────────
