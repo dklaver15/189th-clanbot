@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using ClanGuardBot.Data;
 using ClanGuardBot.Models;
 using Discord;
@@ -32,6 +33,11 @@ public sealed class EventReminderService : BackgroundService
     private readonly DiscordSocketClient _client;
     private readonly BotConfig _config;
     private readonly ILogger<EventReminderService> _logger;
+
+    // Last reminder message id per event, so a newer reminder can delete the
+    // previous one. In-memory: a restart mid-window just leaves the older
+    // reminder (same as before this feature) — no DB column needed.
+    private readonly ConcurrentDictionary<int, ulong> _lastReminderMsg = new();
 
     public EventReminderService(
         IServiceProvider services,
@@ -155,6 +161,12 @@ public sealed class EventReminderService : BackgroundService
             return; // lead still marked sent by caller to avoid a retry loop
         }
 
+        // Remember the prior reminder (if any) so we can delete it once the new one
+        // is up, keeping just the latest reminder in the channel.
+        ulong prevMsgId = 0;
+        var hadPrev = _config.EventReminderReplacePrevious
+            && _lastReminderMsg.TryGetValue(ev.Id, out prevMsgId) && prevMsgId != 0;
+
         var hasImage = ev.ImageBytes is { Length: > 0 } && !string.IsNullOrWhiteSpace(ev.ImageFileName);
 
         var eb = new EmbedBuilder()
@@ -179,14 +191,24 @@ public sealed class EventReminderService : BackgroundService
         {
             try
             {
+                IUserMessage posted;
                 if (hasImage)
                 {
                     using var fa = new FileAttachment(new MemoryStream(ev.ImageBytes!), ev.ImageFileName);
-                    await channel.SendFileAsync(fa, text: content, embed: embed, allowedMentions: allowed);
+                    posted = await channel.SendFileAsync(fa, text: content, embed: embed, allowedMentions: allowed);
                 }
                 else
                 {
-                    await channel.SendMessageAsync(text: content, embed: embed, allowedMentions: allowed);
+                    posted = await channel.SendMessageAsync(text: content, embed: embed, allowedMentions: allowed);
+                }
+
+                _lastReminderMsg[ev.Id] = posted.Id;
+
+                // New reminder is up — remove the previous one to declutter.
+                if (hadPrev)
+                {
+                    try { await channel.DeleteMessageAsync(prevMsgId); }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Couldn't delete previous reminder {Msg} for '{Title}'", prevMsgId, ev.Title); }
                 }
                 return; // delivered
             }

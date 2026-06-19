@@ -330,6 +330,13 @@ public class BotConfig
     public bool EventReminderEnabled { get; set; } = true;
 
     /// <summary>
+    /// When true, each new event reminder deletes the previous reminder for that
+    /// event (e.g. the 15-min reminder removes the 60-min one) to reduce clutter.
+    /// Default true.
+    /// </summary>
+    public bool EventReminderReplacePrevious { get; set; } = true;
+
+    /// <summary>
     /// CSV of minutes-before-start at which a reminder fires (e.g. "60,15").
     /// Add or remove values freely; the worker fires once per value per event
     /// and records fired values on ClanEvent.RemindersSentCsv.
