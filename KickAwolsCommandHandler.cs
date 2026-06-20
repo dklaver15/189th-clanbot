@@ -72,6 +72,20 @@ public class KickAwolsCommandHandler
     /// </summary>
     private const int AuditFlushBatchSize = 25;
 
+    /// <summary>
+    /// Hard per-DM timeout. The goodbye DM is best-effort cosmetic — it must
+    /// never hold up the actual kicks. Opening a DM channel
+    /// (POST /users/@me/channels) is one of Discord's most aggressively
+    /// rate-limited routes and lives in a SEPARATE bucket from the kick route,
+    /// so the loop's 500ms kick pacing does nothing to protect it. On a large
+    /// run the DM route eventually hits a 429 with a long retry-after and,
+    /// under Discord.NET's default RetryMode.RetryRateLimit, the client
+    /// silently AWAITS that retry-after instead of throwing — freezing the
+    /// loop while the process still looks alive (kicks stop, command never
+    /// returns). This is the stall we're fixing. See TrySendGoodbyeDmAsync.
+    /// </summary>
+    private static readonly TimeSpan DmTimeout = TimeSpan.FromSeconds(5);
+
     private readonly DiscordSocketClient _client;
     private readonly IServiceProvider _services;
     private readonly ILogger<KickAwolsCommandHandler> _logger;
@@ -313,22 +327,10 @@ public class KickAwolsCommandHandler
             else
             {
                 // ── Best-effort DM before the kick ────────────────────────
-                try
-                {
-                    var dm = await member.CreateDMChannelAsync();
-                    await dm.SendMessageAsync(
-                        "You've been removed from the **189th** for inactivity (AWOL).\n\n" +
-                        "If you'd like to come back, reach out to a member of leadership and " +
-                        "we'll get you reinstated. No hard feelings — life happens.");
-                }
-                catch (OperationCanceledException)
-                {
-                    throw;
-                }
-                catch
-                {
-                    // DMs disabled / closed / user blocked the bot — fine, continue with the kick.
-                }
+                // Hard-timeout + no-rate-limit-retry so a throttled or hung
+                // DM route can never stall the kick loop. See
+                // TrySendGoodbyeDmAsync for the full rationale.
+                await TrySendGoodbyeDmAsync(member);
 
                 // ── Actually kick ─────────────────────────────────────────
                 try
@@ -525,6 +527,56 @@ public class KickAwolsCommandHandler
             kicked.Count, skippedRes.Count, skippedRank.Count,
             skippedHier.Count, userGone.Count, failed.Count,
             totalAuditsWritten);
+    }
+
+    /// <summary>
+    /// Sends the best-effort "you've been removed" DM with a hard timeout and
+    /// no rate-limit retry, so a throttled or hung DM route can never stall the
+    /// kick loop (the freeze documented on <see cref="DmTimeout"/>). Two
+    /// independent defenses:
+    ///
+    ///   • RetryMode.AlwaysFail — a 429 on the DM route throws
+    ///     RateLimitedException immediately instead of silently awaiting the
+    ///     retry-after.
+    ///   • CancellationToken timeout — caps any single DM attempt at
+    ///     DmTimeout regardless of cause (slow open, hung send, etc.).
+    ///
+    /// Any failure (DMs closed, rate-limited, timed out, network) is swallowed
+    /// — the kick is what matters. Host-shutdown cancellation is distinguished
+    /// from our own timeout and re-thrown so the loop still stops cleanly.
+    /// </summary>
+    private async Task TrySendGoodbyeDmAsync(SocketGuildUser member)
+    {
+        using var cts = new CancellationTokenSource(DmTimeout);
+        var dmOptions = new RequestOptions
+        {
+            RetryMode   = RetryMode.AlwaysFail,
+            CancelToken = cts.Token
+        };
+
+        try
+        {
+            var dm = await member.CreateDMChannelAsync(dmOptions);
+            await dm.SendMessageAsync(
+                "You've been removed from the **189th** for inactivity (AWOL).\n\n" +
+                "If you'd like to come back, reach out to a member of leadership and " +
+                "we'll get you reinstated. No hard feelings — life happens.",
+                options: dmOptions);
+        }
+        catch (OperationCanceledException) when (!cts.IsCancellationRequested)
+        {
+            // Cancellation that ISN'T our DM timeout = host shutdown. Let it
+            // propagate so the kick loop stops cleanly (same contract as before).
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // DMs disabled/closed, rate-limited, timed out, or any other
+            // best-effort failure — log quietly and proceed to the kick.
+            _logger.LogDebug(ex,
+                "Skipped goodbye DM to {User} ({UserId}) — {Reason}",
+                member.Username, member.Id, ex.Message);
+        }
     }
 
     /// <summary>
