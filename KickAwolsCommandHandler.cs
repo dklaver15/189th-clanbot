@@ -631,14 +631,31 @@ public class KickAwolsCommandHandler
     {
         try
         {
-            var hqChannel = guild.TextChannels.FirstOrDefault(c =>
+            // ID first (rename-proof), then name fallback — mirrors
+            // AwolCheckService. A name-only lookup silently fails the moment
+            // the channel name gains an emoji/separator.
+            SocketTextChannel? hqChannel = null;
+            if (_config.HqChannelId != 0)
+            {
+                hqChannel = guild.GetTextChannel(_config.HqChannelId);
+                if (hqChannel is null)
+                {
+                    _logger.LogWarning(
+                        "HqChannelId={ChannelId} did not resolve in {Guild}; " +
+                        "falling back to HqChannelName='{ChannelName}'.",
+                        _config.HqChannelId, guild.Name, _config.HqChannelName);
+                }
+            }
+
+            hqChannel ??= guild.TextChannels.FirstOrDefault(c =>
                 string.Equals(c.Name, _config.HqChannelName, StringComparison.OrdinalIgnoreCase));
 
             if (hqChannel is null)
             {
                 _logger.LogWarning(
-                    "HQ channel '{Channel}' not found in {Guild}; skipping persistent summary post",
-                    _config.HqChannelName, guild.Name);
+                    "HQ channel not found in {Guild} (HqChannelId={ChannelId}, " +
+                    "HqChannelName='{Channel}'); skipping persistent summary post",
+                    guild.Name, _config.HqChannelId, _config.HqChannelName);
                 return;
             }
 

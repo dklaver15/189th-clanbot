@@ -104,13 +104,31 @@ public class ClearAwolListCommandHandler
         }
 
         // ── Resolve the channel ──────────────────────────────────────────
-        var channel = guild.TextChannels.FirstOrDefault(c =>
+        // ID first (rename-proof), then name fallback. The name lookup is
+        // brittle: adding an emoji/separator to the channel name breaks the
+        // exact match, which is exactly what happened here. Mirrors the
+        // resolution in AwolCheckService.
+        SocketTextChannel? channel = null;
+        if (_config.HqChannelId != 0)
+        {
+            channel = guild.GetTextChannel(_config.HqChannelId);
+            if (channel is null)
+            {
+                _logger.LogWarning(
+                    "HqChannelId={ChannelId} did not resolve in guild {Guild}; " +
+                    "falling back to HqChannelName='{ChannelName}'.",
+                    _config.HqChannelId, guild.Name, _config.HqChannelName);
+            }
+        }
+
+        channel ??= guild.TextChannels.FirstOrDefault(c =>
             string.Equals(c.Name, _config.HqChannelName, StringComparison.OrdinalIgnoreCase));
 
         if (channel is null)
         {
             await cmd.FollowupAsync(
-                $"❌ HQ channel `{_config.HqChannelName}` not found in this server.",
+                $"❌ HQ channel not found in this server " +
+                $"(HqChannelId=`{_config.HqChannelId}`, HqChannelName=`{_config.HqChannelName}`).",
                 ephemeral: true);
             return;
         }
