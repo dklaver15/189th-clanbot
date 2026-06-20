@@ -360,9 +360,11 @@ public class AwolCheckService : BackgroundService
                 // Inactive — assign AWOL if they don't have it
                 if (!hasAwolRoleActive)
                 {
+                    var justAssigned = false;
                     try
                     {
                         await member.AddRoleAsync(awolRole);
+                        justAssigned = true;
                         _logger.LogInformation(
                             "Assigned AWOL role to {Username} ({UserId}) in {Guild} — " +
                             "Messages: {Messages}, Voice: {VoiceHours:F1}h (window: {Window}d)",
@@ -391,6 +393,15 @@ public class AwolCheckService : BackgroundService
                         _logger.LogError(ex, "Failed to assign AWOL role to {Username} in {Guild}",
                             member.Username, guild.Name);
                     }
+
+                    // Best-effort DM letting the member know they've been
+                    // flagged AWOL and how to clear it. Only on a FRESH
+                    // assignment, and deliberately OUTSIDE the assignment
+                    // try/catch above so a closed or rate-limited DM can never
+                    // be miscategorized as a role-assignment failure. Gated by
+                    // config so it can be turned off without a redeploy.
+                    if (justAssigned && _config.AwolDmOnAssign)
+                        await TrySendAwolDmAsync(member);
                 }
             }
         }
@@ -578,6 +589,54 @@ public class AwolCheckService : BackgroundService
             _logger.LogInformation(
                 "AWOL Step 3 summary for {Guild}: notified={Notified}, given up={GivenUp}, stale suppressed={Stale}, role gone={RoleGone}, user gone={UserGone}, failed={Failed} (out of {Total} pending)",
                 guild.Name, notified, givenUp, stale, roleGone, userGone, failed, pendingNotifications.Count);
+        }
+    }
+
+    /// <summary>
+    /// Best-effort DM telling a member they've just been assigned the AWOL role
+    /// and how to clear it. Hard 5-second timeout + RetryMode.AlwaysFail so a
+    /// closed DM or a rate-limited DM route can never stall the AWOL check cycle
+    /// (the same guard used on the /kick-awols goodbye DM — opening a DM channel
+    /// is a heavily rate-limited route in a separate bucket, and Discord.NET
+    /// otherwise silently awaits a 429's retry-after). Any failure is logged at
+    /// debug and ignored; host-shutdown cancellation is distinguished from our
+    /// own timeout and re-thrown.
+    /// </summary>
+    private async Task TrySendAwolDmAsync(SocketGuildUser member)
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var dmOptions = new RequestOptions
+        {
+            RetryMode   = RetryMode.AlwaysFail,
+            CancelToken = cts.Token
+        };
+
+        try
+        {
+            var dm = await member.CreateDMChannelAsync(dmOptions);
+            await dm.SendMessageAsync(
+                "Heads up from the **189th** — you've been marked **AWOL** for inactivity.\n\n" +
+                "To clear it, just get back in the mix: send a few messages or hop into voice, " +
+                "and the bot will automatically remove your AWOL status on its next check. " +
+                "If you're going to be away for a while, let an officer know and we can put you " +
+                "on Reserve so you're not flagged.\n\n" +
+                "If you stay inactive you may be removed during our next AWOL review — " +
+                "but you're always welcome back.",
+                options: dmOptions);
+        }
+        catch (OperationCanceledException) when (!cts.IsCancellationRequested)
+        {
+            // Cancellation that ISN'T our DM timeout = host shutdown. Let it propagate.
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // DMs disabled/closed, rate-limited, timed out, or any other
+            // best-effort failure — log quietly and move on. The role is
+            // already assigned and HQ still gets the Step 3 notification.
+            _logger.LogDebug(ex,
+                "Skipped AWOL-assignment DM to {User} ({UserId}) — {Reason}",
+                member.Username, member.Id, ex.Message);
         }
     }
 

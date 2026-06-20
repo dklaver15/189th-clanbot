@@ -61,6 +61,14 @@ public class BotConfig
     public int AwolGraceDays { get; set; } = 2;
 
     /// <summary>
+    /// When true, the bot DMs a member the moment it assigns them the AWOL
+    /// role, so they know they've been flagged and how to clear it. Best-effort:
+    /// a closed DM or a rate-limited DM route never blocks role assignment or
+    /// the check cycle. Set false to return to silent (HQ-only) AWOL handling.
+    /// </summary>
+    public bool AwolDmOnAssign { get; set; } = true;
+
+    /// <summary>
     /// Upper age bound for posting an AWOL notification. A pending record whose
     /// AssignedAt is older than this is considered stale: Step 3 silently
     /// resolves it (marks it sent, logs a warning) instead of posting it.
