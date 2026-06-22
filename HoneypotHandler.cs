@@ -279,19 +279,19 @@ public sealed class HoneypotHandler
             // ── Behavioral cross-channel spam trap (feature #8) ──
             // Checked first and on EVERY channel: a compromised account that
             // blasts many channels is caught here without needing to hit the
-            // honeypot channel at all. If it trips (or is deduped from a prior
-            // trip) we're done — no need to also run the honeypot check.
-            if (spamOn && IsCrossChannelSpam(userMsg.Author.Id, out var distinctChannels))
+            // honeypot channel at all. Two tiers run — a fast one for bot-speed
+            // bursts and a slower one for paced spammers (see IsCrossChannelSpam).
+            // If either trips (or is deduped from a prior trip) we're done — no
+            // need to also run the honeypot check.
+            if (spamOn && IsCrossChannelSpam(userMsg.Author.Id, out var spamHit))
             {
-                var windowSecs = Math.Max(1, _config.SpamTrapWindowSeconds);
-                var threshold  = Math.Max(2, _config.SpamTrapChannelThreshold);
                 var ctx = new TrapHit(
                     Feature:    "SpamTrap",
                     AlertTitle: "🚨 Cross-Channel Spam Detected",
-                    Reason:     $"Cross-channel spam: posted in {distinctChannels} distinct channels within {windowSecs}s.",
+                    Reason:     $"Cross-channel spam ({spamHit.Tier}): posted in {spamHit.DistinctChannels} distinct channels within {spamHit.WindowSeconds}s.",
                     BumpHoneypotCounter: false,
                     ChannelId:  guildChannel.Id,
-                    ExtraDetail: $"Posted in {distinctChannels} distinct channels within {windowSecs}s (threshold {threshold}).",
+                    ExtraDetail: $"{spamHit.Tier} tier: posted in {spamHit.DistinctChannels} distinct channels within {spamHit.WindowSeconds}s (threshold {spamHit.Threshold}).",
                     AlertOnOwner: true);
                 await HandleTripAsync(userMsg, member, guildChannel.Guild, spamMode, ctx);
                 return;
@@ -383,22 +383,62 @@ public sealed class HoneypotHandler
     }
 
     /// <summary>
-    /// Behavioral detector: returns true when <paramref name="userId"/> has
-    /// posted in <see cref="BotConfig.SpamTrapChannelThreshold"/>+ DISTINCT
-    /// channels within the last <see cref="BotConfig.SpamTrapWindowSeconds"/>
-    /// seconds, read straight off the rolling index. Cheap: bounded to the
-    /// per-user list (≤ <see cref="MaxTrackedPerUser"/>) and short-circuits when
-    /// the list can't possibly meet the threshold.
+    /// Behavioral detector with two tiers, both read straight off the rolling
+    /// index:
+    ///   • <b>Fast</b> — <see cref="BotConfig.SpamTrapChannelThreshold"/>+ distinct
+    ///     channels within <see cref="BotConfig.SpamTrapWindowSeconds"/> seconds.
+    ///     Catches a bot blasting many channels in a couple of seconds.
+    ///   • <b>Slow</b> — <see cref="BotConfig.SpamTrapSlowChannelThreshold"/>+
+    ///     distinct channels within <see cref="BotConfig.SpamTrapSlowWindowSeconds"/>
+    ///     seconds. Catches a paced spammer who spreads the same payload over a
+    ///     couple of minutes, slow enough that no short window holds the fast
+    ///     threshold. Disabled when the slow window is ≤ 0.
+    /// Returns true on the first tier that trips (fast checked first), with
+    /// <paramref name="hit"/> describing which one and its counts. Cheap: bounded
+    /// to the per-user list (≤ <see cref="MaxTrackedPerUser"/>) and short-circuits
+    /// when the list can't possibly meet a threshold.
     /// </summary>
-    private bool IsCrossChannelSpam(ulong userId, out int distinctChannels)
+    private bool IsCrossChannelSpam(ulong userId, out SpamTierHit hit)
     {
-        distinctChannels = 0;
-
-        var threshold  = Math.Max(2, _config.SpamTrapChannelThreshold);
-        var windowSecs = Math.Max(1, _config.SpamTrapWindowSeconds);
+        hit = default;
 
         if (!_recent.TryGetValue(userId, out var list)) return false;
 
+        // Fast tier first — a fast burst is the stronger signal and the tighter
+        // window, so attribute the trip to it when both would fire.
+        var fastThreshold  = Math.Max(2, _config.SpamTrapChannelThreshold);
+        var fastWindowSecs = Math.Max(1, _config.SpamTrapWindowSeconds);
+        if (TripsTier(list, fastThreshold, fastWindowSecs, out var fastDistinct))
+        {
+            hit = new SpamTierHit("Fast", fastDistinct, fastWindowSecs, fastThreshold);
+            return true;
+        }
+
+        // Slow tier — optional, gated on a positive window. Larger window catches
+        // paced spammers; the per-user list is already capped at MaxTrackedPerUser.
+        var slowWindowSecs = _config.SpamTrapSlowWindowSeconds;
+        if (slowWindowSecs > 0)
+        {
+            var slowThreshold = Math.Max(2, _config.SpamTrapSlowChannelThreshold);
+            if (TripsTier(list, slowThreshold, slowWindowSecs, out var slowDistinct))
+            {
+                hit = new SpamTierHit("Slow", slowDistinct, slowWindowSecs, slowThreshold);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Counts DISTINCT channels in <paramref name="list"/> posted within
+    /// <paramref name="windowSecs"/> seconds and reports whether that reaches
+    /// <paramref name="threshold"/>. Caller-agnostic so both tiers share it.
+    /// </summary>
+    private static bool TripsTier(
+        List<TrackedMessage> list, int threshold, int windowSecs, out int distinctChannels)
+    {
+        distinctChannels = 0;
         var cutoff = DateTime.UtcNow - TimeSpan.FromSeconds(windowSecs);
         lock (list)
         {
@@ -413,6 +453,10 @@ public sealed class HoneypotHandler
 
         return distinctChannels >= threshold;
     }
+
+    /// <summary>Which spam tier tripped and the counts behind it, for labelling.</summary>
+    private readonly record struct SpamTierHit(
+        string Tier, int DistinctChannels, int WindowSeconds, int Threshold);
 
     // ── Enforce: ban + cross-channel purge + counter + embed refresh ───
 
