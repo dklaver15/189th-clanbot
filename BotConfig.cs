@@ -1119,10 +1119,10 @@ public class BotConfig
 
     /// <summary>
     /// Sliding window, in seconds, over which DISTINCT channels are counted for
-    /// the cross-channel spam trap. Default 10. Clamped to a minimum of 1
+    /// the cross-channel spam trap. Default 30. Clamped to a minimum of 1
     /// internally.
     /// </summary>
-    public int SpamTrapWindowSeconds { get; set; } = 10;
+    public int SpamTrapWindowSeconds { get; set; } = 30;
 
     /// <summary>
     /// Number of DISTINCT channels a single account must post in within
@@ -1132,37 +1132,6 @@ public class BotConfig
     /// Clamped to a minimum of 2 internally.
     /// </summary>
     public int SpamTrapChannelThreshold { get; set; } = 5;
-
-    /// <summary>
-    /// Second, SLOWER detection tier for the cross-channel spam trap. The fast
-    /// tier (<see cref="SpamTrapWindowSeconds"/> / <see cref="SpamTrapChannelThreshold"/>)
-    /// catches a bot blasting many channels in a couple of seconds; this tier
-    /// catches a <i>paced</i> spammer (human, or a throttled account) who spreads
-    /// the same payload across many channels over the better part of a minute —
-    /// slow enough that no short window ever holds the fast threshold. A trip
-    /// needs <see cref="SpamTrapSlowChannelThreshold"/>+ DISTINCT channels within
-    /// <see cref="SpamTrapSlowWindowSeconds"/> seconds. Set the slow threshold a
-    /// little higher than the fast one to keep the false-positive rate low, since
-    /// a member legitimately replying across several channels over half a minute
-    /// is more plausible than doing so in ten seconds.
-    ///
-    /// The slow window is bounded by the rolling index's retention
-    /// (<see cref="HoneypotPurgeWindowMinutes"/>): a value larger than that
-    /// window's worth of seconds can never see the full history.
-    ///
-    /// Set the slow window to 0 to disable the slow tier and keep only the fast
-    /// one. Default 30 (seconds).
-    /// </summary>
-    public int SpamTrapSlowWindowSeconds { get; set; } = 30;
-
-    /// <summary>
-    /// Number of DISTINCT channels a single account must post in within
-    /// <see cref="SpamTrapSlowWindowSeconds"/> to trip the slow spam tier.
-    /// Default 6 — one above the fast tier's default, so a paced spammer hitting
-    /// many channels is still caught while ordinary cross-posting is not. Clamped
-    /// to a minimum of 2 internally.
-    /// </summary>
-    public int SpamTrapSlowChannelThreshold { get; set; } = 6;
 
     // ─── Ban Hammer: "days since last ban" counter ───────────────────
     /// <summary>
