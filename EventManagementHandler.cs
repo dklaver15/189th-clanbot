@@ -578,7 +578,7 @@ public sealed class EventManagementHandler
 
             var rsvps = await db.EventRsvps.Where(r => r.ClanEventId == ev.Id).ToListAsync();
             var embed = EventEmbedBuilder.BuildEmbed(ev, rsvps, ev.ImageFileName,
-                EventEmbedBuilder.GuildNameResolver(_client, ev.GuildId));
+                await EventEmbedBuilder.GuildNameResolverAsync(_client, ev, rsvps));
             var comps = ev.Status == ClanEventStatus.Cancelled
                 ? Empty()
                 : EventEmbedBuilder.BuildComponents(ev.Id, _config.EventRsvpEnabled, locked: DateTime.UtcNow >= ev.StartUtc);
@@ -2569,7 +2569,7 @@ public sealed class EventManagementHandler
 
             var rsvps = await db.EventRsvps.Where(r => r.ClanEventId == ev.Id).ToListAsync();
             var embed = EventEmbedBuilder.BuildEmbed(ev, rsvps, ev.ImageFileName,
-                EventEmbedBuilder.GuildNameResolver(_client, ev.GuildId));
+                await EventEmbedBuilder.GuildNameResolverAsync(_client, ev, rsvps));
             var comps = EventEmbedBuilder.BuildComponents(ev.Id, _config.EventRsvpEnabled, locked: DateTime.UtcNow >= ev.StartUtc);
 
             await msg.ModifyAsync(m => { m.Embed = embed; m.Components = comps; });

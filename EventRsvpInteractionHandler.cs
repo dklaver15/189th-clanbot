@@ -102,10 +102,11 @@ public sealed class EventRsvpInteractionHandler
             if (DateTime.UtcNow >= ev.StartUtc)
             {
                 var current = await db.EventRsvps.Where(r => r.ClanEventId == clanEventId).ToListAsync();
+                var lockedResolver = await EventEmbedBuilder.GuildNameResolverAsync(_client, ev, current);
                 await component.UpdateAsync(m =>
                 {
                     m.Embed      = EventEmbedBuilder.BuildEmbed(ev, current, ev.ImageFileName,
-                        EventEmbedBuilder.GuildNameResolver(_client, ev.GuildId));
+                        lockedResolver);
                     m.Components = EventEmbedBuilder.BuildComponents(ev.Id, _config.EventRsvpEnabled, locked: true);
                 });
                 return;
@@ -144,10 +145,11 @@ public sealed class EventRsvpInteractionHandler
             if (promoted.Count > 0 || db.ChangeTracker.HasChanges())
                 await db.SaveChangesAsync();
 
+            var resolver = await EventEmbedBuilder.GuildNameResolverAsync(_client, ev, rsvps);
             await component.UpdateAsync(m =>
             {
                 m.Embed      = EventEmbedBuilder.BuildEmbed(ev, rsvps, ev.ImageFileName,
-                    EventEmbedBuilder.GuildNameResolver(_client, ev.GuildId));
+                    resolver);
                 m.Components = EventEmbedBuilder.BuildComponents(ev.Id, _config.EventRsvpEnabled, locked: false);
             });
 

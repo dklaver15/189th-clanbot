@@ -223,19 +223,66 @@ public static class EventEmbedBuilder
         .Replace("|", "\\|");
 
     /// <summary>
-    /// Builds a server-side display-name resolver for <see cref="BuildEmbed"/>:
-    /// guild nickname first, then global name / username, else null (caller falls
-    /// back to a mention). Pass this from any render site that has the client.
+    /// Async resolver for a known, finite set of user ids (an event's host +
+    /// roster). Resolves each from the guild member cache, then the global user
+    /// cache, exactly like <see cref="GuildNameResolver"/> — but for any id that
+    /// misses BOTH (almost always a member who has since left the guild) it falls
+    /// back to a one-off REST fetch of the account's global username. That username
+    /// is still retrievable after departure, so the roster shows plain text that
+    /// renders on EVERY client instead of a bare <c>&lt;@id&gt;</c> mention that
+    /// mobile leaves as a raw "&lt;@123…&gt;". The returned delegate is synchronous
+    /// and backed by a pre-filled dictionary, so call sites pass it to
+    /// <see cref="BuildEmbed"/> unchanged. REST is only touched on a cache miss, so
+    /// the normal all-in-cache render path makes zero network calls.
     /// </summary>
-    public static Func<ulong, string?> GuildNameResolver(DiscordSocketClient client, ulong guildId)
+    public static async Task<Func<ulong, string?>> GuildNameResolverAsync(
+        DiscordSocketClient client, ulong guildId, IEnumerable<ulong> userIds)
     {
         var guild = client.GetGuild(guildId);
-        return id =>
+        var resolved = new Dictionary<ulong, string?>();
+        var misses = new List<ulong>();
+
+        foreach (var id in userIds.Distinct())
         {
             var gu = guild?.GetUser(id);
-            if (gu is not null) return gu.DisplayName;
+            if (gu is not null) { resolved[id] = gu.DisplayName; continue; }
+
             var u = client.GetUser(id);
-            return u?.GlobalName ?? u?.Username;
-        };
+            var name = u?.GlobalName ?? u?.Username;
+            if (!string.IsNullOrWhiteSpace(name)) { resolved[id] = name; continue; }
+
+            misses.Add(id);
+        }
+
+        foreach (var id in misses)
+        {
+            try
+            {
+                var ru = await client.Rest.GetUserAsync(id);
+                var name = ru?.GlobalName ?? ru?.Username;
+                if (!string.IsNullOrWhiteSpace(name)) resolved[id] = name;
+            }
+            catch
+            {
+                // Deleted account or a transient REST failure: leave it unresolved so
+                // Label falls back to <@id> (which desktop still renders).
+            }
+        }
+
+        return id => resolved.TryGetValue(id, out var n) ? n : null;
+    }
+
+    /// <summary>
+    /// Convenience overload that gathers the user ids an event embed needs — the
+    /// host/organizer plus every RSVP — and resolves them via the REST-fallback
+    /// <see cref="GuildNameResolverAsync(DiscordSocketClient, ulong, IEnumerable{ulong})"/>.
+    /// </summary>
+    public static Task<Func<ulong, string?>> GuildNameResolverAsync(
+        DiscordSocketClient client, ClanEvent ev, IEnumerable<EventRsvp> rsvps)
+    {
+        var ids = rsvps.Select(r => r.UserId)
+            .Append(ev.HostId ?? ev.OrganizerId)
+            .Append(ev.OrganizerId);
+        return GuildNameResolverAsync(client, ev.GuildId, ids);
     }
 }
