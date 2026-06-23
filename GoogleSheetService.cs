@@ -23,6 +23,14 @@ public record GamertagLookupResult(
     string Bungie);
 
 /// <summary>
+/// One roster row with its Discord ID parsed out (null for legacy/no-ID rows).
+/// <see cref="Tags"/> carries the platform handles. Returned by
+/// <see cref="GoogleSheetsService.GetAllGamertagsAsync"/> for bulk consumers like
+/// THE FINALS leaderboard board that need every member's handles in one read.
+/// </summary>
+public record GamertagRosterEntry(ulong? DiscordId, GamertagLookupResult Tags);
+
+/// <summary>
 /// Outcome of a roster reconcile sweep.
 ///   • <see cref="Deleted"/>       — rows removed (departed members, by ID).
 ///   • <see cref="Kept"/>          — ID rows whose member is still in the guild.
@@ -494,6 +502,61 @@ public class GoogleSheetsService
                 Embark: Cell(6),
                 Bungie: Cell(7));
         }
+    }
+
+    /// <summary>
+    /// Reads the ENTIRE gamertag roster in one API call and returns every data row
+    /// (header skipped). Column A is parsed into <see cref="GamertagRosterEntry.DiscordId"/>
+    /// when it's a valid Discord ID, else null (legacy rows). Rows with no handles at
+    /// all are skipped. Used by bulk consumers (e.g. the FINALS leaderboard board)
+    /// that would otherwise hit the sheet once per member.
+    /// Columns: Discord ID | Discord Name | EA | Steam | PSN | Xbox | Embark | Bungie
+    /// </summary>
+    public async Task<List<GamertagRosterEntry>> GetAllGamertagsAsync()
+    {
+        var credential = GoogleCredential
+            .FromFile(_config.GoogleCredentialsPath)
+            .CreateScoped(SheetsService.Scope.Spreadsheets);
+
+        using var service = new SheetsService(new BaseClientService.Initializer
+        {
+            HttpClientInitializer = credential,
+            ApplicationName = "ClanGuardBot"
+        });
+
+        var range = $"{_config.GoogleSheetName}!A:H";
+        var resp = await service.Spreadsheets.Values.Get(_config.GoogleSpreadsheetId, range).ExecuteAsync();
+
+        var result = new List<GamertagRosterEntry>();
+        if (resp.Values is null) return result;
+
+        // Skip the header row (index 0).
+        for (var i = 1; i < resp.Values.Count; i++)
+        {
+            var row = resp.Values[i];
+            string Cell(int c) => row.Count > c ? row[c]?.ToString() ?? "" : "";
+
+            ulong? id = ulong.TryParse(Cell(0), out var parsed) ? parsed : null;
+            var tags = new GamertagLookupResult(
+                DiscordName: Cell(1),
+                EA: Cell(2),
+                Steam: Cell(3),
+                PSN: Cell(4),
+                Xbox: Cell(5),
+                Embark: Cell(6),
+                Bungie: Cell(7));
+
+            // Skip rows with no handles at all (nothing to match against).
+            if (string.IsNullOrWhiteSpace(tags.Steam)
+                && string.IsNullOrWhiteSpace(tags.PSN)
+                && string.IsNullOrWhiteSpace(tags.Xbox)
+                && string.IsNullOrWhiteSpace(tags.Embark))
+                continue;
+
+            result.Add(new GamertagRosterEntry(id, tags));
+        }
+
+        return result;
     }
 
     /// <summary>

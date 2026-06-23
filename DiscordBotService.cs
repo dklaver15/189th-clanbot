@@ -54,6 +54,7 @@ public class DiscordBotService : IHostedService
     private readonly PollVoteInteractionHandler _pollVoteHandler;
     private readonly PollGatewayVoteHandler _pollGatewayVoteHandler;
     private readonly UfcCommandHandler _ufcCommandHandler;
+    private readonly FinalsCommandHandler _finalsCommandHandler;
     private readonly PromoteCommandHandler _promoteHandler;
     private readonly DemoteCommandHandler _demoteHandler;
     private readonly SetNickCommandHandler _setNickHandler;
@@ -122,6 +123,7 @@ public class DiscordBotService : IHostedService
         PollVoteInteractionHandler pollVoteHandler,
         PollGatewayVoteHandler pollGatewayVoteHandler,
         UfcCommandHandler ufcCommandHandler,
+        FinalsCommandHandler finalsCommandHandler,
         PromoteCommandHandler promoteHandler,
         DemoteCommandHandler demoteHandler,
         SetNickCommandHandler setNickHandler,
@@ -189,6 +191,7 @@ public class DiscordBotService : IHostedService
         _pollVoteHandler             = pollVoteHandler;
         _pollGatewayVoteHandler      = pollGatewayVoteHandler;
         _ufcCommandHandler           = ufcCommandHandler;
+        _finalsCommandHandler        = finalsCommandHandler;
         _promoteHandler              = promoteHandler;
         _demoteHandler               = demoteHandler;
         _setNickHandler              = setNickHandler;
@@ -276,6 +279,7 @@ public class DiscordBotService : IHostedService
         _pollVoteHandler.Register(_client);
         _pollGatewayVoteHandler.Register(_client);
         _ufcCommandHandler.Register(_client);
+        _finalsCommandHandler.Register(_client);
         _promoteHandler.Register(_client);
         _demoteHandler.Register(_client);
         _setNickHandler.Register(_client);
@@ -401,6 +405,14 @@ public class DiscordBotService : IHostedService
 
                 UfcCommandHandler.BuildScheduleCommand(),
                 UfcCommandHandler.BuildResultsCommand(),
+
+                // /finals-rank — look up a player's standing on THE FINALS ranked
+                // leaderboard (self, a clan member via roster gamertags, or a
+                // free-text name search). Open to all members; public reply.
+                // Gated at runtime by BotConfig.FinalsEnabled. Handled by
+                // FinalsCommandHandler. NOTE: keep CommandsCommandHandler.BuildCatalog
+                // in sync when changing /finals-rank.
+                FinalsCommandHandler.BuildCommand(),
 
                 new SlashCommandBuilder()
                     .WithName("promote")

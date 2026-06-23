@@ -452,6 +452,18 @@ try
     builder.Services.AddSingleton<UfcCommandHandler>();
     builder.Services.AddHostedService<UfcReminderService>();
 
+    // ── THE FINALS leaderboard ───────────────────────────────────────
+    // FinalsApiService is the shared (keyless) community-leaderboard client;
+    // FinalsRosterService joins the gamertag roster to the leaderboard;
+    // FinalsCommandHandler owns /finals-rank (Register() called from
+    // DiscordBotService); FinalsLeaderboardService drives the clan board +
+    // rank-up announcements. All gated by BotConfig.Finals* — idle until
+    // FinalsEnabled is set.
+    builder.Services.AddSingleton<FinalsApiService>();
+    builder.Services.AddSingleton<FinalsRosterService>();
+    builder.Services.AddSingleton<FinalsCommandHandler>();
+    builder.Services.AddHostedService<FinalsLeaderboardService>();
+
     // ── Hosted Services ──────────────────────────────────────────────
     builder.Services.AddHostedService<DiscordBotService>();
     builder.Services.AddHostedService<HistoryBackfillService>();

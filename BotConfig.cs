@@ -796,6 +796,64 @@ public class BotConfig
     /// </summary>
     public string GamertagRosterUrl { get; set; } = string.Empty;
 
+    // ─── THE FINALS leaderboard integration ─────────────────────────
+    /// <summary>
+    /// Master switch for the THE FINALS leaderboard feature (the /finals-rank
+    /// command, the clan leaderboard board, and rank-up announcements). The
+    /// community API needs no key, so this is the only gate that must be flipped
+    /// to turn the feature on. Default false — opt-in.
+    /// </summary>
+    public bool FinalsEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Leaderboard version (season) id queried on the community API, e.g. "s10"
+    /// for Season 10. Bump this when a new season starts (the previous season's
+    /// data freezes; the new season becomes the live one). Non-season ids ("cb1",
+    /// "ob") are also accepted. Default "s10".
+    /// </summary>
+    public string FinalsLeaderboardVersion { get; set; } = "s10";
+
+    /// <summary>
+    /// Platform leaderboard to read: "crossplay" (default, recommended — covers
+    /// every platform in one board), or "steam" / "psn" / "xbox" for a single
+    /// platform. Matching uses whichever platform handles a member has linked
+    /// regardless of this value; this only chooses which leaderboard is fetched.
+    /// </summary>
+    public string FinalsPlatform { get; set; } = "crossplay";
+
+    /// <summary>
+    /// How often (minutes) the background service re-fetches the leaderboard to
+    /// update the board and check for rank-ups. The whole leaderboard is one
+    /// fetch shared by both surfaces. Floored at 15 in code. Default 60.
+    /// </summary>
+    public int FinalsRefreshIntervalMinutes { get; set; } = 60;
+
+    /// <summary>
+    /// Master switch for the auto-updating clan leaderboard board. Requires
+    /// <see cref="FinalsBoardChannelId"/>. Default true (no-op until the channel
+    /// is set and FinalsEnabled is on).
+    /// </summary>
+    public bool FinalsBoardEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Channel ID the clan leaderboard board is maintained in. 0 disables the
+    /// board even when FinalsBoardEnabled is true.
+    /// </summary>
+    public ulong FinalsBoardChannelId { get; set; } = default;
+
+    /// <summary>
+    /// Master switch for rank-up announcements. Requires
+    /// <see cref="FinalsAnnounceChannelId"/>. Default true (no-op until the
+    /// channel is set and FinalsEnabled is on).
+    /// </summary>
+    public bool FinalsRankUpEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Channel ID where rank-up announcements are posted. 0 disables announcements
+    /// even when FinalsRankUpEnabled is true.
+    /// </summary>
+    public ulong FinalsAnnounceChannelId { get; set; } = default;
+
     // ─── Server protection: Account-Age Gate ─────────────────────────
     /// <summary>
     /// Operating mode for the account-age gate on UserJoined. One of:
