@@ -92,7 +92,7 @@ public class GoogleSheetsService
 
         // Try to find an existing row for this Discord user by ID
         var getRequest = service.Spreadsheets.Values.Get(spreadsheetId, range);
-        var getResponse = await getRequest.ExecuteAsync();
+        var getResponse = await ExecuteWithRetryAsync(getRequest.ExecuteAsync, "gamertag read");
 
         var newRow = new List<object> { discordId.ToString(), discordName, ea, steam, psn, xbox, embark, bungie };
 
@@ -109,7 +109,7 @@ public class GoogleSheetsService
                     var updateRequest = service.Spreadsheets.Values.Update(updateBody, spreadsheetId, updateRange);
                     updateRequest.ValueInputOption = SpreadsheetsResource.ValuesResource.UpdateRequest
                         .ValueInputOptionEnum.USERENTERED;
-                    await updateRequest.ExecuteAsync();
+                    await ExecuteWithRetryAsync(updateRequest.ExecuteAsync, "gamertag update (by ID)");
 
                     _logger.LogInformation("Updated gamertags for {DiscordName} ({DiscordId}) in row {Row} (matched by ID)",
                         discordName, discordId, i + 1);
@@ -135,7 +135,7 @@ public class GoogleSheetsService
                     var updateRequest = service.Spreadsheets.Values.Update(updateBody, spreadsheetId, updateRange);
                     updateRequest.ValueInputOption = SpreadsheetsResource.ValuesResource.UpdateRequest
                         .ValueInputOptionEnum.USERENTERED;
-                    await updateRequest.ExecuteAsync();
+                    await ExecuteWithRetryAsync(updateRequest.ExecuteAsync, "gamertag update (by name)");
 
                     _logger.LogInformation(
                         "Updated gamertags for {DiscordName} ({DiscordId}) in row {Row} (matched by name, backfilled ID)",
@@ -153,7 +153,7 @@ public class GoogleSheetsService
             SpreadsheetsResource.ValuesResource.AppendRequest.ValueInputOptionEnum.USERENTERED;
         appendRequest.InsertDataOption =
             SpreadsheetsResource.ValuesResource.AppendRequest.InsertDataOptionEnum.INSERTROWS;
-        await appendRequest.ExecuteAsync();
+        await ExecuteWithRetryAsync(appendRequest.ExecuteAsync, "gamertag append");
 
         _logger.LogInformation("Appended gamertags for {DiscordName} ({DiscordId})", discordName, discordId);
 
@@ -565,7 +565,8 @@ public class GoogleSheetsService
     private async Task SortSheetBySecondColumnAsync(SheetsService service, string spreadsheetId, string sheetName)
     {
         // Get the sheet ID by name
-        var spreadsheet = await service.Spreadsheets.Get(spreadsheetId).ExecuteAsync();
+        var spreadsheet = await ExecuteWithRetryAsync(
+            service.Spreadsheets.Get(spreadsheetId).ExecuteAsync, "sort lookup");
         var sheet = spreadsheet.Sheets.FirstOrDefault(s => s.Properties.Title == sheetName);
         if (sheet is null)
         {
@@ -605,7 +606,8 @@ public class GoogleSheetsService
             Requests = new List<Request> { sortRequest }
         };
 
-        var response = await service.Spreadsheets.BatchUpdate(batchUpdate, spreadsheetId).ExecuteAsync();
+        var response = await ExecuteWithRetryAsync(
+            service.Spreadsheets.BatchUpdate(batchUpdate, spreadsheetId).ExecuteAsync, "gamertag sort");
         _logger.LogInformation("Sorted sheet {SheetName} alphabetically by Discord Name (replies: {Count})",
             sheetName, response.Replies?.Count ?? 0);
     }

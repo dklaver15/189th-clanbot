@@ -349,8 +349,17 @@ public sealed partial class GamertagWizard
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to save gamertags for {User}", d.UserId);
+
+            // Surface a short reason so an admin reading the DM has a clue without
+            // digging through logs. The full stack trace is logged above.
+            var reason = ex is Google.GoogleApiException g
+                ? $"Google Sheets returned {(int)g.HttpStatusCode} ({g.HttpStatusCode})."
+                : ex.Message;
+            if (reason.Length > 200) reason = reason[..200] + "…";
+
             await EditBoardViaInteractionAsync(c, BuildClosingEmbed("❌ Save failed",
-                "Couldn't write to the roster sheet. Please try `/gamertags` again or contact an admin."), null);
+                "Couldn't write to the roster sheet. Please try `/gamertags` again or contact an admin.\n\n" +
+                $"-# Reason: {reason}"), null);
             return;
         }
 
