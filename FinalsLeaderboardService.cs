@@ -40,6 +40,7 @@ public sealed class FinalsLeaderboardService : BackgroundService
     private static readonly TimeSpan StartupGrace = TimeSpan.FromSeconds(30);
 
     private readonly FinalsRosterService _roster;
+    private readonly FinalsApiService _api;
     private readonly DiscordSocketClient _client;
     private readonly BotConfig _config;
     private readonly ILogger<FinalsLeaderboardService> _logger;
@@ -48,13 +49,23 @@ public sealed class FinalsLeaderboardService : BackgroundService
     // observation seeds the baseline silently; only a later increase announces.
     private readonly ConcurrentDictionary<string, int> _lastLeague = new();
 
+    // The newer season id we've already nagged about, so the rollover reminder
+    // posts once rather than every cycle until the config is bumped (manual mode).
+    private string? _rolloverAlertedFor;
+
+    // The effective season seen on the previous cycle (auto-detect mode). First
+    // cycle seeds this silently; a later increase posts a one-time "switched" FYI.
+    private string? _lastKnownEffectiveVersion;
+
     public FinalsLeaderboardService(
         FinalsRosterService roster,
+        FinalsApiService api,
         DiscordSocketClient client,
         IOptions<BotConfig> config,
         ILogger<FinalsLeaderboardService> logger)
     {
         _roster = roster;
+        _api = api;
         _client = client;
         _config = config.Value;
         _logger = logger;
@@ -95,6 +106,12 @@ public sealed class FinalsLeaderboardService : BackgroundService
 
     private async Task RunCycleAsync(CancellationToken ct)
     {
+        if (_config.FinalsSeasonRolloverReminderEnabled)
+        {
+            try { await CheckSeasonRolloverAsync(ct); }
+            catch (Exception ex) { _logger.LogError(ex, "FINALS season-rollover check failed"); }
+        }
+
         if (!_config.FinalsBoardEnabled && !_config.FinalsRankUpEnabled) return;
 
         var rankings = await _roster.GetClanRankingsAsync(ct);
@@ -175,6 +192,108 @@ public sealed class FinalsLeaderboardService : BackgroundService
             _logger.LogWarning(ex, "FINALS: failed to post rank-up for {Player}", m.Entry.Name);
         }
     }
+
+    // ─── Season-rollover reminder ────────────────────────────────────────────
+
+    private async Task CheckSeasonRolloverAsync(CancellationToken ct)
+    {
+        if (_config.FinalsAutoDetectSeason)
+            await CheckAutoSwitchAsync(ct);
+        else
+            await CheckManualRolloverAsync(ct);
+    }
+
+    /// <summary>
+    /// Auto-detect mode: the bot already follows the live season on its own, so this
+    /// just posts a one-time FYI when the resolved season advances. Warms the API
+    /// first so the resolved season is current before we compare.
+    /// </summary>
+    private async Task CheckAutoSwitchAsync(CancellationToken ct)
+    {
+        await _api.EnsureWarmAsync(ct);
+        var eff = _api.EffectiveVersion;
+        if (string.IsNullOrWhiteSpace(eff)) return;
+
+        if (_lastKnownEffectiveVersion is null)
+        {
+            _lastKnownEffectiveVersion = eff;  // silent baseline — no announce on first sight / restart
+            return;
+        }
+
+        if (eff == _lastKnownEffectiveVersion)
+            return;
+
+        var advanced = SeasonNumber(eff) is { } now && SeasonNumber(_lastKnownEffectiveVersion) is { } prev && now > prev;
+        var previous = _lastKnownEffectiveVersion;
+        _lastKnownEffectiveVersion = eff;
+
+        if (!advanced) return;  // changed but not an advance (e.g. config edit) — update silently
+
+        var embed = new EmbedBuilder()
+            .WithTitle("🗓️ THE FINALS — new season")
+            .WithColor(new Color(0x57F287))
+            .WithDescription(
+                $"A new ranked season (**{eff}**) is live, and the bot has **automatically switched** to it " +
+                $"(was {previous}). `/finals-rank`, the clan board, and rank-ups now track **{eff}** — no action needed.")
+            .WithFooter("Auto-detected • THE FINALS leaderboard")
+            .Build();
+
+        await PostNoticeAsync(embed, $"auto-switched {previous}→{eff}", ct);
+    }
+
+    /// <summary>
+    /// Manual mode (auto-detect off): nag once to bump the config when a newer
+    /// season goes live, since the bot won't follow it on its own.
+    /// </summary>
+    private async Task CheckManualRolloverAsync(CancellationToken ct)
+    {
+        var newer = await _api.DetectNewerSeasonAsync(ct);
+        if (newer is null || newer == _rolloverAlertedFor) return;
+
+        var current = _api.EffectiveVersion;
+        var embed = new EmbedBuilder()
+            .WithTitle("🗓️ THE FINALS — new season detected")
+            .WithColor(new Color(0xFAA61A))
+            .WithDescription(
+                $"A newer ranked season (**{newer}**) is now live, but the bot is still reading **{current}** " +
+                $"(now frozen/archived).\n\n" +
+                $"Update **`BotConfig.FinalsLeaderboardVersion`** to **`{newer}`** in `appsettings.json` and restart " +
+                $"— or set **`FinalsAutoDetectSeason: true`** to have the bot follow seasons automatically.")
+            .WithFooter("One-time reminder • THE FINALS leaderboard")
+            .Build();
+
+        await PostNoticeAsync(embed, $"manual rollover reminder for {newer}", ct);
+        _rolloverAlertedFor = newer;
+    }
+
+    /// <summary>Posts an officer-facing notice to HQ → announce → board channel.</summary>
+    private async Task PostNoticeAsync(Embed embed, string what, CancellationToken ct)
+    {
+        var channelId = _config.HqChannelId != 0 ? _config.HqChannelId
+            : _config.FinalsAnnounceChannelId != 0 ? _config.FinalsAnnounceChannelId
+            : _config.FinalsBoardChannelId;
+
+        if (channelId == 0 || _client.GetChannel(channelId) is not SocketTextChannel channel)
+        {
+            _logger.LogWarning("FINALS: {What}, but no channel is configured to post the notice.", what);
+            return;
+        }
+
+        try
+        {
+            await channel.SendMessageAsync(embed: embed);
+            _logger.LogInformation("FINALS season notice posted ({What})", what);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "FINALS: failed to post season notice ({What})", what);
+        }
+    }
+
+    private static int? SeasonNumber(string version) =>
+        version.StartsWith("s", StringComparison.OrdinalIgnoreCase) && int.TryParse(version.AsSpan(1), out var n)
+            ? n
+            : null;
 
     // ─── Clan leaderboard board ──────────────────────────────────────────────
 

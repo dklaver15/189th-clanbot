@@ -414,6 +414,12 @@ public class DiscordBotService : IHostedService
                 // in sync when changing /finals-rank.
                 FinalsCommandHandler.BuildCommand(),
 
+                // /finals-club — show a club's ranked players (filtered from the
+                // cached top-10k leaderboard by club tag). Open to all members;
+                // public reply; gated by BotConfig.FinalsEnabled. Same handler as
+                // /finals-rank. NOTE: keep CommandsCommandHandler.BuildCatalog in sync.
+                FinalsCommandHandler.BuildClubCommand(),
+
                 new SlashCommandBuilder()
                     .WithName("promote")
                     .WithDescription("Promote a member to the next rank")

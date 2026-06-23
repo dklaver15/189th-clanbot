@@ -26,6 +26,7 @@ namespace ClanGuardBot.Handlers;
 public sealed class FinalsCommandHandler
 {
     public const string CommandName = "finals-rank";
+    public const string ClubCommandName = "finals-club";
 
     private readonly FinalsApiService _api;
     private readonly GoogleSheetsService _sheets;
@@ -59,18 +60,29 @@ public sealed class FinalsCommandHandler
                 "Search the leaderboard by player name instead", isRequired: false)
             .Build();
 
+    public static SlashCommandProperties BuildClubCommand() =>
+        new SlashCommandBuilder()
+            .WithName(ClubCommandName)
+            .WithDescription("Show a club's ranked players on THE FINALS leaderboard")
+            .AddOption("tag", ApplicationCommandOptionType.String,
+                "The club tag to look up (e.g. DIGA)", isRequired: true)
+            .Build();
+
     private async Task OnSlashCommandAsync(SocketSlashCommand command)
     {
-        if (command.Data.Name != CommandName) return;
+        if (command.Data.Name is not (CommandName or ClubCommandName)) return;
 
         try
         {
             await command.DeferAsync();
-            await HandleAsync(command);
+            if (command.Data.Name == ClubCommandName)
+                await HandleClubAsync(command);
+            else
+                await HandleAsync(command);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error handling /{Command}", CommandName);
+            _logger.LogError(ex, "Error handling /{Command}", command.Data.Name);
             try { await command.FollowupAsync("Something went wrong looking that up. Try again in a bit.", ephemeral: true); }
             catch { /* already responded */ }
         }
@@ -191,6 +203,74 @@ public sealed class FinalsCommandHandler
         await command.FollowupAsync(embed: embed);
     }
 
+    private async Task HandleClubAsync(SocketSlashCommand command)
+    {
+        if (!_config.FinalsEnabled)
+        {
+            await command.FollowupAsync(
+                "THE FINALS lookups aren't enabled on this server yet — an officer can turn them on in the bot config.",
+                ephemeral: true);
+            return;
+        }
+
+        var rawTag = command.Data.Options.FirstOrDefault(o => o.Name == "tag")?.Value as string ?? "";
+        // Players often write the tag with brackets ("[DIGA]") — normalise to the bare tag.
+        var tag = rawTag.Trim().Trim('[', ']', ' ');
+        if (string.IsNullOrWhiteSpace(tag))
+        {
+            await command.FollowupAsync("Give me a club tag to look up, e.g. `/finals-club tag:DIGA`.", ephemeral: true);
+            return;
+        }
+
+        var snapshot = _api.Snapshot();
+        if (snapshot.Count == 0)
+        {
+            await command.FollowupAsync(_api.IsWarmedUp
+                ? "The leaderboard came back empty just now — try again shortly."
+                : "Still loading the leaderboard (the first fetch takes a moment) — try again shortly.", ephemeral: true);
+            return;
+        }
+
+        var members = snapshot
+            .Where(e => string.Equals(e.ClubTag, tag, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(e => e.Rank)
+            .ToList();
+
+        if (members.Count == 0)
+        {
+            await command.FollowupAsync(
+                $"No players with club tag **[{Sanitize(tag)}]** are on the ranked leaderboard (it's the global top 10,000).",
+                ephemeral: true);
+            return;
+        }
+
+        const int maxList = 25;
+        var sb = new StringBuilder();
+        foreach (var e in members.Take(maxList))
+        {
+            sb.AppendLine(
+                $"`#{e.Rank,-6:N0}` {FinalsFormat.LeagueEmoji(e.League)} **{Sanitize(e.Name)}** — " +
+                $"{e.League} · {e.RankScore:N0}");
+        }
+        if (members.Count > maxList)
+            sb.AppendLine($"\n_…and {members.Count - maxList} more._");
+
+        var best = members[0];                         // already rank-sorted
+        var totalScore = members.Sum(e => (long)e.RankScore);
+
+        var embed = new EmbedBuilder()
+            .WithTitle($"🏆 Club [{Sanitize(tag)}] — THE FINALS")
+            .WithColor(new Color(0xE63946))
+            .WithDescription(sb.ToString().TrimEnd())
+            .AddField("Ranked players", $"{members.Count:N0}", inline: true)
+            .AddField("Best", $"{FinalsFormat.LeagueEmoji(best.League)} #{best.Rank:N0}", inline: true)
+            .AddField("Combined score", $"{totalScore:N0}", inline: true)
+            .WithFooter($"Season {SeasonLabel()} • global top-10k members of this club")
+            .Build();
+
+        await command.FollowupAsync(embed: embed);
+    }
+
     private Embed BuildPlayerEmbed(FinalsEntry e, string title, string? thumbnailUrl, string matchedVia)
     {
         var builder = new EmbedBuilder()
@@ -214,7 +294,9 @@ public sealed class FinalsCommandHandler
 
     private string SeasonLabel()
     {
-        var v = string.IsNullOrWhiteSpace(_config.FinalsLeaderboardVersion) ? "s10" : _config.FinalsLeaderboardVersion.Trim();
+        // Reflect the season actually in use (auto-resolved when enabled), not the seed.
+        var v = _api.EffectiveVersion;
+        if (string.IsNullOrWhiteSpace(v)) v = "s10";
         // "s10" → "10"; leave non-season ids (cb1, ob) as-is.
         return v.StartsWith("s") && int.TryParse(v[1..], out var n) ? n.ToString() : v;
     }

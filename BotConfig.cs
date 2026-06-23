@@ -807,11 +807,25 @@ public class BotConfig
 
     /// <summary>
     /// Leaderboard version (season) id queried on the community API, e.g. "s10"
-    /// for Season 10. Bump this when a new season starts (the previous season's
-    /// data freezes; the new season becomes the live one). Non-season ids ("cb1",
-    /// "ob") are also accepted. Default "s10".
+    /// for Season 10. With <see cref="FinalsAutoDetectSeason"/> on (the default)
+    /// this is just the SEED/fallback — the bot resolves the live season itself
+    /// and this only matters before the first resolve or if auto-detect is off.
+    /// With auto-detect off, this is authoritative and must be bumped each season.
+    /// Non-season ids ("cb1", "ob") are also accepted. Default "s10".
     /// </summary>
     public string FinalsLeaderboardVersion { get; set; } = "s10";
+
+    /// <summary>
+    /// When true (default), the bot determines the current live season on its own
+    /// at each refresh — the highest "sN" leaderboard that still returns data — and
+    /// uses it instead of the static <see cref="FinalsLeaderboardVersion"/> (which
+    /// becomes just a starting point). This means a season rollover is picked up
+    /// automatically with no config change or restart; an FYI is still posted (see
+    /// <see cref="FinalsSeasonRolloverReminderEnabled"/>). Set false to pin the
+    /// season to <see cref="FinalsLeaderboardVersion"/> exactly. Only "sN" seeds can
+    /// be auto-resolved; a non-season seed (cb1/ob) disables auto-detect implicitly.
+    /// </summary>
+    public bool FinalsAutoDetectSeason { get; set; } = true;
 
     /// <summary>
     /// Platform leaderboard to read: "crossplay" (default, recommended — covers
@@ -853,6 +867,16 @@ public class BotConfig
     /// even when FinalsRankUpEnabled is true.
     /// </summary>
     public ulong FinalsAnnounceChannelId { get; set; } = default;
+
+    /// <summary>
+    /// When true, the background service watches for a new season going live (the
+    /// next "sN+1" leaderboard returning data) and posts a one-time officer reminder
+    /// to bump <see cref="FinalsLeaderboardVersion"/>, so the feature doesn't keep
+    /// reading a frozen, archived season after a rollover. The reminder posts to
+    /// <see cref="HqChannelId"/> if set, else FinalsAnnounceChannelId, else
+    /// FinalsBoardChannelId. De-duped in memory per detected season. Default true.
+    /// </summary>
+    public bool FinalsSeasonRolloverReminderEnabled { get; set; } = true;
 
     // ─── Server protection: Account-Age Gate ─────────────────────────
     /// <summary>

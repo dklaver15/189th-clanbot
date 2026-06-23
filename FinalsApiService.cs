@@ -79,6 +79,10 @@ public sealed class FinalsApiService
     private Task? _refreshTask;
     private volatile bool _loaded;
 
+    // The season auto-resolved at the last refresh (null until resolved / when
+    // auto-detect is off). EffectiveVersion prefers this over the config seed.
+    private volatile string? _resolvedVersion;
+
     public FinalsApiService(
         IHttpClientFactory httpClientFactory,
         ILogger<FinalsApiService> logger,
@@ -162,7 +166,7 @@ public sealed class FinalsApiService
     {
         if (string.IsNullOrWhiteSpace(query)) return Array.Empty<FinalsEntry>();
 
-        var url = $"{ApiBase}/v1/leaderboard/{Version}/{Platform}?name={Uri.EscapeDataString(query.Trim())}";
+        var url = $"{ApiBase}/v1/leaderboard/{EffectiveVersion}/{Platform}?name={Uri.EscapeDataString(query.Trim())}";
         var resp = await FetchAsync(url, ct);
         if (resp is null) return Array.Empty<FinalsEntry>();
 
@@ -172,9 +176,107 @@ public sealed class FinalsApiService
             .ToList();
     }
 
-    private string Version => string.IsNullOrWhiteSpace(_config.FinalsLeaderboardVersion)
+    /// <summary>
+    /// Probes whether a season NEWER than the configured one has gone live, i.e. a
+    /// rollover has happened and <see cref="BotConfig.FinalsLeaderboardVersion"/>
+    /// should be bumped. Parses the configured "sN" id and checks "s{N+1}": if that
+    /// leaderboard returns entries, it's live → returns its id (e.g. "s11"); else
+    /// null. Non-season ids (cb1/ob) return null (nothing to roll over). Cheap —
+    /// uses a count-only request.
+    /// </summary>
+    public async Task<string?> DetectNewerSeasonAsync(CancellationToken ct = default)
+    {
+        var v = EffectiveVersion;
+        if (!TryParseSeason(v, out var n)) return null;
+
+        var candidate = $"s{n + 1}";
+        var url = $"{ApiBase}/v1/leaderboard/{candidate}/{Platform}?count=true";
+        var count = await FetchCountAsync(url, ct);
+        return count is > 0 ? candidate : null;
+    }
+
+    /// <summary>
+    /// Resolves the current live season: the highest "sN" leaderboard that still
+    /// returns data, searched in a small window around the configured seed (handles
+    /// a seed that's behind OR ahead of reality). Returns null if it can't resolve
+    /// (e.g. a non-season seed, or the API is unreachable) so the caller keeps the
+    /// configured value. Uses cheap count-only probes.
+    /// </summary>
+    private async Task<string?> ResolveCurrentSeasonAsync(CancellationToken ct)
+    {
+        if (!TryParseSeason(ConfigVersion, out var seed)) return null; // non-season seed → no auto-detect
+
+        async Task<bool> HasData(int n)
+        {
+            var url = $"{ApiBase}/v1/leaderboard/s{n}/{Platform}?count=true";
+            return await FetchCountAsync(url, ct) is > 0;
+        }
+
+        // Find a season that has data, starting at the seed and stepping down a few
+        // in case the seed was set ahead of the real current season.
+        int? start = null;
+        for (var n = seed; n >= seed - 3 && n >= 1; n--)
+        {
+            if (await HasData(n)) { start = n; break; }
+        }
+        if (start is null) return null; // nothing around the seed responded; keep config
+
+        // Climb while the next season also has data — the highest with data is live.
+        var current = start.Value;
+        for (var step = 0; step < 6; step++)
+        {
+            if (await HasData(current + 1)) current++;
+            else break;
+        }
+
+        return $"s{current}";
+    }
+
+    private static bool TryParseSeason(string version, out int number)
+    {
+        number = 0;
+        return version.StartsWith("s", StringComparison.OrdinalIgnoreCase)
+               && int.TryParse(version.AsSpan(1), out number);
+    }
+
+    private async Task<int?> FetchCountAsync(string url, CancellationToken ct)
+    {
+        try
+        {
+            var http = _httpClientFactory.CreateClient();
+            http.Timeout = TimeSpan.FromSeconds(15);
+
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            req.Headers.UserAgent.ParseAdd("ClanGuardBot/1.0 (Discord bot for the 189th clan)");
+
+            using var resp = await http.SendAsync(req, ct);
+            if (!resp.IsSuccessStatusCode) return null; // a not-yet-started season 404s / errors
+            var json = await resp.Content.ReadAsStringAsync(ct);
+            if (string.IsNullOrWhiteSpace(json)) return null;
+            return JsonSerializer.Deserialize<ApiResponse>(json, JsonOpts)?.Count;
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "THE FINALS season-probe failed for {Url}", url);
+            return null;
+        }
+    }
+
+    /// <summary>The season seed from config (the authoritative value when auto-detect is off).</summary>
+    private string ConfigVersion => string.IsNullOrWhiteSpace(_config.FinalsLeaderboardVersion)
         ? "s10"
         : _config.FinalsLeaderboardVersion.Trim();
+
+    /// <summary>
+    /// The season actually used for queries: the auto-resolved live season when
+    /// <see cref="BotConfig.FinalsAutoDetectSeason"/> is on and a resolve has
+    /// succeeded, otherwise the config seed. Safe to read from any thread.
+    /// </summary>
+    public string EffectiveVersion =>
+        _config.FinalsAutoDetectSeason && _resolvedVersion is { Length: > 0 }
+            ? _resolvedVersion
+            : ConfigVersion;
 
     private string Platform => string.IsNullOrWhiteSpace(_config.FinalsPlatform)
         ? "crossplay"
@@ -194,7 +296,25 @@ public sealed class FinalsApiService
     {
         try
         {
-            var url = $"{ApiBase}/v1/leaderboard/{Version}/{Platform}";
+            // Auto-detect the live season first (cheap count probes) so the
+            // leaderboard fetch below targets the right season after a rollover.
+            if (_config.FinalsAutoDetectSeason)
+            {
+                var resolved = await ResolveCurrentSeasonAsync(CancellationToken.None);
+                if (resolved is not null && resolved != _resolvedVersion)
+                {
+                    _logger.LogInformation("FinalsApiService resolved live season to {Season} (seed {Seed})",
+                        resolved, ConfigVersion);
+                    _resolvedVersion = resolved;
+                }
+            }
+            else
+            {
+                _resolvedVersion = null;
+            }
+
+            var version = EffectiveVersion;
+            var url = $"{ApiBase}/v1/leaderboard/{version}/{Platform}";
             var entries = await FetchAsync(url, CancellationToken.None);
 
             lock (_cacheLock)
@@ -206,7 +326,7 @@ public sealed class FinalsApiService
                     _expireUtc = DateTime.UtcNow.Add(LeaderboardTtl);
                     _logger.LogInformation(
                         "FinalsApiService cached {Count} leaderboard entries for {Version}/{Platform}",
-                        entries.Count, Version, Platform);
+                        entries.Count, version, Platform);
                 }
                 else
                 {
@@ -296,6 +416,7 @@ public sealed class FinalsApiService
 
     private sealed class ApiResponse
     {
+        public int? Count { get; set; }
         public List<ApiEntry>? Data { get; set; }
     }
 

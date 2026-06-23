@@ -589,6 +589,8 @@ public class CommandsCommandHandler
                 "Everyone", everyone),
             new("finals-rank", "Look up a player's rank on THE FINALS leaderboard",
                 "Everyone", everyone),
+            new("finals-club", "Show a club's ranked players on THE FINALS leaderboard",
+                "Everyone", everyone),
             new("lookup", "Look up someone's gamertags from the roster",
                 "Everyone", everyone),
             new("my-invites", "Show invites you created with use counts and attribution",
