@@ -13,6 +13,27 @@ public class UserActivity
 
     /// <summary>When the user last joined a voice channel (null if not currently in voice).</summary>
     public DateTime? VoiceJoinedAt { get; set; }
+
+    /// <summary>
+    /// When this member's AWOL activity window was last reset. Set when the AWOL
+    /// role is removed from a non-exempt member (detected in real time by
+    /// RankTrackingHandler) so the member gets a full fresh window before they
+    /// can be flagged AWOL again.
+    ///
+    /// ── Why this exists ──
+    /// AwolCheckService re-evaluates every member on a timer purely from their
+    /// activity data and current role state. Removing the AWOL role by hand does
+    /// nothing to the activity data, so without this the very next sweep saw
+    /// "inactive + no AWOL role" and immediately re-assigned the role and
+    /// re-posted the member to #awol-list. AwolCheckService Step 2 now honors
+    /// WindowResetAt the same way it honors JoinedAt for brand-new members: a
+    /// member is not eligible for AWOL until a full activity window has elapsed
+    /// since the reset. If they're still inactive once that window passes, they
+    /// get flagged again — by design.
+    ///
+    /// Null = never reset; normal rolling-window evaluation applies.
+    /// </summary>
+    public DateTime? WindowResetAt { get; set; }
 }
 
 /// <summary>

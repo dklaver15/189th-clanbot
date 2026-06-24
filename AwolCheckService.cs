@@ -234,11 +234,19 @@ public class AwolCheckService : BackgroundService
         // ------------------------------------------------------------------
         // Step 1: Ensure all guild members have an activity record
         // ------------------------------------------------------------------
-        var existingUserIds = (await db.UserActivities
+        var existingActivities = await db.UserActivities
                 .Where(a => a.GuildId == guild.Id)
-                .Select(a => a.UserId)
-                .ToListAsync(ct))
-                .ToHashSet();
+                .Select(a => new { a.UserId, a.WindowResetAt })
+                .ToListAsync(ct);
+
+        var existingUserIds = existingActivities.Select(a => a.UserId).ToHashSet();
+
+        // Per-member window-reset timestamps, used by the Step 2 guard below to
+        // give a recently-cleared member a full fresh window before they can be
+        // flagged AWOL again. See UserActivity.WindowResetAt for the rationale.
+        var windowResetByUser = existingActivities
+                .Where(a => a.WindowResetAt.HasValue)
+                .ToDictionary(a => a.UserId, a => a.WindowResetAt!.Value);
 
         foreach (var member in guild.Users)
         {
@@ -317,6 +325,21 @@ public class AwolCheckService : BackgroundService
             // Must have been in the server long enough for a full window
             if (member.JoinedAt.HasValue &&
                 member.JoinedAt.Value.UtcDateTime > windowStart)
+                continue;
+
+            // ── Window-reset guard ──
+            // If this member's window was reset more recently than a full window
+            // ago (e.g. an officer removed their AWOL role by hand and
+            // RankTrackingHandler stamped WindowResetAt), give them a fresh full
+            // window before they can be re-flagged. Without this, the sweep would
+            // re-assign AWOL on the very next cycle because the underlying
+            // activity data is unchanged. Mirrors the JoinedAt guard above. The
+            // member doesn't currently hold the AWOL role (it was just removed),
+            // so skipping here only suppresses a NEW assignment — there is nothing
+            // to remove. Once windowStart advances past the reset, normal
+            // evaluation resumes against activity in the now-fresh window.
+            if (windowResetByUser.TryGetValue(member.Id, out var windowResetAt) &&
+                windowResetAt > windowStart)
                 continue;
 
             var messageCount = await db.MessageEvents

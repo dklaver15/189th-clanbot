@@ -117,6 +117,22 @@ public class RankTrackingHandler
                 after.Username, after.Guild.Name);
         }
 
+        // ── AWOL-removed handling ──
+        // When the AWOL role is removed from a non-exempt member (officer clears
+        // it by hand, mass cleanup, etc.), reset their activity window so the
+        // periodic sweep doesn't immediately re-assign it. Own try/catch for the
+        // same reasons as the exempt transition above.
+        try
+        {
+            await HandleAwolRoleRemovedAsync(before, after);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Error handling AWOL-role removal for {Username} in {Guild}",
+                after.Username, after.Guild.Name);
+        }
+
         // Determine rank before and after using the configured rank roles list
         var rankRoles = _config.GetRankRolesList();
         var beforeRank = GetHighestRank(before.Roles.Select(r => r.Name), rankRoles);
@@ -380,6 +396,117 @@ public class RankTrackingHandler
                 "Failed to resolve AwolRecords for {Username} after exempt-role transition",
                 after.Username);
         }
+    }
+
+    /// <summary>
+    /// If the member just LOST the AWOL role and is NOT exempt, reset their
+    /// activity window so AwolCheckService gives them a full fresh window before
+    /// it can flag them AWOL again, and clear any outstanding AWOL records /
+    /// HQ embeds. No-op in all other cases.
+    ///
+    /// ── Why this exists ──
+    /// AwolCheckService re-evaluates members on a timer from activity data plus
+    /// current role state. Removing the AWOL role by hand changes neither, so the
+    /// next sweep saw "inactive + no AWOL role" and immediately re-assigned the
+    /// role and re-posted the member to #awol-list. Stamping WindowResetAt here
+    /// makes the manual removal stick for a full window (Step 2's window-reset
+    /// guard honors it the same way it honors JoinedAt). If the member is still
+    /// inactive when that fresh window elapses, they get flagged again — by
+    /// design.
+    ///
+    /// Exempt transitions are handled by HandleExemptRoleGainedAsync. We skip the
+    /// reset when the member is currently exempt: their AWOL state is suppressed
+    /// by the exemption itself, and resetting the window would be meaningless
+    /// (exempt members are never evaluated for activity).
+    /// </summary>
+    private async Task HandleAwolRoleRemovedAsync(SocketGuildUser before, SocketGuildUser after)
+    {
+        var awolRole = after.Guild.Roles.FirstOrDefault(r =>
+            r.Name.Equals(_config.AwolRoleName, StringComparison.OrdinalIgnoreCase));
+        if (awolRole is null) return;
+
+        var hadAwol = before.Roles.Any(r => r.Id == awolRole.Id);
+        var hasAwol = after.Roles.Any(r => r.Id == awolRole.Id);
+
+        // Only react to the AWOL present → absent transition.
+        if (!hadAwol || hasAwol) return;
+
+        // Exempt members are handled by the exempt-transition path; their AWOL
+        // suppression comes from the exemption, not a window reset.
+        var exemptRoles = _config.GetExemptRolesList();
+        var isExempt = after.Roles.Any(r =>
+            exemptRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase));
+        if (isExempt) return;
+
+        var now = DateTime.UtcNow;
+
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+        // ── Reset the activity window (upsert the UserActivity row) ──
+        var activity = await db.UserActivities
+            .FirstOrDefaultAsync(a => a.GuildId == after.Guild.Id && a.UserId == after.Id);
+        if (activity is null)
+        {
+            activity = new UserActivity
+            {
+                GuildId = after.Guild.Id,
+                UserId = after.Id,
+                Username = after.ToString() ?? after.Username,
+            };
+            db.UserActivities.Add(activity);
+        }
+        activity.WindowResetAt = now;
+
+        // ── Resolve outstanding AWOL records and delete posted HQ embeds ──
+        // Catch both pending (NotificationSent false, no message id) and posted
+        // (message id stored) records, so removing the role also clears the
+        // member from #awol-list. Mirrors AwolCheckService.CloseAwolRecordsAnd
+        // DeleteEmbedsAsync; kept here because the sweep's window-reset guard
+        // makes the member skip the branches that would otherwise call it.
+        var openRecords = await db.AwolRecords
+            .Where(r => r.GuildId == after.Guild.Id
+                     && r.UserId == after.Id
+                     && (!r.NotificationSent || r.NotificationMessageId != null))
+            .ToListAsync();
+
+        foreach (var record in openRecords)
+        {
+            if (record.NotificationMessageId.HasValue
+                && record.NotificationChannelId.HasValue)
+            {
+                try
+                {
+                    var notifChannel = after.Guild.GetTextChannel(record.NotificationChannelId.Value);
+                    if (notifChannel is not null)
+                        await notifChannel.DeleteMessageAsync(record.NotificationMessageId.Value);
+                }
+                catch (Discord.Net.HttpException ex)
+                    when (ex.HttpCode == System.Net.HttpStatusCode.NotFound)
+                {
+                    // Already gone (manually deleted, or cleared by /clear-awol-list).
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "Failed to delete AWOL embed for {Username} ({UserId}) on AWOL role removal (message {MessageId})",
+                        after.Username, after.Id, record.NotificationMessageId.Value);
+                }
+
+                record.NotificationChannelId = null;
+                record.NotificationMessageId = null;
+            }
+
+            record.NotificationSent = true;
+            record.NotificationSentAt = now;
+        }
+
+        await db.SaveChangesAsync();
+
+        _logger.LogInformation(
+            "AWOL role removed from {Username} ({UserId}) in {Guild} — reset activity window to {ResetAt:yyyy-MM-dd HH:mm} UTC " +
+            "and resolved {Records} AWOL record(s). Member will not be re-flagged until a full activity window elapses.",
+            after.Username, after.Id, after.Guild.Name, now, openRecords.Count);
     }
 
     /// <summary>
