@@ -29,12 +29,20 @@ namespace ClanGuardBot.RedditLeads;
 /// keyword. Tightening the list later is a one-line change.
 ///
 /// ── Tier 2: negative keyword reject ──
-/// Posts containing any of the recruiter-side phrases ("recruiting",
-/// "join our", etc.) are rejected outright — these are competing clans
-/// posting, not leads. The reject list runs after the positive match;
-/// a post can mention "lfg" in passing while still being a recruitment
-/// ad ("we're recruiting LFG-style players"), and the negative list
-/// catches that.
+/// Posts containing any of the negative phrases are rejected outright.
+/// Two sub-groups:
+///  • Recruiter-side ads ("recruiting", "join our", etc.) — competing
+///    clans posting, not leads. A post can mention "lfg" in passing
+///    while still being a recruitment ad ("we're recruiting LFG-style
+///    players"), and the negative list catches that.
+///  • Explicit-exclusion asks ("not looking for a clan", "not joining a
+///    discord", "one to one for friendship") — these DO trip a positive
+///    keyword (usually "looking for friends") but the author has
+///    explicitly ruled out exactly what we offer. Phrases are anchored
+///    on "not"/"don't" right before the excluded thing so posters who
+///    DO want a clan ("not just looking for a clan") aren't caught.
+/// The reject list runs after the positive match, so anything here wins
+/// over a tier-1 hit.
 ///
 /// ── Tier 3: per-sub game filter ──
 /// Some subs (currently just r/GamerPals) are broad LFG aggregators
@@ -181,6 +189,7 @@ public sealed class LeadMatcher
 
     private static readonly string[] NegativeKeywords = new[]
     {
+        // ── Recruiter-side ads (competing clans posting, not leads) ──
         "we are recruiting",
         "now recruiting",
         "currently recruiting",
@@ -195,6 +204,50 @@ public sealed class LeadMatcher
         "now hiring",
         "we offer",
         "weekly events",
+
+        // ── Poster explicitly rules out a clan / discord / group ──
+        // Added 2026-06-23 after a member flagged LFG posts that trip a
+        // positive keyword ("looking for friends") while the body says
+        // they do NOT want exactly what we offer. These reject the post
+        // outright (Tier 2 runs after the positive match). Each phrase is
+        // anchored on "not"/"don't" immediately before the thing, so a
+        // poster who DOES want a clan isn't caught — an intervening word
+        // ("not JUST looking for a clan") breaks the \s+ sequence and the
+        // phrase no longer matches.
+        "not looking for a clan",
+        "not looking for clan",
+        "not joining a clan",
+        "not joining clan",
+        "not interested in a clan",
+        "not interested in clans",
+        "don't want a clan",
+        "dont want a clan",
+        "not looking to join a clan",
+        "don't want to join a clan",
+        "dont want to join a clan",
+        "no clan recruiters",
+        "no clan recruitment",
+        "not looking for a discord server",
+        "not looking for discord server",
+        "not looking for a discord",
+        "not looking for discord",
+        "not joining a discord",
+        "not joining your discord",
+        "don't want a discord",
+        "dont want a discord",
+        "not looking for a group",
+        "not looking for a community",
+
+        // ── One-to-one / penpal friendship asks (not a group fit) ──
+        // "one to one" / "1 to 1" is penpal vernacular and rarely the
+        // gaming "1 on 1 / one on one" scrim term, so we keep these narrow
+        // and do NOT add bare "1 on 1" — that would reject clan-seekers
+        // who mention 1v1 gameplay.
+        "want one to one",
+        "one to one for friendship",
+        "one to one friendship",
+        "1 to 1 for friendship",
+        "1 to 1 friendship",
     };
 
     // Pre-compiled regexes built once at class-load. Word-boundary anchors
