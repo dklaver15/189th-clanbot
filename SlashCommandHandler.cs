@@ -211,6 +211,27 @@ public class SlashCommandHandler
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
+        // Reset the member's activity window so the periodic AWOL sweep gives
+        // them a full fresh window before it can re-flag them. We stamp this
+        // directly here rather than relying on the GuildMemberUpdated echo from
+        // RemoveRoleAsync (RankTrackingHandler.HandleAwolRoleRemovedAsync) — that
+        // handler bails if the gateway "before" state isn't cached, which would
+        // otherwise leave a cleared member eligible for immediate re-flagging.
+        // See UserActivity.WindowResetAt for the rationale.
+        var activity = await db.UserActivities
+            .FirstOrDefaultAsync(a => a.GuildId == command.GuildId.Value && a.UserId == targetUser.Id);
+        if (activity is null)
+        {
+            activity = new UserActivity
+            {
+                GuildId = command.GuildId.Value,
+                UserId = targetUser.Id,
+                Username = targetUser.ToString() ?? targetUser.Username,
+            };
+            db.UserActivities.Add(activity);
+        }
+        activity.WindowResetAt = DateTime.UtcNow;
+
         // Close pending records AND clean up any HQ embed that was already
         // posted. The OR catches both: pending records (NotificationSent=false,
         // no message id) and posted records (NotificationSent=true with a
