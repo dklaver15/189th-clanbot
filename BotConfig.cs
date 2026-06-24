@@ -87,6 +87,41 @@ public class BotConfig
     /// </summary>
     public int AwolNotificationMaxAgeDays { get; set; } = 4;
 
+    /// <summary>
+    /// When true, the bot posts a reminder in <see cref="AwolWipeReminderChannelId"/>
+    /// on the <see cref="AwolWipeReminderDayOfMonth"/> of every month (at
+    /// <see cref="AwolWipeReminderHourEt"/>), tagging
+    /// <see cref="AwolWipeReminderMentionUserIds"/> to wipe the AWOLs
+    /// (/kick-awols) and clear the list (/clear-awol-list). Set false to disable
+    /// the monthly reminder entirely.
+    /// </summary>
+    public bool AwolWipeReminderEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Channel where the monthly AWOL wipe reminder is posted. The reminder is
+    /// idle if this is 0 or <see cref="AwolWipeReminderEnabled"/> is false.
+    /// </summary>
+    public ulong AwolWipeReminderChannelId { get; set; } = 1501365290569564220;
+
+    /// <summary>
+    /// User IDs tagged (pinged) in the monthly AWOL wipe reminder. Empty means the
+    /// reminder still posts but pings no one.
+    /// </summary>
+    public List<ulong> AwolWipeReminderMentionUserIds { get; set; } =
+        new() { 825902140639412225, 1290399637882273894 };
+
+    /// <summary>
+    /// Day of the month (1-31) on which the monthly AWOL wipe reminder posts.
+    /// Clamped to the month's last day, so 31 still fires on Feb 28/29. Default 23.
+    /// </summary>
+    public int AwolWipeReminderDayOfMonth { get; set; } = 23;
+
+    /// <summary>
+    /// Hour of day (0-23, US Eastern / America/New_York) at which the monthly AWOL
+    /// wipe reminder posts. Default 9 = 9am ET.
+    /// </summary>
+    public int AwolWipeReminderHourEt { get; set; } = 9;
+
     /// <summary>How often (in minutes) the background check runs.</summary>
     public int CheckIntervalMinutes { get; set; } = 180;
 

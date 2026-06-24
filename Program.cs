@@ -470,6 +470,14 @@ try
     builder.Services.AddHostedService<ApolloBackfillService>();
     builder.Services.AddHostedService<AwolCheckService>();
 
+    // AwolWipeReminderService: posts a monthly reminder in
+    // BotConfig.AwolWipeReminderChannelId on AwolWipeReminderDayOfMonth (the 23rd,
+    // 9am ET by default), tagging AwolWipeReminderMentionUserIds, to wipe the
+    // AWOLs (/kick-awols) and clear the list (/clear-awol-list). Restart-safe via
+    // data/awol-wipe-reminder.json. Gated by AwolWipeReminderEnabled + a non-zero
+    // AwolWipeReminderChannelId.
+    builder.Services.AddHostedService<AwolWipeReminderService>();
+
     // VoiceSessionCleanupService: one-shot service that runs at startup to close
     // stuck voice sessions (LeftAt IS NULL rows that don't match current Discord
     // voice state). Prevents orphaned sessions from inflating activity totals.
