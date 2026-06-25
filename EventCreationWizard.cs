@@ -291,6 +291,19 @@ public sealed class EventCreationWizard
 
     private async Task HandleDescriptionAsync(EventCreationSession s, string text)
     {
+        // Cap at Discord's embed-description limit (4096). The live #events post
+        // renders this via WithDescription (4096 max); without this guard an
+        // over-long paste blows up at publish time. The confirm preview truncates
+        // further (to 1024) because it shows the description as an embed field.
+        if (text.Length > 4096
+         && !text.Equals("skip", StringComparison.OrdinalIgnoreCase)
+         && !text.Equals("none", StringComparison.OrdinalIgnoreCase))
+        {
+            await s.Dm.SendMessageAsync(embed: Form("📝 Description too long",
+                "Keep it under 4096 characters — trim it down, or type `skip`."));
+            return;
+        }
+
         s.Draft.Description = text.Equals("skip", StringComparison.OrdinalIgnoreCase)
                            || text.Equals("none", StringComparison.OrdinalIgnoreCase)
             ? string.Empty
@@ -527,7 +540,11 @@ public sealed class EventCreationWizard
         }
         catch (Exception ex)
         {
+            // Don't swallow silently: a throw here (e.g. building the confirm card)
+            // otherwise looks like the button "did nothing". Surface it so the
+            // organizer knows to retry rather than staring at a dead button.
             _logger.LogError(ex, "Wizard button {CustomId} failed", component.Data.CustomId);
+            await SafeSend(s, "⚠️ Something went wrong on that step. Type `cancel` and run `/event` to start over.");
         }
     }
 
@@ -805,8 +822,14 @@ public sealed class EventCreationWizard
             embed.AddField("Dates", string.Join("\n", all.Select(u => $"• {EventTimeParser.Stamp(u, 'f')}")));
         }
 
+        // Truncate for the PREVIEW only: this card renders the description as an
+        // embed FIELD (Discord caps field values at 1024 chars), whereas the live
+        // #events post uses WithDescription (4096 limit) and keeps the full text.
+        // Without this, a 1025–4096-char description threw inside AddField — which
+        // was swallowed on the button path ("Does not repeat" did nothing) and
+        // surfaced as a generic "Something went wrong" on the typed-recurrence path.
         if (!string.IsNullOrWhiteSpace(d.Description))
-            embed.AddField("Description", d.Description);
+            embed.AddField("Description", Truncate(d.Description, 1024));
 
         // Make the assumed zone visible: the times above render in each viewer's
         // own local clock, but the creator's text input was interpreted in this
@@ -863,6 +886,10 @@ public sealed class EventCreationWizard
                   : ", ongoing";
         return $"{d.Frequency}{bound}";
     }
+
+    /// <summary>Caps a value to Discord's 1024-char embed-field limit, with an ellipsis.</summary>
+    private static string Truncate(string s, int max) =>
+        s.Length <= max ? s : s[..(max - 1)] + "…";
 
     private static string FormatDuration(DateTime startUtc, DateTime endUtc)
     {

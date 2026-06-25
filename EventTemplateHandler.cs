@@ -313,6 +313,18 @@ public sealed class EventTemplateHandler
 
     private async Task HandleDescriptionAsync(SaveSession s, string text)
     {
+        // Cap at Discord's embed-description limit (4096) — events created from
+        // this template render the description via WithDescription. The confirm
+        // preview truncates further (1024) since it shows it as an embed field.
+        if (text.Length > 4096
+         && !text.Equals("skip", StringComparison.OrdinalIgnoreCase)
+         && !text.Equals("none", StringComparison.OrdinalIgnoreCase))
+        {
+            await s.Dm.SendMessageAsync(embed: Form("📝 Description too long",
+                "Keep it under 4096 characters — trim it down, or type `skip`."));
+            return;
+        }
+
         s.Description = text.Equals("skip", StringComparison.OrdinalIgnoreCase)
                      || text.Equals("none", StringComparison.OrdinalIgnoreCase)
             ? string.Empty
@@ -440,7 +452,7 @@ public sealed class EventTemplateHandler
             .AddField("Banner", string.IsNullOrWhiteSpace(s.ImageFileName) ? "None" : "Set", inline: true);
 
         if (!string.IsNullOrWhiteSpace(s.Description))
-            embed.AddField("Description", s.Description);
+            embed.AddField("Description", Truncate(s.Description, 1024));
 
         if (!string.IsNullOrWhiteSpace(s.ImageFileName))
             embed.WithThumbnailUrl($"attachment://{s.ImageFileName}");
@@ -1223,6 +1235,14 @@ public sealed class EventTemplateHandler
     private async Task HandleEditDescriptionAsync(EditSession s, string text)
     {
         if (text.Equals("keep", StringComparison.OrdinalIgnoreCase)) { await SendEditMenuAsync(s); return; }
+        if (text.Length > 4096
+         && !text.Equals("none", StringComparison.OrdinalIgnoreCase)
+         && !text.Equals("skip", StringComparison.OrdinalIgnoreCase))
+        {
+            await s.Dm.SendMessageAsync(embed: Form("📝 Description too long",
+                "Keep it under 4096 characters — trim it down, or type `none` to clear it."));
+            return;
+        }
         s.Description = text.Equals("none", StringComparison.OrdinalIgnoreCase)
                      || text.Equals("skip", StringComparison.OrdinalIgnoreCase)
             ? string.Empty
