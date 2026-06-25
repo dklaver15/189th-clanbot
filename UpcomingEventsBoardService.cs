@@ -98,6 +98,15 @@ public sealed class UpcomingEventsBoardService : BackgroundService
         if (!_config.EventBoardEnabled) return Task.CompletedTask;
         if (message.Channel.Id != _config.GetEventPostChannelId()) return Task.CompletedTask;
 
+        // Ephemeral messages (the "add to calendar" .ics prompt and any other
+        // interaction-only reply) are visible to a single user and render at the
+        // bottom of THAT user's view only — they never change the public message
+        // order. Re-sticking on them just shoves the board below the ephemeral for
+        // that one user, which is exactly what we don't want, so they must not
+        // trigger a re-stick.
+        if (message.Flags?.HasFlag(MessageFlags.Ephemeral) == true)
+            return Task.CompletedTask;
+
         // Ignore the board's own (re)posts so re-sticking never feeds itself a loop.
         if (message.Author.Id == _client.CurrentUser?.Id
             && message is IUserMessage um && IsBoardMessage(um))
