@@ -233,10 +233,15 @@ public sealed class LeadMatcher
         "not looking for discord",
         "not joining a discord",
         "not joining your discord",
+        "not looking to join a discord",
         "don't want a discord",
         "dont want a discord",
         "not looking for a group",
         "not looking for a community",
+        // "<num>" is a sentinel expanded to \d+\+? in BuildPattern, so this
+        // matches "not interested in 200+ clans", "...50 clans", etc.
+        "not interested in <num> clans",
+        "not interested in <num> clan",
 
         // ── One-to-one / penpal friendship asks (not a group fit) ──
         // "one to one" / "1 to 1" is penpal vernacular and rarely the
@@ -244,6 +249,7 @@ public sealed class LeadMatcher
         // and do NOT add bare "1 on 1" — that would reject clan-seekers
         // who mention 1v1 gameplay.
         "want one to one",
+        "looking for a friend or two",
         "one to one for friendship",
         "one to one friendship",
         "1 to 1 for friendship",
@@ -322,7 +328,10 @@ public sealed class LeadMatcher
         var alternation = string.Join("|",
             phrases
                 .Select(Regex.Escape)
-                .Select(p => p.Replace(@"\ ", @"\s+")));
+                .Select(p => p.Replace(@"\ ", @"\s+"))
+                // "<num>" sentinel → one-or-more digits with an optional
+                // trailing "+" (so "200" and "200+" both match).
+                .Select(p => p.Replace("<num>", @"\d+\+?")));
 
         return new Regex(
             $@"\b(?:{alternation})\b",
