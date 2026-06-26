@@ -249,6 +249,13 @@ try
     // DiscordBotService alongside the other command handlers.
     builder.Services.AddSingleton<PromoEligibilityCommandHandler>();
 
+    // LateCheckCommandHandler: /late-check slash command, gated to MAJ+.
+    // Reports how often a member showed up late to events they organized or
+    // hosted, using the same Events-category voice-session window logic as
+    // EventAttendanceSnapshotService. Register() is called from
+    // DiscordBotService alongside the other command handlers.
+    builder.Services.AddSingleton<LateCheckCommandHandler>();
+
     // NOTE: RecruitCommandHandler was removed — recruits are now auto-logged by
     // RankTrackingHandler when a member gains the RCT role. See TryLogRecruitAsync
     // in RankTrackingHandler.cs.

@@ -603,6 +603,8 @@ public class CommandsCommandHandler
             // Officer tier
             new("awol-check", "Check another user's activity stats",
                 "Officer+", officer),
+            new("late-check", "How often a member showed up late to their own events",
+                attendanceLbl, MinRank("MAJ")),   // SyncWithHandlers: LateCheckCommandHandler.MinRankFloor
             new("banhammer", "Repost the Ban Hammer counter embed if it gets deleted",
                 "Officer+", officer),   // SyncWithHandlers: BanHammerHandler.HasElevatedPermissions
             new("clear-awol", "Clear a user's AWOL status",

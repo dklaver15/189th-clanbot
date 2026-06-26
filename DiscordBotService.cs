@@ -26,6 +26,7 @@ public class DiscordBotService : IHostedService
     private readonly GamertagBackfillCommandHandler _gamertagBackfillHandler;
     private readonly LookupCommandHandler _lookupHandler;
     private readonly PromoEligibilityCommandHandler _promoEligibilityHandler;
+    private readonly LateCheckCommandHandler _lateCheckHandler;
     private readonly RankTrackingHandler _rankHandler;
     private readonly MemberLifecycleHandler _memberLifecycleHandler;
     private readonly DepartureCaptureHandler _departureCaptureHandler;
@@ -95,6 +96,7 @@ public class DiscordBotService : IHostedService
         GamertagBackfillCommandHandler gamertagBackfillHandler,
         LookupCommandHandler lookupHandler,
         PromoEligibilityCommandHandler promoEligibilityHandler,
+        LateCheckCommandHandler lateCheckHandler,
         RankTrackingHandler rankHandler,
         MemberLifecycleHandler memberLifecycleHandler,
         DepartureCaptureHandler departureCaptureHandler,
@@ -163,6 +165,7 @@ public class DiscordBotService : IHostedService
         _gamertagBackfillHandler     = gamertagBackfillHandler;
         _lookupHandler               = lookupHandler;
         _promoEligibilityHandler     = promoEligibilityHandler;
+        _lateCheckHandler            = lateCheckHandler;
         _rankHandler                 = rankHandler;
         _memberLifecycleHandler      = memberLifecycleHandler;
         _departureCaptureHandler     = departureCaptureHandler;
@@ -236,6 +239,7 @@ public class DiscordBotService : IHostedService
         _gamertagBackfillHandler.Register(_client);
         _lookupHandler.Register(_client);
         _promoEligibilityHandler.Register(_client);
+        _lateCheckHandler.Register(_client);
         _rankHandler.Register(_client);
         _memberLifecycleHandler.Register(_client);
         _departureCaptureHandler.Register(_client);
@@ -380,6 +384,11 @@ public class DiscordBotService : IHostedService
                     .AddOption("user", ApplicationCommandOptionType.User,
                         "The clan member to check", isRequired: true)
                     .Build(),
+
+                // /late-check — how often a member showed up late to events they
+                // organized or hosted (MAJ+). Handled by LateCheckCommandHandler.
+                // NOTE: keep CommandsCommandHandler.BuildCatalog in sync.
+                LateCheckCommandHandler.BuildCommand(),
 
                 new SlashCommandBuilder()
                     .WithName("roster-export")
