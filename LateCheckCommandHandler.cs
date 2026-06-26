@@ -16,18 +16,27 @@ namespace ClanGuardBot.Handlers;
 ///
 /// ── What counts ──
 ///   • "Their events"  = ClanEvents where OrganizerId == target OR HostId ==
-///                       target, excluding cancelled events, that have already
-///                       started.
+///                       target that have already started. Duplicate-series
+///                       rows are collapsed to one slot per StartUtc, and
+///                       cancelled slots are KEPT (not dropped) because the
+///                       series churn marks real, attended events as cancelled
+///                       — they're just flagged "(cancelled)" in the output.
 ///   • "Showed up"     = the target has a VoiceSession in the EVENTS category
 ///                       (matched by EventsCategoryId; pre-migration rows with
 ///                       a null CategoryId fall back to EventsVoiceChannelId)
-///                       overlapping the buffered window
-///                       [StartUtc - buffer, EndUtc + buffer].
+///                       overlapping the scan window
+///                       [StartUtc - buffer, max(EndUtc + buffer,
+///                       StartUtc + MaxLateHours)].
 ///   • "Late"          = their EARLIEST qualifying join is more than the grace
 ///                       period (default 15 min, overridable via the grace
-///                       option) after StartUtc.
+///                       option) after StartUtc. The window reaches MaxLateHours
+///                       past start so an hours-late arrival is counted as late
+///                       rather than a no-show.
 ///   • "No-show"       = no qualifying voice session at all — reported
-///                       separately, NOT counted as late.
+///                       separately (with dates), NOT counted as late.
+///
+/// The target may be given as the user picker OR a raw numeric user_id, the
+/// latter so the command works on members who have already left the guild.
 ///
 /// The window/category/buffer logic mirrors EventAttendanceSnapshotService so
 /// the "showed up" determination matches what the attendance snapshotter would
@@ -43,6 +52,15 @@ public class LateCheckCommandHandler
     private const string MinRankFloor = "MAJ";
     private const int DefaultGraceMinutes = 15;
     private const int MaxListedEvents = 15;
+
+    /// <summary>
+    /// How many hours past an event's start we still scan for the member's
+    /// first qualifying voice join. Without this, anyone arriving after
+    /// EndUtc + buffer fell outside the window and was misclassified as a
+    /// no-show instead of "very late". 4h comfortably covers a member who
+    /// rolls in hours into their own event.
+    /// </summary>
+    private const int MaxLateHours = 4;
 
     private readonly ILogger<LateCheckCommandHandler> _logger;
     private readonly BotConfig _config;
@@ -63,7 +81,10 @@ public class LateCheckCommandHandler
             .WithName("late-check")
             .WithDescription("How often a member showed up late to their own events (MAJ+)")
             .AddOption("user", ApplicationCommandOptionType.User,
-                "The member whose own events to check", isRequired: true)
+                "The member whose own events to check", isRequired: false)
+            .AddOption("user_id", ApplicationCommandOptionType.String,
+                "Raw numeric ID instead of the picker — use for members who already left",
+                isRequired: false)
             .AddOption("grace", ApplicationCommandOptionType.Integer,
                 $"Minutes after start that still count as on time (default {DefaultGraceMinutes})",
                 isRequired: false)
@@ -117,9 +138,21 @@ public class LateCheckCommandHandler
         }
 
         var targetUser = command.Data.Options.FirstOrDefault(o => o.Name == "user")?.Value as SocketUser;
-        if (targetUser is null)
+        var rawId = command.Data.Options.FirstOrDefault(o => o.Name == "user_id")?.Value as string;
+
+        // Resolve the target from EITHER the picker or a raw ID. The raw-ID path
+        // is what makes this usable on members who have already left the server
+        // (the user picker can't select someone who isn't in the guild).
+        ulong targetId;
+        if (targetUser is not null)
         {
-            await command.FollowupAsync("⚠️ You must select a user.", ephemeral: true);
+            targetId = targetUser.Id;
+        }
+        else if (string.IsNullOrWhiteSpace(rawId) || !ulong.TryParse(rawId.Trim(), out targetId))
+        {
+            await command.FollowupAsync(
+                "⚠️ Select a user, or pass a numeric `user_id` (use this for members who already left).",
+                ephemeral: true);
             return;
         }
 
@@ -127,10 +160,9 @@ public class LateCheckCommandHandler
         if (command.Data.Options.FirstOrDefault(o => o.Name == "grace")?.Value is long g)
             grace = (int)Math.Clamp(g, 0, 240);
 
-        var displayName = (targetUser as IGuildUser)?.DisplayName
-                          ?? targetUser.GlobalName ?? targetUser.Username;
+        var displayName = await ResolveDisplayNameAsync(guildId, targetId, targetUser);
 
-        var result = await ComputeAsync(guildId, targetUser.Id, grace);
+        var result = await ComputeAsync(guildId, targetId, grace);
 
         if (result.TotalOwnEvents == 0)
         {
@@ -145,9 +177,9 @@ public class LateCheckCommandHandler
             : "";
 
         var embed = new EmbedBuilder()
-            .WithAuthor(displayName, targetUser.GetDisplayAvatarUrl())
+            .WithAuthor(displayName, targetUser?.GetDisplayAvatarUrl())
             .WithTitle("⏰ Late-to-own-events report")
-            .WithColor(result.TimesLate > 0 ? Color.Orange : Color.Green)
+            .WithColor(result.TimesLate > 0 || result.NoShows > 0 ? Color.Orange : Color.Green)
             .WithDescription(
                 $"Across **{result.TotalOwnEvents}** event(s) they organized or hosted, " +
                 $"showing up later than **{grace} min** after start counts as late.")
@@ -159,14 +191,29 @@ public class LateCheckCommandHandler
         {
             var lines = result.LateEvents
                 .Take(MaxListedEvents)
-                .Select(e => $"• `{e.StartUtc:yyyy-MM-dd HH:mm}` UTC — **+{e.MinutesLate} min** — {Truncate(e.Title, 50)}");
+                .Select(e => $"• `{e.StartUtc:yyyy-MM-dd HH:mm}` UTC — **+{e.MinutesLate} min**" +
+                             $"{(e.WasCancelled ? " *(cancelled)*" : "")} — {Truncate(e.Title, 48)}");
             var more = result.LateEvents.Count > MaxListedEvents
                 ? $"\n…and {result.LateEvents.Count - MaxListedEvents} more."
                 : "";
             embed.AddField("Late arrivals", string.Join("\n", lines) + more);
         }
 
-        embed.WithFooter("Arrival = earliest voice join in the Events category, vs. scheduled start.");
+        if (result.NoShowEvents.Count > 0)
+        {
+            var lines = result.NoShowEvents
+                .Take(MaxListedEvents)
+                .Select(e => $"• `{e.StartUtc:yyyy-MM-dd HH:mm}` UTC" +
+                             $"{(e.WasCancelled ? " *(cancelled)*" : "")} — {Truncate(e.Title, 48)}");
+            var more = result.NoShowEvents.Count > MaxListedEvents
+                ? $"\n…and {result.NoShowEvents.Count - MaxListedEvents} more."
+                : "";
+            embed.AddField("No-shows", string.Join("\n", lines) + more);
+        }
+
+        embed.WithFooter(
+            $"Arrival = earliest Events-category voice join, vs. scheduled start. " +
+            $"Late scanned up to {MaxLateHours}h past start; cancelled slots are included.");
 
         await command.FollowupAsync(embed: embed.Build(), ephemeral: true);
     }
@@ -186,16 +233,42 @@ public class LateCheckCommandHandler
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
-        var events = await db.ClanEvents
+        // Every own (organized or hosted) event that has already started. We
+        // deliberately do NOT filter out Cancelled rows here: the duplicate-
+        // series churn stamps real, attended events as Cancelled, so dropping
+        // them silently hid genuine misses (an officer who skipped their own
+        // event). Cancelled slots are instead kept and annotated below.
+        var rows = await db.ClanEvents
             .Where(e => e.GuildId == guildId
                      && (e.OrganizerId == userId || e.HostId == userId)
-                     && e.Status != ClanEventStatus.Cancelled
                      && e.StartUtc <= now)
-            .OrderByDescending(e => e.StartUtc)
             .ToListAsync();
 
-        if (events.Count == 0)
+        if (rows.Count == 0)
             return new LateCheckResult();
+
+        // Collapse the duplicate-series rows: one real event per distinct start
+        // time. The representative row prefers a non-cancelled occurrence (for
+        // the truest title/end), falling back to a cancelled one when that's
+        // all that survives. A slot counts as cancelled only if EVERY row for
+        // that start time is cancelled.
+        var slots = rows
+            .GroupBy(e => e.StartUtc)
+            .Select(g =>
+            {
+                var rep = g.OrderBy(e => e.Status == ClanEventStatus.Cancelled ? 1 : 0)
+                           .ThenByDescending(e => (int)e.Status)
+                           .First();
+                return new
+                {
+                    rep.StartUtc,
+                    rep.EndUtc,
+                    rep.Title,
+                    WasCancelled = g.All(e => e.Status == ClanEventStatus.Cancelled)
+                };
+            })
+            .OrderByDescending(s => s.StartUtc)
+            .ToList();
 
         // Pull this member's voice sessions in the EVENTS category once, then
         // match them to each event window in memory (avoids one query/event).
@@ -207,12 +280,16 @@ public class LateCheckCommandHandler
             .Select(v => new { v.JoinedAt, v.LeftAt })
             .ToListAsync();
 
-        var result = new LateCheckResult { TotalOwnEvents = events.Count };
+        var result = new LateCheckResult { TotalOwnEvents = slots.Count };
 
-        foreach (var evt in events)
+        foreach (var evt in slots)
         {
             var winStart = evt.StartUtc - buffer;
-            var winEnd = evt.EndUtc + buffer;
+            // Extend the scan window so a very-late arrival reads as LATE rather
+            // than a no-show: reach to at least MaxLateHours past start.
+            var lateHorizon = evt.StartUtc + TimeSpan.FromHours(MaxLateHours);
+            var bufferedEnd = evt.EndUtc + buffer;
+            var winEnd = bufferedEnd > lateHorizon ? bufferedEnd : lateHorizon;
 
             DateTime? firstJoin = null;
             foreach (var s in sessions)
@@ -229,6 +306,7 @@ public class LateCheckCommandHandler
             if (firstJoin is null)
             {
                 result.NoShows++;
+                result.NoShowEvents.Add(new SlotOutcome(evt.Title, evt.StartUtc, 0, evt.WasCancelled));
                 continue;
             }
 
@@ -236,7 +314,8 @@ public class LateCheckCommandHandler
             if (minutesAfterStart > graceMinutes)
             {
                 result.TimesLate++;
-                result.LateEvents.Add(new LateEvent(evt.Title, evt.StartUtc, Math.Max(0, minutesAfterStart)));
+                result.LateEvents.Add(
+                    new SlotOutcome(evt.Title, evt.StartUtc, Math.Max(0, minutesAfterStart), evt.WasCancelled));
             }
             else
             {
@@ -245,6 +324,40 @@ public class LateCheckCommandHandler
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Resolves a human-readable name for the target. When the command supplied
+    /// a live user object we use it directly; for the raw-ID path (members who
+    /// already left) we fall back to KnownMembers, then the most recent
+    /// attendance snapshot's name, then the bare ID.
+    /// </summary>
+    private async Task<string> ResolveDisplayNameAsync(ulong guildId, ulong userId, SocketUser? user)
+    {
+        if (user is not null)
+            return (user as IGuildUser)?.DisplayName ?? user.GlobalName ?? user.Username;
+
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+        var known = await db.KnownMembers
+            .Where(k => k.GuildId == guildId && k.UserId == userId)
+            .Select(k => new { k.DisplayName, k.Username })
+            .FirstOrDefaultAsync();
+        if (known is not null)
+        {
+            if (!string.IsNullOrWhiteSpace(known.DisplayName)) return known.DisplayName;
+            if (!string.IsNullOrWhiteSpace(known.Username)) return known.Username;
+        }
+
+        var lastSnapshotName = await db.EventAttendances
+            .Where(a => a.GuildId == guildId && a.UserId == userId && a.Username != "")
+            .OrderByDescending(a => a.EventEndUtc)
+            .Select(a => a.Username)
+            .FirstOrDefaultAsync();
+        if (!string.IsNullOrWhiteSpace(lastSnapshotName)) return lastSnapshotName!;
+
+        return $"User {userId}";
     }
 
     private bool HasMinRankFloor(SocketGuildUser user)
@@ -272,9 +385,11 @@ public class LateCheckCommandHandler
         public int TimesLate { get; set; }
         public int OnTime { get; set; }
         public int NoShows { get; set; }
-        public List<LateEvent> LateEvents { get; } = new();
+        public List<SlotOutcome> LateEvents { get; } = new();
+        public List<SlotOutcome> NoShowEvents { get; } = new();
         public int ShowedUp => TimesLate + OnTime;
     }
 
-    private readonly record struct LateEvent(string Title, DateTime StartUtc, int MinutesLate);
+    private readonly record struct SlotOutcome(
+        string Title, DateTime StartUtc, int MinutesLate, bool WasCancelled);
 }
