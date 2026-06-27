@@ -169,11 +169,21 @@ public sealed class EventReminderService : BackgroundService
 
         var hasImage = ev.ImageBytes is { Length: > 0 } && !string.IsNullOrWhiteSpace(ev.ImageFileName);
 
+        // Deep link back to the event's RSVP post in #events so a click on the
+        // reminder title jumps straight to it. Same jump-URL shape used elsewhere
+        // (UpcomingEventsBoardService, EventWaitlist). Only attach when the ids are
+        // present; an embed URL must be a real link, so a 0 id would be invalid.
+        var jump = ev.GuildId != 0 && ev.ChannelId != 0 && ev.MessageId != 0
+            ? $"https://discord.com/channels/{ev.GuildId}/{ev.ChannelId}/{ev.MessageId}"
+            : null;
+
         var eb = new EmbedBuilder()
             .WithColor(new Color(0x5865F2))
             .WithTitle($"⏰ {ev.Title}")
             .WithDescription(
                 $"Starts {EventTimeParser.Stamp(ev.StartUtc, 'R')}\n{EventTimeParser.Stamp(ev.StartUtc, 'F')}");
+        if (jump is not null)
+            eb.WithUrl(jump);
         if (hasImage)
             eb.WithImageUrl($"attachment://{ev.ImageFileName}");
         var embed = eb.Build();
