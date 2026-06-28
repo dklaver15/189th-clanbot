@@ -447,6 +447,8 @@ try
     builder.Services.AddSingleton<PollVoteInteractionHandler>();
     builder.Services.AddSingleton<PollGatewayVoteHandler>();
     builder.Services.AddHostedService<PollCloseService>();
+    // Posts a single no-mention reminder at the midpoint of each poll's life.
+    builder.Services.AddHostedService<PollReminderService>();
 
     // ── UFC / MMA ────────────────────────────────────────────────────
     // UfcApiService is the single API-Sports MMA client (shared cache); UfcEventPosterService

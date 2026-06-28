@@ -191,6 +191,9 @@ public sealed class PollPublisher
             AnnounceOnClose  = d.AnnounceOnClose,
             CreatedAt        = now,
             ClosesAtUtc      = closesAt,
+            // Single reminder at the midpoint of the poll's life (now → close),
+            // so a 24h poll reminds at hour 12 and a 2h poll at hour 1.
+            RemindAtUtc      = now.AddTicks((closesAt - now).Ticks / 2),
             // Banner persisted only for anonymous polls. Store the custom blob (so a
             // future re-post could re-attach it); the default flag carries only its
             // file name (bytes come from the bundled asset).

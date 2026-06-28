@@ -72,6 +72,22 @@ public class Poll
     public DateTime? ClosedAtUtc { get; set; }
 
     /// <summary>
+    /// When to post the single "halfway, still open" reminder — the midpoint of
+    /// the poll's life (<see cref="CreatedAt"/> + half of its run). A 24h poll
+    /// reminds at hour 12, a 2h poll at hour 1. Null means no reminder is
+    /// scheduled (e.g. polls created before this feature shipped), so the sweep
+    /// skips them rather than firing immediately.
+    /// </summary>
+    public DateTime? RemindAtUtc { get; set; }
+
+    /// <summary>
+    /// Guards the midpoint reminder against double-posting if the reminder sweep
+    /// overlaps a restart. Set once the reminder has been posted (mirrors
+    /// <see cref="ResultsAnnounced"/>).
+    /// </summary>
+    public bool ReminderSent { get; set; }
+
+    /// <summary>
     /// Guards the close announcement against double-posting if the close sweep
     /// overlaps a restart. Set once the winner announcement has been posted.
     /// </summary>
