@@ -33,8 +33,10 @@ services:
       # Dedicated channel for posted minutes:
       - BotConfig__MeetingMinutesChannelId=1509712699414679602
       # Live: bot auto-joins/records/summarizes meetings whose title matches the pattern.
+      # Case-insensitive substring regex. Clan meetings are titled e.g.
+      # "189th June Leadership Meeting", so match leadership/monthly meetings.
       - BotConfig__MeetingRecordingEnabled=true
-      - BotConfig__MeetingTitlePattern=monthly meeting
+      - BotConfig__MeetingTitlePattern=(leadership|monthly) meeting
     volumes:
       - bot-data:/app/data
       - bot-logs:/app/logs
