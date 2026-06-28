@@ -79,6 +79,15 @@ def fmt_offset(seconds):
     return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
+def atomic_write_text(path, text):
+    """Write text to a temp file then rename into place, so a concurrent reader
+    (the bot resuming after a timeout) never sees a half-written file."""
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
 def authorized(req):
     return not SHARED_SECRET or req.headers.get("x-transcriber-secret") == SHARED_SECRET
 
@@ -196,6 +205,30 @@ def transcribe():
     if not os.path.isfile(manifest_path):
         return jsonify(error=f"manifest.json not found in {audio_dir}"), 404
 
+    # Serve from cache: if this dir was already transcribed (transcript.json is
+    # present and valid), return it instead of re-running Whisper. This makes a
+    # duplicate or retried /transcribe call cheap and idempotent — e.g. after the
+    # bot's HTTP call timed out while the (still-running) transcription finished.
+    transcript_json = os.path.join(audio_dir, "transcript.json")
+    if os.path.isfile(transcript_json):
+        try:
+            with open(transcript_json, "r", encoding="utf-8") as f:
+                cached = json.load(f)
+            if cached.get("transcript"):
+                segs = cached.get("segments", []) or []
+                speakers = {s.get("displayName") for s in segs if s.get("displayName")}
+                log(f"serving cached transcript for {audio_dir} ({len(segs)} segment(s))")
+                return jsonify(
+                    ok=True,
+                    segmentCount=len(segs),
+                    speakerCount=len(speakers),
+                    transcript=cached["transcript"],
+                    segments=segs,
+                    cached=True,
+                )
+        except Exception as e:
+            log("cached transcript unreadable, will re-transcribe:", repr(e))
+
     if not _lock.acquire(blocking=False):
         return jsonify(error="busy: another transcription is in progress"), 409
 
@@ -217,10 +250,11 @@ def transcribe():
         lines = [f"[{fmt_offset(r['offset'])}] {r['displayName']}: {r['text']}" for r in results]
         transcript = "\n".join(lines)
 
-        with open(os.path.join(audio_dir, "transcript.txt"), "w", encoding="utf-8") as f:
-            f.write(transcript)
-        with open(os.path.join(audio_dir, "transcript.json"), "w", encoding="utf-8") as f:
-            json.dump({"segments": results, "transcript": transcript}, f, ensure_ascii=False, indent=2)
+        atomic_write_text(os.path.join(audio_dir, "transcript.txt"), transcript)
+        atomic_write_text(
+            os.path.join(audio_dir, "transcript.json"),
+            json.dumps({"segments": results, "transcript": transcript}, ensure_ascii=False, indent=2),
+        )
 
         log(f"done: {len(results)} non-empty segment(s), {len(speakers)} speaker(s)")
         return jsonify(

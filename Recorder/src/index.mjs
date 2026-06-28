@@ -492,6 +492,10 @@ app.get('/health', (req, res) =>
     ok: true,
     ready: client.isReady(),
     recording: current?.meetingRecordingId ?? null,
+    // IDs the recorder has already auto-finalized (VC-empty or hard cap) and is
+    // holding for an idempotent /stop. The bot polls this so it can advance a
+    // recording promptly instead of waiting for its far-out safety backstop.
+    finalized: [...finalized.keys()],
   }),
 );
 

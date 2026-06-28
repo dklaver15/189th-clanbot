@@ -37,6 +37,16 @@ public interface IMeetingRecorderController
     /// null if the recorder reports nothing was captured.
     /// </summary>
     Task<string?> StopRecordingAsync(int meetingRecordingId, CancellationToken ct);
+
+    /// <summary>
+    /// Has the recorder already finalized this meeting (it auto-stops when the VC
+    /// empties or the hard cap is hit, writing audio + manifest and remembering
+    /// the result)? Lets the scheduler advance Recording → Transcribing promptly
+    /// rather than waiting for the far-out safety backstop. Returns false when the
+    /// answer is unknown (recorder unreachable, restarted, etc.) so the backstop
+    /// still covers those cases.
+    /// </summary>
+    Task<bool> IsFinalizedAsync(int meetingRecordingId, CancellationToken ct);
 }
 
 /// <summary>Everything the recorder needs to start a capture.</summary>
@@ -72,4 +82,9 @@ public sealed class LoggingMeetingRecorderController(
             meetingRecordingId);
         return Task.FromResult<string?>(null);
     }
+
+    // No sidecar, so nothing is ever finalized — the scheduler falls back to its
+    // backstop, which is correct since there's no real recording to advance.
+    public Task<bool> IsFinalizedAsync(int meetingRecordingId, CancellationToken ct) =>
+        Task.FromResult(false);
 }

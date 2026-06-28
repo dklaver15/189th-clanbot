@@ -54,6 +54,21 @@ public sealed class HttpMeetingTranscriber : IMeetingTranscriber
 
     public async Task<MeetingTranscript> TranscribeAsync(string audioDir, CancellationToken ct)
     {
+        // Resumability: if a previous attempt's transcription already completed and
+        // wrote transcript.json to the shared volume — e.g. the HTTP call timed out
+        // (the sidecar keeps running after the client disconnects) or the bot
+        // restarted mid-call — reuse it instead of re-running Whisper from scratch.
+        // transcript.json is written atomically by the sidecar, so it's only ever
+        // present complete.
+        var cached = TryReadCachedTranscript(audioDir);
+        if (cached is not null)
+        {
+            _logger.LogInformation(
+                "Reusing existing transcript from {Dir} ({Segments} segment(s), {Speakers} speaker(s)) — skipping re-transcription.",
+                audioDir, cached.SegmentCount, cached.SpeakerCount);
+            return cached;
+        }
+
         var client = _httpFactory.CreateClient(HttpClientName);
         client.BaseAddress = new Uri(_config.MeetingTranscriberBaseUrl.TrimEnd('/') + "/");
         client.Timeout = TimeSpan.FromMinutes(_config.MeetingTranscriberTimeoutMinutes);
@@ -79,6 +94,47 @@ public sealed class HttpMeetingTranscriber : IMeetingTranscriber
             result.SegmentCount, result.SpeakerCount, audioDir);
 
         return new MeetingTranscript(result.Transcript ?? string.Empty, result.SegmentCount, result.SpeakerCount);
+    }
+
+    /// <summary>
+    /// Read a completed transcript.json the sidecar previously wrote into the
+    /// shared audio dir, if present and non-empty. Returns null when there's no
+    /// usable cached transcript (so the caller transcribes normally). The bot and
+    /// sidecar share this volume at the same path, so the dir is readable here.
+    /// </summary>
+    private MeetingTranscript? TryReadCachedTranscript(string audioDir)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(audioDir)) return null;
+            var path = Path.Combine(audioDir, "transcript.json");
+            if (!File.Exists(path)) return null;
+
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            var root = doc.RootElement;
+
+            if (!root.TryGetProperty("transcript", out var transcriptEl)) return null;
+            var transcript = transcriptEl.GetString();
+            if (string.IsNullOrWhiteSpace(transcript)) return null;
+
+            var segmentCount = 0;
+            var speakers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (root.TryGetProperty("segments", out var segs) && segs.ValueKind == JsonValueKind.Array)
+            {
+                segmentCount = segs.GetArrayLength();
+                foreach (var s in segs.EnumerateArray())
+                    if (s.TryGetProperty("displayName", out var dn) && dn.GetString() is { } name && name.Length > 0)
+                        speakers.Add(name);
+            }
+
+            return new MeetingTranscript(transcript, segmentCount, speakers.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Could not read cached transcript in {Dir}; will re-transcribe.", audioDir);
+            return null;
+        }
     }
 
     private sealed record TranscribeResponse(string? Transcript, int SegmentCount, int SpeakerCount);

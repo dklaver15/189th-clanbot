@@ -192,12 +192,15 @@ public class MeetingRecordingScheduler : BackgroundService
 
         var joinAt = match.StartUtc.AddMinutes(-_config.MeetingRecordingLeadMinutes);
 
+        // Match the recording for this occurrence in ANY state, including terminal
+        // ones. A single meeting (DiscordMessageId) must never spawn a second row:
+        // its CalendarEvent stays a discovery candidate for a short window after
+        // StartUtc, so a meeting that already ran and reached a terminal state
+        // (Posted/Pruned/Failed/Cancelled) would otherwise be re-created here and
+        // re-recorded. Reschedule/rename below is still gated to pre-recording
+        // states, so finding a terminal row simply means "leave it alone."
         var existing = await db.MeetingRecordings
-            .FirstOrDefaultAsync(m => m.DiscordMessageId == match.DiscordMessageId
-                                   && m.State != MeetingRecordingState.Cancelled
-                                   && m.State != MeetingRecordingState.Failed
-                                   && m.State != MeetingRecordingState.Posted
-                                   && m.State != MeetingRecordingState.Pruned, ct);
+            .FirstOrDefaultAsync(m => m.DiscordMessageId == match.DiscordMessageId, ct);
 
         if (existing is null)
         {
@@ -330,12 +333,17 @@ public class MeetingRecordingScheduler : BackgroundService
                 continue;
             }
 
-            // While Recording: the recorder auto-stops when the VC empties. We
-            // only issue a backstop stop far past EndUtc. Either way, when we ask
-            // the recorder to stop it returns the dir it (already) finalized.
-            if (rec.State == MeetingRecordingState.Recording && now >= backstopAt)
+            // While Recording: the recorder auto-stops when the VC empties and
+            // remembers the finalized result. As soon as it reports this meeting as
+            // finalized, advance promptly (StopRecordingAsync then just returns the
+            // already-finalized dir). The backstop far past EndUtc is the fallback
+            // for when the recorder can't be reached or restarted and lost state.
+            if (rec.State == MeetingRecordingState.Recording)
             {
-                await FinalizeRecordingAsync(rec, now, ct, reason: "backstop");
+                if (await _recorder.IsFinalizedAsync(rec.Id, ct))
+                    await FinalizeRecordingAsync(rec, now, ct, reason: "recorder-finalized");
+                else if (now >= backstopAt)
+                    await FinalizeRecordingAsync(rec, now, ct, reason: "backstop");
             }
         }
     }

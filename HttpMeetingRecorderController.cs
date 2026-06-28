@@ -90,6 +90,26 @@ public sealed class HttpMeetingRecorderController : IMeetingRecorderController
         return result?.AudioDir;
     }
 
+    public async Task<bool> IsFinalizedAsync(int meetingRecordingId, CancellationToken ct)
+    {
+        try
+        {
+            var client = CreateClient();
+            using var resp = await client.GetAsync("health", ct);
+            if (!resp.IsSuccessStatusCode) return false;
+            var health = await resp.Content.ReadFromJsonAsync<HealthResponse>(Json, ct);
+            return health?.Finalized?.Contains(meetingRecordingId) == true;
+        }
+        catch (Exception ex)
+        {
+            // Unknown → false, so the scheduler relies on its backstop. Never throw:
+            // a health blip must not disturb the state machine.
+            _logger.LogDebug(ex,
+                "Recorder /health check failed for #{Id}; will rely on the backstop.", meetingRecordingId);
+            return false;
+        }
+    }
+
     private HttpClient CreateClient()
     {
         var client = _httpFactory.CreateClient(HttpClientName);
@@ -108,4 +128,6 @@ public sealed class HttpMeetingRecorderController : IMeetingRecorderController
     }
 
     private sealed record StopResponse(string? AudioDir);
+
+    private sealed record HealthResponse(bool Ok, bool Ready, int? Recording, List<int>? Finalized);
 }

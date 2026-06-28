@@ -670,6 +670,23 @@ public class BotConfig
     /// </summary>
     public ulong MeetingMinutesChannelId { get; set; } = default;
 
+    /// <summary>
+    /// Transcript size (characters) above which minutes generation switches from a
+    /// single Claude call to a map-reduce over chunks. A normal monthly meeting is
+    /// well under this and takes the single-shot path unchanged; only an unusually
+    /// long meeting is chunked, so its transcript can never overflow the model's
+    /// context window. Lower it to exercise the chunked path in testing. Default 200000.
+    /// </summary>
+    public int MeetingMinutesMaxSingleShotChars { get; set; } = 200_000;
+
+    /// <summary>
+    /// Maximum characters of transcript per chunk when the map-reduce path is used
+    /// (see <see cref="MeetingMinutesMaxSingleShotChars"/>). Each chunk is condensed
+    /// to notes by one Claude call, then all notes are reduced into the final
+    /// minutes. Kept well inside the context window. Default 150000.
+    /// </summary>
+    public int MeetingMinutesChunkChars { get; set; } = 150_000;
+
     // ─── Voice Activity Safeguards ───────────────────────────────────
 
     /// <summary>
