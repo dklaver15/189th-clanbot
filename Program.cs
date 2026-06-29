@@ -435,6 +435,12 @@ try
     builder.Services.AddSingleton<UpcomingEventsBoardService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<UpcomingEventsBoardService>()); // pinned upcoming-events board
 
+    // /qotd — Question of the Day. Self-contained handler: gated SGT+, opens a
+    // DM to collect the question, previews + confirms, then posts an embed (with
+    // the 189th logo) to BotConfig.QotdChannelId. Self-registers slash + DM +
+    // button events. NOTE: keep CommandsCommandHandler.BuildCatalog in sync.
+    builder.Services.AddSingleton<QotdCommandHandler>();
+
     // /poll — the native + anonymous hybrid poll system. PollPublisher posts the
     // poll (native Discord poll or our custom anonymous embed); PollCommandHandler
     // owns the slash command; PollVoteInteractionHandler handles anonymous vote +

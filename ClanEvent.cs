@@ -94,6 +94,15 @@ public class ClanEvent
     /// </summary>
     public string RemindersSentCsv { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Message id of the most recently posted reminder for this occurrence, or 0
+    /// if none. When EventReminderReplacePrevious is on, a newer reminder deletes
+    /// this message so only the latest remains. Persisted (not in-memory) so the
+    /// delete still happens when the bot restarts between two lead times — the
+    /// same restart-safety lesson as <see cref="RemindersSentCsv"/>.
+    /// </summary>
+    public ulong LastReminderMessageId { get; set; }
+
     public DateTime CreatedAt { get; set; }
 
     /// <summary>Stamped when Status flips to Cancelled.</summary>

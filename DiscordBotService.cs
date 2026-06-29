@@ -51,6 +51,7 @@ public class DiscordBotService : IHostedService
     private readonly EventRsvpInteractionHandler _eventRsvpHandler;
     private readonly EventManagementHandler _eventMgmtHandler;
     private readonly EventTemplateHandler _eventTemplateHandler;
+    private readonly QotdCommandHandler _qotdCommandHandler;
     private readonly PollCommandHandler _pollCommandHandler;
     private readonly PollVoteInteractionHandler _pollVoteHandler;
     private readonly PollGatewayVoteHandler _pollGatewayVoteHandler;
@@ -121,6 +122,7 @@ public class DiscordBotService : IHostedService
         EventRsvpInteractionHandler eventRsvpHandler,
         EventManagementHandler eventMgmtHandler,
         EventTemplateHandler eventTemplateHandler,
+        QotdCommandHandler qotdCommandHandler,
         PollCommandHandler pollCommandHandler,
         PollVoteInteractionHandler pollVoteHandler,
         PollGatewayVoteHandler pollGatewayVoteHandler,
@@ -190,6 +192,7 @@ public class DiscordBotService : IHostedService
         _eventRsvpHandler            = eventRsvpHandler;
         _eventMgmtHandler            = eventMgmtHandler;
         _eventTemplateHandler        = eventTemplateHandler;
+        _qotdCommandHandler          = qotdCommandHandler;
         _pollCommandHandler          = pollCommandHandler;
         _pollVoteHandler             = pollVoteHandler;
         _pollGatewayVoteHandler      = pollGatewayVoteHandler;
@@ -279,6 +282,7 @@ public class DiscordBotService : IHostedService
         _eventRsvpHandler.Register(_client);
         _eventMgmtHandler.Register(_client);
         _eventTemplateHandler.Register(_client);
+        _qotdCommandHandler.Register(_client);
         _pollCommandHandler.Register(_client);
         _pollVoteHandler.Register(_client);
         _pollGatewayVoteHandler.Register(_client);
@@ -408,6 +412,12 @@ public class DiscordBotService : IHostedService
                 // zone used to read each member's event-time input.
                 EventCommandHandler.BuildEventCommand(_config.EventCommandMinRank, _config.EventTemplateManageMinRank),
                 EventCommandHandler.BuildTimezoneCommand(),
+
+                // /qotd — Question of the Day. Opens a DM wizard (gated by
+                // QotdMinRank, default SGT) to collect the question, then posts an
+                // embed with the 189th logo to QotdChannelId. NOTE: keep
+                // CommandsCommandHandler.BuildCatalog in sync.
+                QotdCommandHandler.BuildCommand(_config.QotdMinRank),
 
                 // /poll — native + anonymous hybrid poll, open to all members.
                 PollCommandHandler.BuildCommand(),

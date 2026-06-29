@@ -633,6 +633,9 @@ public class CommandsCommandHandler
             new("comp-event", "Create a competitive division event on the calendar",
                 compEventLbl, MinRank(config.CompEventMinRank)),
 
+            new("qotd", "Post a Question of the Day — set it up in DMs",
+                $"{config.QotdMinRank}+", MinRank(config.QotdMinRank)),   // SyncWithHandlers: QotdCommandHandler.HasPermission
+
             new("add-event-credit", "Manually add 1 event credit at member's current rank",
                 eventCreditLbl, MinRank("CPT")),
             new("remove-event-credit", "Remove 1 manual event credit at member's current rank",

@@ -345,6 +345,23 @@ public class BotConfig
     /// <summary>Master switch for the cosmetic RSVP buttons on event posts.</summary>
     public bool EventRsvpEnabled { get; set; } = true;
 
+    // ──────────────────────────────────────────────────────────────────────
+    //  Question of the Day (/qotd)
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Minimum rank required to post a Question of the Day via /qotd. Must match
+    /// a rank name in RankRoles (case-insensitive). Default "SGT". Admins / users
+    /// with Manage Roles always pass regardless of rank.
+    /// </summary>
+    public string QotdMinRank { get; set; } = "SGT";
+
+    /// <summary>
+    /// Channel the /qotd embed is posted to. Defaults to the clan's general
+    /// channel.
+    /// </summary>
+    public ulong QotdChannelId { get; set; } = 1421928902963494922;
+
     /// <summary>
     /// Master switch for the pinned "Upcoming Events" board maintained by
     /// <see cref="Services.UpcomingEventsBoardService"/>. When false the service

@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using ClanGuardBot.Data;
 using ClanGuardBot.Models;
 using Discord;
@@ -33,11 +32,6 @@ public sealed class EventReminderService : BackgroundService
     private readonly DiscordSocketClient _client;
     private readonly BotConfig _config;
     private readonly ILogger<EventReminderService> _logger;
-
-    // Last reminder message id per event, so a newer reminder can delete the
-    // previous one. In-memory: a restart mid-window just leaves the older
-    // reminder (same as before this feature) — no DB column needed.
-    private readonly ConcurrentDictionary<int, ulong> _lastReminderMsg = new();
 
     public EventReminderService(
         IServiceProvider services,
@@ -162,10 +156,11 @@ public sealed class EventReminderService : BackgroundService
         }
 
         // Remember the prior reminder (if any) so we can delete it once the new one
-        // is up, keeping just the latest reminder in the channel.
-        ulong prevMsgId = 0;
-        var hadPrev = _config.EventReminderReplacePrevious
-            && _lastReminderMsg.TryGetValue(ev.Id, out prevMsgId) && prevMsgId != 0;
+        // is up, keeping just the latest reminder in the channel. The id lives on
+        // the event row (not in memory) so the delete still fires when the bot
+        // restarts between two lead times.
+        var prevMsgId = ev.LastReminderMessageId;
+        var hadPrev = _config.EventReminderReplacePrevious && prevMsgId != 0;
 
         var hasImage = ev.ImageBytes is { Length: > 0 } && !string.IsNullOrWhiteSpace(ev.ImageFileName);
 
@@ -212,7 +207,9 @@ public sealed class EventReminderService : BackgroundService
                     posted = await channel.SendMessageAsync(text: content, embed: embed, allowedMentions: allowed);
                 }
 
-                _lastReminderMsg[ev.Id] = posted.Id;
+                // Record the new reminder's id on the event; the caller saves the
+                // tracked entity (changed=true) so this survives a restart.
+                ev.LastReminderMessageId = posted.Id;
 
                 // New reminder is up — remove the previous one to declutter.
                 if (hadPrev)
