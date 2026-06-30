@@ -35,7 +35,7 @@ public sealed record AiResult(string Text, string Model, int InputTokens, int Ou
 public sealed class ClaudeOptions
 {
     public required string ApiKey { get; set; }
-    public string Model { get; set; } = "claude-sonnet-4-6";
+    public string Model { get; set; } = "claude-sonnet-5";
     public string ApiVersion { get; set; } = "2023-06-01";
     public string BaseUrl { get; set; } = "https://api.anthropic.com/v1/";
 }
