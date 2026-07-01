@@ -14,63 +14,71 @@ using Microsoft.Extensions.Options;
 namespace ClanGuardBot.Services;
 
 /// <summary>
-/// The scheduling "brain" for meeting recordings. Pure orchestration — it
-/// never touches voice itself; that's delegated to <see cref="IMeetingRecorderController"/>.
+/// The scheduling "brain" for meeting recordings. Pure orchestration — it never
+/// touches voice itself; that's delegated to <see cref="IMeetingRecorderController"/>.
 ///
-/// On a fixed cadence it:
-///   1. Finds the next upcoming meeting by matching CalendarEvent.Title against
-///      MeetingTitlePattern (a regex), restricted to the attendance-counting
-///      sources ("Clan"). No day/time is ever hardcoded.
-///   2. Upserts a MeetingRecording row for it, recomputing JoinAtUtc when the
-///      event is rescheduled and refreshing the title on rename (pre-recording
-///      states only).
-///   3. Reconciles cancellations — if a scheduled meeting's CalendarEvent has
-///      disappeared (Apollo event deleted), the recording is Cancelled.
-///   4. Fires the recorder at JoinAtUtc: posts the recording-consent notice,
-///      then asks the controller to start.
+/// ── Trigger: presence, not calendar (changed) ──────────────────────────────
+/// Recording is driven entirely by who is *in the meeting voice channel*, not by
+/// any calendar event or title. On each poll (and immediately when someone joins
+/// the VC) the scheduler checks the live occupancy of MeetingVoiceChannelId:
+///   • Once at least MeetingRecordingMinPresenceToStart non-bot members are
+///     present and nothing is already recording, it posts the consent notice,
+///     asks the recorder to join, and moves the row to Recording. No event needs
+///     to exist and the meeting can be titled anything.
+///   • A recording is *named* by borrowing the title of a clan-source Apollo
+///     event that happens to overlap the moment it starts (preferring one whose
+///     title matches the optional MeetingTitlePattern); if there is no concurrent
+///     event, it's named after the voice channel and the date.
 ///
-/// ── Stop policy (changed) ──────────────────────────────────────────────────
-/// The recorder now decides when a meeting actually ends — it stops once the VC
-/// has been empty for a grace period (so meetings that run long are captured in
-/// full), bounded by a hard safety cap. The scheduler therefore does NOT stop
-/// the recorder at a fixed calendar buffer anymore. Instead, once Recording, it
-/// asks the recorder for the finalized audio dir only after a generous backstop
-/// window (EndUtc + StopBackstop) has elapsed — by which point the recorder has
-/// almost always already auto-stopped, and StopRecordingAsync simply returns the
-/// dir it finalized (idempotent). The bot's stop is a safety net, not the
-/// primary trigger.
+/// ── Stop policy ────────────────────────────────────────────────────────────
+/// The recorder owns the real stop — it auto-stops once the VC has been empty for
+/// a grace period (so long meetings are captured in full), bounded by a hard cap.
+/// The scheduler advances Recording → Transcribing as soon as the recorder reports
+/// the meeting finalized; a far-out backstop (start + StopBackstop) is the only
+/// fallback for when the recorder can't be reached or restarted and lost state.
 ///
-/// ── Never lose captured audio (changed) ────────────────────────────────────
+/// ── Never lose captured audio ──────────────────────────────────────────────
 /// If StopRecordingAsync returns null (e.g. the recorder restarted and lost its
-/// in-memory state), the scheduler reconciles against the shared audio volume:
-/// it looks for a meeting_{id}_* directory containing a manifest.json with real
-/// tracks/segments and adopts it. A recording is only marked Failed when there
-/// is genuinely no audio on disk. This is the fix for the May-31 stop-race that
-/// wrongly failed a meeting whose 2,518 segments were sitting on disk.
+/// in-memory state), the scheduler reconciles against the shared audio volume: it
+/// looks for a meeting_{id}_* directory whose manifest.json has real
+/// tracks/segments and adopts it. A recording is only marked Failed when there is
+/// genuinely no audio on disk.
 ///
-/// Restart-safe: all state lives in the MeetingRecordings table.
+/// Restart-safe: all state lives in the MeetingRecordings table. On restart, a
+/// meeting still in progress stays in its Recording row (the presence guard stops
+/// a duplicate from being created) and the recorder/backstop finalize it.
 ///
-/// Feature-gated: a no-op unless MeetingRecordingEnabled is true AND both
-/// MeetingVoiceChannelId and MeetingTitlePattern are configured.
+/// Feature-gated: a no-op unless MeetingRecordingEnabled is true AND
+/// MeetingVoiceChannelId is configured.
 /// </summary>
 public class MeetingRecordingScheduler : BackgroundService
 {
     /// <summary>
-    /// How long past the scheduled EndUtc the scheduler waits before issuing its
-    /// backstop stop. Large on purpose: the recorder owns the real (VC-empty)
-    /// stop, so this only fires if the recorder never reported in. Must be
-    /// comfortably larger than the recorder's own VC-empty grace.
+    /// How long past the start the scheduler waits before issuing its backstop
+    /// stop. Large on purpose: the recorder owns the real (VC-empty) stop, so this
+    /// only fires if the recorder never reported in. Must be comfortably larger
+    /// than the recorder's own VC-empty grace.
     /// </summary>
     private static readonly TimeSpan StopBackstop = TimeSpan.FromHours(4);
 
     /// <summary>
-    /// The "expected stop" we hand the recorder for its hard-cap math. The
-    /// recorder adds its own grace on top; this is just a hint, not a deadline.
+    /// The "expected stop" hint we hand the recorder for its hard-cap math. The
+    /// recorder adds its own grace on top; this is a generous hint, not a deadline.
     /// </summary>
-    private static readonly TimeSpan ExpectedStopBuffer = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan ExpectedMeetingDuration = TimeSpan.FromHours(3);
 
-    /// <summary>Don't schedule meetings further out than this.</summary>
-    private static readonly TimeSpan SchedulingHorizon = TimeSpan.FromDays(60);
+    /// <summary>
+    /// How long a row may sit Announced (notice posted, trying to start) before we
+    /// give up and fail it. Covers a recorder that's unreachable at start time.
+    /// </summary>
+    private static readonly TimeSpan StartWindow = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// After a recording stops, ignore presence in the same channel for this long
+    /// so a meeting that briefly empties and refills isn't split into a second
+    /// recording the instant the first one finalizes.
+    /// </summary>
+    private static readonly TimeSpan StartCooldown = TimeSpan.FromMinutes(5);
 
     private readonly IServiceProvider _services;
     private readonly DiscordSocketClient _client;
@@ -78,7 +86,13 @@ public class MeetingRecordingScheduler : BackgroundService
     private readonly ILogger<MeetingRecordingScheduler> _logger;
     private readonly BotConfig _config;
 
+    // Optional — only used to prefer a concurrent event when naming a recording.
     private Regex? _titleRegex;
+
+    // Wakes the poll loop early when someone joins the meeting VC, so recording
+    // starts within moments of a conversation forming rather than at the next poll.
+    private volatile TaskCompletionSource _wake =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     // Remembers the recording-notice message posted per recording, so it can be
     // deleted when recording stops. In-memory by design (cosmetic edge case).
@@ -106,56 +120,89 @@ public class MeetingRecordingScheduler : BackgroundService
             return;
         }
 
-        if (_config.MeetingVoiceChannelId == 0 || string.IsNullOrWhiteSpace(_config.MeetingTitlePattern))
+        if (_config.MeetingVoiceChannelId == 0)
         {
             _logger.LogWarning(
-                "MeetingRecordingScheduler disabled: requires MeetingVoiceChannelId (got {ChannelId}) " +
-                "and MeetingTitlePattern (got '{Pattern}').",
-                _config.MeetingVoiceChannelId, _config.MeetingTitlePattern);
+                "MeetingRecordingScheduler disabled: requires MeetingVoiceChannelId (got {ChannelId}).",
+                _config.MeetingVoiceChannelId);
             return;
         }
 
-        try
+        // The title pattern is optional now — used only to prefer a concurrent
+        // event when naming a recording. A bad pattern disables title-borrowing,
+        // never the feature itself.
+        if (!string.IsNullOrWhiteSpace(_config.MeetingTitlePattern))
         {
-            _titleRegex = new Regex(_config.MeetingTitlePattern,
-                RegexOptions.IgnoreCase | RegexOptions.Compiled, TimeSpan.FromSeconds(1));
-        }
-        catch (ArgumentException ex)
-        {
-            _logger.LogError(ex,
-                "MeetingRecordingScheduler disabled: MeetingTitlePattern '{Pattern}' is not a valid regex.",
-                _config.MeetingTitlePattern);
-            return;
+            try
+            {
+                _titleRegex = new Regex(_config.MeetingTitlePattern,
+                    RegexOptions.IgnoreCase | RegexOptions.Compiled, TimeSpan.FromSeconds(1));
+            }
+            catch (ArgumentException ex)
+            {
+                _logger.LogWarning(ex,
+                    "MeetingTitlePattern '{Pattern}' is not a valid regex — recordings will be named by " +
+                    "channel + date rather than by a matching event title.",
+                    _config.MeetingTitlePattern);
+            }
         }
 
         while (_client.ConnectionState != ConnectionState.Connected || !_client.Guilds.Any())
             await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
         await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
 
+        _client.UserVoiceStateUpdated += OnVoiceStateUpdated;
+
         var interval = TimeSpan.FromMinutes(Math.Max(1, _config.MeetingRecordingPollIntervalMinutes));
         _logger.LogInformation(
-            "MeetingRecordingScheduler started. Pattern='{Pattern}', VC={ChannelId}, Lead={Lead}min, " +
-            "Poll={Poll}min, Retain={Retain}.",
-            _config.MeetingTitlePattern, _config.MeetingVoiceChannelId, _config.MeetingRecordingLeadMinutes,
-            _config.MeetingRecordingPollIntervalMinutes, _config.MeetingRecordingRetainCount);
+            "MeetingRecordingScheduler started (presence-driven). VC={ChannelId}, MinPresence={Min}, " +
+            "Poll={Poll}min, Retain={Retain}, TitleHint='{Pattern}'.",
+            _config.MeetingVoiceChannelId, _config.MeetingRecordingMinPresenceToStart,
+            _config.MeetingRecordingPollIntervalMinutes, _config.MeetingRecordingRetainCount,
+            _config.MeetingTitlePattern);
 
-        while (!stoppingToken.IsCancellationRequested)
+        try
         {
-            try
+            while (!stoppingToken.IsCancellationRequested)
             {
-                await TickAsync(stoppingToken);
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "MeetingRecordingScheduler poll failed; will retry next interval.");
-            }
+                try
+                {
+                    await TickAsync(stoppingToken);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "MeetingRecordingScheduler poll failed; will retry next interval.");
+                }
 
-            await Task.Delay(interval, stoppingToken);
+                // Wait for the poll interval, but wake early if someone joins the VC.
+                var wake = _wake;
+                var delay = Task.Delay(interval, stoppingToken);
+                await Task.WhenAny(delay, wake.Task);
+                // Reset the signal for the next round (a race here at worst causes
+                // one extra, harmless idempotent tick).
+                _wake = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            }
         }
+        finally
+        {
+            _client.UserVoiceStateUpdated -= OnVoiceStateUpdated;
+        }
+    }
+
+    /// <summary>Nudge the poll loop the moment someone joins the meeting VC.</summary>
+    private Task OnVoiceStateUpdated(SocketUser user, SocketVoiceState before, SocketVoiceState after)
+    {
+        if (user is { IsBot: true }) return Task.CompletedTask;
+        if (after.VoiceChannel?.Id == _config.MeetingVoiceChannelId
+            && before.VoiceChannel?.Id != _config.MeetingVoiceChannelId)
+        {
+            _wake.TrySetResult();
+        }
+        return Task.CompletedTask;
     }
 
     private async Task TickAsync(CancellationToken ct)
@@ -164,187 +211,192 @@ public class MeetingRecordingScheduler : BackgroundService
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
         var now = DateTime.UtcNow;
 
-        await DiscoverAndUpsertAsync(db, now, ct);
-        await ReconcileCancellationsAsync(db, now, ct);
-        await DriveStateMachineAsync(db, now, ct);
+        // Live occupancy of the single meeting VC.
+        var vc = _client.GetChannel(_config.MeetingVoiceChannelId) as SocketVoiceChannel;
+        var humanCount = vc?.ConnectedUsers.Count(u => !u.IsBot) ?? 0;
+        var guildId = vc?.Guild.Id ?? 0;
+
+        await MaybeStartFromPresenceAsync(db, vc, humanCount, guildId, now, ct);
+        await DriveActiveRecordingsAsync(db, humanCount, now, ct);
 
         await db.SaveChangesAsync(ct);
     }
 
-    // ── 1. Find the next matching meeting and create/refresh its row ──────────
-    private async Task DiscoverAndUpsertAsync(BotDbContext db, DateTime now, CancellationToken ct)
+    // ── 1. Start a recording when enough people are in the VC ─────────────────
+    private async Task MaybeStartFromPresenceAsync(
+        BotDbContext db, SocketVoiceChannel? vc, int humanCount, ulong guildId, DateTime now, CancellationToken ct)
+    {
+        if (vc is null || guildId == 0)
+            return;
+
+        var threshold = Math.Max(1, _config.MeetingRecordingMinPresenceToStart);
+        if (humanCount < threshold)
+            return;
+
+        // Never run two recordings for the same channel at once. A row that's
+        // Announced (trying to start) or Recording counts as active.
+        var hasActive = await db.MeetingRecordings.AnyAsync(
+            m => m.GuildId == guildId
+              && (m.State == MeetingRecordingState.Announced || m.State == MeetingRecordingState.Recording),
+            ct);
+        if (hasActive)
+            return;
+
+        // Cooldown: don't immediately re-record a meeting that just finalized.
+        var cooldownCutoff = now - StartCooldown;
+        var recentlyStopped = await db.MeetingRecordings.AnyAsync(
+            m => m.GuildId == guildId
+              && m.RecordingStoppedUtc != null
+              && m.RecordingStoppedUtc > cooldownCutoff,
+            ct);
+        if (recentlyStopped)
+            return;
+
+        var (title, discordMessageId, calendarEventId, meetingStart) =
+            await ResolveTitleAsync(db, guildId, vc, now, ct);
+
+        var rec = new MeetingRecording
+        {
+            GuildId          = guildId,
+            DiscordMessageId = discordMessageId,   // 0 when there's no concurrent event
+            CalendarEventId  = calendarEventId,    // 0 when there's no concurrent event
+            MeetingTitle     = title,
+            MeetingStartUtc  = meetingStart,
+            MeetingEndUtc    = now,                 // placeholder; only feeds the backstop cap
+            JoinAtUtc        = now,
+            State            = MeetingRecordingState.Announced,
+            StateUpdatedUtc  = now,
+            CreatedAt        = now,
+        };
+        db.MeetingRecordings.Add(rec);
+        // Persist now so the row gets its Id (the recorder keys audio dirs on it)
+        // and so a crash right after this doesn't lose the fact that we started.
+        await db.SaveChangesAsync(ct);
+
+        _logger.LogInformation(
+            "Meeting VC has {Count} members (≥{Threshold}) — starting recording '{Title}' (#{Id}).",
+            humanCount, threshold, title, rec.Id);
+
+        await PostAnnouncementAsync(rec, ct);
+        // The actual recorder start is attempted here and retried by the drive
+        // loop while the row is Announced (in case the recorder is briefly down).
+        await TryStartRecorderAsync(rec, now, ct);
+    }
+
+    /// <summary>
+    /// Name a presence-triggered recording. If a clan-source Apollo event overlaps
+    /// now (within the lead-minutes buffer), borrow its title — preferring one that
+    /// matches the optional title pattern — and reference it for debugging. Failing
+    /// that, name the recording after the voice channel and the date.
+    /// </summary>
+    private async Task<(string Title, ulong DiscordMessageId, int CalendarEventId, DateTime MeetingStart)>
+        ResolveTitleAsync(BotDbContext db, ulong guildId, SocketVoiceChannel vc, DateTime now, CancellationToken ct)
     {
         var sources = _config.GetAttendanceCountingSourcesList();
-        var leadGrace = TimeSpan.FromMinutes(_config.MeetingRecordingLeadMinutes + 5);
+        var buffer = TimeSpan.FromMinutes(Math.Max(0, _config.MeetingRecordingLeadMinutes));
+        var lo = now - buffer;
+        var hi = now + buffer;
 
-        var candidates = await db.CalendarEvents
-            .Where(e => e.StartUtc > now - leadGrace
-                     && e.StartUtc < now + SchedulingHorizon
-                     && sources.Contains(e.Source))
+        var concurrent = await db.CalendarEvents
+            .Where(e => e.GuildId == guildId
+                     && sources.Contains(e.Source)
+                     && e.StartUtc <= hi
+                     && e.EndUtc >= lo)
             .OrderBy(e => e.StartUtc)
             .ToListAsync(ct);
 
-        var match = candidates.FirstOrDefault(e =>
-            !string.IsNullOrEmpty(e.Title) && _titleRegex!.IsMatch(e.Title));
+        CalendarEvent? evt = null;
+        if (_titleRegex is not null)
+            evt = concurrent.FirstOrDefault(e => !string.IsNullOrEmpty(e.Title) && _titleRegex.IsMatch(e.Title));
+        evt ??= concurrent.FirstOrDefault(e => !string.IsNullOrEmpty(e.Title));
 
-        if (match is null)
-            return;
-
-        var joinAt = match.StartUtc.AddMinutes(-_config.MeetingRecordingLeadMinutes);
-
-        // Match the recording for this occurrence in ANY state, including terminal
-        // ones. A single meeting (DiscordMessageId) must never spawn a second row:
-        // its CalendarEvent stays a discovery candidate for a short window after
-        // StartUtc, so a meeting that already ran and reached a terminal state
-        // (Posted/Pruned/Failed/Cancelled) would otherwise be re-created here and
-        // re-recorded. Reschedule/rename below is still gated to pre-recording
-        // states, so finding a terminal row simply means "leave it alone."
-        var existing = await db.MeetingRecordings
-            .FirstOrDefaultAsync(m => m.DiscordMessageId == match.DiscordMessageId, ct);
-
-        if (existing is null)
+        if (evt is not null)
         {
-            db.MeetingRecordings.Add(new MeetingRecording
-            {
-                GuildId          = match.GuildId,
-                DiscordMessageId = match.DiscordMessageId,
-                CalendarEventId  = match.Id,
-                MeetingTitle     = match.Title,
-                MeetingStartUtc  = match.StartUtc,
-                MeetingEndUtc    = match.EndUtc,
-                JoinAtUtc        = joinAt,
-                State            = MeetingRecordingState.Scheduled,
-                StateUpdatedUtc  = now,
-                CreatedAt        = now,
-            });
             _logger.LogInformation(
-                "Scheduled recording for '{Title}' starting {Start:yyyy-MM-dd HH:mm} UTC (join at {Join:HH:mm}).",
-                match.Title, match.StartUtc, joinAt);
-            return;
+                "Naming recording after concurrent event '{Title}' (msg {Msg}).", evt.Title, evt.DiscordMessageId);
+            return (evt.Title, evt.DiscordMessageId, evt.Id, evt.StartUtc);
         }
 
-        if (existing.State is MeetingRecordingState.Scheduled or MeetingRecordingState.Announced)
-        {
-            var moved   = existing.MeetingStartUtc != match.StartUtc || existing.MeetingEndUtc != match.EndUtc;
-            var renamed = existing.MeetingTitle != match.Title;
-
-            if (moved || renamed)
-            {
-                if (moved)
-                    _logger.LogInformation(
-                        "Meeting '{Title}' rescheduled {Old:yyyy-MM-dd HH:mm} → {New:yyyy-MM-dd HH:mm} UTC; " +
-                        "recomputed join to {Join:HH:mm}.",
-                        match.Title, existing.MeetingStartUtc, match.StartUtc, joinAt);
-                if (renamed)
-                    _logger.LogInformation("Meeting renamed '{Old}' → '{New}'.", existing.MeetingTitle, match.Title);
-
-                existing.MeetingTitle    = match.Title;
-                existing.MeetingStartUtc = match.StartUtc;
-                existing.MeetingEndUtc   = match.EndUtc;
-                existing.JoinAtUtc       = joinAt;
-                existing.CalendarEventId = match.Id;
-
-                if (existing.State == MeetingRecordingState.Announced && joinAt > now)
-                    Transition(existing, MeetingRecordingState.Scheduled, now);
-            }
-        }
+        var channelName = string.IsNullOrWhiteSpace(vc.Name) ? "Meeting" : vc.Name;
+        return ($"{channelName} — {now:yyyy-MM-dd}", 0UL, 0, now);
     }
 
-    // ── 2. Cancel recordings whose meeting vanished (Apollo event deleted) ────
-    private async Task ReconcileCancellationsAsync(BotDbContext db, DateTime now, CancellationToken ct)
-    {
-        var pending = await db.MeetingRecordings
-            .Where(m => m.State == MeetingRecordingState.Scheduled
-                     || m.State == MeetingRecordingState.Announced)
-            .ToListAsync(ct);
-
-        foreach (var rec in pending)
-        {
-            var stillExists = await db.CalendarEvents
-                .AnyAsync(e => e.DiscordMessageId == rec.DiscordMessageId, ct);
-
-            if (!stillExists)
-            {
-                _logger.LogInformation(
-                    "Meeting '{Title}' (msg {Msg}) was cancelled before recording — marking Cancelled.",
-                    rec.MeetingTitle, rec.DiscordMessageId);
-                await DeleteAnnouncementAsync(rec, ct);
-                Transition(rec, MeetingRecordingState.Cancelled, now);
-            }
-        }
-    }
-
-    // ── 3. Announce → start → (recorder auto-stops) → backstop stop → hand off ─
-    private async Task DriveStateMachineAsync(BotDbContext db, DateTime now, CancellationToken ct)
+    // ── 2. Drive active rows: finish starting, then finalize when done ────────
+    private async Task DriveActiveRecordingsAsync(BotDbContext db, int humanCount, DateTime now, CancellationToken ct)
     {
         var active = await db.MeetingRecordings
-            .Where(m => m.State == MeetingRecordingState.Scheduled
-                     || m.State == MeetingRecordingState.Announced
+            .Where(m => m.State == MeetingRecordingState.Announced
                      || m.State == MeetingRecordingState.Recording)
             .ToListAsync(ct);
 
         foreach (var rec in active)
         {
-            // The recorder owns the real stop; the bot's backstop is far out.
-            var backstopAt = rec.MeetingEndUtc + StopBackstop;
-            // The window in which we still bother trying to START if we haven't.
-            var startWindowEnd = rec.MeetingEndUtc + TimeSpan.FromMinutes(_config.MeetingRecordingLeadMinutes + 30);
-
-            // Missed the whole start window without ever starting — give up.
-            if (rec.State is MeetingRecordingState.Scheduled or MeetingRecordingState.Announced
-                && now >= startWindowEnd)
+            if (rec.State == MeetingRecordingState.Announced)
             {
-                rec.ErrorMessage = "Recording window elapsed without a successful start.";
-                _logger.LogWarning("Recording for '{Title}' (#{Id}) missed its window — Failed.",
-                    rec.MeetingTitle, rec.Id);
-                await DeleteAnnouncementAsync(rec, ct);
-                Transition(rec, MeetingRecordingState.Failed, now);
+                // Everyone left before the recorder ever started — nothing captured.
+                if (humanCount == 0)
+                {
+                    _logger.LogInformation(
+                        "Recording '{Title}' (#{Id}) — VC emptied before recording started; cancelling.",
+                        rec.MeetingTitle, rec.Id);
+                    await DeleteAnnouncementAsync(rec, ct);
+                    Transition(rec, MeetingRecordingState.Cancelled, now);
+                    continue;
+                }
+
+                // Gave up trying to reach the recorder.
+                if (now - rec.StateUpdatedUtc >= StartWindow)
+                {
+                    rec.ErrorMessage = "Recorder could not be started within the start window.";
+                    _logger.LogWarning("Recording '{Title}' (#{Id}) never started — Failed.",
+                        rec.MeetingTitle, rec.Id);
+                    await DeleteAnnouncementAsync(rec, ct);
+                    Transition(rec, MeetingRecordingState.Failed, now);
+                    continue;
+                }
+
+                // Retry the start.
+                await TryStartRecorderAsync(rec, now, ct);
                 continue;
             }
 
-            // Announce once, at lead time.
-            if (rec.State == MeetingRecordingState.Scheduled && now >= rec.JoinAtUtc && now < startWindowEnd)
-            {
-                await PostAnnouncementAsync(rec, ct);
-                Transition(rec, MeetingRecordingState.Announced, now);
-            }
-
-            // Start (retried each poll while Announced and still within the window).
-            if (rec.State == MeetingRecordingState.Announced && now < startWindowEnd)
-            {
-                try
-                {
-                    // ExpectedStop is just a hint for the recorder's hard-cap math;
-                    // the real stop is VC-empty-driven inside the recorder.
-                    var expectedStop = rec.MeetingEndUtc + ExpectedStopBuffer;
-                    await _recorder.StartRecordingAsync(new MeetingRecorderStartContext(
-                        rec.Id, rec.GuildId, _config.MeetingVoiceChannelId, rec.MeetingTitle, expectedStop), ct);
-                    rec.RecordingStartedUtc = now;
-                    rec.ErrorMessage = null;
-                    Transition(rec, MeetingRecordingState.Recording, now);
-                }
-                catch (Exception ex)
-                {
-                    rec.ErrorMessage = Truncate(ex.Message, 800);
-                    _logger.LogError(ex,
-                        "Failed to start recorder for '{Title}' (#{Id}); will retry until {End:HH:mm} UTC.",
-                        rec.MeetingTitle, rec.Id, startWindowEnd);
-                }
-                continue;
-            }
-
-            // While Recording: the recorder auto-stops when the VC empties and
-            // remembers the finalized result. As soon as it reports this meeting as
-            // finalized, advance promptly (StopRecordingAsync then just returns the
-            // already-finalized dir). The backstop far past EndUtc is the fallback
-            // for when the recorder can't be reached or restarted and lost state.
+            // Recording: the recorder auto-stops when the VC empties and remembers
+            // the result. Advance as soon as it reports finalized; the far-out
+            // backstop covers a recorder that can't be reached or lost its state.
             if (rec.State == MeetingRecordingState.Recording)
             {
+                var backstopAt = rec.MeetingEndUtc + StopBackstop;
                 if (await _recorder.IsFinalizedAsync(rec.Id, ct))
                     await FinalizeRecordingAsync(rec, now, ct, reason: "recorder-finalized");
                 else if (now >= backstopAt)
                     await FinalizeRecordingAsync(rec, now, ct, reason: "backstop");
             }
+        }
+    }
+
+    /// <summary>
+    /// Ask the recorder to join and begin capturing. On success advance to
+    /// Recording; on failure leave the row Announced to retry on the next poll
+    /// until the start window closes.
+    /// </summary>
+    private async Task TryStartRecorderAsync(MeetingRecording rec, DateTime now, CancellationToken ct)
+    {
+        try
+        {
+            var expectedStop = now + ExpectedMeetingDuration;
+            await _recorder.StartRecordingAsync(new MeetingRecorderStartContext(
+                rec.Id, rec.GuildId, _config.MeetingVoiceChannelId, rec.MeetingTitle, expectedStop), ct);
+            rec.RecordingStartedUtc = now;
+            rec.ErrorMessage = null;
+            Transition(rec, MeetingRecordingState.Recording, now);
+            _logger.LogInformation("Recorder joined for '{Title}' (#{Id}).", rec.MeetingTitle, rec.Id);
+        }
+        catch (Exception ex)
+        {
+            rec.ErrorMessage = Truncate(ex.Message, 800);
+            _logger.LogError(ex,
+                "Failed to start recorder for '{Title}' (#{Id}); will retry until the start window closes.",
+                rec.MeetingTitle, rec.Id);
         }
     }
 
@@ -394,9 +446,9 @@ public class MeetingRecordingScheduler : BackgroundService
     /// <summary>
     /// Look on the shared audio volume for a finalized recording directory for
     /// this meeting id (meeting_{id}_*) whose manifest.json reports real audio.
-    /// Returns the directory path, or null if none. This makes the pipeline
-    /// robust to the recorder losing its in-memory state (restart) after it had
-    /// already written the audio + manifest — the May-31 failure mode.
+    /// Returns the directory path, or null if none. This makes the pipeline robust
+    /// to the recorder losing its in-memory state (restart) after it had already
+    /// written the audio + manifest.
     /// </summary>
     private string? TryReconcileFromDisk(int meetingRecordingId)
     {
@@ -468,7 +520,7 @@ public class MeetingRecordingScheduler : BackgroundService
         }
 
         var notice =
-            $"🔴 **Recording notice** — **{rec.MeetingTitle}** is being recorded by ClanGuard to generate " +
+            $"🔴 **Recording notice** — this meeting is being recorded by ClanGuard to generate " +
             $"minutes and action items. Only the last {_config.MeetingRecordingRetainCount} meetings' audio is " +
             "kept; older recordings are deleted automatically. If you'd rather not be recorded, please leave " +
             "the voice channel — staying in the channel indicates your consent to being recorded.";

@@ -591,19 +591,32 @@ public class BotConfig
     public bool MeetingRecordingEnabled { get; set; } = false;
 
     /// <summary>
-    /// Regex (matched case-insensitively) against CalendarEvent.Title to
-    /// identify which meeting to record. A pattern rather than an exact title
-    /// lets the meeting drift — "189th Monthly Meeting" → "Monthly Meeting –
-    /// June" — without breaking the schedule. No day/time is ever hardcoded;
-    /// the time comes from the matched Apollo event, so reschedules are
-    /// followed automatically. Empty disables the feature.
+    /// OPTIONAL. Recording is now triggered purely by voice-channel presence
+    /// (see <see cref="MeetingRecordingMinPresenceToStart"/>) — a calendar event
+    /// is no longer required to record. This pattern is only used to *name* a
+    /// presence-triggered recording: when a clan-source Apollo event happens to
+    /// overlap the moment recording starts, its title is borrowed for the minutes.
+    /// If set, a concurrent event whose Title matches (case-insensitively) is
+    /// preferred; if empty, any concurrent clan event is used, and if there is no
+    /// concurrent event at all the recording is named after the voice channel and
+    /// date. Never gates the feature.
     /// </summary>
     public string MeetingTitlePattern { get; set; } = "monthly meeting";
 
     /// <summary>
-    /// Minutes before the meeting's StartUtc that the recorder joins the VC.
-    /// Default 5. The join time (StartUtc − this) is recomputed whenever the
-    /// event is rescheduled while still pre-recording.
+    /// How many non-bot members must be in the meeting voice channel before the
+    /// recorder joins and starts capturing. Default 2, so one person sitting
+    /// alone in the channel is never recorded — recording begins once a real
+    /// conversation (two or more people) forms. Set to 1 to record the instant
+    /// anyone joins.
+    /// </summary>
+    public int MeetingRecordingMinPresenceToStart { get; set; } = 2;
+
+    /// <summary>
+    /// Retained for backward compatibility. With presence-driven recording the
+    /// recorder joins when people are already in the channel, so there is no
+    /// pre-meeting lead to honour; this value is now only used as the +/- buffer
+    /// when looking for a concurrent event to borrow a title from.
     /// </summary>
     public int MeetingRecordingLeadMinutes { get; set; } = 5;
 

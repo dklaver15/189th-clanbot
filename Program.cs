@@ -525,10 +525,12 @@ try
     builder.Services.AddHostedService<MeetingAttendanceSnapshotService>();
 
     // MeetingRecordingScheduler: the scheduling "brain" for meeting recordings.
-    // Finds the next meeting by regex-matching CalendarEvent.Title
-    // (BotConfig.MeetingTitlePattern), follows reschedules/renames, posts the
-    // recording-consent notice, and drives the recorder via
-    // IMeetingRecorderController. Opt-in via BotConfig.MeetingRecordingEnabled.
+    // Presence-driven — it watches the meeting VC (BotConfig.MeetingVoiceChannelId)
+    // and, once BotConfig.MeetingRecordingMinPresenceToStart non-bot members are
+    // present, posts the recording-consent notice and drives the recorder via
+    // IMeetingRecorderController. No calendar event or title is required; a
+    // concurrent clan event's title is borrowed for naming when one exists.
+    // Opt-in via BotConfig.MeetingRecordingEnabled.
     // The controller is the @discordjs/voice sidecar in production; until that
     // exists, LoggingMeetingRecorderController is a logging no-op so the
     // scheduler runs end-to-end against real CalendarEvent data.
