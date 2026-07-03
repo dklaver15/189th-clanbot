@@ -533,7 +533,15 @@ public class DiscordBotService : IHostedService
                 // visible to (and clickable by) the original invoker.
                 new SlashCommandBuilder()
                     .WithName(SquadCommandHandler.CommandName)
-                    .WithDescription("Randomize everyone in the events VC into 4-man squads (Officer+ only)")
+                    .WithDescription("Randomize everyone in the events VC into squads (Officer+ only)")
+                    .AddOption(
+                        new SlashCommandOptionBuilder()
+                            .WithName("size")
+                            .WithDescription("Players per squad (default 4)")
+                            .WithType(ApplicationCommandOptionType.Integer)
+                            .WithRequired(false)
+                            .WithMinValue(1)
+                            .WithMaxValue(30))
                     .Build(),
 
                 // /kick-awols — bulk-kick all members holding the AWOL role.

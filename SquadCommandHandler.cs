@@ -26,11 +26,14 @@ namespace ClanGuardBot.Handlers;
 /// anyone else.
 ///
 /// ── Squad sizing ──
-/// Hardcoded 4-man squads (SquadSize const) for Vendetta. The final
-/// squad is smaller if the player count isn't divisible by 4; partial
+/// Defaults to 4-man squads (DefaultSquadSize const) for Vendetta, but
+/// the officer can override per invocation with the optional `size`
+/// integer parameter (e.g. /squads size:3). The final squad is smaller
+/// if the player count isn't divisible by the chosen size; partial
 /// squads render with just the assigned names — no "needs more" tag,
 /// since the running officer is the only one seeing the draw and
-/// already knows how many they have.
+/// already knows how many they have. On reroll the size is preserved by
+/// encoding it in the button's custom id.
 ///
 /// ── Visibility ──
 /// Ephemeral. Only the officer who ran the command sees the result, so
@@ -57,18 +60,26 @@ public class SquadCommandHandler
     public const string CommandName = "squads";
 
     /// <summary>
-    /// Vendetta uses 4-man squads. Hardcoded to keep the slash-command
-    /// surface area small; lift to a config field or an optional slash
-    /// parameter if other modes ever need different sizing.
+    /// Default squad size when the optional `size` slash parameter is
+    /// omitted. Vendetta uses 4-man squads; the officer can override per
+    /// invocation (e.g. `/squads size:3`) for other modes.
     /// </summary>
-    private const int SquadSize = 4;
+    private const int DefaultSquadSize = 4;
 
     /// <summary>
-    /// Custom-id for the reroll button. No invoker ID encoded because the
-    /// result message is ephemeral — only the officer who ran the command
+    /// Name of the optional integer slash parameter controlling squad size.
+    /// SyncWithBuilder: DiscordBotService.cs /squads SlashCommandOptionBuilder.
+    /// </summary>
+    private const string SizeOptionName = "size";
+
+    /// <summary>
+    /// Custom-id prefix for the reroll button. The chosen squad size is
+    /// appended after the colon (e.g. "squads_reroll:3") so rerolls preserve
+    /// the size the officer originally picked. No invoker ID encoded because
+    /// the result message is ephemeral — only the officer who ran the command
     /// can see (and therefore press) the button in the first place.
     /// </summary>
-    private const string RerollButtonId = "squads_reroll";
+    private const string RerollButtonPrefix = "squads_reroll:";
 
     private readonly ILogger<SquadCommandHandler> _logger;
     private readonly BotConfig _config;
@@ -112,7 +123,7 @@ public class SquadCommandHandler
 
     private async Task OnButtonExecutedAsync(SocketMessageComponent component)
     {
-        if (component.Data.CustomId != RerollButtonId) return;
+        if (!component.Data.CustomId.StartsWith(RerollButtonPrefix, StringComparison.Ordinal)) return;
 
         try
         {
@@ -162,14 +173,16 @@ public class SquadCommandHandler
             return;
         }
 
-        var squads = BuildSquads(players);
+        var squadSize = ResolveSquadSize(command);
+
+        var squads = BuildSquads(players, squadSize);
         var embed = BuildEmbed(squads, players.Count, caller);
 
-        await command.RespondAsync(embed: embed, components: BuildRerollButton(), ephemeral: true);
+        await command.RespondAsync(embed: embed, components: BuildRerollButton(squadSize), ephemeral: true);
 
         _logger.LogInformation(
-            "/squads: {Caller} drew {SquadCount} squad(s) from {PlayerCount} player(s) in events VC",
-            caller.Username, squads.Count, players.Count);
+            "/squads: {Caller} drew {SquadCount} squad(s) of {SquadSize} from {PlayerCount} player(s) in events VC",
+            caller.Username, squads.Count, squadSize, players.Count);
     }
 
     private async Task HandleRerollAsync(SocketMessageComponent component)
@@ -181,6 +194,8 @@ public class SquadCommandHandler
 
         var caller = component.User as SocketGuildUser;
         if (caller is null) return;
+
+        var squadSize = ParseRerollSquadSize(component.Data.CustomId);
 
         var players = GetEventVcPlayers(guild);
         if (players.Count == 0)
@@ -195,23 +210,23 @@ public class SquadCommandHandler
                         "Have everyone rejoin the events VC, then press 🎲 Reroll again.")
                     .WithCurrentTimestamp()
                     .Build();
-                msg.Components = BuildRerollButton();
+                msg.Components = BuildRerollButton(squadSize);
             });
             return;
         }
 
-        var squads = BuildSquads(players);
+        var squads = BuildSquads(players, squadSize);
         var embed = BuildEmbed(squads, players.Count, caller, isReroll: true);
 
         await component.UpdateAsync(msg =>
         {
             msg.Embed = embed;
-            msg.Components = BuildRerollButton();
+            msg.Components = BuildRerollButton(squadSize);
         });
 
         _logger.LogInformation(
-            "/squads reroll: {Caller} re-drew {SquadCount} squad(s) from {PlayerCount} player(s)",
-            caller.Username, squads.Count, players.Count);
+            "/squads reroll: {Caller} re-drew {SquadCount} squad(s) of {SquadSize} from {PlayerCount} player(s)",
+            caller.Username, squads.Count, squadSize, players.Count);
     }
 
     /// <summary>
@@ -232,12 +247,39 @@ public class SquadCommandHandler
     }
 
     /// <summary>
-    /// Fisher-Yates shuffle then chunk into <see cref="SquadSize"/>-man squads.
-    /// The final squad may have 1..<see cref="SquadSize"/> members depending on
-    /// the total player count. Uses <see cref="Random.Shared"/> so we don't
-    /// allocate a new RNG per invocation.
+    /// Reads the optional `size` integer parameter, falling back to
+    /// <see cref="DefaultSquadSize"/> when it's omitted. The slash-command
+    /// builder already clamps to 1..30, so no extra bounds check here.
     /// </summary>
-    private static List<List<SocketGuildUser>> BuildSquads(List<SocketGuildUser> players)
+    private static int ResolveSquadSize(SocketSlashCommand command)
+    {
+        var opt = command.Data.Options
+            .FirstOrDefault(o => o.Name == SizeOptionName);
+        if (opt?.Value is long size && size >= 1)
+            return (int)size;
+        return DefaultSquadSize;
+    }
+
+    /// <summary>
+    /// Recovers the squad size encoded in the reroll button's custom id
+    /// (see <see cref="RerollButtonPrefix"/>). Falls back to
+    /// <see cref="DefaultSquadSize"/> if the suffix is missing or malformed.
+    /// </summary>
+    private static int ParseRerollSquadSize(string customId)
+    {
+        var suffix = customId.Substring(RerollButtonPrefix.Length);
+        if (int.TryParse(suffix, out var size) && size >= 1)
+            return size;
+        return DefaultSquadSize;
+    }
+
+    /// <summary>
+    /// Fisher-Yates shuffle then chunk into <paramref name="squadSize"/>-man
+    /// squads. The final squad may have 1..<paramref name="squadSize"/> members
+    /// depending on the total player count. Uses <see cref="Random.Shared"/> so
+    /// we don't allocate a new RNG per invocation.
+    /// </summary>
+    private static List<List<SocketGuildUser>> BuildSquads(List<SocketGuildUser> players, int squadSize)
     {
         var rng = Random.Shared;
         var shuffled = players.ToList();
@@ -248,9 +290,9 @@ public class SquadCommandHandler
         }
 
         var squads = new List<List<SocketGuildUser>>();
-        for (int i = 0; i < shuffled.Count; i += SquadSize)
+        for (int i = 0; i < shuffled.Count; i += squadSize)
         {
-            squads.Add(shuffled.Skip(i).Take(SquadSize).ToList());
+            squads.Add(shuffled.Skip(i).Take(squadSize).ToList());
         }
         return squads;
     }
@@ -286,9 +328,9 @@ public class SquadCommandHandler
             .Build();
     }
 
-    private static MessageComponent BuildRerollButton() =>
+    private static MessageComponent BuildRerollButton(int squadSize) =>
         new ComponentBuilder()
-            .WithButton("🎲 Reroll", RerollButtonId, ButtonStyle.Secondary)
+            .WithButton("🎲 Reroll", RerollButtonPrefix + squadSize, ButtonStyle.Secondary)
             .Build();
 
     /// <summary>

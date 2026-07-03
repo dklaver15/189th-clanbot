@@ -617,7 +617,7 @@ public class CommandsCommandHandler
                 "Officer+", officer),
             new("setnick", "Change a member's nickname",
                 "Officer+", officerOrManageNicknames),
-            new("squads", "Randomize everyone in the events VC into 4-man squads",
+            new("squads", "Randomize everyone in the events VC into squads (default 4 per squad, or set size:)",
                 "Officer+", officer),
             new("timeline", "Show a member's complete history — joins, ranks, AWOL, applications, events",
                 "Officer+", officer),   // SyncWithHandlers: TimelineCommandHandler.HasElevatedPermissions
