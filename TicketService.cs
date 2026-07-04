@@ -154,6 +154,21 @@ public sealed class TicketService
             catch (Exception ex) { _logger.LogWarning(ex, "Could not archive/lock thread for ticket #{Id}", ticket.Id); }
         }
 
+        // Let an anonymous reporter know their report was closed (best-effort;
+        // they've been talking via DM, so close the loop there).
+        if (ticket.IsAnonymous && guild.GetUser(ticket.OpenerUserId) is { } reporter)
+        {
+            try
+            {
+                var dm = await reporter.CreateDMChannelAsync();
+                await dm.SendMessageAsync(
+                    $"🔒 Your anonymous report **#{ticket.Id}** has been closed by HQ."
+                    + (ticket.Resolution is { } r ? $"\n**Resolution:** {r}" : ""),
+                    allowedMentions: AllowedMentions.None);
+            }
+            catch (Exception ex) { _logger.LogInformation(ex, "Could not DM anonymous reporter on close for ticket #{Id}", ticket.Id); }
+        }
+
         _logger.LogInformation("Ticket #{Id} closed by {Closer}", ticket.Id, closedByName);
         return true;
     }

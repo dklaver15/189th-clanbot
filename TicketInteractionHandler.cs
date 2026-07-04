@@ -47,6 +47,7 @@ public sealed class TicketInteractionHandler
     private const string ActionRecDel        = "recdel";        // button: ticket:recdel:{id}        (transcript)
     private const string ActionRecDelConfirm = "recdelconfirm"; // button: ticket:recdelconfirm:{id}
     private const string ActionRecDelCancel  = "recdelcancel";  // button: ticket:recdelcancel:{id}
+    private const string ActionUnmask        = "unmask";        // button: ticket:unmask:{id}        (anonymous only)
 
     private const string ModalSubjectId  = "subject";
     private const string ModalDetailsId  = "details";
@@ -56,17 +57,20 @@ public sealed class TicketInteractionHandler
     private const int MaxThreadMembersToAdd   = 50;
 
     private readonly IServiceProvider _services;
+    private readonly DiscordSocketClient _client;
     private readonly TicketService _tickets;
     private readonly ILogger<TicketInteractionHandler> _logger;
     private readonly BotConfig _config;
 
     public TicketInteractionHandler(
         IServiceProvider services,
+        DiscordSocketClient client,
         TicketService tickets,
         ILogger<TicketInteractionHandler> logger,
         IOptions<BotConfig> config)
     {
         _services = services;
+        _client   = client;
         _tickets  = tickets;
         _logger   = logger;
         _config   = config.Value;
@@ -117,12 +121,20 @@ public sealed class TicketInteractionHandler
             .WithButton("Delete Record", $"ticket:{ActionRecDel}:{ticketId}", ButtonStyle.Danger, new Emoji("🗑️"))
             .Build();
 
-    private static MessageComponent BuildControlButtons(int ticketId) =>
-        new ComponentBuilder()
+    private static MessageComponent BuildControlButtons(int ticketId, bool isAnonymous)
+    {
+        var builder = new ComponentBuilder()
             .WithButton("Claim",        $"ticket:{ActionClaim}:{ticketId}",    ButtonStyle.Primary,   new Emoji("🙋"))
             .WithButton("Set Priority", $"ticket:{ActionPrioMenu}:{ticketId}", ButtonStyle.Secondary, new Emoji("⚙️"))
-            .WithButton("Close",        $"ticket:{ActionCloseBtn}:{ticketId}", ButtonStyle.Danger,    new Emoji("🔒"))
-            .Build();
+            .WithButton("Close",        $"ticket:{ActionCloseBtn}:{ticketId}", ButtonStyle.Danger,    new Emoji("🔒"));
+
+        // Anonymous (Report-a-Member) tickets get an Unmask control, gated at
+        // click time to TicketUnmaskRoleId / Administrator.
+        if (isAnonymous)
+            builder.WithButton("Unmask", $"ticket:{ActionUnmask}:{ticketId}", ButtonStyle.Secondary, new Emoji("🕵️"));
+
+        return builder.Build();
+    }
 
     // ─── Category select → creation modal ─────────────────────────────
 
@@ -261,6 +273,27 @@ public sealed class TicketInteractionHandler
             return;
         }
 
+        // Anonymous tickets relay through the opener's DM, so keep it to one
+        // open anonymous ticket per person — that keeps the DM→ticket routing
+        // unambiguous.
+        if (category.AnonymousAllowed)
+        {
+            using var guardScope = _services.CreateScope();
+            var guardDb = guardScope.ServiceProvider.GetRequiredService<BotDbContext>();
+            var hasOpenAnon = await guardDb.SupportTickets.AnyAsync(t =>
+                t.GuildId == guild.Id &&
+                t.OpenerUserId == member.Id &&
+                t.IsAnonymous &&
+                t.Status != SupportTicketStatus.Closed);
+            if (hasOpenAnon)
+            {
+                await modal.FollowupAsync(
+                    "⛔ You already have an open anonymous report. Please wait for it to be resolved before opening another.",
+                    ephemeral: true);
+                return;
+            }
+        }
+
         var fields  = modal.Data.Components.ToDictionary(c => c.CustomId, c => c.Value ?? "");
         var subject = fields.GetValueOrDefault(ModalSubjectId, "").Trim();
         var details = fields.GetValueOrDefault(ModalDetailsId, "").Trim();
@@ -332,7 +365,7 @@ public sealed class TicketInteractionHandler
             spacer, TicketService.SpacerFileName,
             text: ping,
             embed: embed,
-            components: BuildControlButtons(ticket.Id),
+            components: BuildControlButtons(ticket.Id, ticket.IsAnonymous),
             allowedMentions: routedRoleId != 0
                 ? new AllowedMentions { RoleIds = new List<ulong> { routedRoleId }, MentionRepliedUser = false }
                 : AllowedMentions.None);
@@ -357,15 +390,43 @@ public sealed class TicketInteractionHandler
 
         if (ticket.IsAnonymous)
         {
+            // Open a DM so the reporter has a channel to continue the (relayed)
+            // conversation in. Best-effort — if their DMs are closed, the report
+            // is still delivered; they just can't do two-way follow-up.
+            var dmOk = await SendReporterIntroDmAsync(member, ticket);
+
             await modal.FollowupAsync(
                 "✅ Your **anonymous** report has been submitted to HQ. Because it's anonymous "
-                + "you won't see the ticket thread — HQ will handle it without seeing who filed it.",
+                + "you won't see the ticket thread — HQ will handle it without seeing who filed it.\n\n"
+                + (dmOk
+                    ? "💬 I've sent you a DM — **reply there** to add more and to talk with HQ. Your identity stays hidden."
+                    : "⚠️ I couldn't DM you, so two-way follow-up is off. Enable DMs from server members if you want to keep the conversation going."),
                 ephemeral: true);
         }
         else
         {
             var link = $"https://discord.com/channels/{guild.Id}/{thread.Id}";
             await modal.FollowupAsync($"✅ Ticket **#{ticket.Id}** opened: {link}", ephemeral: true);
+        }
+    }
+
+    private async Task<bool> SendReporterIntroDmAsync(SocketGuildUser reporter, SupportTicket ticket)
+    {
+        try
+        {
+            var dm = await reporter.CreateDMChannelAsync();
+            await dm.SendMessageAsync(
+                $"🕵️ **Anonymous report #{ticket.Id} received.**\n"
+                + "You can **reply to this DM** to add details or answer HQ — I'll relay your messages "
+                + "into the report **without revealing who you are**. HQ's replies will show up here too.\n"
+                + "_Reply here anytime while the report is open._",
+                allowedMentions: AllowedMentions.None);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogInformation(ex, "Could not DM anonymous reporter for ticket #{Id}", ticket.Id);
+            return false;
         }
     }
 
@@ -387,6 +448,8 @@ public sealed class TicketInteractionHandler
                 await HandleRecordDeleteConfirmAsync(component, rdcId);
             else if (TryParse(component.Data.CustomId, ActionRecDelCancel, out var rdxId))
                 await HandleRecordDeleteCancelAsync(component, rdxId);
+            else if (TryParse(component.Data.CustomId, ActionUnmask, out var umId))
+                await HandleUnmaskAsync(component, umId);
         }
         catch (Exception ex)
         {
@@ -611,6 +674,41 @@ public sealed class TicketInteractionHandler
         _logger.LogInformation("Ticket #{Id} record deleted by {User}", ticketId, user.Username);
     }
 
+    // ─── Unmask (reveal an anonymous reporter, gated + logged) ─────────
+
+    private async Task HandleUnmaskAsync(SocketMessageComponent component, int ticketId)
+    {
+        var user = component.User as SocketGuildUser;
+        if (user is null || !HasUnmaskPermission(user))
+        {
+            await component.RespondAsync("⛔ You don't have permission to unmask reporters.", ephemeral: true);
+            return;
+        }
+
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+        var ticket = await db.SupportTickets.AsNoTracking().FirstOrDefaultAsync(t => t.Id == ticketId);
+        if (ticket is null) { await component.RespondAsync("Ticket not found.", ephemeral: true); return; }
+        if (!ticket.IsAnonymous) { await component.RespondAsync("This ticket isn't anonymous.", ephemeral: true); return; }
+
+        // Reveal only to the requester (ephemeral). The action is logged.
+        await component.RespondAsync(
+            $"🕵️ Reporter of ticket **#{ticket.Id}** ({ticket.AnonHandle}) is "
+            + $"<@{ticket.OpenerUserId}> — **{ticket.OpenerDisplayName}**.\n"
+            + "_This unmask was recorded in the bot logs. Handle with care._",
+            ephemeral: true);
+
+        _logger.LogWarning(
+            "ANONYMOUS UNMASK: ticket #{Id} reporter {ReporterId} ({ReporterName}) revealed to {ByUser} ({ById})",
+            ticket.Id, ticket.OpenerUserId, ticket.OpenerDisplayName, user.Username, user.Id);
+    }
+
+    private bool HasUnmaskPermission(SocketGuildUser user)
+    {
+        if (user.GuildPermissions.Administrator) return true;
+        return _config.TicketUnmaskRoleId != 0 && user.Roles.Any(r => r.Id == _config.TicketUnmaskRoleId);
+    }
+
     // ─── Message capture (transcript + activity) ──────────────────────
 
     private async Task OnMessageReceivedAsync(SocketMessage message)
@@ -619,6 +717,16 @@ public sealed class TicketInteractionHandler
         {
             if (message.Author.IsBot) return;
             if (message is not SocketUserMessage) return;
+
+            // Reporter DM → relayed into their open anonymous ticket thread.
+            if (message.Channel is IDMChannel)
+            {
+                await HandleReporterDmAsync(message);
+                return;
+            }
+
+            // Ticket-thread message → capture for the transcript (+ relay staff
+            // messages out to an anonymous reporter's DM).
             if (message.Channel is not SocketThreadChannel thread) return;
             if (thread.ParentChannel?.Id != _config.TicketCenterChannelId) return;
             if (string.IsNullOrWhiteSpace(message.Content)) return;
@@ -645,10 +753,86 @@ public sealed class TicketInteractionHandler
             });
             ticket.LastActivityUtc = message.Timestamp.UtcDateTime;
             await db.SaveChangesAsync();
+
+            // Anonymous ticket: the reporter isn't in the thread, so every human
+            // message here is staff — relay it to the reporter's DM.
+            if (ticket.IsAnonymous && direction == SupportTicketMessageDirection.FromStaff)
+                await RelayStaffToReporterAsync(ticket, message.Content);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to capture ticket thread message");
+        }
+    }
+
+    /// <summary>
+    /// A DM from a member who has an open anonymous ticket → relayed into that
+    /// ticket's staff thread under their anon handle. If they have no open
+    /// anonymous ticket, the DM is ignored (other DM handlers may own it).
+    /// </summary>
+    private async Task HandleReporterDmAsync(SocketMessage message)
+    {
+        if (string.IsNullOrWhiteSpace(message.Content)) return;
+
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+        var ticket = await db.SupportTickets.FirstOrDefaultAsync(t =>
+            t.OpenerUserId == message.Author.Id &&
+            t.IsAnonymous &&
+            t.Status != SupportTicketStatus.Closed);
+        if (ticket is null) return; // not a relay DM
+
+        var guild = _client.GetGuild(ticket.GuildId);
+        if (guild is null) return;
+
+        IThreadChannel? thread = guild.GetChannel(ticket.ThreadId) as IThreadChannel;
+        if (thread is null)
+        {
+            try { thread = await _client.Rest.GetChannelAsync(ticket.ThreadId) as IThreadChannel; }
+            catch { /* thread gone */ }
+        }
+
+        if (thread is IMessageChannel msgChannel)
+        {
+            await msgChannel.SendMessageAsync(
+                $"🕵️ **{ticket.AnonHandle}:** {Truncate(message.Content, 1800)}",
+                allowedMentions: AllowedMentions.None);
+        }
+
+        db.SupportTicketMessages.Add(new SupportTicketMessage
+        {
+            TicketId          = ticket.Id,
+            AuthorUserId      = message.Author.Id,
+            AuthorDisplayName = ticket.AnonHandle ?? "Anonymous",
+            Content           = Truncate(message.Content, 4000),
+            SentUtc           = message.Timestamp.UtcDateTime,
+            Direction         = SupportTicketMessageDirection.FromOpener,
+        });
+        ticket.LastActivityUtc = message.Timestamp.UtcDateTime;
+        await db.SaveChangesAsync();
+
+        // Acknowledge delivery so the reporter knows it went through.
+        try { await message.AddReactionAsync(new Emoji("✅")); }
+        catch { /* reaction is best-effort */ }
+    }
+
+    /// <summary>Relays a staff thread message out to the anonymous reporter's DM.</summary>
+    private async Task RelayStaffToReporterAsync(SupportTicket ticket, string content)
+    {
+        var guild = _client.GetGuild(ticket.GuildId);
+        var reporter = guild?.GetUser(ticket.OpenerUserId);
+        if (reporter is null) return;
+
+        try
+        {
+            var dm = await reporter.CreateDMChannelAsync();
+            await dm.SendMessageAsync(
+                $"🛡️ **HQ (report #{ticket.Id}):** {Truncate(content, 1800)}",
+                allowedMentions: AllowedMentions.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogInformation(ex, "Could not relay staff reply to anonymous reporter for ticket #{Id}", ticket.Id);
         }
     }
 
