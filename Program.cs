@@ -341,8 +341,17 @@ try
     // claim/priority/close controls, close-time transcript to
     // BotConfig.TicketLogChannelId, and thread-message capture for the
     // transcript. Both subscribe to their own interaction CustomIds.
+    // TicketService: shared close/embed/transcript pipeline used by both the
+    // interaction handler and the maintenance sweep.
+    builder.Services.AddSingleton<TicketService>();
     builder.Services.AddSingleton<TicketPanelCommandHandler>();
     builder.Services.AddSingleton<TicketInteractionHandler>();
+
+    // TicketMaintenanceService: hourly sweep that keeps still-open tickets
+    // un-archived (beating Discord's 1-week auto-archive cap) until
+    // TicketAutoCloseInactivityDays of silence, then auto-closes them via
+    // TicketService. Idle when TicketAutoCloseInactivityDays == 0.
+    builder.Services.AddHostedService<TicketMaintenanceService>();
 
     // KickAwolsCommandHandler: /kick-awols slash command for officers
     // (AwolKickMinRank+). Iterates over members with the AWOL role and removes

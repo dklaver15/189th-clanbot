@@ -905,10 +905,19 @@ public class BotConfig
     public double TicketSecondEscalationHours { get; set; } = 72.0;
 
     /// <summary>
-    /// Days of inactivity after which an open ticket is auto-closed by the
-    /// sweep (a later phase). 0 disables auto-close.
+    /// Days of inactivity after which an open ticket is auto-closed by
+    /// TicketMaintenanceService. Until this threshold the sweep also keeps the
+    /// thread un-archived, which is how a ticket stays visible past Discord's
+    /// hard 1-week auto-archive cap (Discord has no native 2-week option).
+    /// 0 disables both the keep-alive and the auto-close.
     /// </summary>
-    public int TicketAutoCloseInactivityDays { get; set; } = 0;
+    public int TicketAutoCloseInactivityDays { get; set; } = 14;
+
+    /// <summary>
+    /// How often (minutes) TicketMaintenanceService runs its keep-alive +
+    /// auto-close sweep. Hourly is plenty — the window is measured in days.
+    /// </summary>
+    public int TicketMaintenanceIntervalMinutes { get; set; } = 60;
 
     /// <summary>
     /// Optional small thumbnail (e.g. the 189th logo) for the ticket panel and
