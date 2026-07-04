@@ -600,7 +600,7 @@ public sealed class TicketInteractionHandler
             .AddField("Opener",
                 ticket.IsAnonymous ? $"🕵️ {ticket.AnonHandle} — <@{ticket.OpenerUserId}> *(unmasked, HQ-only)*"
                                    : $"<@{ticket.OpenerUserId}>", inline: true)
-            .AddField("Priority", ticket.Priority.ToString(), inline: true)
+            .AddField("Priority", PriorityLabel(ticket.Priority), inline: true)
             .AddField("Closed by", ticket.ClosedByUsername ?? "—", inline: true)
             .AddField("Subject", Truncate(ticket.Subject, 1024), inline: false)
             .WithFooter($"Opened {ticket.CreatedUtc:yyyy-MM-dd HH:mm} UTC • Closed {ticket.ClosedUtc:yyyy-MM-dd HH:mm} UTC")
@@ -685,7 +685,7 @@ public sealed class TicketInteractionHandler
             .WithColor(ticket.Status == SupportTicketStatus.Closed ? new Color(0x99, 0xAA, 0xB5) : PriorityColor(ticket.Priority))
             .WithDescription(Truncate($"**{ticket.Subject}**\n\n{ticket.Details}", 4000))
             .AddField("Opened by", openerValue, inline: true)
-            .AddField("Priority", ticket.Priority.ToString(), inline: true)
+            .AddField("Priority", PriorityLabel(ticket.Priority), inline: true)
             .AddField("Status", statusLabel, inline: true)
             .WithFooter($"Opened {ticket.CreatedUtc:yyyy-MM-dd HH:mm} UTC");
 
@@ -797,6 +797,17 @@ public sealed class TicketInteractionHandler
         SupportTicketPriority.High   => new Color(0xE6, 0x7E, 0x22),
         SupportTicketPriority.Urgent => new Color(0xE7, 0x4C, 0x3C),
         _                            => new Color(0x58, 0x65, 0xF2),
+    };
+
+    /// <summary>Priority as a colored-dot label — the embed side bar is subtle,
+    /// so this makes severity obvious in the field itself.</summary>
+    private static string PriorityLabel(SupportTicketPriority p) => p switch
+    {
+        SupportTicketPriority.Low    => "⚪ Low",
+        SupportTicketPriority.Normal => "🔵 Normal",
+        SupportTicketPriority.High   => "🟠 High",
+        SupportTicketPriority.Urgent => "🔴 Urgent",
+        _                            => p.ToString(),
     };
 
     private static string BuildThreadName(SupportTicket ticket, TicketCategoryDef category)
