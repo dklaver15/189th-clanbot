@@ -849,6 +849,96 @@ public class BotConfig
     /// </summary>
     public string OfficerAppInstructionsBannerImageUrl { get; set; } = string.Empty;
 
+    // ─── Ticket System ───────────────────────────────────────────────
+
+    /// <summary>
+    /// Public tickets channel. Hosts the persistent ticket panel (category
+    /// select menu, posted by /ticket-panel) AND is the parent channel under
+    /// which per-ticket private threads are created. Must be visible to every
+    /// member who should be able to open a ticket — per-ticket privacy comes
+    /// from the private threads, not this channel. Leave 0 to disable the
+    /// ticket system.
+    /// </summary>
+    public ulong TicketCenterChannelId { get; set; } = default;
+
+    /// <summary>
+    /// HQ-only log channel that receives a transcript when a ticket is closed.
+    /// The bot needs Send Messages + Embed Links + Attach Files here. Leave 0
+    /// to skip transcript posting (tickets still close; nothing is logged).
+    /// </summary>
+    public ulong TicketLogChannelId { get; set; } = default;
+
+    /// <summary>
+    /// Fallback HQ role for tickets whose category defines no routed role
+    /// (RoutedRoleId = 0). Also gates /ticket-panel and the claim/close/priority
+    /// controls (Administrators always pass). Typically the same value as
+    /// OfficerAppHqRoleId. Leave 0 to restrict controls to Administrators only.
+    /// </summary>
+    public ulong TicketHqRoleId { get; set; } = default;
+
+    /// <summary>
+    /// Role permitted to unmask an anonymous reporter (a later phase). Kept
+    /// separate from TicketHqRoleId so the ability to see who filed an
+    /// anonymous report can be delegated to a narrower group. Leave 0 to
+    /// restrict unmasking to Administrators only.
+    /// </summary>
+    public ulong TicketUnmaskRoleId { get; set; } = default;
+
+    /// <summary>
+    /// Role the escalation sweep pings when a ticket passes the second
+    /// escalation threshold (a later phase). Leave 0 to escalate to the
+    /// routed role again instead of a distinct higher role.
+    /// </summary>
+    public ulong TicketEscalationRoleId { get; set; } = default;
+
+    /// <summary>
+    /// Hours a ticket may sit without a staff reply before the escalation
+    /// sweep bumps its priority and re-pings the routed role. 0 disables the
+    /// first escalation.
+    /// </summary>
+    public double TicketFirstEscalationHours { get; set; } = 24.0;
+
+    /// <summary>
+    /// Hours a ticket may sit before the sweep escalates it to
+    /// TicketEscalationRoleId. 0 disables the second escalation.
+    /// </summary>
+    public double TicketSecondEscalationHours { get; set; } = 72.0;
+
+    /// <summary>
+    /// Days of inactivity after which an open ticket is auto-closed by the
+    /// sweep (a later phase). 0 disables auto-close.
+    /// </summary>
+    public int TicketAutoCloseInactivityDays { get; set; } = 0;
+
+    /// <summary>
+    /// Optional small thumbnail (e.g. the 189th logo) for the ticket panel and
+    /// ticket embeds. Public HTTPS URL Discord can fetch. Empty disables it.
+    /// </summary>
+    public string TicketPanelThumbnailUrl { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Ticket category definitions, one per entry, entries separated by ';'
+    /// and fields within an entry by '|':
+    ///
+    ///   key|Label|emoji|routedRoleId|anonymousAllowed|defaultPriority
+    ///
+    ///   • key              — stable lowercase id used in custom IDs + DB
+    ///   • Label            — text shown in the select menu + embeds
+    ///   • emoji            — unicode emoji for the select option ("" for none)
+    ///   • routedRoleId     — role pinged/added on open; 0 falls back to TicketHqRoleId
+    ///   • anonymousAllowed — true|false; true hides the opener's identity
+    ///   • defaultPriority  — Low|Normal|High|Urgent
+    ///
+    /// Parsed by GetTicketCategories(). Malformed entries are skipped.
+    /// </summary>
+    public string TicketCategoriesCsv { get; set; } =
+        "awol|AWOL / Time-off|⏱️|0|false|Normal;"
+      + "recruit|Recruitment|🎯|0|false|Normal;"
+      + "report|Report a Member|🚨|0|true|High;"
+      + "tech|Bot / Tech Issue|🛠️|0|false|Normal;"
+      + "suggest|Suggestion / Feedback|💡|0|false|Low;"
+      + "general|General|📩|0|false|Normal";
+
     // ─── Gamertag Button Settings ────────────────────────────────────
 
     /// <summary>
@@ -1550,6 +1640,42 @@ public class BotConfig
 
     public List<string> GetRankRolesList() =>
         RankRoles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+
+    /// <summary>
+    /// Parses TicketCategoriesCsv into a list of TicketCategoryDef. Each entry
+    /// is "key|Label|emoji|routedRoleId|anonymousAllowed|defaultPriority";
+    /// entries are separated by ';'. Malformed entries (wrong field count,
+    /// bad role id) are skipped rather than throwing so one typo can't take
+    /// the whole ticket panel down. RoutedRoleId 0 means "fall back to
+    /// TicketHqRoleId" — resolved by the handler, not here.
+    /// </summary>
+    public List<TicketCategoryDef> GetTicketCategories()
+    {
+        var result = new List<TicketCategoryDef>();
+        if (string.IsNullOrWhiteSpace(TicketCategoriesCsv)) return result;
+
+        foreach (var raw in TicketCategoriesCsv.Split(';',
+                     StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var f = raw.Split('|');
+            if (f.Length != 6) continue;
+
+            var key   = f[0].Trim();
+            var label = f[1].Trim();
+            if (key.Length == 0 || label.Length == 0) continue;
+
+            var emoji = f[2].Trim();
+            _ = ulong.TryParse(f[3].Trim(), out var roleId);
+            var anon = bool.TryParse(f[4].Trim(), out var a) && a;
+            var priority = Enum.TryParse<SupportTicketPriority>(f[5].Trim(), true, out var p)
+                ? p
+                : SupportTicketPriority.Normal;
+
+            result.Add(new TicketCategoryDef(key, label, emoji, roleId, anon, priority));
+        }
+
+        return result;
+    }
 
     public List<string> GetPlatoonRolesList() =>
         PlatoonRoles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();

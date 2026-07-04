@@ -332,6 +332,18 @@ try
     // database state.
     builder.Services.AddSingleton<OfficerApplicationReviewHandler>();
 
+    // ── Ticket system ─────────────────────────────────────────────────
+    // TicketPanelCommandHandler: /ticket-panel (HQ-gated). Posts the persistent
+    // category select menu to BotConfig.TicketCenterChannelId. Idempotent via
+    // BotState.TicketPanelMessageId.
+    // TicketInteractionHandler: owns the whole runtime flow — category select →
+    // creation modal → private thread + routing + auto-ping, plus the
+    // claim/priority/close controls, close-time transcript to
+    // BotConfig.TicketLogChannelId, and thread-message capture for the
+    // transcript. Both subscribe to their own interaction CustomIds.
+    builder.Services.AddSingleton<TicketPanelCommandHandler>();
+    builder.Services.AddSingleton<TicketInteractionHandler>();
+
     // KickAwolsCommandHandler: /kick-awols slash command for officers
     // (AwolKickMinRank+). Iterates over members with the AWOL role and removes
     // them from the server, with multiple safety guards (Reserve role, min rank,

@@ -84,6 +84,8 @@ public class DiscordBotService : IHostedService
     private readonly OfficerApplicationSetupCommandHandler _officerAppSetupHandler;
     private readonly OfficerApplicationModalHandler _officerAppModalHandler;
     private readonly OfficerApplicationReviewHandler _officerAppReviewHandler;
+    private readonly TicketPanelCommandHandler _ticketPanelHandler;
+    private readonly TicketInteractionHandler _ticketInteractionHandler;
     private readonly ILogger<DiscordBotService> _logger;
     private readonly BotConfig _config;
 
@@ -155,6 +157,8 @@ public class DiscordBotService : IHostedService
         OfficerApplicationSetupCommandHandler officerAppSetupHandler,
         OfficerApplicationModalHandler officerAppModalHandler,
         OfficerApplicationReviewHandler officerAppReviewHandler,
+        TicketPanelCommandHandler ticketPanelHandler,
+        TicketInteractionHandler ticketInteractionHandler,
         ILogger<DiscordBotService> logger,
         IOptions<BotConfig> config)
     {
@@ -225,6 +229,8 @@ public class DiscordBotService : IHostedService
         _officerAppSetupHandler      = officerAppSetupHandler;
         _officerAppModalHandler      = officerAppModalHandler;
         _officerAppReviewHandler     = officerAppReviewHandler;
+        _ticketPanelHandler          = ticketPanelHandler;
+        _ticketInteractionHandler    = ticketInteractionHandler;
         _logger                      = logger;
         _config                      = config.Value;
     }
@@ -315,6 +321,8 @@ public class DiscordBotService : IHostedService
         _officerAppSetupHandler.Register(_client);
         _officerAppModalHandler.Register(_client);
         _officerAppReviewHandler.Register(_client);
+        _ticketPanelHandler.Register(_client);
+        _ticketInteractionHandler.Register(_client);
 
         await _client.LoginAsync(TokenType.Bot, _config.Token);
         await _client.StartAsync();
@@ -704,6 +712,14 @@ public class DiscordBotService : IHostedService
                 // BotState.OfficerAppButtonMessageId. NOTE: keep
                 // CommandsCommandHandler.BuildCatalog in sync when this changes.
                 OfficerApplicationSetupCommandHandler.BuildCommand(),
+
+                // /ticket-panel — HQ-only. Posts (or re-posts with force:true)
+                // the persistent ticket panel (category select menu) to
+                // BotConfig.TicketCenterChannelId. The select menu, creation
+                // modal, and claim/priority/close controls all live on
+                // TicketInteractionHandler. NOTE: keep
+                // CommandsCommandHandler.BuildCatalog in sync.
+                TicketPanelCommandHandler.BuildCommand(),
 
                 // /health — Officer+ diagnostic for uptime / DB / scheduled jobs / queues.
                 // All data is read locally so the command works even when Drive / Sheets /

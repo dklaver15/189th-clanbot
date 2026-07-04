@@ -530,6 +530,14 @@ public class CommandsCommandHandler
             return user.Roles.Any(r => exempt.Contains(r.Name, StringComparer.OrdinalIgnoreCase));
         };
 
+        // SyncWithHandlers: TicketPanelCommandHandler.InvokerHasPermission
+        Func<SocketGuildUser, BotConfig, bool> ticketHq = (user, cfg) =>
+        {
+            if (user.GuildPermissions.Administrator) return true;
+            if (cfg.TicketHqRoleId == 0) return false;
+            return user.Roles.Any(r => r.Id == cfg.TicketHqRoleId);
+        };
+
         // SyncWithHandlers: SetNickCommandHandler.HasPermission
         Func<SocketGuildUser, BotConfig, bool> officerOrManageNicknames = (user, cfg) =>
         {
@@ -658,6 +666,9 @@ public class CommandsCommandHandler
 
             new("briefing-now", "Generate the weekly officer briefing immediately",
                 briefingLbl, MinRank(config.BriefingNowMinRank)),
+
+            new("ticket-panel", "Post (or re-post) the ticket panel to the tickets channel",
+                "HQ", ticketHq),   // SyncWithHandlers: TicketPanelCommandHandler.InvokerHasPermission
         };
     }
 }

@@ -45,6 +45,9 @@ public class BotDbContext : DbContext
     public DbSet<Poll>                Polls               => Set<Poll>();
     public DbSet<PollOption>          PollOptions         => Set<PollOption>();
     public DbSet<PollVote>            PollVotes           => Set<PollVote>();
+    // ── Support tickets ──
+    public DbSet<SupportTicket>        SupportTickets        => Set<SupportTicket>();
+    public DbSet<SupportTicketMessage> SupportTicketMessages => Set<SupportTicketMessage>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -493,6 +496,38 @@ public class BotDbContext : DbContext
             entity.HasIndex(e => new { e.PollId, e.UserId, e.PollOptionId }).IsUnique();
             entity.HasIndex(e => e.PollId);                      // tally render
             entity.HasIndex(e => new { e.PollId, e.UserId });    // a member's votes / participation
+        });
+
+        // ── Support tickets ───────────────────────────────────────────
+        // One row per ticket opened from the panel. Status + Priority are
+        // stored as int (SQLite has no native enum) — same pattern as
+        // OfficerApplication.Status. Indexes cover the expected reads:
+        //   • ThreadId unique — button/close handlers map a thread back to its
+        //     ticket row; a thread hosts exactly one ticket.
+        //   • ControlMessageId — locate the embed to edit its state in place.
+        //   • (GuildId, Status, LastActivityUtc) — the escalation/auto-close
+        //     sweep's "open tickets, oldest activity first" scan.
+        //   • (GuildId, OpenerUserId, Status) — "does this member already have
+        //     an open ticket?" spam guard + their ticket history.
+        //   • (Status, ReserveAssigned, LeaveEndUtc) — time-off Reserve-removal
+        //     sweep ("approved leaves whose window has ended").
+        modelBuilder.Entity<SupportTicket>(e =>
+        {
+            e.Property(t => t.Status).HasConversion<int>();
+            e.Property(t => t.Priority).HasConversion<int>();
+
+            e.HasIndex(t => t.ThreadId).IsUnique();
+            e.HasIndex(t => t.ControlMessageId);
+            e.HasIndex(t => new { t.GuildId, t.Status, t.LastActivityUtc });
+            e.HasIndex(t => new { t.GuildId, t.OpenerUserId, t.Status });
+            e.HasIndex(t => new { t.Status, t.ReserveAssigned, t.LeaveEndUtc });
+        });
+
+        modelBuilder.Entity<SupportTicketMessage>(e =>
+        {
+            e.Property(m => m.Direction).HasConversion<int>();
+            // Transcript render: all messages for a ticket in send order.
+            e.HasIndex(m => new { m.TicketId, m.SentUtc });
         });
     }
 }

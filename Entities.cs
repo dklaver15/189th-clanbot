@@ -577,6 +577,15 @@ public class BotState
     public ulong? GamertagButtonMessageId { get; set; }
 
     /// <summary>
+    /// Discord message ID of the persistent ticket panel (category select
+    /// menu) in the tickets channel. Set by /ticket-panel; consulted on
+    /// re-run for idempotency. Null until the panel has been posted for the
+    /// first time. If the message is deleted manually, re-run /ticket-panel
+    /// with force:true to repost.
+    /// </summary>
+    public ulong? TicketPanelMessageId { get; set; }
+
+    /// <summary>
     /// Timestamp of the last successfully-completed RosterExportService run.
     /// Null if no run has ever completed. Stamped by RosterExportService when
     /// the nightly export commits its Sheet write + DB updates. Surfaced on
