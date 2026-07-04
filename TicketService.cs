@@ -326,13 +326,15 @@ public sealed class TicketService
         if (ticket.ClaimedByUsername is { } claimant && ticket.Status != SupportTicketStatus.Closed)
             builder.AddField("Claimed by", claimant, inline: true);
 
-        // Show the approved leave window on time-off tickets. LeaveEndUtc is
-        // stored exclusive (day after the last leave day), so display end-1.
-        if (ticket.LeaveScheduled && ticket.LeaveStartUtc is { } ls && ticket.LeaveEndUtc is { } le)
+        // Leave window on time-off tickets (dates stored inclusive). Before HQ
+        // approves, these are the member's requested dates; after approval they
+        // become the managed window (scheduled → active).
+        if (ticket.LeaveStartUtc is { } ls && ticket.LeaveEndUtc is { } le)
         {
-            var state = ticket.ReserveAssigned ? "active" : "scheduled";
-            builder.AddField($"On leave (Reserve, {state})",
-                $"{ls:yyyy-MM-dd} → {le.AddDays(-1):yyyy-MM-dd}", inline: true);
+            var label = ticket.LeaveScheduled
+                ? $"On leave (Reserve, {(ticket.ReserveAssigned ? "active" : "scheduled")})"
+                : "Requested leave (pending approval)";
+            builder.AddField(label, $"{ls:yyyy-MM-dd} → {le:yyyy-MM-dd}", inline: true);
         }
 
         if (!string.IsNullOrWhiteSpace(_config.TicketPanelThumbnailUrl))

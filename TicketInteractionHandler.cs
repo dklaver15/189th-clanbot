@@ -208,24 +208,40 @@ public sealed class TicketInteractionHandler
             ? "This category is anonymous — HQ won't see who submitted it."
             : $"Category: {category.Label}";
 
-        var modal = new ModalBuilder()
+        var isTimeOff = IsTimeOffCategory(category);
+
+        var builder = new ModalBuilder()
             .WithTitle(Truncate($"New Ticket — {category.Label}", 45))
             .WithCustomId($"ticket:{ActionCreate}:{category.Key}")
             .AddTextInput(
-                label: "Subject",
+                label: isTimeOff ? "Reason for time off" : "Subject",
                 customId: ModalSubjectId,
                 style: TextInputStyle.Short,
-                placeholder: "A short summary of what you need",
-                minLength: 3, maxLength: 100, required: true)
-            .AddTextInput(
+                placeholder: isTimeOff ? "e.g. vacation, exams, work travel" : "A short summary of what you need",
+                minLength: 3, maxLength: 100, required: true);
+
+        if (isTimeOff)
+        {
+            // Member supplies the dates they need so HQ sees them up front.
+            builder
+                .AddTextInput("First day away (YYYY-MM-DD)", ModalLeaveStartId, TextInputStyle.Short,
+                    placeholder: "e.g. 2026-07-10", minLength: 8, maxLength: 10, required: true)
+                .AddTextInput("Last day away (YYYY-MM-DD)", ModalLeaveEndId, TextInputStyle.Short,
+                    placeholder: "e.g. 2026-07-20", minLength: 8, maxLength: 10, required: true)
+                .AddTextInput("Anything else? (optional)", ModalDetailsId, TextInputStyle.Paragraph,
+                    placeholder: "Any extra context for HQ", minLength: 0, maxLength: 1000, required: false);
+        }
+        else
+        {
+            builder.AddTextInput(
                 label: "Details",
                 customId: ModalDetailsId,
                 style: TextInputStyle.Paragraph,
                 placeholder: anonNote,
-                minLength: 10, maxLength: 1500, required: true)
-            .Build();
+                minLength: 10, maxLength: 1500, required: true);
+        }
 
-        await component.RespondWithModalAsync(modal);
+        await component.RespondWithModalAsync(builder.Build());
 
         // Reset the panel dropdown back to its placeholder. Discord won't fire a
         // new event if the user re-picks the same option, and it sends no event
@@ -332,6 +348,22 @@ public sealed class TicketInteractionHandler
         var subject = fields.GetValueOrDefault(ModalSubjectId, "").Trim();
         var details = fields.GetValueOrDefault(ModalDetailsId, "").Trim();
 
+        // Time-off tickets carry the member's requested dates. Store them as the
+        // (not-yet-approved) window so HQ sees them and the Approve modal
+        // pre-fills; the sweep does nothing until HQ approves (LeaveScheduled).
+        DateTime? reqStart = null, reqEnd = null;
+        if (IsTimeOffCategory(category))
+        {
+            var startRaw = fields.GetValueOrDefault(ModalLeaveStartId, "").Trim();
+            var endRaw   = fields.GetValueOrDefault(ModalLeaveEndId, "").Trim();
+            if (TryParseLeaveDate(startRaw, out var s)) reqStart = DateTime.SpecifyKind(s, DateTimeKind.Utc);
+            if (TryParseLeaveDate(endRaw, out var e))   reqEnd   = DateTime.SpecifyKind(e, DateTimeKind.Utc);
+
+            // Always surface what they typed, even if it didn't parse cleanly.
+            var reqLine = $"📅 Requested dates: {(startRaw.Length > 0 ? startRaw : "?")} → {(endRaw.Length > 0 ? endRaw : "?")}";
+            details = string.IsNullOrEmpty(details) ? reqLine : $"{reqLine}\n\n{details}";
+        }
+
         var routedRoleId = category.RoutedRoleId != 0 ? category.RoutedRoleId : _config.TicketHqRoleId;
         var now = DateTime.UtcNow;
 
@@ -354,6 +386,8 @@ public sealed class TicketInteractionHandler
             Priority          = category.DefaultPriority,
             CreatedUtc        = now,
             LastActivityUtc   = now,
+            LeaveStartUtc     = reqStart, // requested (pending approval); LeaveScheduled stays false
+            LeaveEndUtc       = reqEnd,
         };
         if (ticket.IsAnonymous)
             ticket.AnonHandle = $"Anonymous #{Guid.NewGuid().ToString("N")[..4]}";
@@ -395,8 +429,7 @@ public sealed class TicketInteractionHandler
         // Send with the transparent spacer attachment so the embed (which
         // references attachment://spacer.png) renders at full desktop width.
         using var spacer = TicketService.OpenSpacerStream();
-        var isTimeOff = !string.IsNullOrWhiteSpace(_config.TicketTimeOffCategoryKey)
-            && string.Equals(category.Key, _config.TicketTimeOffCategoryKey, StringComparison.OrdinalIgnoreCase);
+        var isTimeOff = IsTimeOffCategory(category);
         var control = await thread.SendFileAsync(
             spacer, TicketService.SpacerFileName,
             text: ping,
@@ -763,13 +796,18 @@ public sealed class TicketInteractionHandler
             return;
         }
 
+        // Pre-fill with the dates the member requested at creation (if any) so
+        // HQ can just confirm or tweak them.
+        var startDefault = ticket.LeaveStartUtc?.ToString("yyyy-MM-dd");
+        var endDefault   = ticket.LeaveEndUtc?.ToString("yyyy-MM-dd");
+
         var modal = new ModalBuilder()
             .WithTitle(Truncate($"Approve Leave — Ticket #{ticketId}", 45))
             .WithCustomId($"ticket:{ActionLeaveModal}:{ticketId}")
             .AddTextInput("Start date (YYYY-MM-DD)", ModalLeaveStartId, TextInputStyle.Short,
-                placeholder: "e.g. 2026-07-10", minLength: 8, maxLength: 10, required: true)
+                placeholder: "e.g. 2026-07-10", minLength: 8, maxLength: 10, required: true, value: startDefault)
             .AddTextInput("End date (YYYY-MM-DD, last day of leave)", ModalLeaveEndId, TextInputStyle.Short,
-                placeholder: "e.g. 2026-07-20", minLength: 8, maxLength: 10, required: true)
+                placeholder: "e.g. 2026-07-20", minLength: 8, maxLength: 10, required: true, value: endDefault)
             .Build();
 
         await component.RespondWithModalAsync(modal);
@@ -810,10 +848,10 @@ public sealed class TicketInteractionHandler
             return;
         }
 
-        // Store end as exclusive (day after the last leave day) so the removal
-        // sweep fires once the final day is fully over.
+        // Store dates inclusive (start day and last leave day, both at 00:00 UTC).
+        // The removal sweep fires after the end day is fully over (end + 1 day).
         var leaveStartUtc = DateTime.SpecifyKind(startDate, DateTimeKind.Utc);
-        var leaveEndUtc   = DateTime.SpecifyKind(endDate.AddDays(1), DateTimeKind.Utc);
+        var leaveEndUtc   = DateTime.SpecifyKind(endDate, DateTimeKind.Utc);
 
         var reserveRole = guild.Roles.FirstOrDefault(r =>
             r.Name.Equals(_config.ReserveRoleName, StringComparison.OrdinalIgnoreCase));
@@ -1091,6 +1129,10 @@ public sealed class TicketInteractionHandler
         if (user.GuildPermissions.Administrator) return true;
         return _config.TicketHqRoleId != 0 && user.Roles.Any(r => r.Id == _config.TicketHqRoleId);
     }
+
+    private bool IsTimeOffCategory(TicketCategoryDef category) =>
+        !string.IsNullOrWhiteSpace(_config.TicketTimeOffCategoryKey)
+        && string.Equals(category.Key, _config.TicketTimeOffCategoryKey, StringComparison.OrdinalIgnoreCase);
 
     private static SupportTicketMessage SystemMessage(SupportTicket ticket, SocketGuildUser actor, string content, DateTime whenUtc) =>
         new()

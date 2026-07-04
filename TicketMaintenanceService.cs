@@ -184,7 +184,9 @@ public class TicketMaintenanceService : BackgroundService
                 r.Name.Equals(_config.ReserveRoleName, StringComparison.OrdinalIgnoreCase));
 
             // ── End: window has passed → remove Reserve, reset window, finish ──
-            if (ticket.LeaveEndUtc is { } end && now >= end)
+            // LeaveEndUtc is the inclusive last day (00:00 UTC), so the leave is
+            // over once we're past the end of that day (end + 1 day).
+            if (ticket.LeaveEndUtc is { } end && now >= end.AddDays(1))
             {
                 if (member is not null && reserveRole is not null && member.Roles.Any(r => r.Id == reserveRole.Id))
                 {
