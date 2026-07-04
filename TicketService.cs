@@ -181,12 +181,51 @@ public sealed class TicketService
             using var stream = new MemoryStream(Encoding.UTF8.GetBytes(transcript));
             await logChannel.SendFileAsync(
                 stream, $"ticket-{ticket.Id}-transcript.txt",
-                embed: summary, allowedMentions: AllowedMentions.None);
+                embed: summary,
+                components: TicketInteractionHandler.BuildRecordButtons(ticket.Id),
+                allowedMentions: AllowedMentions.None);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to post transcript for ticket #{Id}", ticket.Id);
         }
+    }
+
+    // ─── Record deletion (HQ "Delete Record" button) ──────────────────
+
+    /// <summary>
+    /// Permanently deletes a ticket's persisted record: its SupportTicket row,
+    /// all SupportTicketMessage rows, and the archived thread (best-effort) if
+    /// it still exists. Does NOT delete the transcript message itself — the
+    /// caller (button handler) owns that, since it holds the message reference.
+    /// </summary>
+    public async Task DeleteTicketRecordAsync(int ticketId, SocketGuild guild)
+    {
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+        var ticket = await db.SupportTickets.AsNoTracking().FirstOrDefaultAsync(t => t.Id == ticketId);
+        var threadId = ticket?.ThreadId ?? 0;
+
+        await db.SupportTicketMessages.Where(m => m.TicketId == ticketId).ExecuteDeleteAsync();
+        await db.SupportTickets.Where(t => t.Id == ticketId).ExecuteDeleteAsync();
+
+        if (threadId != 0)
+        {
+            IThreadChannel? thread = guild.GetChannel(threadId) as IThreadChannel;
+            if (thread is null)
+            {
+                try { thread = await _client.Rest.GetChannelAsync(threadId) as IThreadChannel; }
+                catch { /* thread already gone */ }
+            }
+            if (thread is not null)
+            {
+                try { await thread.DeleteAsync(); }
+                catch (Exception ex) { _logger.LogDebug(ex, "Could not delete thread for purged ticket #{Id}", ticketId); }
+            }
+        }
+
+        _logger.LogInformation("Ticket #{Id} record permanently deleted", ticketId);
     }
 
     // ─── Embed ────────────────────────────────────────────────────────

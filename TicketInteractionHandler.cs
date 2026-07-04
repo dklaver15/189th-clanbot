@@ -44,6 +44,9 @@ public sealed class TicketInteractionHandler
     private const string ActionPrio      = "prio";     // select: ticket:prio:{id}
     private const string ActionCloseBtn  = "closebtn"; // button: ticket:closebtn:{id}
     private const string ActionClose     = "close";    // modal:  ticket:close:{id}
+    private const string ActionRecDel        = "recdel";        // button: ticket:recdel:{id}        (transcript)
+    private const string ActionRecDelConfirm = "recdelconfirm"; // button: ticket:recdelconfirm:{id}
+    private const string ActionRecDelCancel  = "recdelcancel";  // button: ticket:recdelcancel:{id}
 
     private const string ModalSubjectId  = "subject";
     private const string ModalDetailsId  = "details";
@@ -106,6 +109,13 @@ public sealed class TicketInteractionHandler
 
         return new ComponentBuilder().WithSelectMenu(menu).Build();
     }
+
+    /// <summary>The single "Delete Record" button attached to a transcript in
+    /// the log channel. Public so TicketService can attach it when posting.</summary>
+    public static MessageComponent BuildRecordButtons(int ticketId) =>
+        new ComponentBuilder()
+            .WithButton("Delete Record", $"ticket:{ActionRecDel}:{ticketId}", ButtonStyle.Danger, new Emoji("🗑️"))
+            .Build();
 
     private static MessageComponent BuildControlButtons(int ticketId) =>
         new ComponentBuilder()
@@ -367,6 +377,12 @@ public sealed class TicketInteractionHandler
                 await HandlePriorityMenuAsync(component, pmId);
             else if (TryParse(component.Data.CustomId, ActionCloseBtn, out var closeId))
                 await HandleCloseButtonAsync(component, closeId);
+            else if (TryParse(component.Data.CustomId, ActionRecDel, out var rdId))
+                await HandleRecordDeletePromptAsync(component, rdId);
+            else if (TryParse(component.Data.CustomId, ActionRecDelConfirm, out var rdcId))
+                await HandleRecordDeleteConfirmAsync(component, rdcId);
+            else if (TryParse(component.Data.CustomId, ActionRecDelCancel, out var rdxId))
+                await HandleRecordDeleteCancelAsync(component, rdxId);
         }
         catch (Exception ex)
         {
@@ -546,6 +562,51 @@ public sealed class TicketInteractionHandler
             ephemeral: true);
     }
 
+    // ─── Record deletion (HQ, from the transcript in the log channel) ──
+
+    private async Task HandleRecordDeletePromptAsync(SocketMessageComponent component, int ticketId)
+    {
+        var user = component.User as SocketGuildUser;
+        if (user is null || !HasHqPermission(user))
+        {
+            await component.RespondAsync("⛔ Only HQ can delete ticket records.", ephemeral: true);
+            return;
+        }
+
+        // Swap the transcript's Delete button for a confirm/cancel pair in place.
+        await component.UpdateAsync(p => p.Components = new ComponentBuilder()
+            .WithButton("Confirm delete", $"ticket:{ActionRecDelConfirm}:{ticketId}", ButtonStyle.Danger, new Emoji("🗑️"))
+            .WithButton("Cancel",         $"ticket:{ActionRecDelCancel}:{ticketId}",  ButtonStyle.Secondary)
+            .Build());
+    }
+
+    private async Task HandleRecordDeleteCancelAsync(SocketMessageComponent component, int ticketId)
+    {
+        // Restore the original Delete button.
+        await component.UpdateAsync(p => p.Components = BuildRecordButtons(ticketId));
+    }
+
+    private async Task HandleRecordDeleteConfirmAsync(SocketMessageComponent component, int ticketId)
+    {
+        var user = component.User as SocketGuildUser;
+        if (user is null || !HasHqPermission(user))
+        {
+            await component.RespondAsync("⛔ Only HQ can delete ticket records.", ephemeral: true);
+            return;
+        }
+
+        var guild = (component.Channel as SocketGuildChannel)?.Guild ?? user.Guild;
+
+        await component.RespondAsync($"🗑️ Ticket **#{ticketId}** record permanently deleted.", ephemeral: true);
+        await _tickets.DeleteTicketRecordAsync(ticketId, guild);
+
+        // Remove the transcript message the button lived on.
+        try { await component.Message.DeleteAsync(); }
+        catch (Exception ex) { _logger.LogWarning(ex, "Could not delete transcript message for ticket #{Id}", ticketId); }
+
+        _logger.LogInformation("Ticket #{Id} record deleted by {User}", ticketId, user.Username);
+    }
+
     // ─── Message capture (transcript + activity) ──────────────────────
 
     private async Task OnMessageReceivedAsync(SocketMessage message)
@@ -632,6 +693,13 @@ public sealed class TicketInteractionHandler
         if (_config.TicketHqRoleId != 0 && user.Roles.Any(r => r.Id == _config.TicketHqRoleId)) return true;
         if (ticket.RoutedRoleId != 0 && user.Roles.Any(r => r.Id == ticket.RoutedRoleId)) return true;
         return false;
+    }
+
+    /// <summary>Gate for destructive record deletion — Administrator or the HQ role.</summary>
+    private bool HasHqPermission(SocketGuildUser user)
+    {
+        if (user.GuildPermissions.Administrator) return true;
+        return _config.TicketHqRoleId != 0 && user.Roles.Any(r => r.Id == _config.TicketHqRoleId);
     }
 
     private static SupportTicketMessage SystemMessage(SupportTicket ticket, SocketGuildUser actor, string content, DateTime whenUtc) =>
