@@ -48,6 +48,10 @@ public sealed class TicketInteractionHandler
     private const string ActionRecDelConfirm = "recdelconfirm"; // button: ticket:recdelconfirm:{id}
     private const string ActionRecDelCancel  = "recdelcancel";  // button: ticket:recdelcancel:{id}
     private const string ActionUnmask        = "unmask";        // button: ticket:unmask:{id}        (anonymous only)
+    private const string ActionApproveLeave  = "approveleave";  // button: ticket:approveleave:{id}  (time-off only)
+    private const string ActionLeaveModal    = "leaveapprove";  // modal:  ticket:leaveapprove:{id}
+    private const string ModalLeaveStartId   = "start";
+    private const string ModalLeaveEndId     = "end";
 
     private const string ModalSubjectId  = "subject";
     private const string ModalDetailsId  = "details";
@@ -121,12 +125,17 @@ public sealed class TicketInteractionHandler
             .WithButton("Delete Record", $"ticket:{ActionRecDel}:{ticketId}", ButtonStyle.Danger, new Emoji("🗑️"))
             .Build();
 
-    private static MessageComponent BuildControlButtons(int ticketId, bool isAnonymous)
+    private static MessageComponent BuildControlButtons(int ticketId, bool isAnonymous, bool isTimeOff)
     {
         var builder = new ComponentBuilder()
             .WithButton("Claim",        $"ticket:{ActionClaim}:{ticketId}",    ButtonStyle.Primary,   new Emoji("🙋"))
             .WithButton("Set Priority", $"ticket:{ActionPrioMenu}:{ticketId}", ButtonStyle.Secondary, new Emoji("⚙️"))
             .WithButton("Close",        $"ticket:{ActionCloseBtn}:{ticketId}", ButtonStyle.Danger,    new Emoji("🔒"));
+
+        // Time-off tickets get an Approve Leave control (assigns Reserve for a
+        // date range); gated at click time to ticket staff.
+        if (isTimeOff)
+            builder.WithButton("Approve Leave", $"ticket:{ActionApproveLeave}:{ticketId}", ButtonStyle.Success, new Emoji("📆"));
 
         // Anonymous (Report-a-Member) tickets get an Unmask control, gated at
         // click time to TicketUnmaskRoleId / Administrator.
@@ -230,6 +239,8 @@ public sealed class TicketInteractionHandler
                 await HandleCreateAsync(modal, parts[2]);
             else if (parts[1] == ActionClose && parts.Length == 3 && int.TryParse(parts[2], out var id))
                 await HandleCloseSubmitAsync(modal, id);
+            else if (parts[1] == ActionLeaveModal && parts.Length == 3 && int.TryParse(parts[2], out var leaveId))
+                await HandleLeaveApproveSubmitAsync(modal, leaveId);
         }
         catch (Exception ex)
         {
@@ -361,11 +372,13 @@ public sealed class TicketInteractionHandler
         // Send with the transparent spacer attachment so the embed (which
         // references attachment://spacer.png) renders at full desktop width.
         using var spacer = TicketService.OpenSpacerStream();
+        var isTimeOff = !string.IsNullOrWhiteSpace(_config.TicketTimeOffCategoryKey)
+            && string.Equals(category.Key, _config.TicketTimeOffCategoryKey, StringComparison.OrdinalIgnoreCase);
         var control = await thread.SendFileAsync(
             spacer, TicketService.SpacerFileName,
             text: ping,
             embed: embed,
-            components: BuildControlButtons(ticket.Id, ticket.IsAnonymous),
+            components: BuildControlButtons(ticket.Id, ticket.IsAnonymous, isTimeOff),
             allowedMentions: routedRoleId != 0
                 ? new AllowedMentions { RoleIds = new List<ulong> { routedRoleId }, MentionRepliedUser = false }
                 : AllowedMentions.None);
@@ -450,6 +463,8 @@ public sealed class TicketInteractionHandler
                 await HandleRecordDeleteCancelAsync(component, rdxId);
             else if (TryParse(component.Data.CustomId, ActionUnmask, out var umId))
                 await HandleUnmaskAsync(component, umId);
+            else if (TryParse(component.Data.CustomId, ActionApproveLeave, out var alId))
+                await HandleApproveLeavePromptAsync(component, alId);
         }
         catch (Exception ex)
         {
@@ -707,6 +722,158 @@ public sealed class TicketInteractionHandler
     {
         if (user.GuildPermissions.Administrator) return true;
         return _config.TicketUnmaskRoleId != 0 && user.Roles.Any(r => r.Id == _config.TicketUnmaskRoleId);
+    }
+
+    // ─── Time-off approval (assign Reserve for a date range) ───────────
+
+    private async Task HandleApproveLeavePromptAsync(SocketMessageComponent component, int ticketId)
+    {
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+        var ticket = await db.SupportTickets.AsNoTracking().FirstOrDefaultAsync(t => t.Id == ticketId);
+        if (ticket is null) { await component.RespondAsync("Ticket not found.", ephemeral: true); return; }
+
+        var user = component.User as SocketGuildUser;
+        if (user is null || !HasStaffPermission(user, ticket))
+        {
+            await component.RespondAsync("⛔ Only the assigned team can approve leave.", ephemeral: true);
+            return;
+        }
+
+        var modal = new ModalBuilder()
+            .WithTitle(Truncate($"Approve Leave — Ticket #{ticketId}", 45))
+            .WithCustomId($"ticket:{ActionLeaveModal}:{ticketId}")
+            .AddTextInput("Start date (YYYY-MM-DD)", ModalLeaveStartId, TextInputStyle.Short,
+                placeholder: "e.g. 2026-07-10", minLength: 8, maxLength: 10, required: true)
+            .AddTextInput("End date (YYYY-MM-DD, last day of leave)", ModalLeaveEndId, TextInputStyle.Short,
+                placeholder: "e.g. 2026-07-20", minLength: 8, maxLength: 10, required: true)
+            .Build();
+
+        await component.RespondWithModalAsync(modal);
+    }
+
+    private async Task HandleLeaveApproveSubmitAsync(SocketModal modal, int ticketId)
+    {
+        await modal.DeferAsync(ephemeral: true);
+
+        var actor = modal.User as SocketGuildUser;
+        var guild = (modal.Channel as SocketGuildChannel)?.Guild ?? actor?.Guild;
+        if (actor is null || guild is null)
+        {
+            await modal.FollowupAsync("Could not resolve the server.", ephemeral: true);
+            return;
+        }
+
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+        var ticket = await db.SupportTickets.FirstOrDefaultAsync(t => t.Id == ticketId);
+        if (ticket is null) { await modal.FollowupAsync("Ticket not found.", ephemeral: true); return; }
+        if (!HasStaffPermission(actor, ticket))
+        {
+            await modal.FollowupAsync("⛔ Only the assigned team can approve leave.", ephemeral: true);
+            return;
+        }
+
+        var fields = modal.Data.Components.ToDictionary(c => c.CustomId, c => c.Value ?? "");
+        if (!TryParseLeaveDate(fields.GetValueOrDefault(ModalLeaveStartId), out var startDate) ||
+            !TryParseLeaveDate(fields.GetValueOrDefault(ModalLeaveEndId), out var endDate))
+        {
+            await modal.FollowupAsync("⚠️ Couldn't read those dates. Use `YYYY-MM-DD` (e.g. 2026-07-10).", ephemeral: true);
+            return;
+        }
+        if (endDate < startDate)
+        {
+            await modal.FollowupAsync("⚠️ The end date is before the start date.", ephemeral: true);
+            return;
+        }
+
+        // Store end as exclusive (day after the last leave day) so the removal
+        // sweep fires once the final day is fully over.
+        var leaveStartUtc = DateTime.SpecifyKind(startDate, DateTimeKind.Utc);
+        var leaveEndUtc   = DateTime.SpecifyKind(endDate.AddDays(1), DateTimeKind.Utc);
+
+        var reserveRole = guild.Roles.FirstOrDefault(r =>
+            r.Name.Equals(_config.ReserveRoleName, StringComparison.OrdinalIgnoreCase));
+        if (reserveRole is null)
+        {
+            await modal.FollowupAsync(
+                $"⚠️ Couldn't find the **{_config.ReserveRoleName}** role in this server.", ephemeral: true);
+            return;
+        }
+
+        var member = guild.GetUser(ticket.OpenerUserId);
+        if (member is null)
+        {
+            await modal.FollowupAsync("⚠️ The member who opened this ticket is no longer in the server.", ephemeral: true);
+            return;
+        }
+
+        try
+        {
+            if (!member.Roles.Any(r => r.Id == reserveRole.Id))
+                await member.AddRoleAsync(reserveRole);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to assign Reserve for leave on ticket #{Id}", ticket.Id);
+            await modal.FollowupAsync(
+                "⚠️ Couldn't assign the Reserve role — the bot's highest role may be below Reserve. "
+                + "Fix the role order and try again.", ephemeral: true);
+            return;
+        }
+
+        ticket.LeaveStartUtc   = leaveStartUtc;
+        ticket.LeaveEndUtc     = leaveEndUtc;
+        ticket.ReserveAssigned = true;
+        ticket.LastActivityUtc = DateTime.UtcNow;
+        db.SupportTicketMessages.Add(SystemMessage(ticket, actor,
+            $"Leave approved {startDate:yyyy-MM-dd} → {endDate:yyyy-MM-dd}; Reserve assigned", DateTime.UtcNow));
+        await db.SaveChangesAsync();
+
+        // Update the control embed (adds the "On leave" field) and post a note.
+        if (modal.Channel is SocketThreadChannel thread)
+        {
+            try
+            {
+                var category = _config.GetTicketCategories().FirstOrDefault(c => c.Key == ticket.CategoryKey);
+                if (await thread.GetMessageAsync(ticket.ControlMessageId) is IUserMessage control)
+                    await control.ModifyAsync(p => p.Embed = _tickets.BuildTicketEmbed(ticket, category));
+
+                await thread.SendMessageAsync(
+                    $"📆 Leave approved by {actor.Mention}: **{startDate:yyyy-MM-dd} → {endDate:yyyy-MM-dd}**.\n"
+                    + $"{member.Mention} has been given **{reserveRole.Name}** (AWOL-exempt) for the window — "
+                    + "I'll remove it automatically when they're back.",
+                    allowedMentions: AllowedMentions.None);
+            }
+            catch (Exception ex) { _logger.LogWarning(ex, "Could not post leave-approval note for ticket #{Id}", ticket.Id); }
+        }
+
+        // DM the member.
+        try
+        {
+            var dm = await member.CreateDMChannelAsync();
+            await dm.SendMessageAsync(
+                $"✅ Your time-off request (ticket #{ticket.Id}) is **approved** for "
+                + $"**{startDate:yyyy-MM-dd} → {endDate:yyyy-MM-dd}**. You've been set to "
+                + $"**{reserveRole.Name}**, so you won't be flagged AWOL while you're out. "
+                + "Enjoy your break!",
+                allowedMentions: AllowedMentions.None);
+        }
+        catch (Exception ex) { _logger.LogInformation(ex, "Could not DM leave approval to member for ticket #{Id}", ticket.Id); }
+
+        await modal.FollowupAsync(
+            $"✅ Leave approved for {member.DisplayName} ({startDate:yyyy-MM-dd} → {endDate:yyyy-MM-dd}). "
+            + "Reserve assigned; it'll be removed automatically when the window ends.",
+            ephemeral: true);
+    }
+
+    private static bool TryParseLeaveDate(string? raw, out DateTime date)
+    {
+        date = default;
+        if (string.IsNullOrWhiteSpace(raw)) return false;
+        return DateTime.TryParseExact(raw.Trim(), "yyyy-MM-dd",
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.None, out date);
     }
 
     // ─── Message capture (transcript + activity) ──────────────────────

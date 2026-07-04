@@ -301,6 +301,11 @@ public sealed class TicketService
         if (ticket.ClaimedByUsername is { } claimant && ticket.Status != SupportTicketStatus.Closed)
             builder.AddField("Claimed by", claimant, inline: true);
 
+        // Show the approved leave window on time-off tickets. LeaveEndUtc is
+        // stored exclusive (day after the last leave day), so display end-1.
+        if (ticket.ReserveAssigned && ticket.LeaveStartUtc is { } ls && ticket.LeaveEndUtc is { } le)
+            builder.AddField("On leave (Reserve)", $"{ls:yyyy-MM-dd} → {le.AddDays(-1):yyyy-MM-dd}", inline: true);
+
         if (!string.IsNullOrWhiteSpace(_config.TicketPanelThumbnailUrl))
             builder.WithThumbnailUrl(_config.TicketPanelThumbnailUrl);
 

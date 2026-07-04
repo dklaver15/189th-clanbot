@@ -926,6 +926,14 @@ public class BotConfig
     public string TicketPanelThumbnailUrl { get; set; } = string.Empty;
 
     /// <summary>
+    /// Category key (must match a key in TicketCategoriesCsv) that gets the
+    /// time-off approval flow: an "Approve Leave" control that assigns the
+    /// Reserve role (AWOL-exempt) for a date range and auto-removes it when the
+    /// window ends. Empty disables the time-off flow entirely.
+    /// </summary>
+    public string TicketTimeOffCategoryKey { get; set; } = "awol";
+
+    /// <summary>
     /// Ticket category definitions, one per entry, entries separated by ';'
     /// and fields within an entry by '|':
     ///
