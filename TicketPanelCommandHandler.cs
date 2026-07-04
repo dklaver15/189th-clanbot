@@ -200,10 +200,19 @@ public sealed class TicketPanelCommandHandler
             .WithTitle("🎫 189th Support Tickets")
             .WithColor(new Color(0x58, 0x65, 0xF2))
             .WithDescription(
-                "Need to reach HQ? Pick a category from the menu below and a private "
-                + "ticket will be opened for you. Only you and the relevant team can see it.\n\n"
+                "Need to reach HQ? Pick the category that best fits from the menu below and I'll "
+                + "open a **private thread** just for you — only you and the relevant team can see it.\n\n"
                 + string.Join("\n", lines)
                 + "\n​")
+            .AddField("How it works",
+                "1️⃣ Pick a category below.\n"
+                + "2️⃣ Fill in the short form (subject + a few details).\n"
+                + "3️⃣ Your private ticket opens and HQ is notified — reply right in that thread.\n"
+                + "4️⃣ It's closed once resolved; you'll still be able to reach HQ anytime.\n​")
+            .AddField("Good to know",
+                "• **One ticket per issue** — add details inside your ticket instead of opening more.\n"
+                + "• **Report a Member** can be sent **anonymously** — you'll continue in DMs with HQ and your name stays hidden.\n"
+                + "• HQ replies as soon as someone's available, so hang tight after opening one.")
             .WithFooter("Choose a category below to get started.");
 
         if (!string.IsNullOrWhiteSpace(_config.TicketPanelThumbnailUrl))
