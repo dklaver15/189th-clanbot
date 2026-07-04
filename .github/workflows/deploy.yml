@@ -12,6 +12,12 @@ jobs:
           host: ${{ secrets.DROPLET_HOST }}
           username: root
           key: ${{ secrets.DROPLET_SSH_KEY }}
+          # Default command_timeout is 10m. `docker compose build --no-cache`
+          # rebuilds all three images (clanguard + recorder + transcriber) from
+          # scratch every deploy, and the heavy transcriber image regularly
+          # pushes total build time past 10m → "Run Command Timeout". 30m gives
+          # plenty of headroom.
+          command_timeout: 30m
           envs: GOOGLE_CREDENTIALS_BASE64,ANTHROPIC_API_KEY
           script: |
             cd /opt/clanguard
