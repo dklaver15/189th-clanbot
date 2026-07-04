@@ -743,6 +743,7 @@ public sealed class TicketInteractionHandler
         var added = 0;
         foreach (var m in role.Members)
         {
+            if (m.IsBot) continue; // don't drag DISBOARD et al. into ticket threads
             if (added >= MaxThreadMembersToAdd) break;
             try { await thread.AddUserAsync(m); added++; }
             catch (Exception ex) { _logger.LogDebug(ex, "Could not add {User} to ticket thread", m.Id); }
