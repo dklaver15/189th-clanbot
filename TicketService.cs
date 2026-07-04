@@ -269,6 +269,31 @@ public sealed class TicketService
         _logger.LogInformation("Ticket #{Id} record permanently deleted", ticketId);
     }
 
+    /// <summary>Best-effort refresh of a ticket's control embed in its thread
+    /// (used by the sweep when leave activates/ends). No-op if the thread or
+    /// message is gone or archived-locked.</summary>
+    public async Task RefreshControlEmbedAsync(SupportTicket ticket, SocketGuild guild)
+    {
+        try
+        {
+            IThreadChannel? thread = guild.GetChannel(ticket.ThreadId) as IThreadChannel;
+            if (thread is null)
+            {
+                try { thread = await _client.Rest.GetChannelAsync(ticket.ThreadId) as IThreadChannel; }
+                catch { return; }
+            }
+            if (thread is not IMessageChannel mc) return;
+            if (await mc.GetMessageAsync(ticket.ControlMessageId) is not IUserMessage control) return;
+
+            var category = _config.GetTicketCategories().FirstOrDefault(c => c.Key == ticket.CategoryKey);
+            await control.ModifyAsync(p => p.Embed = BuildTicketEmbed(ticket, category));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not refresh control embed for ticket #{Id}", ticket.Id);
+        }
+    }
+
     // ─── Embed ────────────────────────────────────────────────────────
 
     public Embed BuildTicketEmbed(SupportTicket ticket, TicketCategoryDef? category)
@@ -303,8 +328,12 @@ public sealed class TicketService
 
         // Show the approved leave window on time-off tickets. LeaveEndUtc is
         // stored exclusive (day after the last leave day), so display end-1.
-        if (ticket.ReserveAssigned && ticket.LeaveStartUtc is { } ls && ticket.LeaveEndUtc is { } le)
-            builder.AddField("On leave (Reserve)", $"{ls:yyyy-MM-dd} → {le.AddDays(-1):yyyy-MM-dd}", inline: true);
+        if (ticket.LeaveScheduled && ticket.LeaveStartUtc is { } ls && ticket.LeaveEndUtc is { } le)
+        {
+            var state = ticket.ReserveAssigned ? "active" : "scheduled";
+            builder.AddField($"On leave (Reserve, {state})",
+                $"{ls:yyyy-MM-dd} → {le.AddDays(-1):yyyy-MM-dd}", inline: true);
+        }
 
         if (!string.IsNullOrWhiteSpace(_config.TicketPanelThumbnailUrl))
             builder.WithThumbnailUrl(_config.TicketPanelThumbnailUrl);

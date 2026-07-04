@@ -808,29 +808,42 @@ public sealed class TicketInteractionHandler
             return;
         }
 
-        try
+        // Fully date-driven: only apply Reserve now if the leave has already
+        // started; otherwise the maintenance sweep applies it on the start date.
+        var now = DateTime.UtcNow;
+        var startNow = leaveStartUtc <= now;
+
+        if (startNow)
         {
-            if (!member.Roles.Any(r => r.Id == reserveRole.Id))
-                await member.AddRoleAsync(reserveRole);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to assign Reserve for leave on ticket #{Id}", ticket.Id);
-            await modal.FollowupAsync(
-                "⚠️ Couldn't assign the Reserve role — the bot's highest role may be below Reserve. "
-                + "Fix the role order and try again.", ephemeral: true);
-            return;
+            try
+            {
+                if (!member.Roles.Any(r => r.Id == reserveRole.Id))
+                    await member.AddRoleAsync(reserveRole);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to assign Reserve for leave on ticket #{Id}", ticket.Id);
+                await modal.FollowupAsync(
+                    "⚠️ Couldn't assign the Reserve role — the bot's highest role may be below Reserve. "
+                    + "Fix the role order and try again.", ephemeral: true);
+                return;
+            }
         }
 
         ticket.LeaveStartUtc   = leaveStartUtc;
         ticket.LeaveEndUtc     = leaveEndUtc;
-        ticket.ReserveAssigned = true;
-        ticket.LastActivityUtc = DateTime.UtcNow;
+        ticket.LeaveScheduled  = true;
+        ticket.ReserveAssigned = startNow;
+        ticket.LastActivityUtc = now;
         db.SupportTicketMessages.Add(SystemMessage(ticket, actor,
-            $"Leave approved {startDate:yyyy-MM-dd} → {endDate:yyyy-MM-dd}; Reserve assigned", DateTime.UtcNow));
+            $"Leave approved {startDate:yyyy-MM-dd} → {endDate:yyyy-MM-dd} "
+            + (startNow ? "(active now)" : "(starts on date)"), now));
         await db.SaveChangesAsync();
 
-        // Update the control embed (adds the "On leave" field) and post a note.
+        var whenNote = startNow
+            ? $"{member.Mention} has been given **{reserveRole.Name}** (AWOL-exempt) now through the window — I'll remove it automatically when they're back."
+            : $"{member.Mention} will be given **{reserveRole.Name}** (AWOL-exempt) automatically on **{startDate:yyyy-MM-dd}**, and it'll be removed when the window ends.";
+
         if (modal.Channel is SocketThreadChannel thread)
         {
             try
@@ -840,30 +853,29 @@ public sealed class TicketInteractionHandler
                     await control.ModifyAsync(p => p.Embed = _tickets.BuildTicketEmbed(ticket, category));
 
                 await thread.SendMessageAsync(
-                    $"📆 Leave approved by {actor.Mention}: **{startDate:yyyy-MM-dd} → {endDate:yyyy-MM-dd}**.\n"
-                    + $"{member.Mention} has been given **{reserveRole.Name}** (AWOL-exempt) for the window — "
-                    + "I'll remove it automatically when they're back.",
+                    $"📆 Leave approved by {actor.Mention}: **{startDate:yyyy-MM-dd} → {endDate:yyyy-MM-dd}**.\n{whenNote}",
                     allowedMentions: AllowedMentions.None);
             }
             catch (Exception ex) { _logger.LogWarning(ex, "Could not post leave-approval note for ticket #{Id}", ticket.Id); }
         }
 
-        // DM the member.
         try
         {
             var dm = await member.CreateDMChannelAsync();
             await dm.SendMessageAsync(
                 $"✅ Your time-off request (ticket #{ticket.Id}) is **approved** for "
-                + $"**{startDate:yyyy-MM-dd} → {endDate:yyyy-MM-dd}**. You've been set to "
-                + $"**{reserveRole.Name}**, so you won't be flagged AWOL while you're out. "
-                + "Enjoy your break!",
+                + $"**{startDate:yyyy-MM-dd} → {endDate:yyyy-MM-dd}**.\n"
+                + (startNow
+                    ? $"You've been set to **{reserveRole.Name}** now, so you won't be flagged AWOL while you're out. Enjoy your break!"
+                    : $"You'll be set to **{reserveRole.Name}** automatically on **{startDate:yyyy-MM-dd}** and returned to normal when it ends."),
                 allowedMentions: AllowedMentions.None);
         }
         catch (Exception ex) { _logger.LogInformation(ex, "Could not DM leave approval to member for ticket #{Id}", ticket.Id); }
 
         await modal.FollowupAsync(
             $"✅ Leave approved for {member.DisplayName} ({startDate:yyyy-MM-dd} → {endDate:yyyy-MM-dd}). "
-            + "Reserve assigned; it'll be removed automatically when the window ends.",
+            + (startNow ? "Reserve applied now" : $"Reserve will be applied on {startDate:yyyy-MM-dd}")
+            + "; it's removed automatically when the window ends.",
             ephemeral: true);
     }
 

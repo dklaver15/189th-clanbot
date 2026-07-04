@@ -521,6 +521,7 @@ public class BotDbContext : DbContext
             e.HasIndex(t => new { t.GuildId, t.Status, t.LastActivityUtc });
             e.HasIndex(t => new { t.GuildId, t.OpenerUserId, t.Status });
             e.HasIndex(t => new { t.Status, t.ReserveAssigned, t.LeaveEndUtc });
+            e.HasIndex(t => t.LeaveScheduled); // leave-management sweep
         });
 
         modelBuilder.Entity<SupportTicketMessage>(e =>

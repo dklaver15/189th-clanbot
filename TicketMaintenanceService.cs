@@ -84,20 +84,21 @@ public class TicketMaintenanceService : BackgroundService
     {
         var now = DateTime.UtcNow;
 
-        // ── 1. End expired leaves (independent of the auto-close setting) ──
-        List<int> endedLeaveIds;
+        // ── 1. Manage approved leaves (independent of the auto-close setting) ──
+        // Applies Reserve on the start date and removes it after the end date.
+        List<int> managedLeaveIds;
         using (var scope = _services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-            endedLeaveIds = await db.SupportTickets
-                .Where(t => t.ReserveAssigned && t.LeaveEndUtc != null && t.LeaveEndUtc <= now)
+            managedLeaveIds = await db.SupportTickets
+                .Where(t => t.LeaveScheduled)
                 .Select(t => t.Id)
                 .ToListAsync(ct);
         }
-        foreach (var id in endedLeaveIds)
+        foreach (var id in managedLeaveIds)
         {
             if (ct.IsCancellationRequested) break;
-            await EndLeaveAsync(id);
+            await ManageLeaveAsync(id);
         }
 
         // ── 2. Keep-alive + auto-close (only when enabled) ──
@@ -139,71 +140,112 @@ public class TicketMaintenanceService : BackgroundService
     }
 
     /// <summary>
-    /// Ends an approved leave whose window has passed: removes the Reserve role,
-    /// resets the member's AWOL activity window (so the leave period can't
-    /// instantly re-flag them — same mechanism RankTrackingHandler uses on AWOL
-    /// removal), clears ReserveAssigned, and DMs the member. Clears the flag
-    /// even if the member/role is gone so it isn't retried forever.
+    /// Drives an approved leave through its window: applies the Reserve role once
+    /// the start date arrives, and removes it (plus resets the member's AWOL
+    /// activity window, same mechanism RankTrackingHandler uses on AWOL removal)
+    /// once the end date passes. Clears LeaveScheduled when done so it isn't
+    /// re-processed, even if the member/role is gone.
     /// </summary>
-    private async Task EndLeaveAsync(int ticketId)
+    private async Task ManageLeaveAsync(int ticketId)
     {
-        var guild = default(SocketGuild);
         try
         {
             using var scope = _services.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
             var ticket = await db.SupportTickets.FirstOrDefaultAsync(t => t.Id == ticketId);
-            if (ticket is null || !ticket.ReserveAssigned) return;
+            if (ticket is null || !ticket.LeaveScheduled) return;
 
-            guild = _client.GetGuild(ticket.GuildId);
+            var guild = _client.GetGuild(ticket.GuildId);
             if (guild is null) return; // bot not ready for this guild; retry next cycle
 
+            var now = DateTime.UtcNow;
             var member = guild.GetUser(ticket.OpenerUserId);
             var reserveRole = guild.Roles.FirstOrDefault(r =>
                 r.Name.Equals(_config.ReserveRoleName, StringComparison.OrdinalIgnoreCase));
 
-            if (member is not null && reserveRole is not null && member.Roles.Any(r => r.Id == reserveRole.Id))
+            // ── End: window has passed → remove Reserve, reset window, finish ──
+            if (ticket.LeaveEndUtc is { } end && now >= end)
             {
-                try { await member.RemoveRoleAsync(reserveRole); }
-                catch (Exception ex) { _logger.LogWarning(ex, "Could not remove Reserve for ended leave (ticket #{Id})", ticketId); }
-            }
-
-            // Fresh activity window so the leave gap doesn't immediately flag them.
-            if (member is not null)
-            {
-                var activity = await db.UserActivities
-                    .FirstOrDefaultAsync(a => a.GuildId == guild.Id && a.UserId == member.Id);
-                if (activity is null)
+                if (member is not null && reserveRole is not null && member.Roles.Any(r => r.Id == reserveRole.Id))
                 {
-                    activity = new UserActivity { GuildId = guild.Id, UserId = member.Id, Username = member.ToString() ?? member.Username };
-                    db.UserActivities.Add(activity);
+                    try { await member.RemoveRoleAsync(reserveRole); }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Could not remove Reserve for ended leave (ticket #{Id})", ticketId); }
                 }
-                activity.WindowResetAt = DateTime.UtcNow;
-            }
 
-            ticket.ReserveAssigned = false;
-            await db.SaveChangesAsync();
-
-            _logger.LogInformation("Leave ended for ticket #{Id}; Reserve removed, window reset", ticketId);
-
-            if (member is not null)
-            {
-                try
+                if (member is not null)
                 {
-                    var dm = await member.CreateDMChannelAsync();
-                    await dm.SendMessageAsync(
+                    var activity = await db.UserActivities
+                        .FirstOrDefaultAsync(a => a.GuildId == guild.Id && a.UserId == member.Id);
+                    if (activity is null)
+                    {
+                        activity = new UserActivity { GuildId = guild.Id, UserId = member.Id, Username = member.ToString() ?? member.Username };
+                        db.UserActivities.Add(activity);
+                    }
+                    activity.WindowResetAt = now;
+                }
+
+                ticket.ReserveAssigned = false;
+                ticket.LeaveScheduled  = false;
+                await db.SaveChangesAsync();
+                _logger.LogInformation("Leave ended for ticket #{Id}; Reserve removed, window reset", ticketId);
+
+                await _tickets.RefreshControlEmbedAsync(ticket, guild);
+                if (member is not null)
+                    await TryDmAsync(member,
                         $"👋 Welcome back! Your time-off (ticket #{ticketId}) has ended and your "
                         + $"**{_config.ReserveRoleName}** status has been removed. You've got a fresh "
-                        + "activity window, so no worries about being flagged.",
-                        allowedMentions: AllowedMentions.None);
-                }
-                catch (Exception ex) { _logger.LogInformation(ex, "Could not DM leave-end notice for ticket #{Id}", ticketId); }
+                        + "activity window, so no worries about being flagged.");
+                return;
             }
+
+            // ── Start: window has begun but Reserve not yet applied → apply it ──
+            if (!ticket.ReserveAssigned && ticket.LeaveStartUtc is { } start && now >= start)
+            {
+                if (member is null || reserveRole is null)
+                {
+                    _logger.LogWarning("Cannot start leave for ticket #{Id}: member or Reserve role missing", ticketId);
+                    return; // retry next cycle
+                }
+
+                try
+                {
+                    if (!member.Roles.Any(r => r.Id == reserveRole.Id))
+                        await member.AddRoleAsync(reserveRole);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Could not apply Reserve at leave start (ticket #{Id})", ticketId);
+                    return; // retry next cycle
+                }
+
+                ticket.ReserveAssigned = true;
+                await db.SaveChangesAsync();
+                _logger.LogInformation("Leave started for ticket #{Id}; Reserve applied", ticketId);
+
+                await _tickets.RefreshControlEmbedAsync(ticket, guild);
+                await TryDmAsync(member,
+                    $"🟢 Your approved time-off (ticket #{ticketId}) has started — you're now set to "
+                    + $"**{reserveRole.Name}** and won't be flagged AWOL until it ends.");
+            }
+            // else: approved but start date not reached yet — nothing to do.
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error ending leave for ticket #{Id}", ticketId);
+            _logger.LogError(ex, "Error managing leave for ticket #{Id}", ticketId);
+        }
+    }
+
+    private async Task TryDmAsync(SocketGuildUser member, string content)
+    {
+        try
+        {
+            var dm = await member.CreateDMChannelAsync();
+            await dm.SendMessageAsync(content, allowedMentions: AllowedMentions.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogInformation(ex, "Could not DM member {UserId} for leave update", member.Id);
         }
     }
 

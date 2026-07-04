@@ -111,7 +111,18 @@ public class SupportTicket
     // ── Time-off (AWOL category) ─────────────────────────────────────
     public DateTime? LeaveStartUtc  { get; set; }
     public DateTime? LeaveEndUtc    { get; set; }
-    public bool      ReserveAssigned { get; set; }
+
+    /// <summary>
+    /// True while an approved leave is being managed by the maintenance sweep —
+    /// from approval until the end date passes. Combined with ReserveAssigned it
+    /// encodes the lifecycle: LeaveScheduled=true & ReserveAssigned=false =
+    /// "approved, waiting for the start date"; both true = "leave active";
+    /// LeaveScheduled=false = "no leave, or finished".
+    /// </summary>
+    public bool LeaveScheduled { get; set; }
+
+    /// <summary>True while the Reserve role is currently applied for this leave.</summary>
+    public bool ReserveAssigned { get; set; }
 }
 
 /// <summary>
