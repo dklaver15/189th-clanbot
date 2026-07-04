@@ -181,6 +181,7 @@ public sealed class TicketInteractionHandler
         if (category is null)
         {
             await component.RespondAsync("That category is no longer available.", ephemeral: true);
+            await ResetPanelSelectAsync(component);
             return;
         }
 
@@ -198,6 +199,7 @@ public sealed class TicketInteractionHandler
                 await component.RespondAsync(
                     $"⛔ You already have {openCount} open tickets. Please wait for one to be resolved before opening another.",
                     ephemeral: true);
+                await ResetPanelSelectAsync(component);
                 return;
             }
         }
@@ -224,6 +226,27 @@ public sealed class TicketInteractionHandler
             .Build();
 
         await component.RespondWithModalAsync(modal);
+
+        // Reset the panel dropdown back to its placeholder. Discord won't fire a
+        // new event if the user re-picks the same option, and it sends no event
+        // when a modal is dismissed — so without this, dismissing the modal
+        // leaves the category "selected" and un-clickable. Editing the message's
+        // components clears the selection for everyone.
+        await ResetPanelSelectAsync(component);
+    }
+
+    /// <summary>Re-renders the panel's select menu so no option stays selected.</summary>
+    private async Task ResetPanelSelectAsync(SocketMessageComponent component)
+    {
+        try
+        {
+            var cats = _config.GetTicketCategories();
+            await component.Message.ModifyAsync(m => m.Components = BuildPanelComponents(cats));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not reset ticket panel select");
+        }
     }
 
     // ─── Creation modal → thread + route ──────────────────────────────
