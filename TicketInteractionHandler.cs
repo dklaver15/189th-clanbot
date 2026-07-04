@@ -325,7 +325,11 @@ public sealed class TicketInteractionHandler
         // Post the ticket embed with control buttons.
         var embed = _tickets.BuildTicketEmbed(ticket, category);
         var ping  = routedRoleId != 0 ? $"<@&{routedRoleId}> — new ticket" : "New ticket";
-        var control = await thread.SendMessageAsync(
+        // Send with the transparent spacer attachment so the embed (which
+        // references attachment://spacer.png) renders at full desktop width.
+        using var spacer = TicketService.OpenSpacerStream();
+        var control = await thread.SendFileAsync(
+            spacer, TicketService.SpacerFileName,
             text: ping,
             embed: embed,
             components: BuildControlButtons(ticket.Id),

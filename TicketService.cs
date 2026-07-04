@@ -7,6 +7,9 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.PixelFormats;
+using Color = Discord.Color; // disambiguate from SixLabors.ImageSharp.Color
 
 namespace ClanGuardBot.Handlers;
 
@@ -35,6 +38,29 @@ public sealed class TicketService
         _client   = client;
         _logger   = logger;
         _config   = config.Value;
+    }
+
+    // ─── Embed-width spacer ───────────────────────────────────────────
+    // Discord embeds shrink-wrap to their content, so a short ticket renders
+    // narrow on desktop. Attaching a fully-transparent wide/short PNG as the
+    // embed image forces the embed out to Discord's max width. Built once and
+    // reused; each ticket message attaches it and the embed references it via
+    // attachment://.
+
+    public const string SpacerFileName = "spacer.png";
+    private static readonly byte[] SpacerPngBytes = BuildSpacerPng();
+
+    /// <summary>Fresh read-only stream over the cached spacer PNG for one send.</summary>
+    public static Stream OpenSpacerStream() => new MemoryStream(SpacerPngBytes, writable: false);
+
+    private static byte[] BuildSpacerPng()
+    {
+        // 512×1 is transparent by default (all-zero RGBA). Wide enough to push
+        // the embed to its max desktop width; 1px tall so it's invisible.
+        using var img = new Image<Rgba32>(512, 1);
+        using var ms = new MemoryStream();
+        img.SaveAsPng(ms);
+        return ms.ToArray();
     }
 
     // ─── Close pipeline ───────────────────────────────────────────────
@@ -262,6 +288,11 @@ public sealed class TicketService
 
         if (!string.IsNullOrWhiteSpace(_config.TicketPanelThumbnailUrl))
             builder.WithThumbnailUrl(_config.TicketPanelThumbnailUrl);
+
+        // Transparent spacer → forces the embed to full desktop width. The
+        // attachment is added by TicketInteractionHandler when the ticket
+        // message is first sent, and persists through later ModifyAsync edits.
+        builder.WithImageUrl($"attachment://{SpacerFileName}");
 
         return builder.Build();
     }
