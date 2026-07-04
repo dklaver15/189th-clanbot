@@ -101,7 +101,26 @@ public class TicketMaintenanceService : BackgroundService
             await ManageLeaveAsync(id);
         }
 
-        // ── 2. Keep-alive + auto-close (only when enabled) ──
+        // ── 2. Escalate unanswered (unclaimed) tickets (always-on if configured) ──
+        if (_config.TicketFirstEscalationHours > 0 || _config.TicketSecondEscalationHours > 0)
+        {
+            List<int> unclaimedIds;
+            using (var scope = _services.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+                unclaimedIds = await db.SupportTickets
+                    .Where(t => t.Status == SupportTicketStatus.Open && t.EscalationLevel < 2)
+                    .Select(t => t.Id)
+                    .ToListAsync(ct);
+            }
+            foreach (var id in unclaimedIds)
+            {
+                if (ct.IsCancellationRequested) break;
+                await EscalateIfDueAsync(id);
+            }
+        }
+
+        // ── 3. Keep-alive + auto-close (only when enabled) ──
         var cutoffDays = _config.TicketAutoCloseInactivityDays;
         if (cutoffDays <= 0) return;
 
@@ -246,6 +265,115 @@ public class TicketMaintenanceService : BackgroundService
         catch (Exception ex)
         {
             _logger.LogInformation(ex, "Could not DM member {UserId} for leave update", member.Id);
+        }
+    }
+
+    /// <summary>
+    /// Escalates a still-unclaimed ticket. First threshold: bump priority one
+    /// level and re-ping the routed role in the thread. Second threshold: set
+    /// priority to Urgent and ping TicketEscalationRoleId (or the routed role if
+    /// none is configured), pulling that role's members into the thread first.
+    /// EscalationLevel is stamped so each stage fires once; a ticket that's blown
+    /// past both thresholds (e.g. after downtime) jumps straight to stage 2.
+    /// </summary>
+    private async Task EscalateIfDueAsync(int ticketId)
+    {
+        try
+        {
+            using var scope = _services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+            var ticket = await db.SupportTickets.FirstOrDefaultAsync(t => t.Id == ticketId);
+            if (ticket is null || ticket.Status != SupportTicketStatus.Open || ticket.EscalationLevel >= 2)
+                return;
+
+            var now = DateTime.UtcNow;
+            var ageHours = (now - ticket.CreatedUtc).TotalHours;
+            var first  = _config.TicketFirstEscalationHours;
+            var second = _config.TicketSecondEscalationHours;
+
+            var doSecond = ticket.EscalationLevel < 2 && second > 0 && ageHours >= second;
+            var doFirst  = !doSecond && ticket.EscalationLevel < 1 && first > 0 && ageHours >= first;
+            if (!doSecond && !doFirst) return;
+
+            var guild = _client.GetGuild(ticket.GuildId);
+            if (guild is null) return;
+
+            var thread = guild.GetChannel(ticket.ThreadId) as IThreadChannel;
+            if (thread is null)
+            {
+                try { thread = await _client.Rest.GetChannelAsync(ticket.ThreadId) as IThreadChannel; }
+                catch { /* gone */ }
+            }
+
+            var hours = (int)Math.Round(ageHours);
+
+            if (doSecond)
+            {
+                ticket.Priority = SupportTicketPriority.Urgent;
+                ticket.EscalationLevel = 2;
+
+                var escalationRoleId = _config.TicketEscalationRoleId != 0
+                    ? _config.TicketEscalationRoleId
+                    : ticket.RoutedRoleId;
+
+                if (thread is SocketThreadChannel st && _config.TicketEscalationRoleId != 0)
+                    await AddRoleMembersToThreadAsync(st, guild, escalationRoleId);
+
+                await db.SaveChangesAsync();
+                _logger.LogInformation("Ticket #{Id} escalated to level 2 ({Hours}h unclaimed)", ticket.Id, hours);
+
+                if (thread is IMessageChannel mc)
+                    await SendPingAsync(mc, escalationRoleId,
+                        $"⏫⏫ **Escalation** — ticket **#{ticket.Id}** has been open **{hours}h** without being claimed. "
+                        + (escalationRoleId != 0 ? $"<@&{escalationRoleId}> please take this." : "Please take this."));
+            }
+            else
+            {
+                ticket.Priority = BumpPriority(ticket.Priority);
+                ticket.EscalationLevel = 1;
+                await db.SaveChangesAsync();
+                _logger.LogInformation("Ticket #{Id} escalated to level 1 ({Hours}h unclaimed)", ticket.Id, hours);
+
+                if (thread is IMessageChannel mc)
+                    await SendPingAsync(mc, ticket.RoutedRoleId,
+                        $"⏫ Ticket **#{ticket.Id}** has been open **{hours}h** without being claimed — priority bumped to **{ticket.Priority}**. "
+                        + (ticket.RoutedRoleId != 0 ? $"<@&{ticket.RoutedRoleId}> please take a look." : "Please take a look."));
+            }
+
+            await _tickets.RefreshControlEmbedAsync(ticket, guild);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error escalating ticket #{Id}", ticketId);
+        }
+    }
+
+    private static SupportTicketPriority BumpPriority(SupportTicketPriority p) =>
+        p < SupportTicketPriority.Urgent ? p + 1 : SupportTicketPriority.Urgent;
+
+    private static async Task SendPingAsync(IMessageChannel channel, ulong roleId, string content)
+    {
+        var mentions = roleId != 0
+            ? new AllowedMentions { RoleIds = new List<ulong> { roleId } }
+            : AllowedMentions.None;
+        try { await channel.SendMessageAsync(content, allowedMentions: mentions); }
+        catch { /* best-effort */ }
+    }
+
+    private async Task AddRoleMembersToThreadAsync(SocketThreadChannel thread, SocketGuild guild, ulong roleId)
+    {
+        if (roleId == 0) return;
+        var role = guild.GetRole(roleId);
+        if (role is null) return;
+
+        var added = 0;
+        foreach (var m in role.Members)
+        {
+            if (m.IsBot) continue;
+            if (added >= 50) break;
+            try { await thread.AddUserAsync(m); added++; }
+            catch (Exception ex) { _logger.LogDebug(ex, "Could not add {User} to escalated thread", m.Id); }
         }
     }
 
