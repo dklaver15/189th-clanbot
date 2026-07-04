@@ -116,12 +116,45 @@ public sealed class TicketService
 
         if (thread is not null)
         {
+            // Remove the members the bot added on open. Discord keeps a thread
+            // pinned in a member's sidebar until they leave it — archiving alone
+            // never clears it — so removing everyone is what actually makes a
+            // closed ticket disappear from sidebars. The archived thread itself
+            // stays on record (findable via the thread browser by Manage-Threads
+            // holders) and the transcript is already in the log channel.
+            await RemoveThreadMembersAsync(thread, guild, ticket);
+
             try { await thread.ModifyAsync(p => { p.Archived = true; p.Locked = true; }); }
             catch (Exception ex) { _logger.LogWarning(ex, "Could not archive/lock thread for ticket #{Id}", ticket.Id); }
         }
 
         _logger.LogInformation("Ticket #{Id} closed by {Closer}", ticket.Id, closedByName);
         return true;
+    }
+
+    /// <summary>
+    /// Removes the humans the bot added on open (the opener + the routed role's
+    /// members) from the ticket thread so it leaves their sidebars. Best-effort
+    /// per user. Skips the bot itself. Runs before archive/lock because member
+    /// changes on a locked/archived thread can be rejected.
+    /// </summary>
+    private async Task RemoveThreadMembersAsync(IThreadChannel thread, SocketGuild guild, SupportTicket ticket)
+    {
+        var ids = new HashSet<ulong>();
+        if (!ticket.IsAnonymous) ids.Add(ticket.OpenerUserId);
+        if (ticket.RoutedRoleId != 0 && guild.GetRole(ticket.RoutedRoleId) is { } role)
+            foreach (var m in role.Members)
+                if (!m.IsBot) ids.Add(m.Id);
+
+        ids.Remove(_client.CurrentUser.Id);
+
+        foreach (var id in ids)
+        {
+            var member = guild.GetUser(id);
+            if (member is null) continue;
+            try { await thread.RemoveUserAsync(member); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Could not remove {User} from closed ticket #{Id}", id, ticket.Id); }
+        }
     }
 
     private async Task PostTranscriptAsync(SocketGuild guild, SupportTicket ticket, List<SupportTicketMessage> messages)
