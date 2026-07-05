@@ -393,7 +393,19 @@ public sealed class TicketInteractionHandler
             ticket.AnonHandle = $"Anonymous #{Guid.NewGuid().ToString("N")[..4]}";
 
         db.SupportTickets.Add(ticket);
-        await db.SaveChangesAsync();
+        try
+        {
+            await db.SaveChangesAsync();
+        }
+        catch (DbUpdateException) when (category.AnonymousAllowed)
+        {
+            // Hit the one-open-anonymous-ticket unique index (the atomic backstop
+            // for a race that beat the pre-check above). Nothing was persisted.
+            await modal.FollowupAsync(
+                "⛔ You already have an open anonymous report. Please wait for it to be resolved before opening another.",
+                ephemeral: true);
+            return;
+        }
 
         // Create the private thread.
         var threadName = BuildThreadName(ticket, category);
@@ -785,16 +797,32 @@ public sealed class TicketInteractionHandler
         if (ticket is null) { await component.RespondAsync("Ticket not found.", ephemeral: true); return; }
         if (!ticket.IsAnonymous) { await component.RespondAsync("This ticket isn't anonymous.", ephemeral: true); return; }
 
-        // Reveal only to the requester (ephemeral). The action is logged.
+        // Reveal only to the requester (ephemeral). The action is logged + audited.
         await component.RespondAsync(
             $"🕵️ Reporter of ticket **#{ticket.Id}** ({ticket.AnonHandle}) is "
             + $"<@{ticket.OpenerUserId}> — **{ticket.OpenerDisplayName}**.\n"
-            + "_This unmask was recorded in the bot logs. Handle with care._",
+            + "_This unmask was recorded in the ticket log. Handle with care._",
             ephemeral: true);
 
         _logger.LogWarning(
             "ANONYMOUS UNMASK: ticket #{Id} reporter {ReporterId} ({ReporterName}) revealed to {ByUser} ({ById})",
             ticket.Id, ticket.OpenerUserId, ticket.OpenerDisplayName, user.Username, user.Id);
+
+        // Audit post to the HQ log channel so unmasks are visible to other
+        // officers, not just buried in bot logs.
+        if (_config.TicketLogChannelId != 0
+            && (component.Channel as SocketGuildChannel)?.Guild is { } g
+            && g.GetTextChannel(_config.TicketLogChannelId) is { } logChannel)
+        {
+            try
+            {
+                await logChannel.SendMessageAsync(
+                    $"🕵️ **Unmask** — {user.Mention} revealed the reporter of ticket **#{ticket.Id}** "
+                    + $"({ticket.AnonHandle}) as <@{ticket.OpenerUserId}>.",
+                    allowedMentions: AllowedMentions.None);
+            }
+            catch (Exception ex) { _logger.LogWarning(ex, "Could not post unmask audit for ticket #{Id}", ticket.Id); }
+        }
     }
 
     private bool HasUnmaskPermission(SocketGuildUser user)
@@ -868,6 +896,14 @@ public sealed class TicketInteractionHandler
         if (endDate < startDate)
         {
             await modal.FollowupAsync("⚠️ The end date is before the start date.", ephemeral: true);
+            return;
+        }
+        if (_config.TicketMaxLeaveDays > 0 && (endDate - startDate).TotalDays + 1 > _config.TicketMaxLeaveDays)
+        {
+            await modal.FollowupAsync(
+                $"⚠️ That leave is longer than the max of **{_config.TicketMaxLeaveDays} days**. "
+                + "Double-check the dates (or split it into separate requests).",
+                ephemeral: true);
             return;
         }
 

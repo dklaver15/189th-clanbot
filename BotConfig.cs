@@ -934,6 +934,14 @@ public class BotConfig
     public string TicketTimeOffCategoryKey { get; set; } = "awol";
 
     /// <summary>
+    /// Maximum length (in days, inclusive) of a single approved time-off window.
+    /// A safety cap so a fat-fingered end date (e.g. 2099) can't hold the Reserve
+    /// role indefinitely. Approvals longer than this are rejected. 0 disables the
+    /// cap.
+    /// </summary>
+    public int TicketMaxLeaveDays { get; set; } = 180;
+
+    /// <summary>
     /// Ticket category definitions, one per entry, entries separated by ';'
     /// and fields within an entry by '|':
     ///

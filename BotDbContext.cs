@@ -522,6 +522,16 @@ public class BotDbContext : DbContext
             e.HasIndex(t => new { t.GuildId, t.OpenerUserId, t.Status });
             e.HasIndex(t => new { t.Status, t.ReserveAssigned, t.LeaveEndUtc });
             e.HasIndex(t => t.LeaveScheduled); // leave-management sweep
+
+            // Atomic backstop for "one open anonymous ticket per user" — a
+            // filtered unique index over only the open (Status != Closed=3)
+            // anonymous rows. This closes the check-then-insert race where a
+            // scripted client could submit two anonymous tickets at once; the
+            // insert of the second throws and is caught in HandleCreateAsync.
+            e.HasIndex(t => new { t.GuildId, t.OpenerUserId })
+                .IsUnique()
+                .HasFilter("\"IsAnonymous\" = 1 AND \"Status\" <> 3")
+                .HasDatabaseName("IX_SupportTickets_OneOpenAnonPerUser");
         });
 
         modelBuilder.Entity<SupportTicketMessage>(e =>
