@@ -408,6 +408,11 @@ public sealed class TicketInteractionHandler
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to create ticket thread for ticket #{Id}", ticket.Id);
+            // Roll back the row we just inserted so it can't become an orphan
+            // (ThreadId=0) that counts against the open-ticket cap and gets
+            // picked up by the escalation/auto-close sweeps.
+            try { db.SupportTickets.Remove(ticket); await db.SaveChangesAsync(); }
+            catch (Exception rex) { _logger.LogWarning(rex, "Could not roll back orphan ticket #{Id}", ticket.Id); }
             await modal.FollowupAsync(
                 "⚠️ Couldn't create your ticket thread — the bot may be missing the "
                 + "\"Create Private Threads\" permission in the tickets channel. Please ping an officer.",
@@ -558,15 +563,33 @@ public sealed class TicketInteractionHandler
         }
 
         var now = DateTime.UtcNow;
-        ticket.ClaimedByUserId   = user.Id;
-        ticket.ClaimedByUsername = user.DisplayName ?? user.Username;
-        ticket.ClaimedAtUtc      = now;
-        ticket.Status            = SupportTicketStatus.InProgress;
-        ticket.LastActivityUtc   = now;
-        db.SupportTicketMessages.Add(SystemMessage(ticket, user, $"Claimed by {ticket.ClaimedByUsername}", now));
+        var claimant = user.DisplayName ?? user.Username;
+
+        // Atomic claim: only succeeds if still unclaimed, so two simultaneous
+        // clicks can't both "win" and post a claim message.
+        var rows = await db.SupportTickets
+            .Where(t => t.Id == ticketId && t.ClaimedByUserId == null && t.Status != SupportTicketStatus.Closed)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(t => t.ClaimedByUserId, (ulong?)user.Id)
+                .SetProperty(t => t.ClaimedByUsername, claimant)
+                .SetProperty(t => t.ClaimedAtUtc, (DateTime?)now)
+                .SetProperty(t => t.Status, SupportTicketStatus.InProgress)
+                .SetProperty(t => t.LastActivityUtc, now));
+        if (rows == 0)
+        {
+            await component.FollowupAsync("Someone else just claimed this ticket.", ephemeral: true);
+            return;
+        }
+
+        var fresh = await db.SupportTickets.AsNoTracking().FirstOrDefaultAsync(t => t.Id == ticketId);
+        db.SupportTicketMessages.Add(new SupportTicketMessage
+        {
+            TicketId = ticketId, AuthorUserId = user.Id, AuthorDisplayName = claimant,
+            Content = $"Claimed by {claimant}", SentUtc = now, Direction = SupportTicketMessageDirection.System,
+        });
         await db.SaveChangesAsync();
 
-        await UpdateControlEmbedAsync(component, ticket);
+        if (fresh is not null) await UpdateControlEmbedAsync(component, fresh);
         await component.Channel.SendMessageAsync(
             $"🙋 {user.Mention} claimed this ticket.", allowedMentions: AllowedMentions.None);
     }
@@ -896,6 +919,18 @@ public sealed class TicketInteractionHandler
         ticket.LeaveScheduled  = true;
         ticket.ReserveAssigned = startNow;
         ticket.LastActivityUtc = now;
+
+        // Approving is handling the ticket — mark it in-progress (and claim it if
+        // nobody has) so the escalation sweep stops treating it as unanswered.
+        if (ticket.Status == SupportTicketStatus.Open)
+            ticket.Status = SupportTicketStatus.InProgress;
+        if (ticket.ClaimedByUserId is null)
+        {
+            ticket.ClaimedByUserId   = actor.Id;
+            ticket.ClaimedByUsername = actor.DisplayName ?? actor.Username;
+            ticket.ClaimedAtUtc      = now;
+        }
+
         db.SupportTicketMessages.Add(SystemMessage(ticket, actor,
             $"Leave approved {startDate:yyyy-MM-dd} → {endDate:yyyy-MM-dd} "
             + (startNow ? "(active now)" : "(starts on date)"), now));
@@ -1016,10 +1051,15 @@ public sealed class TicketInteractionHandler
 
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-        var ticket = await db.SupportTickets.FirstOrDefaultAsync(t =>
-            t.OpenerUserId == message.Author.Id &&
-            t.IsAnonymous &&
-            t.Status != SupportTicketStatus.Closed);
+        // Deterministic: newest open anonymous ticket wins if there's ever more
+        // than one (the create-guard normally prevents that, but never route a
+        // private report to an arbitrary/wrong thread).
+        var ticket = await db.SupportTickets
+            .Where(t => t.OpenerUserId == message.Author.Id
+                     && t.IsAnonymous
+                     && t.Status != SupportTicketStatus.Closed)
+            .OrderByDescending(t => t.CreatedUtc)
+            .FirstOrDefaultAsync();
         if (ticket is null) return; // not a relay DM
 
         var guild = _client.GetGuild(ticket.GuildId);
@@ -1032,11 +1072,17 @@ public sealed class TicketInteractionHandler
             catch { /* thread gone */ }
         }
 
+        var delivered = false;
         if (thread is IMessageChannel msgChannel)
         {
-            await msgChannel.SendMessageAsync(
-                $"🕵️ **{ticket.AnonHandle}:** {Truncate(message.Content, 1800)}",
-                allowedMentions: AllowedMentions.None);
+            try
+            {
+                await msgChannel.SendMessageAsync(
+                    $"🕵️ **{ticket.AnonHandle}:** {Truncate(message.Content, 1800)}",
+                    allowedMentions: AllowedMentions.None);
+                delivered = true;
+            }
+            catch (Exception ex) { _logger.LogWarning(ex, "Could not post relayed reporter message to thread for ticket #{Id}", ticket.Id); }
         }
 
         db.SupportTicketMessages.Add(new SupportTicketMessage
@@ -1051,8 +1097,9 @@ public sealed class TicketInteractionHandler
         ticket.LastActivityUtc = message.Timestamp.UtcDateTime;
         await db.SaveChangesAsync();
 
-        // Acknowledge delivery so the reporter knows it went through.
-        try { await message.AddReactionAsync(new Emoji("✅")); }
+        // Acknowledge to the reporter: ✅ if it reached the thread, ⚠️ if it was
+        // only recorded (thread temporarily unreachable) so they know to retry.
+        try { await message.AddReactionAsync(new Emoji(delivered ? "✅" : "⚠️")); }
         catch { /* reaction is best-effort */ }
     }
 

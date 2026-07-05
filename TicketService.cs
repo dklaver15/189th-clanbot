@@ -79,16 +79,26 @@ public sealed class TicketService
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
-        var ticket = await db.SupportTickets.FirstOrDefaultAsync(t => t.Id == ticketId);
-        if (ticket is null || ticket.Status == SupportTicketStatus.Closed) return false;
-
         var now = DateTime.UtcNow;
-        ticket.Status           = SupportTicketStatus.Closed;
-        ticket.ClosedUtc        = now;
-        ticket.ClosedByUserId   = closedByUserId;
-        ticket.ClosedByUsername = closedByName;
-        ticket.Resolution       = string.IsNullOrWhiteSpace(resolution) ? null : resolution;
-        ticket.LastActivityUtc  = now;
+
+        // Atomically flip the ticket to Closed. Only the caller that actually
+        // changes a row (rows == 1) proceeds to post the transcript / archive —
+        // this is what stops two concurrent closers (two staff, or a staff Close
+        // racing the sweep's auto-close) from double-posting transcripts.
+        var rows = await db.SupportTickets
+            .Where(t => t.Id == ticketId && t.Status != SupportTicketStatus.Closed)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(t => t.Status, SupportTicketStatus.Closed)
+                .SetProperty(t => t.ClosedUtc, now)
+                .SetProperty(t => t.ClosedByUserId, (ulong?)closedByUserId)
+                .SetProperty(t => t.ClosedByUsername, closedByName)
+                .SetProperty(t => t.Resolution, string.IsNullOrWhiteSpace(resolution) ? null : resolution)
+                .SetProperty(t => t.LastActivityUtc, now));
+        if (rows == 0) return false; // already closed by someone else
+
+        var ticket = await db.SupportTickets.AsNoTracking().FirstOrDefaultAsync(t => t.Id == ticketId);
+        if (ticket is null) return false;
+
         db.SupportTicketMessages.Add(new SupportTicketMessage
         {
             TicketId          = ticket.Id,

@@ -188,11 +188,23 @@ public class TicketMaintenanceService : BackgroundService
             // over once we're past the end of that day (end + 1 day).
             if (ticket.LeaveEndUtc is { } end && now >= end.AddDays(1))
             {
+                // Only consider the removal "done" if the role is actually off
+                // the member (or the member/role is genuinely gone). If the
+                // RemoveRoleAsync call fails — e.g. the bot's role got moved
+                // below Reserve — we must NOT clear LeaveScheduled, or the member
+                // would be stuck in Reserve forever. Leave it scheduled to retry.
+                var removed = true;
                 if (member is not null && reserveRole is not null && member.Roles.Any(r => r.Id == reserveRole.Id))
                 {
                     try { await member.RemoveRoleAsync(reserveRole); }
-                    catch (Exception ex) { _logger.LogWarning(ex, "Could not remove Reserve for ended leave (ticket #{Id})", ticketId); }
+                    catch (Exception ex)
+                    {
+                        removed = false;
+                        _logger.LogWarning(ex, "Could not remove Reserve for ended leave (ticket #{Id}) — will retry", ticketId);
+                    }
                 }
+
+                if (!removed) return; // retry next cycle; keep LeaveScheduled set
 
                 if (member is not null)
                 {
@@ -288,6 +300,7 @@ public class TicketMaintenanceService : BackgroundService
             var ticket = await db.SupportTickets.FirstOrDefaultAsync(t => t.Id == ticketId);
             if (ticket is null || ticket.Status != SupportTicketStatus.Open || ticket.EscalationLevel >= 2)
                 return;
+            if (ticket.ThreadId == 0) return; // orphan with no thread — nothing to escalate
 
             var now = DateTime.UtcNow;
             var ageHours = (now - ticket.CreatedUtc).TotalHours;
