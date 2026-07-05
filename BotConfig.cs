@@ -961,6 +961,7 @@ public class BotConfig
       + "recruit|Recruitment|🎯|0|false|Normal;"
       + "report|Report a Member|🚨|0|true|High;"
       + "tech|Bot / Tech Issue|🛠️|0|false|Normal;"
+      + "portal|Battlefield Portal|🌀|1523406872655167640|false|Normal;"
       + "suggest|Suggestion / Feedback|💡|0|false|Low;"
       + "general|General|📩|0|false|Normal";
 
