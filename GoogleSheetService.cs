@@ -20,7 +20,8 @@ public record GamertagLookupResult(
     string PSN,
     string Xbox,
     string Embark,
-    string Bungie);
+    string Bungie,
+    string YouTube = "");
 
 /// <summary>
 /// One roster row with its Discord ID parsed out (null for legacy/no-ID rows).
@@ -69,12 +70,12 @@ public class GoogleSheetsService
 
     /// <summary>
     /// Appends (or updates) a row in the configured Google Sheet.
-    /// Columns: Discord ID | Discord Name | EA | Steam | PSN | Xbox | Embark | Bungie
+    /// Columns: Discord ID | Discord Name | EA | Steam | PSN | Xbox | Embark | Bungie | YouTube
     /// Matches rows by Discord ID so name changes don't create duplicates.
     /// </summary>
     public async Task WriteGamertagsAsync(
         ulong discordId, string discordName, string ea, string steam, string psn,
-        string xbox, string embark, string bungie)
+        string xbox, string embark, string bungie, string youtube = "")
     {
         var credential = GoogleCredential
             .FromFile(_config.GoogleCredentialsPath)
@@ -88,13 +89,13 @@ public class GoogleSheetsService
 
         var spreadsheetId = _config.GoogleSpreadsheetId;
         var sheetName = _config.GoogleSheetName;
-        var range = $"{sheetName}!A:H";
+        var range = $"{sheetName}!A:I";
 
         // Try to find an existing row for this Discord user by ID
         var getRequest = service.Spreadsheets.Values.Get(spreadsheetId, range);
         var getResponse = await ExecuteWithRetryAsync(getRequest.ExecuteAsync, "gamertag read");
 
-        var newRow = new List<object> { discordId.ToString(), discordName, ea, steam, psn, xbox, embark, bungie };
+        var newRow = new List<object> { discordId.ToString(), discordName, ea, steam, psn, xbox, embark, bungie, youtube };
 
         if (getResponse.Values is not null)
         {
@@ -104,7 +105,7 @@ public class GoogleSheetsService
                 var row = getResponse.Values[i];
                 if (row.Count > 0 && string.Equals(row[0]?.ToString(), discordId.ToString(), StringComparison.Ordinal))
                 {
-                    var updateRange = $"{sheetName}!A{i + 1}:H{i + 1}";
+                    var updateRange = $"{sheetName}!A{i + 1}:I{i + 1}";
                     var updateBody = new ValueRange { Values = new List<IList<object>> { newRow } };
                     var updateRequest = service.Spreadsheets.Values.Update(updateBody, spreadsheetId, updateRange);
                     updateRequest.ValueInputOption = SpreadsheetsResource.ValuesResource.UpdateRequest
@@ -130,7 +131,7 @@ public class GoogleSheetsService
                     (string.Equals(colA, discordName, StringComparison.OrdinalIgnoreCase) && !ulong.TryParse(colA, out _)))
                 {
                     // Update the row and backfill the Discord ID
-                    var updateRange = $"{sheetName}!A{i + 1}:H{i + 1}";
+                    var updateRange = $"{sheetName}!A{i + 1}:I{i + 1}";
                     var updateBody = new ValueRange { Values = new List<IList<object>> { newRow } };
                     var updateRequest = service.Spreadsheets.Values.Update(updateBody, spreadsheetId, updateRange);
                     updateRequest.ValueInputOption = SpreadsheetsResource.ValuesResource.UpdateRequest
@@ -185,7 +186,7 @@ public class GoogleSheetsService
 
         var spreadsheetId = _config.GoogleSpreadsheetId;
         var sheetName     = _config.GoogleSheetName;
-        var range         = $"{sheetName}!A:H";
+        var range         = $"{sheetName}!A:I";
 
         var getResponse = await service.Spreadsheets.Values.Get(spreadsheetId, range).ExecuteAsync();
         if (getResponse.Values is null) return false;
@@ -276,7 +277,7 @@ public class GoogleSheetsService
 
         var spreadsheetId = _config.GoogleSpreadsheetId;
         var sheetName     = _config.GoogleSheetName;
-        var range         = $"{sheetName}!A:H";
+        var range         = $"{sheetName}!A:I";
 
         var getResponse = await service.Spreadsheets.Values.Get(spreadsheetId, range).ExecuteAsync();
         var values = getResponse.Values;
@@ -376,7 +377,7 @@ public class GoogleSheetsService
             ApplicationName = "ClanGuardBot"
         });
 
-        var range = $"{_config.GoogleSheetName}!A:H";
+        var range = $"{_config.GoogleSheetName}!A:I";
         var resp = await service.Spreadsheets.Values.Get(_config.GoogleSpreadsheetId, range).ExecuteAsync();
 
         var result = new List<LegacyGamertagRow>();
@@ -456,7 +457,7 @@ public class GoogleSheetsService
 
         var spreadsheetId = _config.GoogleSpreadsheetId;
         var sheetName = _config.GoogleSheetName;
-        var range = $"{sheetName}!A:H";
+        var range = $"{sheetName}!A:I";
 
         var getRequest = service.Spreadsheets.Values.Get(spreadsheetId, range);
         var getResponse = await getRequest.ExecuteAsync();
@@ -500,7 +501,8 @@ public class GoogleSheetsService
                 PSN: Cell(4),
                 Xbox: Cell(5),
                 Embark: Cell(6),
-                Bungie: Cell(7));
+                Bungie: Cell(7),
+                YouTube: Cell(8));
         }
     }
 
@@ -524,7 +526,7 @@ public class GoogleSheetsService
             ApplicationName = "ClanGuardBot"
         });
 
-        var range = $"{_config.GoogleSheetName}!A:H";
+        var range = $"{_config.GoogleSheetName}!A:I";
         var resp = await service.Spreadsheets.Values.Get(_config.GoogleSpreadsheetId, range).ExecuteAsync();
 
         var result = new List<GamertagRosterEntry>();
@@ -544,7 +546,8 @@ public class GoogleSheetsService
                 PSN: Cell(4),
                 Xbox: Cell(5),
                 Embark: Cell(6),
-                Bungie: Cell(7));
+                Bungie: Cell(7),
+                YouTube: Cell(8));
 
             // Skip rows with no handles at all (nothing to match against).
             if (string.IsNullOrWhiteSpace(tags.Steam)
@@ -576,7 +579,7 @@ public class GoogleSheetsService
 
         var sheetId = sheet.Properties.SheetId ?? 0;
         var rowCount = sheet.Properties.GridProperties.RowCount ?? 1000;
-        var colCount = sheet.Properties.GridProperties.ColumnCount ?? 8;
+        var colCount = sheet.Properties.GridProperties.ColumnCount ?? 9;
 
         var sortRequest = new Request
         {
@@ -629,13 +632,13 @@ public class GoogleSheetsService
                 ApplicationName = "ClanGuardBot"
             });
 
-            var range = $"{_config.GoogleSheetName}!A1:H1";
+            var range = $"{_config.GoogleSheetName}!A1:I1";
             var getRequest = service.Spreadsheets.Values.Get(_config.GoogleSpreadsheetId, range);
             var response = await getRequest.ExecuteAsync();
 
             if (response.Values is null || response.Values.Count == 0)
             {
-                var header = new List<object> { "Discord ID", "Discord Name", "EA", "Steam", "PSN", "Xbox", "Embark", "Bungie" };
+                var header = new List<object> { "Discord ID", "Discord Name", "EA", "Steam", "PSN", "Xbox", "Embark", "Bungie", "YouTube" };
                 var body = new ValueRange { Values = new List<IList<object>> { header } };
                 var updateRequest = service.Spreadsheets.Values.Update(body, _config.GoogleSpreadsheetId, range);
                 updateRequest.ValueInputOption =

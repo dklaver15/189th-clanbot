@@ -58,6 +58,7 @@ public sealed partial class GamertagWizard
         GamertagWizardStep.Xbox,
         GamertagWizardStep.Embark,
         GamertagWizardStep.Bungie,
+        GamertagWizardStep.YouTube,
     };
 
     private readonly ConcurrentDictionary<ulong, GamertagWizardSession> _sessions = new();
@@ -149,6 +150,7 @@ public sealed partial class GamertagWizard
                 Xbox        = existing?.Xbox   ?? string.Empty,
                 Embark      = existing?.Embark ?? string.Empty,
                 Bungie      = existing?.Bungie ?? string.Empty,
+                YouTube     = existing?.YouTube ?? string.Empty,
             },
         };
         _sessions[user.Id] = session;
@@ -344,7 +346,7 @@ public sealed partial class GamertagWizard
         try
         {
             await _sheetsService.WriteGamertagsAsync(
-                d.UserId, d.DiscordName, d.Ea, d.Steam, d.Psn, d.Xbox, d.Embark, d.Bungie);
+                d.UserId, d.DiscordName, d.Ea, d.Steam, d.Psn, d.Xbox, d.Embark, d.Bungie, d.YouTube);
         }
         catch (Exception ex)
         {
@@ -430,7 +432,7 @@ public sealed partial class GamertagWizard
         {
             var name = PlatformName(s.Step);
             var val  = GetField(d, s.Step);
-            eb.WithTitle($"🎮 Your gamertags  ·  {StepNumber(s.Step)}/6");
+            eb.WithTitle($"🎮 Your gamertags  ·  {StepNumber(s.Step)}/{PlatformOrder.Length}");
 
             string q;
             if (!string.IsNullOrWhiteSpace(val))
@@ -604,6 +606,7 @@ public sealed partial class GamertagWizard
         GamertagWizardStep.Psn    => GamertagWizardStep.Xbox,
         GamertagWizardStep.Xbox   => GamertagWizardStep.Embark,
         GamertagWizardStep.Embark => GamertagWizardStep.Bungie,
+        GamertagWizardStep.Bungie => GamertagWizardStep.YouTube,
         _                         => GamertagWizardStep.Confirm,
     };
 
@@ -618,6 +621,7 @@ public sealed partial class GamertagWizard
         GamertagWizardStep.Xbox   => "Xbox",
         GamertagWizardStep.Embark => "Embark",
         GamertagWizardStep.Bungie => "Bungie",
+        GamertagWizardStep.YouTube => "YouTube",
         _                         => string.Empty,
     };
 
@@ -636,6 +640,7 @@ public sealed partial class GamertagWizard
         GamertagWizardStep.Xbox   => d.Xbox,
         GamertagWizardStep.Embark => d.Embark,
         GamertagWizardStep.Bungie => d.Bungie,
+        GamertagWizardStep.YouTube => d.YouTube,
         _                         => string.Empty,
     };
 
@@ -649,6 +654,7 @@ public sealed partial class GamertagWizard
             case GamertagWizardStep.Xbox:   d.Xbox   = value; break;
             case GamertagWizardStep.Embark: d.Embark = value; break;
             case GamertagWizardStep.Bungie: d.Bungie = value; break;
+            case GamertagWizardStep.YouTube: d.YouTube = value; break;
         }
     }
 

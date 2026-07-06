@@ -16,6 +16,7 @@ public enum GamertagWizardStep
     Xbox,
     Embark,
     Bungie,
+    YouTube,
     Confirm, // button step
 }
 
@@ -40,6 +41,7 @@ public sealed class GamertagDraft
     public string Xbox { get; set; } = string.Empty;
     public string Embark { get; set; } = string.Empty;
     public string Bungie { get; set; } = string.Empty;
+    public string YouTube { get; set; } = string.Empty;
 }
 
 /// <summary>

@@ -62,6 +62,7 @@ public class LookupCommandHandler
                 .AddField("Xbox", string.IsNullOrWhiteSpace(result.Xbox) ? "—" : result.Xbox, true)
                 .AddField("Embark", string.IsNullOrWhiteSpace(result.Embark) ? "—" : result.Embark, true)
                 .AddField("Bungie", string.IsNullOrWhiteSpace(result.Bungie) ? "—" : result.Bungie, true)
+                .AddField("YouTube", string.IsNullOrWhiteSpace(result.YouTube) ? "—" : result.YouTube, true)
                 .WithFooter("Looked up from the roster sheet.")
                 .Build();
 
