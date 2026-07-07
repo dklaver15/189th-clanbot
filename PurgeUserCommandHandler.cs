@@ -201,6 +201,9 @@ public class PurgeUserCommandHandler
         var deleted = 0;
         var failed = 0;
         var skippedNoPerm = 0;
+        // Actual per-channel deleted counts (may differ from the scan's byChannel
+        // if a channel is skipped for lack of Manage Messages or a delete fails).
+        var deletedByChannel = new List<(ulong Id, string Name, int Count)>();
         var bulkCutoff = DateTimeOffset.UtcNow - BulkDeleteWindow + TimeSpan.FromMinutes(1);
 
         foreach (var grp in toDelete.GroupBy(m => m.Channel.Id))
@@ -224,6 +227,7 @@ public class PurgeUserCommandHandler
             var msgs = grp.ToList();
             var recent = msgs.Where(m => m.Timestamp > bulkCutoff).ToList();
             var old    = msgs.Where(m => m.Timestamp <= bulkCutoff).ToList();
+            var channelDeleted = 0;
 
             // Bulk-delete recent messages in chunks of 100 (Discord's per-call max).
             foreach (var chunk in Chunk(recent, 100))
@@ -234,6 +238,7 @@ public class PurgeUserCommandHandler
                     {
                         await channel.DeleteMessagesAsync(chunk);
                         deleted += chunk.Count;
+                        channelDeleted += chunk.Count;
                     }
                     catch (Exception ex)
                     {
@@ -241,23 +246,35 @@ public class PurgeUserCommandHandler
                             "/{Command}: bulk delete failed in #{Channel}; falling back to per-message.",
                             CommandName, channel.Name);
                         foreach (var m in chunk)
-                            await SlowDeleteAsync(m, channel, () => deleted++, () => failed++);
+                            await SlowDeleteAsync(m, channel, () => { deleted++; channelDeleted++; }, () => failed++);
                     }
                 }
                 else if (chunk.Count == 1)
                 {
-                    await SlowDeleteAsync(chunk[0], channel, () => deleted++, () => failed++);
+                    await SlowDeleteAsync(chunk[0], channel, () => { deleted++; channelDeleted++; }, () => failed++);
                 }
             }
 
             // Slow-delete old (>14d) messages one at a time.
             foreach (var m in old)
-                await SlowDeleteAsync(m, channel, () => deleted++, () => failed++);
+                await SlowDeleteAsync(m, channel, () => { deleted++; channelDeleted++; }, () => failed++);
+
+            if (channelDeleted > 0)
+                deletedByChannel.Add((channel.Id, channel.Name, channelDeleted));
         }
 
         var summary =
             $"✅ Deleted **{deleted}** message(s) from **{targetName}** across " +
-            $"**{byChannel.Count}** channel(s).";
+            $"**{deletedByChannel.Count}** channel(s):";
+
+        var deletedLines = deletedByChannel
+            .OrderByDescending(x => x.Count)
+            .Take(20)
+            .Select(x => $"• <#{x.Id}> — {x.Count}");
+        summary += "\n" + string.Join("\n", deletedLines);
+        if (deletedByChannel.Count > 20)
+            summary += $"\n…and {deletedByChannel.Count - 20} more channel(s).";
+
         if (skippedNoPerm > 0)
             summary += $"\n• Skipped (bot lacks Manage Messages): {skippedNoPerm}";
         if (failed > 0)
