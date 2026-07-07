@@ -94,21 +94,40 @@ public class PurgeUserCommandHandler
         client.SlashCommandExecuted += OnSlashCommandExecuted;
     }
 
-    private async Task OnSlashCommandExecuted(SocketSlashCommand cmd)
+    private Task OnSlashCommandExecuted(SocketSlashCommand cmd)
     {
-        if (cmd.Data.Name != CommandName) return;
+        if (cmd.Data.Name != CommandName) return Task.CompletedTask;
 
-        await cmd.DeferAsync(ephemeral: true);
+        // Offload the whole run to a background task and return immediately.
+        // Discord.NET's gateway awaits each event handler before dispatching the
+        // next gateway event, so a multi-minute purge running inline here blocks
+        // EVERY other interaction (e.g. /health) until it finishes — they time
+        // out with "application did not respond". Doing the work off the gateway
+        // loop keeps the bot responsive during a purge. DeferAsync still runs
+        // first (inside the task) to acknowledge within Discord's 3s window.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await cmd.DeferAsync(ephemeral: true);
+                await HandleAsync(cmd);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Unexpected error in /{Command}", CommandName);
+                try
+                {
+                    await cmd.FollowupAsync($"❌ Unexpected error: {ex.Message}", ephemeral: true);
+                }
+                catch (Exception followupEx)
+                {
+                    _logger.LogWarning(followupEx,
+                        "/{Command}: couldn't report the error back to the invoker.", CommandName);
+                }
+            }
+        });
 
-        try
-        {
-            await HandleAsync(cmd);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Unexpected error in /{Command}", CommandName);
-            await cmd.FollowupAsync($"❌ Unexpected error: {ex.Message}", ephemeral: true);
-        }
+        return Task.CompletedTask;
     }
 
     private async Task HandleAsync(SocketSlashCommand cmd)
@@ -196,9 +215,7 @@ public class PurgeUserCommandHandler
                 $"🧾 **Dry run** — would delete **{toDelete.Count}** message(s) from **{targetName}** " +
                 $"across **{byChannel.Count}** channel(s):\n" +
                 string.Join("\n", lines) + more +
-                (unreadableChannels > 0
-                    ? $"\n\n⚠️ {unreadableChannels} channel(s) couldn't be scanned (missing View / Read History)."
-                    : "") +
+                FormatUnreadable(unreadableChannels) +
                 $"\n\nRe-run with `confirm:true` to delete.";
 
             await ReportResultAsync(cmd, invoker, preview);
@@ -287,8 +304,7 @@ public class PurgeUserCommandHandler
             summary += $"\n• Skipped (bot lacks Manage Messages): {skippedNoPerm}";
         if (failed > 0)
             summary += $"\n• Failed: {failed} (see bot logs)";
-        if (unreadableChannels > 0)
-            summary += $"\n• Channels not scanned (missing View / Read History): {unreadableChannels}";
+        summary += FormatUnreadable(unreadableChannels);
         if (toDelete.Count >= count)
             summary += $"\n\nℹ️ Hit the requested cap of {count}. Run again to remove more.";
 
@@ -358,17 +374,17 @@ public class PurgeUserCommandHandler
     /// forced every channel to be paged to its full depth. Doing it in parallel
     /// cuts wall-clock time roughly by the concurrency factor.
     /// </summary>
-    private async Task<(List<IMessage> ToDelete, int Scanned, int Unreadable)> CollectNewestAsync(
+    private async Task<(List<IMessage> ToDelete, int Scanned, List<ulong> Unreadable)> CollectNewestAsync(
         SocketGuild guild, ulong targetId, int count)
     {
         var readable = new List<SocketTextChannel>();
-        var unreadable = 0;
+        var unreadable = new List<ulong>();
 
         foreach (var channel in guild.TextChannels)
         {
             var perms = guild.CurrentUser.GetPermissions(channel);
             if (!perms.ViewChannel || !perms.ReadMessageHistory)
-                unreadable++;
+                unreadable.Add(channel.Id);
             else
                 readable.Add(channel);
         }
@@ -455,5 +471,21 @@ public class PurgeUserCommandHandler
     {
         for (var i = 0; i < source.Count; i += size)
             yield return source.GetRange(i, Math.Min(size, source.Count - i));
+    }
+
+    /// <summary>
+    /// Renders the list of channels the bot couldn't scan (missing View / Read
+    /// History) as channel mentions, capped so the message can't blow past
+    /// Discord's 2000-char limit on a server with many locked channels. Returns
+    /// an empty string when nothing was skipped.
+    /// </summary>
+    private static string FormatUnreadable(List<ulong> unreadable)
+    {
+        if (unreadable.Count == 0) return "";
+
+        const int max = 20;
+        var mentions = string.Join(", ", unreadable.Take(max).Select(id => $"<#{id}>"));
+        var more = unreadable.Count > max ? $" …and {unreadable.Count - max} more" : "";
+        return $"\n\n⚠️ Couldn't scan {unreadable.Count} channel(s) (missing View / Read History): {mentions}{more}";
     }
 }
