@@ -154,8 +154,8 @@ public class PurgeUserCommandHandler
             : $"User {targetId}";
 
         await cmd.FollowupAsync(
-            $"🔎 Scanning channels for **{targetName}**'s recent messages…" +
-            (confirm ? " I'll **DM you** the results when it's done." : ""),
+            $"🔎 Scanning channels for **{targetName}**'s recent messages… " +
+            "I'll **DM you** the results when it's done.",
             ephemeral: true);
 
         // ── Collect the globally-newest `count` messages by the target ───
@@ -164,10 +164,9 @@ public class PurgeUserCommandHandler
 
         if (toDelete.Count == 0)
         {
-            await cmd.FollowupAsync(
+            await ReportResultAsync(cmd, invoker,
                 $"No deletable messages from **{targetName}** were found across " +
-                $"{scannedChannels} scanned channel(s). (Pinned messages are never touched.)",
-                ephemeral: true);
+                $"{scannedChannels} scanned channel(s). (Pinned messages are never touched.)");
             return;
         }
 
@@ -194,7 +193,7 @@ public class PurgeUserCommandHandler
                     : "") +
                 $"\n\nRe-run with `confirm:true` to delete.";
 
-            await cmd.FollowupAsync(preview, ephemeral: true);
+            await ReportResultAsync(cmd, invoker, preview);
             return;
         }
 
@@ -281,14 +280,16 @@ public class PurgeUserCommandHandler
     }
 
     /// <summary>
-    /// Sends the final run summary to the admin who invoked the command. Prefers
-    /// a DM (survives the 15-minute interaction-token limit); if their DMs are
-    /// closed, falls back to an EPHEMERAL interaction followup so no one but the
-    /// admin sees the moderation action. That followup only works while the
-    /// interaction token is still alive (<15 min), so on a long run where DMs are
-    /// also closed we deliberately post nothing — logging only — rather than leak
-    /// the result into a public channel. The deletions have already completed
-    /// regardless of how this summary is delivered.
+    /// Delivers a result to the admin who invoked the command — used for the
+    /// dry-run preview, the "nothing found" message, AND the post-deletion
+    /// summary, so every outcome arrives the same way. Prefers a DM (survives the
+    /// 15-minute interaction-token limit); if their DMs are closed, falls back to
+    /// an EPHEMERAL interaction followup so no one but the admin sees the
+    /// moderation action. That followup only works while the interaction token is
+    /// still alive (<15 min), so on a long run where DMs are also closed we
+    /// deliberately post nothing — logging only — rather than leak the result
+    /// into a public channel. Any deletions have already completed regardless of
+    /// how this message is delivered.
     /// </summary>
     private async Task ReportResultAsync(SocketSlashCommand cmd, SocketGuildUser invoker, string summary)
     {
