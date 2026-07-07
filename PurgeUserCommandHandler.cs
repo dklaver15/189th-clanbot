@@ -382,6 +382,14 @@ public class PurgeUserCommandHandler
 
         foreach (var channel in guild.TextChannels)
         {
+            // Skip the text chat embedded in voice/stage channels. Discord.NET
+            // models those as a SocketTextChannel subclass, so they show up in
+            // guild.TextChannels — but they're throwaway in-call chatter, not
+            // worth purging, and would otherwise clutter the "couldn't scan"
+            // list when the bot lacks access to them.
+            if (channel is SocketVoiceChannel)
+                continue;
+
             var perms = guild.CurrentUser.GetPermissions(channel);
             if (!perms.ViewChannel || !perms.ReadMessageHistory)
                 unreadable.Add(channel.Id);
