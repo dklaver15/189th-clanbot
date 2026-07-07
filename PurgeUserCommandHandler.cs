@@ -54,6 +54,14 @@ public class PurgeUserCommandHandler
     /// <summary>Per-channel page cap so a runaway history scan can't hang the bot.</summary>
     private const int MaxPagesPerChannel = 50; // 50 * 100 = 5k messages/channel
 
+    /// <summary>
+    /// How many channels to scan at once. Different channels use independent
+    /// Discord rate-limit buckets, so scanning concurrently is safe and roughly
+    /// divides wall-clock scan time by this factor. Kept well under Discord's
+    /// global ~50 req/s ceiling.
+    /// </summary>
+    private const int MaxConcurrentChannelScans = 8;
+
     private readonly ILogger<PurgeUserCommandHandler> _logger;
 
     public PurgeUserCommandHandler(ILogger<PurgeUserCommandHandler> logger)
@@ -339,79 +347,90 @@ public class PurgeUserCommandHandler
     }
 
     /// <summary>
-    /// Pages every readable text channel newest→older, collecting the target's
-    /// non-pinned messages, and returns the globally-newest <paramref name="count"/>
-    /// of them. Early-stops a channel once all remaining messages are older than
-    /// the current count-th newest candidate.
+    /// Collects the target's non-pinned messages across every readable text
+    /// channel and returns the globally-newest <paramref name="count"/> of them.
+    ///
+    /// Channels are scanned CONCURRENTLY (bounded by <see cref="MaxConcurrentChannelScans"/>).
+    /// Reads to different channels hit independent Discord rate-limit buckets, so
+    /// serialising them was the main reason a low-activity target on a many-channel
+    /// server took many minutes: the cross-channel early-stop can't arm until
+    /// `count` messages are found, so a target with fewer than `count` messages
+    /// forced every channel to be paged to its full depth. Doing it in parallel
+    /// cuts wall-clock time roughly by the concurrency factor.
     /// </summary>
     private async Task<(List<IMessage> ToDelete, int Scanned, int Unreadable)> CollectNewestAsync(
         SocketGuild guild, ulong targetId, int count)
     {
-        var candidates = new List<IMessage>();
-        var scanned = 0;
+        var readable = new List<SocketTextChannel>();
         var unreadable = 0;
 
         foreach (var channel in guild.TextChannels)
         {
             var perms = guild.CurrentUser.GetPermissions(channel);
             if (!perms.ViewChannel || !perms.ReadMessageHistory)
-            {
                 unreadable++;
-                continue;
-            }
-
-            scanned++;
-            ulong? cursor = null;
-            var pages = 0;
-
-            while (pages++ < MaxPagesPerChannel)
-            {
-                List<IMessage> batch;
-                try
-                {
-                    batch = (cursor is null
-                        ? await channel.GetMessagesAsync(100).FlattenAsync()
-                        : await channel.GetMessagesAsync(cursor.Value, Direction.Before, 100).FlattenAsync())
-                        .ToList();
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex,
-                        "/{Command}: failed to fetch history from #{Channel}; skipping rest.",
-                        CommandName, channel.Name);
-                    break;
-                }
-
-                if (batch.Count == 0) break;
-                cursor = batch.Min(m => m.Id);
-
-                candidates.AddRange(batch.Where(m => m.Author.Id == targetId && !m.IsPinned));
-
-                // Early stop: once we already have enough candidates, anything
-                // older than the current count-th newest can never make the cut.
-                if (candidates.Count >= count)
-                {
-                    var threshold = candidates
-                        .OrderByDescending(m => m.Timestamp)
-                        .ElementAt(count - 1)
-                        .Timestamp;
-
-                    // Oldest message on this page — if it's already past the
-                    // threshold, every older page is too. Stop scanning here.
-                    if (batch.Min(m => m.Timestamp) <= threshold)
-                        break;
-                }
-
-                if (batch.Count < 100) break; // reached start of channel history
-            }
+            else
+                readable.Add(channel);
         }
 
-        var toDelete = candidates
+        using var gate = new SemaphoreSlim(MaxConcurrentChannelScans);
+        var perChannel = await Task.WhenAll(readable.Select(async channel =>
+        {
+            await gate.WaitAsync();
+            try { return await ScanChannelAsync(channel, targetId, count); }
+            finally { gate.Release(); }
+        }));
+
+        var toDelete = perChannel
+            .SelectMany(list => list)
             .OrderByDescending(m => m.Timestamp)
             .Take(count)
             .ToList();
 
-        return (toDelete, scanned, unreadable);
+        return (toDelete, readable.Count, unreadable);
+    }
+
+    /// <summary>
+    /// Pages a single channel newest→older, collecting the target's non-pinned
+    /// messages, up to <see cref="MaxPagesPerChannel"/> pages. Stops early once it
+    /// has <paramref name="count"/> messages from this channel alone — no single
+    /// channel can contribute more than that to the global newest-`count`.
+    /// </summary>
+    private async Task<List<IMessage>> ScanChannelAsync(
+        SocketTextChannel channel, ulong targetId, int count)
+    {
+        var found = new List<IMessage>();
+        ulong? cursor = null;
+        var pages = 0;
+
+        while (pages++ < MaxPagesPerChannel)
+        {
+            List<IMessage> batch;
+            try
+            {
+                batch = (cursor is null
+                    ? await channel.GetMessagesAsync(100).FlattenAsync()
+                    : await channel.GetMessagesAsync(cursor.Value, Direction.Before, 100).FlattenAsync())
+                    .ToList();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "/{Command}: failed to fetch history from #{Channel}; skipping rest.",
+                    CommandName, channel.Name);
+                break;
+            }
+
+            if (batch.Count == 0) break;
+            cursor = batch.Min(m => m.Id);
+
+            found.AddRange(batch.Where(m => m.Author.Id == targetId && !m.IsPinned));
+
+            if (found.Count >= count) break;      // this channel already has enough
+            if (batch.Count < 100) break;         // reached start of channel history
+        }
+
+        return found;
     }
 
     private async Task SlowDeleteAsync(
