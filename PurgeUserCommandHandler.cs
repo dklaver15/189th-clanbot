@@ -66,7 +66,10 @@ public class PurgeUserCommandHandler
             .WithName(CommandName)
             .WithDescription("Delete a member's recent messages server-wide (Admin only)")
             .AddOption("user", ApplicationCommandOptionType.User,
-                "The member whose messages to delete", isRequired: true)
+                "The member whose messages to delete", isRequired: false)
+            .AddOption("user_id", ApplicationCommandOptionType.String,
+                "Raw numeric ID instead of the picker — use for kicked/banned members who already left",
+                isRequired: false)
             .AddOption(new SlashCommandOptionBuilder()
                 .WithName("count")
                 .WithDescription($"How many of their messages to delete (default {DefaultCount}, max {MaxCount})")
@@ -120,10 +123,23 @@ public class PurgeUserCommandHandler
         }
 
         // ── Options ──────────────────────────────────────────────────────
+        // Target resolves from EITHER the picker OR a raw numeric ID. The raw-ID
+        // path is the important one here: this command's main job is cleaning up
+        // after a member has been kicked or banned, and the user picker can't
+        // select someone who's no longer in the guild. Mirrors /late-check.
         var target = cmd.Data.Options.FirstOrDefault(o => o.Name == "user")?.Value as SocketUser;
-        if (target is null)
+        var rawId  = cmd.Data.Options.FirstOrDefault(o => o.Name == "user_id")?.Value as string;
+
+        ulong targetId;
+        if (target is not null)
         {
-            await cmd.FollowupAsync("⚠️ You must specify a user.", ephemeral: true);
+            targetId = target.Id;
+        }
+        else if (string.IsNullOrWhiteSpace(rawId) || !ulong.TryParse(rawId.Trim(), out targetId))
+        {
+            await cmd.FollowupAsync(
+                "⚠️ Select a user, or pass a numeric `user_id` (use this for members who were kicked/banned).",
+                ephemeral: true);
             return;
         }
 
@@ -133,8 +149,9 @@ public class PurgeUserCommandHandler
 
         var confirm = (bool)(cmd.Data.Options.FirstOrDefault(o => o.Name == "confirm")?.Value ?? false);
 
-        var targetId = target.Id;
-        var targetName = (target as IGuildUser)?.DisplayName ?? target.GlobalName ?? target.Username;
+        var targetName = target is not null
+            ? ((target as IGuildUser)?.DisplayName ?? target.GlobalName ?? target.Username)
+            : $"User {targetId}";
 
         await cmd.FollowupAsync(
             $"🔎 Scanning channels for **{targetName}**'s recent messages…",

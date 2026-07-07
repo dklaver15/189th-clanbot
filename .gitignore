@@ -22,3 +22,7 @@ Archive.zip
 *.xlsx#
 *.pdf
 *.pptx
+/docs/KUDOS_SPEC.md
+/docs/KUDOS_PROPOSAL.md
+/TICKET_TESTING.md
+/TICKET_SYSTEM_DESIGN.md
