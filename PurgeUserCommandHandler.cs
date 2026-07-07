@@ -154,7 +154,8 @@ public class PurgeUserCommandHandler
             : $"User {targetId}";
 
         await cmd.FollowupAsync(
-            $"🔎 Scanning channels for **{targetName}**'s recent messages…",
+            $"🔎 Scanning channels for **{targetName}**'s recent messages…" +
+            (confirm ? " I'll **DM you** the results when it's done." : ""),
             ephemeral: true);
 
         // ── Collect the globally-newest `count` messages by the target ───
@@ -271,7 +272,52 @@ public class PurgeUserCommandHandler
             "/{Command} by {Invoker}: target={Target}, deleted={Deleted}, failed={Failed}, skippedNoPerm={Skipped}",
             CommandName, cmd.User.Username, targetId, deleted, failed, skippedNoPerm);
 
-        await cmd.FollowupAsync(summary, ephemeral: true);
+        // Deliver the result via DM rather than an interaction followup. A big
+        // purge (especially many >14-day messages at 750ms each) can outlast the
+        // 15-minute interaction-token window; the deletions themselves use the
+        // bot token and are unaffected, but the followup would fail. A DM has no
+        // such limit, so the admin always gets the summary.
+        await ReportResultAsync(cmd, invoker, summary);
+    }
+
+    /// <summary>
+    /// Sends the final run summary to the admin who invoked the command. Prefers
+    /// a DM (survives the 15-minute interaction-token limit); if their DMs are
+    /// closed, falls back to an EPHEMERAL interaction followup so no one but the
+    /// admin sees the moderation action. That followup only works while the
+    /// interaction token is still alive (<15 min), so on a long run where DMs are
+    /// also closed we deliberately post nothing — logging only — rather than leak
+    /// the result into a public channel. The deletions have already completed
+    /// regardless of how this summary is delivered.
+    /// </summary>
+    private async Task ReportResultAsync(SocketSlashCommand cmd, SocketGuildUser invoker, string summary)
+    {
+        try
+        {
+            var dm = await invoker.CreateDMChannelAsync();
+            await dm.SendMessageAsync(summary);
+            return;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "/{Command}: couldn't DM the summary to {User} (DMs closed?); trying an ephemeral followup.",
+                CommandName, invoker.Username);
+        }
+
+        try
+        {
+            // Ephemeral so only the invoking admin can see it. Fails if the
+            // 15-minute interaction token has already expired.
+            await cmd.FollowupAsync(summary, ephemeral: true);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "/{Command}: couldn't deliver the summary by DM or ephemeral followup " +
+                "(token likely expired). Result logged only, not posted publicly.",
+                CommandName);
+        }
     }
 
     /// <summary>
