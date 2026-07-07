@@ -364,6 +364,12 @@ try
     // officer doesn't have to scroll through months of stale embeds.
     builder.Services.AddSingleton<ClearAwolListCommandHandler>();
 
+    // PurgeUserCommandHandler: /purge-user slash command (Administrator only).
+    // Deletes a target member's most recent messages server-wide (default 100,
+    // override with count:). Dry-run preview unless confirm:true; pinned
+    // messages are preserved.
+    builder.Services.AddSingleton<PurgeUserCommandHandler>();
+
     // TicketReminderHandler: singleton for event registration + hosted service for startup recovery.
     builder.Services.AddSingleton<TicketReminderHandler>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<TicketReminderHandler>());

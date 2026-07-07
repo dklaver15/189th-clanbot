@@ -669,6 +669,9 @@ public class CommandsCommandHandler
 
             new("ticket-panel", "Post (or re-post) the ticket panel to the tickets channel",
                 "HQ", ticketHq),   // SyncWithHandlers: TicketPanelCommandHandler.InvokerHasPermission
+
+            new("purge-user", "Delete a member's recent messages server-wide (dry-run unless confirm:true)",
+                "Admin", (user, _) => user.GuildPermissions.Administrator),   // SyncWithHandlers: PurgeUserCommandHandler
         };
     }
 }

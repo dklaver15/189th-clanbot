@@ -67,6 +67,7 @@ public class DiscordBotService : IHostedService
     private readonly SquadCommandHandler _squadHandler;
     private readonly KickAwolsCommandHandler _kickAwolsHandler;
     private readonly ClearAwolListCommandHandler _clearAwolListHandler;
+    private readonly PurgeUserCommandHandler _purgeUserHandler;
     private readonly BriefingNowCommandHandler _briefingNowHandler;
     private readonly CleanupCalendarDupesCommandHandler _cleanupCalendarDupesHandler;
     private readonly CalendarCommandHandler _calendarHandler;
@@ -140,6 +141,7 @@ public class DiscordBotService : IHostedService
         SquadCommandHandler squadHandler,
         KickAwolsCommandHandler kickAwolsHandler,
         ClearAwolListCommandHandler clearAwolListHandler,
+        PurgeUserCommandHandler purgeUserHandler,
         BriefingNowCommandHandler briefingNowHandler,
         CleanupCalendarDupesCommandHandler cleanupCalendarDupesHandler,
         CalendarCommandHandler calendarHandler,
@@ -212,6 +214,7 @@ public class DiscordBotService : IHostedService
         _squadHandler                = squadHandler;
         _kickAwolsHandler            = kickAwolsHandler;
         _clearAwolListHandler        = clearAwolListHandler;
+        _purgeUserHandler            = purgeUserHandler;
         _briefingNowHandler          = briefingNowHandler;
         _cleanupCalendarDupesHandler = cleanupCalendarDupesHandler;
         _calendarHandler             = calendarHandler;
@@ -304,6 +307,7 @@ public class DiscordBotService : IHostedService
         _squadHandler.Register(_client);
         _kickAwolsHandler.Register(_client);
         _clearAwolListHandler.Register(_client);
+        _purgeUserHandler.Register(_client);
         _briefingNowHandler.Register(_client);
         _cleanupCalendarDupesHandler.Register(_client);
         _calendarHandler.Register(_client);
@@ -575,6 +579,13 @@ public class DiscordBotService : IHostedService
                     .AddOption("confirm", ApplicationCommandOptionType.Boolean,
                         "Set to true to confirm deletion", isRequired: false)
                     .Build(),
+
+                // /purge-user — Admin-only. Deletes a member's most recent
+                // messages server-wide (default 100, override with count:).
+                // Runs a dry-run preview unless confirm:true. Pinned messages
+                // are preserved. NOTE: keep CommandsCommandHandler.BuildCatalog
+                // in sync.
+                PurgeUserCommandHandler.BuildCommand(),
 
                 // /briefing-now — manually trigger the weekly officer briefing
                 // out of band from the Sunday cron. Honours the same DryRun
