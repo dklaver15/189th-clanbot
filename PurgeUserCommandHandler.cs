@@ -52,7 +52,7 @@ public class PurgeUserCommandHandler
     private static readonly TimeSpan SlowDeleteDelay = TimeSpan.FromMilliseconds(750);
 
     /// <summary>Per-channel page cap so a runaway history scan can't hang the bot.</summary>
-    private const int MaxPagesPerChannel = 200; // 200 * 100 = 20k messages/channel
+    private const int MaxPagesPerChannel = 50; // 50 * 100 = 5k messages/channel
 
     private readonly ILogger<PurgeUserCommandHandler> _logger;
 
