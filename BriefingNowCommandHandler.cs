@@ -1,3 +1,4 @@
+using System.Globalization;
 using ClanGuardBot.Briefing;
 using ClanGuardBot.Models;
 using Discord;
@@ -102,14 +103,30 @@ public class BriefingNowCommandHandler
             return;
         }
 
+        // ── Optional explicit window (start_date / end_date) ─────────────
+        // Both-or-neither. Dates are clan-local Eastern calendar days; the
+        // service converts them to the UTC window. Parse & validate BEFORE the
+        // progress message so a typo fails fast without a 10–30s wait.
+        if (!TryReadWindow(cmd, out var window, out var parseError))
+        {
+            await cmd.FollowupAsync(parseError, ephemeral: true);
+            return;
+        }
+
         // ── Initial progress message — Claude calls take 10–30 seconds ───
+        var windowNote = window is { } w
+            ? $" for **{w.Start:yyyy-MM-dd} → {w.End:yyyy-MM-dd}** (Eastern)"
+            : string.Empty;
         await cmd.FollowupAsync(
-            "⏳ Generating briefing… this usually takes 10–30 seconds.",
+            $"⏳ Generating briefing{windowNote}… this usually takes 10–30 seconds.",
             ephemeral: true);
 
         try
         {
-            await _briefing.RunBriefingNowAsync();
+            if (window is { } win)
+                await _briefing.RunBriefingForDatesAsync(win.Start, win.End);
+            else
+                await _briefing.RunBriefingNowAsync();
 
             // <#id> renders as a clickable channel link in the ephemeral, so the
             // invoker can jump straight to the post they just triggered.
@@ -120,8 +137,9 @@ public class BriefingNowCommandHandler
                 ephemeral: true);
 
             _logger.LogInformation(
-                "/briefing-now triggered by {Invoker}",
-                cmd.User.Username);
+                "/briefing-now triggered by {Invoker}{Window}",
+                cmd.User.Username,
+                window is { } lw ? $" for {lw.Start:yyyy-MM-dd}→{lw.End:yyyy-MM-dd} ET" : string.Empty);
         }
         catch (Exception ex)
         {
@@ -130,6 +148,64 @@ public class BriefingNowCommandHandler
                 $"❌ Briefing run failed: {ex.Message}",
                 ephemeral: true);
         }
+    }
+
+    /// <summary>
+    /// Reads the optional start_date/end_date options. Returns true when the
+    /// input is valid, setting <paramref name="window"/> to null (no custom
+    /// window → trailing 7 days) or a validated (Start, End) pair. Returns false
+    /// with a user-facing <paramref name="error"/> on any problem. Enforces
+    /// both-or-neither, YYYY-MM-DD format, Start &lt; End, and a sane max span.
+    /// </summary>
+    private static bool TryReadWindow(
+        SocketSlashCommand cmd,
+        out (DateOnly Start, DateOnly End)? window,
+        out string error)
+    {
+        window = null;
+        error = string.Empty;
+
+        string? Opt(string name) =>
+            (cmd.Data.Options?.FirstOrDefault(o => o.Name == name)?.Value as string)?.Trim();
+
+        var startRaw = Opt("start_date");
+        var endRaw = Opt("end_date");
+        var hasStart = !string.IsNullOrWhiteSpace(startRaw);
+        var hasEnd = !string.IsNullOrWhiteSpace(endRaw);
+
+        if (!hasStart && !hasEnd)
+            return true; // no window supplied → default trailing-7-days behaviour
+
+        if (hasStart ^ hasEnd)
+        {
+            error = "⚠️ Provide **both** `start_date` and `end_date`, or neither (which uses the trailing 7 days).";
+            return false;
+        }
+
+        const string fmt = "yyyy-MM-dd";
+        if (!DateOnly.TryParseExact(startRaw, fmt, CultureInfo.InvariantCulture, DateTimeStyles.None, out var start) ||
+            !DateOnly.TryParseExact(endRaw, fmt, CultureInfo.InvariantCulture, DateTimeStyles.None, out var end))
+        {
+            error = "⚠️ Dates must be in `YYYY-MM-DD` format — e.g. `2026-06-28`.";
+            return false;
+        }
+
+        if (end <= start)
+        {
+            error = $"⚠️ `end_date` must be after `start_date` (you gave `{startRaw}` → `{endRaw}`).";
+            return false;
+        }
+
+        // Guard against typo-scale ranges (e.g. a wrong year) pulling an enormous
+        // data snapshot. 366 days covers any reasonable manual backfill.
+        if (end.DayNumber - start.DayNumber > 366)
+        {
+            error = "⚠️ That window is over a year long — double-check the dates and pick a shorter range.";
+            return false;
+        }
+
+        window = (start, end);
+        return true;
     }
 
     /// <summary>

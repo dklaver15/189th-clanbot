@@ -165,6 +165,29 @@ public sealed class WeeklyOfficerBriefingService(
     }
 
     /// <summary>
+    /// Run a briefing for an explicit date window, used by /briefing-now when the
+    /// caller supplies start_date/end_date. The two dates are interpreted as
+    /// clan-local Eastern calendar days at 00:00, matching how the briefing
+    /// title/filename render dates — so passing the same two dates shown in a
+    /// prior briefing's title reproduces that window. The window is half-open:
+    /// [start 00:00 ET, end 00:00 ET). Like <see cref="RunBriefingNowAsync"/>,
+    /// this deliberately does NOT stamp BotState — manual runs must not convince
+    /// the startup catch-up that the weekly slot was filled.
+    /// </summary>
+    /// <exception cref="ArgumentException">If end is not strictly after start.</exception>
+    public Task RunBriefingForDatesAsync(DateOnly startDateEt, DateOnly endDateEt, CancellationToken ct = default)
+    {
+        var startUtc = TimeZoneInfo.ConvertTimeToUtc(startDateEt.ToDateTime(TimeOnly.MinValue), EasternTz);
+        var endUtc = TimeZoneInfo.ConvertTimeToUtc(endDateEt.ToDateTime(TimeOnly.MinValue), EasternTz);
+
+        if (endUtc <= startUtc)
+            throw new ArgumentException(
+                $"end_date ({endDateEt:yyyy-MM-dd}) must be after start_date ({startDateEt:yyyy-MM-dd}).");
+
+        return RunBriefingForWindowAsync(startUtc, endUtc, ct);
+    }
+
+    /// <summary>
     /// Core run: collect the snapshot for [weekStart, weekEnd), generate the
     /// briefing (with transient-aware retry), and either post it or log it in
     /// dry-run. Throws on unrecoverable failure (e.g. 401) so the caller can

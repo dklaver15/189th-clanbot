@@ -594,6 +594,16 @@ public class DiscordBotService : IHostedService
                 new SlashCommandBuilder()
                     .WithName("briefing-now")
                     .WithDescription($"Generate the weekly officer briefing immediately ({_config.BriefingNowMinRank}+ only)")
+                    .AddOption(
+                        "start_date",
+                        ApplicationCommandOptionType.String,
+                        "Window start, YYYY-MM-DD (Eastern). Pass with end_date; omit both for the trailing 7 days.",
+                        isRequired: false)
+                    .AddOption(
+                        "end_date",
+                        ApplicationCommandOptionType.String,
+                        "Window end, YYYY-MM-DD (Eastern). Matches the date range shown in the briefing title.",
+                        isRequired: false)
                     .Build(),
 
                 // /cleanup-calendar-dupes — reconcile CalendarEvents and the
