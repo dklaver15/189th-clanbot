@@ -131,9 +131,14 @@ public sealed class ClaudeAiService(
 
         var result = new AiResult(text, modelUsed, payload.Usage.InputTokens, payload.Usage.OutputTokens);
 
+        // Log stop_reason alongside usage. This is the single field that tells a
+        // truncated answer ("max_tokens" — raise MaxOutputTokens) apart from one
+        // the model chose to end early ("end_turn" — a prompt/model-behavior
+        // issue, not a length cap). Without it, a short briefing is ambiguous.
         logger.LogInformation(
-            "Claude {Model} usage: {Input} in + {Output} out tokens (~{Cost:C4})",
-            result.Model, result.InputTokens, result.OutputTokens, result.EstimatedCostUsd);
+            "Claude {Model} usage: {Input} in + {Output} out tokens, stop_reason={StopReason} (~{Cost:C4})",
+            result.Model, result.InputTokens, result.OutputTokens,
+            payload.StopReason ?? "null", result.EstimatedCostUsd);
 
         return result;
     }
