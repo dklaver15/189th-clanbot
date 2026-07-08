@@ -25,11 +25,25 @@ public interface IAiService
     /// Single-shot completion. Returns the assistant's text content.
     /// Throws on HTTP/API errors — caller decides retry policy.
     /// </summary>
+    /// <param name="effort">
+    /// Adaptive-thinking/token-spend effort for Sonnet 5+ (low/medium/high/xhigh/max).
+    /// Controls total token spend across text and any thinking. Null omits the
+    /// field, which the API treats as its default ("high"). Callers that want a
+    /// cheaper/faster run pass "medium" or "low".
+    /// </param>
+    /// <param name="enableThinking">
+    /// When false, sends thinking:{type:"disabled"} — turns off adaptive thinking
+    /// (on by default on Sonnet 5) so no reasoning tokens are billed. Default true
+    /// keeps model-default behavior, so existing callers (e.g. meeting minutes)
+    /// are unaffected.
+    /// </param>
     Task<AiResult> GenerateAsync(
         string systemPrompt,
         string userMessage,
         int maxTokens = 1500,
-        CancellationToken ct = default);
+        CancellationToken ct = default,
+        string? effort = null,
+        bool enableThinking = true);
 }
 
 /// <summary>
@@ -70,14 +84,20 @@ public sealed class ClaudeAiService(
         string systemPrompt,
         string userMessage,
         int maxTokens = 1500,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        string? effort = null,
+        bool enableThinking = true)
     {
         var request = new MessagesRequest
         {
             Model = _options.Model,
             MaxTokens = maxTokens,
             System = systemPrompt,
-            Messages = [new Message("user", userMessage)]
+            Messages = [new Message("user", userMessage)],
+            // Only emit these when they diverge from the API default, so a plain
+            // call serializes exactly as before (WhenWritingNull drops the nulls).
+            OutputConfig = effort is null ? null : new OutputConfig { Effort = effort },
+            Thinking = enableThinking ? null : new ThinkingConfig { Type = "disabled" }
         };
 
         using var response = await httpClient.PostAsJsonAsync("messages", request, JsonOptions, ct);
@@ -151,9 +171,25 @@ public sealed class ClaudeAiService(
         public required int MaxTokens { get; init; }
         public string? System { get; init; }
         public required IReadOnlyList<Message> Messages { get; init; }
+
+        /// <summary>Serializes to "output_config": {"effort": "..."} when set.</summary>
+        public OutputConfig? OutputConfig { get; init; }
+
+        /// <summary>Serializes to "thinking": {"type": "disabled"} when set.</summary>
+        public ThinkingConfig? Thinking { get; init; }
     }
 
     private sealed record Message(string Role, string Content);
+
+    private sealed record OutputConfig
+    {
+        public required string Effort { get; init; }
+    }
+
+    private sealed record ThinkingConfig
+    {
+        public required string Type { get; init; }
+    }
 
     private sealed record MessagesResponse
     {

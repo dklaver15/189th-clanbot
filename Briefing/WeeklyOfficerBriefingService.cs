@@ -28,8 +28,32 @@ public sealed class WeeklyBriefingOptions
     /// <summary>If true, log the briefing instead of posting to Discord. Useful while iterating.</summary>
     public bool DryRun { get; set; }
 
-    /// <summary>Cap on output tokens. 1500 ≈ ~1100 words; well above the 400-word target.</summary>
-    public int MaxOutputTokens { get; set; } = 1500;
+    /// <summary>
+    /// Cap on output tokens. With <see cref="EnableThinking"/> = false the model
+    /// emits no reasoning tokens, so this only needs to cover the ~600-word
+    /// (~800-token) briefing text; 4000 is generous headroom. If thinking is ever
+    /// re-enabled, raise this well above the expected thinking budget — Sonnet 5's
+    /// adaptive thinking counts against this cap and starved the old 1500, which
+    /// produced truncated or empty (stop_reason=max_tokens) briefings.
+    /// </summary>
+    public int MaxOutputTokens { get; set; } = 4000;
+
+    /// <summary>
+    /// Adaptive-thinking/token-spend effort passed to the model (low/medium/high/
+    /// xhigh/max), or null for the API default ("high"). Default "medium": on
+    /// Sonnet 5 this is roughly Sonnet 4.6 at high effort — a small step up from
+    /// the old model at controlled cost. See ClaudeOptions/effort docs.
+    /// </summary>
+    public string? Effort { get; set; } = "medium";
+
+    /// <summary>
+    /// Whether to let the model run adaptive thinking. Default false: the briefing
+    /// is a data-summary task that doesn't need step-by-step reasoning, and
+    /// disabling thinking means no reasoning tokens are billed — keeping the cost
+    /// profile close to the old thinking-off Sonnet 4.6 while using the stronger
+    /// Sonnet 5 base model at <see cref="Effort"/> = medium.
+    /// </summary>
+    public bool EnableThinking { get; set; }
 
     /// <summary>
     /// Total attempts for the AI generation call within a single run, including
@@ -190,7 +214,8 @@ public sealed class WeeklyOfficerBriefingService(
             try
             {
                 return await ai.GenerateAsync(
-                    BriefingPrompts.SystemPrompt, userMessage, _options.MaxOutputTokens, ct);
+                    BriefingPrompts.SystemPrompt, userMessage, _options.MaxOutputTokens, ct,
+                    effort: _options.Effort, enableThinking: _options.EnableThinking);
             }
             catch (Exception ex) when (attempt < attempts && IsTransient(ex, ct))
             {

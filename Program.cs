@@ -660,7 +660,7 @@ try
     // Registers IAiService (Claude HTTP client), IBriefingDataCollector, and
     // itself as both a singleton + hosted service. Configuration sections:
     //   "Claude"         { ApiKey, Model }
-    //   "WeeklyBriefing" { OfficerChannelId, RunOnDayUtc, RunAtUtc, DryRun, MaxOutputTokens }
+    //   "WeeklyBriefing" { OfficerChannelId, RunOnDayUtc, RunAtUtc, DryRun, MaxOutputTokens, Effort, EnableThinking }
     // The API key is loaded from env var Claude__ApiKey in production (set by
     // docker-compose from the ANTHROPIC_API_KEY GitHub Actions secret).
     builder.Services.AddWeeklyOfficerBriefing(builder.Configuration);
