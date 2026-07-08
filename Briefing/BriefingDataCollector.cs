@@ -610,6 +610,12 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
         var rankRoles = _config.GetRankRolesList();
         var exemptRoles = _config.GetExemptRolesList();
 
+        // Spotlight highlights rank-and-file activity, so HQ leadership is
+        // excluded from the pick. "HQ" = members carrying the configured HQ role
+        // (the same role that gates officer tools/tickets). 0 = unset, in which
+        // case no one is excluded on this basis.
+        var hqRoleId = _config.OfficerAppHqRoleId;
+
         // Events attended in the 7-day window — single GROUP BY per table.
         // EventAttendance and MeetingAttendance are merged client-side because
         // the spotlight scores per-member and we need a unified count keyed by
@@ -640,6 +646,7 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
             if (member.IsBot) continue;
             if (member.Roles.Any(r =>
                     exemptRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase))) continue;
+            if (hqRoleId != 0 && member.Roles.Any(r => r.Id == hqRoleId)) continue;
 
             var msgs = ctx7d.MessageCounts.GetValueOrDefault(member.Id, 0);
             var voiceHours = ctx7d.VoiceSeconds.GetValueOrDefault(member.Id, 0d) / 3600.0;
