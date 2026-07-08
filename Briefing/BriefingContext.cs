@@ -143,14 +143,18 @@ public sealed record RiskWatchItem(
     int WindowDays,
     double ClosestThresholdRatio);
 
-/// <param name="Score">Combined score (1pt/msg + 5pts/voice hour + 10pts/event). Tunable in BriefingDataCollector.</param>
+/// <remarks>
+/// The winner is chosen by an internal weighted score (1pt/msg + 5pts/voice hour
+/// + 10pts/event, tunable in BriefingDataCollector), but that score is
+/// deliberately NOT surfaced here — the briefing shows the raw stats only, not
+/// the ranking number.
+/// </remarks>
 public sealed record MemberSpotlight(
     string Gamertag,
     string CurrentRank,
     int Messages,
     double VoiceHours,
-    int EventsAttended,
-    int Score);
+    int EventsAttended);
 
 /// <summary>
 /// Week-over-week deltas. Negative numbers mean "worse than last week"

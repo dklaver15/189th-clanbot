@@ -664,8 +664,7 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
                 CurrentRank: GetCurrentRank(member, rankRoles) ?? "No Rank",
                 Messages: msgs,
                 VoiceHours: Math.Round(voiceHours, 1),
-                EventsAttended: events,
-                Score: score);
+                EventsAttended: events);
         }
 
         return bestScore > 0 ? best : null;
