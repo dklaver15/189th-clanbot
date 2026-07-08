@@ -6,6 +6,19 @@ using Microsoft.Extensions.Options;
 
 namespace ClanGuardBot.AI;
 
+/// <summary>
+/// Thrown when the Claude API returns a successful (2xx) response that contains
+/// no usable text content. This is distinct from an HTTP error: the call
+/// "succeeded" but produced nothing to use. Callers treat it like a transient
+/// failure so the surrounding retry/catch-up logic engages rather than emitting
+/// an empty artifact.
+/// </summary>
+public sealed class EmptyCompletionException(string? stopReason)
+    : Exception($"Claude returned an empty completion (stop_reason={stopReason ?? "null"})")
+{
+    public string? StopReason { get; } = stopReason;
+}
+
 public interface IAiService
 {
     /// <summary>
@@ -93,6 +106,25 @@ public sealed class ClaudeAiService(
                 .Where(c => c.Type == "text" && !string.IsNullOrEmpty(c.Text))
                 .Select(c => c.Text));
 
+        // A 2xx response with no usable text block is not a valid completion:
+        // it happens when the model stops with no text (e.g. stop_reason
+        // "max_tokens" before any text, "pause_turn", a tool-only turn, or a
+        // transient server-side glitch). Returning "" here would let callers
+        // post an empty artifact (a 0-byte briefing) and consider the run a
+        // success. Throw instead so the caller's retry/catch-up logic engages,
+        // and log enough to diagnose which case it was.
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            var blockTypes = string.Join(",", payload.Content.Select(c => c.Type));
+            logger.LogWarning(
+                "Claude {Model} returned no text content (stop_reason={StopReason}, blocks=[{Blocks}], {Output} out tokens)",
+                string.IsNullOrEmpty(payload.Model) ? _options.Model : payload.Model,
+                payload.StopReason ?? "null",
+                blockTypes,
+                payload.Usage.OutputTokens);
+            throw new EmptyCompletionException(payload.StopReason);
+        }
+
         // Fall back to the configured model id if the API ever omits the field;
         // the response field is required per the Messages API spec, so this is defensive.
         var modelUsed = string.IsNullOrEmpty(payload.Model) ? _options.Model : payload.Model;
@@ -121,6 +153,7 @@ public sealed class ClaudeAiService(
     private sealed record MessagesResponse
     {
         public string? Model { get; init; }
+        public string? StopReason { get; init; }
         public required IReadOnlyList<ContentBlock> Content { get; init; }
         public required Usage Usage { get; init; }
     }

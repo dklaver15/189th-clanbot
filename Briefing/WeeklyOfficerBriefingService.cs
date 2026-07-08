@@ -155,6 +155,14 @@ public sealed class WeeklyOfficerBriefingService(
 
         var result = await GenerateWithRetryAsync(userMessage, ct);
 
+        // Defense in depth: GenerateWithRetryAsync already throws on an empty
+        // completion, so we should never get here with blank text. Guard anyway
+        // — posting a 0-byte briefing (embed + empty attachment) and then
+        // stamping the week complete is exactly the silent failure this feature
+        // must never produce. Throw so the slot stays unstamped for catch-up.
+        if (string.IsNullOrWhiteSpace(result.Text))
+            throw new EmptyCompletionException("blank text post-generation");
+
         if (_options.DryRun)
         {
             logger.LogInformation(
@@ -205,6 +213,11 @@ public sealed class WeeklyOfficerBriefingService(
     /// </summary>
     private static bool IsTransient(Exception ex, CancellationToken ct) => ex switch
     {
+        // A 2xx-but-empty completion is usually a one-off (a stray max_tokens/
+        // pause_turn or a server-side hiccup); a re-ask normally returns text,
+        // so retry it like a transient network failure rather than shipping a
+        // 0-byte briefing.
+        EmptyCompletionException => true,
         HttpRequestException { StatusCode: null } => true,
         HttpRequestException http =>
             http.StatusCode == HttpStatusCode.TooManyRequests || (int)http.StatusCode >= 500,
