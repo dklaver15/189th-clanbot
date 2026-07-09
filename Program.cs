@@ -370,6 +370,15 @@ try
     // messages are preserved.
     builder.Services.AddSingleton<PurgeUserCommandHandler>();
 
+    // AllowNewAccountCommandHandler: /allow-new-account slash command
+    // (Administrator only). Escape hatch for the account-age gate: writes a
+    // one-time AccountAgeGateExemption row for a specific user AND lifts any
+    // existing ban, so a legitimate brand-new account (e.g. a member's spouse
+    // auto-banned for a minutes-old account) can be unbanned and rejoin without
+    // being caught again. The exemption is consumed by AccountAgeGateHandler on
+    // the user's next join. NOTE: keep CommandsCommandHandler.BuildCatalog in sync.
+    builder.Services.AddSingleton<AllowNewAccountCommandHandler>();
+
     // TicketReminderHandler: singleton for event registration + hosted service for startup recovery.
     builder.Services.AddSingleton<TicketReminderHandler>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<TicketReminderHandler>());

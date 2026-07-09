@@ -10,6 +10,7 @@ public class BotDbContext : DbContext
     public DbSet<AwolRecord>          AwolRecords         => Set<AwolRecord>();
     public DbSet<AwolKickAuditRecord> AwolKickAudits      => Set<AwolKickAuditRecord>();
     public DbSet<SecurityAuditRecord> SecurityAuditRecords => Set<SecurityAuditRecord>();
+    public DbSet<AccountAgeGateExemption> AccountAgeGateExemptions => Set<AccountAgeGateExemption>();
     public DbSet<WebhookSnapshot>     WebhookSnapshots    => Set<WebhookSnapshot>();
     public DbSet<MessageEvent>        MessageEvents       => Set<MessageEvent>();
     public DbSet<VoiceSession>        VoiceSessions       => Set<VoiceSession>();
@@ -111,6 +112,16 @@ public class BotDbContext : DbContext
             entity.HasIndex(e => new { e.GuildId, e.Feature, e.OccurredAt });
             entity.HasIndex(e => new { e.GuildId, e.UserId, e.OccurredAt })
                   .HasFilter("\"UserId\" IS NOT NULL");
+        });
+
+        // ── Account-age gate exemptions ───────────────────────────────
+        // One-time allowlist entries added by /allow-new-account and consumed
+        // by AccountAgeGateHandler on the exempted user's next join. Unique on
+        // (GuildId, UserId): a user is cleared or not — there's no meaning to
+        // two rows. The command upserts on this key; the index is the backstop.
+        modelBuilder.Entity<AccountAgeGateExemption>(entity =>
+        {
+            entity.HasIndex(e => new { e.GuildId, e.UserId }).IsUnique();
         });
 
         modelBuilder.Entity<WebhookSnapshot>(entity =>

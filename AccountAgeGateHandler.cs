@@ -3,6 +3,7 @@ using ClanGuardBot.Models;
 using Discord;
 using Discord.Net;
 using Discord.WebSocket;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -157,6 +158,25 @@ public sealed class AccountAgeGateHandler
             if (accountAge >= threshold)
             {
                 // Account is older than the threshold. Nothing to do.
+                return;
+            }
+
+            // ── One-time exemption check ──────────────────────────────────
+            // /allow-new-account (Administrator only) can pre-clear a specific
+            // brand-new account — e.g. a member's spouse whose Discord account
+            // is genuinely minutes old. If a matching exemption exists, consume
+            // it (so it can't be reused), then alert-only and stop — never ban.
+            // Checked only for under-threshold joins, so the common case (an
+            // old account joining) still does zero DB work.
+            if (await TryConsumeExemptionAsync(member.Guild.Id, member.Id))
+            {
+                _logger.LogInformation(
+                    "Account-age gate: {Username} ({UserId}) allowed in via a one-time exemption " +
+                    "(account age {AgeDays:F1}d < threshold {MinDays}d). Exemption consumed.",
+                    member.Username, member.Id, accountAge.TotalDays, minDays);
+
+                await WriteAuditAsync(member, accountAge, minDays, AccountAgeGateOutcome.AllowedByExemption, null);
+                await PostAlertAsync(member, accountAge, minDays, mode, AccountAgeGateOutcome.AllowedByExemption, null);
                 return;
             }
 
@@ -343,6 +363,42 @@ public sealed class AccountAgeGateHandler
     }
 
     /// <summary>
+    /// Looks for a one-time age-gate exemption for this (guild, user) and, if
+    /// found, deletes it and returns true. The delete IS the consumption — a
+    /// single row can only be claimed once, so even the (extremely unlikely)
+    /// double-join race can't be waved through twice. Wrapped in its own
+    /// try/catch: a DB failure here must fall through to the normal gate path
+    /// (fail closed — better to ban a pre-cleared account and have an admin
+    /// re-run /allow-new-account than to silently let everyone through on a DB
+    /// hiccup), so it returns false on any error.
+    /// </summary>
+    private async Task<bool> TryConsumeExemptionAsync(ulong guildId, ulong userId)
+    {
+        try
+        {
+            using var scope = _services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+            var exemption = await db.AccountAgeGateExemptions
+                .FirstOrDefaultAsync(e => e.GuildId == guildId && e.UserId == userId);
+
+            if (exemption is null) return false;
+
+            db.AccountAgeGateExemptions.Remove(exemption);
+            await db.SaveChangesAsync();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Account-age gate: failed to check/consume exemption for user {UserId} in guild {GuildId}. " +
+                "Falling through to the normal gate path (fail closed).",
+                userId, guildId);
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Resolves the security-alerts channel and posts an embed describing the
     /// join + action taken. Falls back to the configured HqChannelName when
     /// SecurityAlertsChannelId is unset (0) so newly-deployed instances get
@@ -369,6 +425,7 @@ public sealed class AccountAgeGateHandler
         var (color, title, statusLine) = outcome switch
         {
             AccountAgeGateOutcome.Banned                 => (Color.Red,        "🛡️ Account-Age Gate — Banned",          "Member was banned automatically."),
+            AccountAgeGateOutcome.AllowedByExemption     => (Color.Green,      "🛡️ Account-Age Gate — Allowed In",      "Account is under the threshold but was pre-cleared via `/allow-new-account`. No action taken; the one-time exemption has been used up."),
             AccountAgeGateOutcome.Alerted                => (Color.Orange,     "🛡️ Account-Age Gate — Alert",           "Mode is **AlertOnly** — no action taken."),
             AccountAgeGateOutcome.UserAlreadyLeft        => (Color.LightGrey,  "🛡️ Account-Age Gate — User Left",       "Member left before the ban could be issued."),
             AccountAgeGateOutcome.BanSkippedHierarchy    => (Color.Gold,       "🛡️ Account-Age Gate — Cannot Ban",      "Bot lacks role hierarchy to ban this member. Manual review required."),
@@ -459,6 +516,9 @@ internal enum AccountAgeGateOutcome
 
     /// <summary>Enforcement mode — member was successfully banned.</summary>
     Banned,
+
+    /// <summary>Account was under the threshold but had a one-time exemption (added via /allow-new-account), so it was allowed in and the exemption consumed.</summary>
+    AllowedByExemption,
 
     /// <summary>Member left the guild before we could ban them.</summary>
     UserAlreadyLeft,

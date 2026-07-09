@@ -672,6 +672,9 @@ public class CommandsCommandHandler
 
             new("purge-user", "Delete a member's recent messages server-wide (dry-run unless confirm:true)",
                 "Admin", (user, _) => user.GuildPermissions.Administrator),   // SyncWithHandlers: PurgeUserCommandHandler
+
+            new("allow-new-account", "Let a new account bypass the age gate and unban them if needed",
+                "Admin", (user, _) => user.GuildPermissions.Administrator),   // SyncWithHandlers: AllowNewAccountCommandHandler
         };
     }
 }

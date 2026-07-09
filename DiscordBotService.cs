@@ -68,6 +68,7 @@ public class DiscordBotService : IHostedService
     private readonly KickAwolsCommandHandler _kickAwolsHandler;
     private readonly ClearAwolListCommandHandler _clearAwolListHandler;
     private readonly PurgeUserCommandHandler _purgeUserHandler;
+    private readonly AllowNewAccountCommandHandler _allowNewAccountHandler;
     private readonly BriefingNowCommandHandler _briefingNowHandler;
     private readonly CleanupCalendarDupesCommandHandler _cleanupCalendarDupesHandler;
     private readonly CalendarCommandHandler _calendarHandler;
@@ -142,6 +143,7 @@ public class DiscordBotService : IHostedService
         KickAwolsCommandHandler kickAwolsHandler,
         ClearAwolListCommandHandler clearAwolListHandler,
         PurgeUserCommandHandler purgeUserHandler,
+        AllowNewAccountCommandHandler allowNewAccountHandler,
         BriefingNowCommandHandler briefingNowHandler,
         CleanupCalendarDupesCommandHandler cleanupCalendarDupesHandler,
         CalendarCommandHandler calendarHandler,
@@ -215,6 +217,7 @@ public class DiscordBotService : IHostedService
         _kickAwolsHandler            = kickAwolsHandler;
         _clearAwolListHandler        = clearAwolListHandler;
         _purgeUserHandler            = purgeUserHandler;
+        _allowNewAccountHandler      = allowNewAccountHandler;
         _briefingNowHandler          = briefingNowHandler;
         _cleanupCalendarDupesHandler = cleanupCalendarDupesHandler;
         _calendarHandler             = calendarHandler;
@@ -308,6 +311,7 @@ public class DiscordBotService : IHostedService
         _kickAwolsHandler.Register(_client);
         _clearAwolListHandler.Register(_client);
         _purgeUserHandler.Register(_client);
+        _allowNewAccountHandler.Register(_client);
         _briefingNowHandler.Register(_client);
         _cleanupCalendarDupesHandler.Register(_client);
         _calendarHandler.Register(_client);
@@ -586,6 +590,14 @@ public class DiscordBotService : IHostedService
                 // are preserved. NOTE: keep CommandsCommandHandler.BuildCatalog
                 // in sync.
                 PurgeUserCommandHandler.BuildCommand(),
+
+                // /allow-new-account — Admin-only escape hatch for the account-age
+                // gate. Writes a one-time exemption for a specific user and lifts
+                // any existing ban so a legitimate brand-new account can be
+                // unbanned and rejoin without being auto-banned again. The gate
+                // consumes the exemption on their next join. NOTE: keep
+                // CommandsCommandHandler.BuildCatalog in sync.
+                AllowNewAccountCommandHandler.BuildCommand(),
 
                 // /briefing-now — manually trigger the weekly officer briefing
                 // out of band from the Sunday cron. Honours the same DryRun
