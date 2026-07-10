@@ -168,15 +168,16 @@ public sealed class AccountAgeGateHandler
             // it (so it can't be reused), then alert-only and stop — never ban.
             // Checked only for under-threshold joins, so the common case (an
             // old account joining) still does zero DB work.
-            if (await TryConsumeExemptionAsync(member.Guild.Id, member.Id))
+            var exemption = await TryConsumeExemptionAsync(member.Guild.Id, member.Id);
+            if (exemption is not null)
             {
                 _logger.LogInformation(
                     "Account-age gate: {Username} ({UserId}) allowed in via a one-time exemption " +
-                    "(account age {AgeDays:F1}d < threshold {MinDays}d). Exemption consumed.",
-                    member.Username, member.Id, accountAge.TotalDays, minDays);
+                    "(account age {AgeDays:F1}d < threshold {MinDays}d). Exemption consumed. Note: {Note}",
+                    member.Username, member.Id, accountAge.TotalDays, minDays, exemption.Note ?? "(none)");
 
-                await WriteAuditAsync(member, accountAge, minDays, AccountAgeGateOutcome.AllowedByExemption, null);
-                await PostAlertAsync(member, accountAge, minDays, mode, AccountAgeGateOutcome.AllowedByExemption, null);
+                await WriteAuditAsync(member, accountAge, minDays, AccountAgeGateOutcome.AllowedByExemption, null, exemption);
+                await PostAlertAsync(member, accountAge, minDays, mode, AccountAgeGateOutcome.AllowedByExemption, null, exemption);
                 return;
             }
 
@@ -328,12 +329,22 @@ public sealed class AccountAgeGateHandler
         TimeSpan accountAge,
         int minDays,
         AccountAgeGateOutcome outcome,
-        string? errorMessage)
+        string? errorMessage,
+        AccountAgeGateExemption? exemption = null)
     {
         try
         {
             using var scope = _services.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+            var details = $"Account age {accountAge.TotalDays:F2}d, threshold {minDays}d. " +
+                          $"Created: {member.CreatedAt:O}.";
+            if (exemption is not null)
+            {
+                details += $" Pre-cleared by {exemption.AddedByUsername} ({exemption.AddedByUserId}).";
+                if (!string.IsNullOrWhiteSpace(exemption.Note))
+                    details += $" Note: {exemption.Note}";
+            }
 
             var record = new SecurityAuditRecord
             {
@@ -344,8 +355,7 @@ public sealed class AccountAgeGateHandler
                 Username     = member.Username,
                 DisplayName  = member.DisplayName ?? member.Username,
                 ChannelId    = null, // Account-age gate is join-scoped, not channel-scoped.
-                Details      = $"Account age {accountAge.TotalDays:F2}d, threshold {minDays}d. " +
-                               $"Created: {member.CreatedAt:O}.",
+                Details      = details,
                 OccurredAt   = DateTime.UtcNow,
                 ErrorMessage = errorMessage,
             };
@@ -364,15 +374,16 @@ public sealed class AccountAgeGateHandler
 
     /// <summary>
     /// Looks for a one-time age-gate exemption for this (guild, user) and, if
-    /// found, deletes it and returns true. The delete IS the consumption — a
+    /// found, deletes it and returns the consumed row (so the caller can surface
+    /// its note + who added it in the alert). The delete IS the consumption — a
     /// single row can only be claimed once, so even the (extremely unlikely)
     /// double-join race can't be waved through twice. Wrapped in its own
     /// try/catch: a DB failure here must fall through to the normal gate path
     /// (fail closed — better to ban a pre-cleared account and have an admin
     /// re-run /allow-new-account than to silently let everyone through on a DB
-    /// hiccup), so it returns false on any error.
+    /// hiccup), so it returns null on no-match AND on any error.
     /// </summary>
-    private async Task<bool> TryConsumeExemptionAsync(ulong guildId, ulong userId)
+    private async Task<AccountAgeGateExemption?> TryConsumeExemptionAsync(ulong guildId, ulong userId)
     {
         try
         {
@@ -382,11 +393,11 @@ public sealed class AccountAgeGateHandler
             var exemption = await db.AccountAgeGateExemptions
                 .FirstOrDefaultAsync(e => e.GuildId == guildId && e.UserId == userId);
 
-            if (exemption is null) return false;
+            if (exemption is null) return null;
 
             db.AccountAgeGateExemptions.Remove(exemption);
             await db.SaveChangesAsync();
-            return true;
+            return exemption;
         }
         catch (Exception ex)
         {
@@ -394,7 +405,7 @@ public sealed class AccountAgeGateHandler
                 "Account-age gate: failed to check/consume exemption for user {UserId} in guild {GuildId}. " +
                 "Falling through to the normal gate path (fail closed).",
                 userId, guildId);
-            return false;
+            return null;
         }
     }
 
@@ -410,7 +421,8 @@ public sealed class AccountAgeGateHandler
         int minDays,
         string mode,
         AccountAgeGateOutcome outcome,
-        string? banFailureReason)
+        string? banFailureReason,
+        AccountAgeGateExemption? exemption = null)
     {
         var channel = ResolveSecurityAlertsChannel(member.Guild);
         if (channel is null)
@@ -444,6 +456,19 @@ public sealed class AccountAgeGateHandler
             .AddField("Mode",              mode,                                                        inline: true)
             .WithFooter("ClanGuard • Account-Age Gate")
             .WithCurrentTimestamp();
+
+        // When the member was let in via /allow-new-account, surface who cleared
+        // them and any note they left, so the moderator log records the "why".
+        if (exemption is not null)
+        {
+            embed.AddField(
+                "Cleared By",
+                $"<@{exemption.AddedByUserId}> (`{exemption.AddedByUsername}`)",
+                inline: true);
+
+            if (!string.IsNullOrWhiteSpace(exemption.Note))
+                embed.AddField("Note", exemption.Note, inline: false);
+        }
 
         try
         {
