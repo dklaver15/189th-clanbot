@@ -45,8 +45,12 @@ public sealed class FinalsLeaderboardService : BackgroundService
     private readonly BotConfig _config;
     private readonly ILogger<FinalsLeaderboardService> _logger;
 
-    // Player Embark name (or "id:{discordId}") → last-seen league number. First
-    // observation seeds the baseline silently; only a later increase announces.
+    // "{season}:{playerKey}" → highest league number we've seen for that player this
+    // season (a high-water mark). First observation seeds the mark silently; only a
+    // climb ABOVE the mark announces, and the mark is only ever raised — never lowered.
+    // This makes announcements idempotent against transient dips (a flaky API cycle that
+    // reports a lower/zero league, then recovers) which would otherwise re-fire the same
+    // rank-up. Keying by season lets a legitimate season reset re-baseline silently.
     private readonly ConcurrentDictionary<string, int> _lastLeague = new();
 
     // The newer season id we've already nagged about, so the rollover reminder
@@ -146,27 +150,48 @@ public sealed class FinalsLeaderboardService : BackgroundService
         }
         if (_client.GetChannel(channelId) is not SocketTextChannel channel) return;
 
+        // Scope the dedup keys to the current season so a season reset re-baselines
+        // silently rather than announcing everyone's placement climbs as "rank-ups".
+        var season = string.IsNullOrWhiteSpace(_api.EffectiveVersion) ? "?" : _api.EffectiveVersion;
+
         foreach (var m in rankings)
         {
-            var key = m.DiscordId.HasValue ? $"id:{m.DiscordId.Value}" : $"embark:{m.Entry.Name}";
             var current = m.Entry.LeagueNumber;
 
-            if (_lastLeague.TryGetValue(key, out var previous))
+            // Ignore invalid/unknown reads (0 or negative). Treating a flaky "no league"
+            // response as a real value would drop the high-water mark and let the next
+            // valid read re-announce the same rank-up.
+            if (current <= 0) continue;
+
+            var playerKey = m.DiscordId.HasValue ? $"id:{m.DiscordId.Value}" : $"embark:{m.Entry.Name}";
+            var key = $"{season}:{playerKey}";
+
+            if (_lastLeague.TryGetValue(key, out var best))
             {
-                if (current > previous)
+                // Only announce a genuine climb above the best we've ever seen this
+                // season, and only then raise the mark. A dip (or unchanged league)
+                // never lowers it, so a later recovery won't re-announce.
+                if (current > best)
                 {
                     await AnnounceRankUpAsync(channel, m, ct);
+                    _lastLeague[key] = current;
                 }
             }
-            // else: first time we've seen this player — seed baseline silently below.
-
-            _lastLeague[key] = current;
+            else
+            {
+                // First sighting this season — seed the high-water mark silently.
+                _lastLeague[key] = current;
+            }
         }
     }
 
     private async Task AnnounceRankUpAsync(SocketTextChannel channel, FinalsMemberRank m, CancellationToken ct)
     {
-        var mention = m.DiscordId.HasValue ? $"<@{m.DiscordId.Value}>" : $"**{m.DiscordName}**";
+        // Prefer the Discord ID linked in the roster; if the roster row has no ID (the
+        // member linked only a gamertag), try to resolve them by name in this guild so
+        // we can still tag them. Fall back to a bold display name if no match is found.
+        var discordId = m.DiscordId ?? ResolveGuildUserId(channel.Guild, m.DiscordName);
+        var mention = discordId.HasValue ? $"<@{discordId.Value}>" : $"**{m.DiscordName}**";
         var emoji = FinalsFormat.LeagueEmoji(m.Entry.League);
 
         var embed = new EmbedBuilder()
@@ -181,9 +206,9 @@ public sealed class FinalsLeaderboardService : BackgroundService
         try
         {
             await channel.SendMessageAsync(
-                text: m.DiscordId.HasValue ? mention : null,
+                text: discordId.HasValue ? mention : null,
                 embed: embed,
-                allowedMentions: m.DiscordId.HasValue ? new AllowedMentions { UserIds = new List<ulong> { m.DiscordId.Value } } : AllowedMentions.None);
+                allowedMentions: discordId.HasValue ? new AllowedMentions { UserIds = new List<ulong> { discordId.Value } } : AllowedMentions.None);
 
             _logger.LogInformation("FINALS rank-up announced: {Player} → {League}", m.Entry.Name, m.Entry.League);
         }
@@ -191,6 +216,31 @@ public sealed class FinalsLeaderboardService : BackgroundService
         {
             _logger.LogWarning(ex, "FINALS: failed to post rank-up for {Player}", m.Entry.Name);
         }
+    }
+
+    /// <summary>
+    /// Best-effort resolution of a Discord user id from a display name, for members
+    /// whose roster row has no linked id. Matches (case-insensitive) on nickname,
+    /// global/display name, or username; returns null if there's no unambiguous hit.
+    /// </summary>
+    private static ulong? ResolveGuildUserId(SocketGuild guild, string? name)
+    {
+        if (guild is null || string.IsNullOrWhiteSpace(name)) return null;
+        var n = name.Trim();
+
+        var matches = guild.Users
+            .Where(u =>
+                string.Equals(u.Nickname, n, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(u.DisplayName, n, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(u.GlobalName, n, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(u.Username, n, StringComparison.OrdinalIgnoreCase))
+            .Select(u => u.Id)
+            .Distinct()
+            .Take(2)
+            .ToList();
+
+        // Only tag on a single unambiguous match — never risk pinging the wrong person.
+        return matches.Count == 1 ? matches[0] : null;
     }
 
     // ─── Season-rollover reminder ────────────────────────────────────────────
@@ -238,7 +288,7 @@ public sealed class FinalsLeaderboardService : BackgroundService
             .WithFooter("Auto-detected • THE FINALS leaderboard")
             .Build();
 
-        await PostNoticeAsync(embed, $"auto-switched {previous}→{eff}", ct);
+        await PostNoticeAsync(embed, $"auto-switched {previous}→{eff}", officerFacing: false, ct);
     }
 
     /// <summary>
@@ -262,16 +312,25 @@ public sealed class FinalsLeaderboardService : BackgroundService
             .WithFooter("One-time reminder • THE FINALS leaderboard")
             .Build();
 
-        await PostNoticeAsync(embed, $"manual rollover reminder for {newer}", ct);
+        await PostNoticeAsync(embed, $"manual rollover reminder for {newer}", officerFacing: true, ct);
         _rolloverAlertedFor = newer;
     }
 
-    /// <summary>Posts an officer-facing notice to HQ → announce → board channel.</summary>
-    private async Task PostNoticeAsync(Embed embed, string what, CancellationToken ct)
+    /// <summary>
+    /// Posts a season notice. Officer-facing notices (the manual-mode "bump the config"
+    /// nag) go to HQ first; member-facing notices (the auto-switch FYI, which the whole
+    /// clan should see and needs no action) go to the public FINALS channel first so they
+    /// don't land in the moderator log.
+    /// </summary>
+    private async Task PostNoticeAsync(Embed embed, string what, bool officerFacing, CancellationToken ct)
     {
-        var channelId = _config.HqChannelId != 0 ? _config.HqChannelId
-            : _config.FinalsAnnounceChannelId != 0 ? _config.FinalsAnnounceChannelId
-            : _config.FinalsBoardChannelId;
+        var channelId = officerFacing
+            ? (_config.HqChannelId != 0 ? _config.HqChannelId
+                : _config.FinalsAnnounceChannelId != 0 ? _config.FinalsAnnounceChannelId
+                : _config.FinalsBoardChannelId)
+            : (_config.FinalsAnnounceChannelId != 0 ? _config.FinalsAnnounceChannelId
+                : _config.FinalsBoardChannelId != 0 ? _config.FinalsBoardChannelId
+                : _config.HqChannelId);
 
         if (channelId == 0 || _client.GetChannel(channelId) is not SocketTextChannel channel)
         {
