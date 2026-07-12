@@ -459,6 +459,25 @@ public sealed class TicketInteractionHandler
         ticket.ThreadId         = thread.Id;
         ticket.ControlMessageId = control.Id;
 
+        // Privacy warning. Discord adds every member of a mentioned role (roles
+        // under 100 members) to the thread it was mentioned in — private threads
+        // included — so a single role ping in here silently exposes the whole
+        // ticket to that role. We can't block what staff type, so we warn.
+        // See: https://support.discord.com/hc/en-us/articles/4403205878423-Threads-FAQ
+        try
+        {
+            await thread.SendMessageAsync(
+                "⚠️ **Heads up — this is a private thread.** Pinging a **role** in here will add "
+                + "*every member of that role* to this thread and they'll be able to read the whole "
+                + "ticket. Same goes for @mentioning a user. If you need to loop someone in, do it "
+                + "deliberately — otherwise link them out to another channel instead.",
+                allowedMentions: AllowedMentions.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not post privacy warning in ticket thread #{Id}", ticket.Id);
+        }
+
         db.SupportTicketMessages.Add(new SupportTicketMessage
         {
             TicketId          = ticket.Id,
