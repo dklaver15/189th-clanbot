@@ -148,6 +148,22 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
         var ctx14d = await LoadBatchActivityAsync(db, guild.Id, now.AddDays(-ActivityContextWindowDays), now, ct);
         var ctx7d  = await LoadBatchActivityAsync(db, guild.Id, now.AddDays(-SpotlightWindowDays), now, ct);
 
+        // Risk Watch must measure each member over their *own* AWOL window
+        // (WindowDays normally, ShortWindowDays for Guest/RCT) so its numbers
+        // mean the same thing AwolCheckService's do. Using a single fixed
+        // window here previously produced lines like "4/5 msgs over 28d" that
+        // were actually 14d counts — a member with 300+ messages spread across
+        // the month could surface as at-risk. GetWindowDaysForRoles only ever
+        // returns one of these two values, so this is at most two extra loads.
+        var riskActivityByWindow = new Dictionary<int, BatchActivity>();
+        foreach (var days in new[] { _config.WindowDays, _config.ShortWindowDays }
+                     .Where(d => d > 0)
+                     .Distinct())
+        {
+            riskActivityByWindow[days] =
+                await LoadBatchActivityAsync(db, guild.Id, now.AddDays(-days), now, ct);
+        }
+
         // ── Run independent fetches concurrently, each isolated from failures ──
         var awolTask     = SafeAsync(() => GetAwolRisksAsync(guild, db, ctx14d, ct), "AWOL risks", []);
         var promoTask    = SafeAsync(() => GetPromotionCandidatesAsync(guild, db, ct), "promotion candidates", []);
@@ -161,7 +177,7 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
             "prior-week top-line",
             new TopLineNumbers(0, 0, 0d, 0));
         var spotlightTask = SafeAsync(() => GetSpotlightAsync(guild, db, ctx7d, ct), "spotlight", null);
-        var riskTask      = SafeAsync(() => GetRiskWatchAsync(guild, ctx14d, ct), "risk watch", []);
+        var riskTask      = SafeAsync(() => GetRiskWatchAsync(guild, riskActivityByWindow, ct), "risk watch", []);
 
         // ── v3: Recruitment sources + top referrers ──
         // Lives in BriefingInviteSection so the new section doesn't tangle
@@ -543,7 +559,7 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
     // Below 50% → about to be flagged AWOL anyway; ≥100% → safe.
     private Task<List<RiskWatchItem>> GetRiskWatchAsync(
         SocketGuild guild,
-        BatchActivity ctx14d,
+        IReadOnlyDictionary<int, BatchActivity> activityByWindow,
         CancellationToken ct)
     {
         var awolRole = guild.Roles.FirstOrDefault(r =>
@@ -560,16 +576,15 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
                     exemptRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase))) continue;
             if (awolRole is not null && member.Roles.Any(r => r.Id == awolRole.Id)) continue;
 
-            // Use the role-aware window so Guests/RCTs (shorter window) are evaluated
-            // on the same threshold AwolCheckService uses for them.
+            // Use the role-aware window so every member is measured against the
+            // exact window AwolCheckService will judge them on.
             var windowDays = _config.GetWindowDaysForRoles(member.Roles.Select(r => r.Name));
 
-            // ctx14d is fixed at 14d. If a member's window is shorter (e.g. Guest 14d
-            // matches; RCT 14d matches), use ctx14d. If their window is longer, the
-            // 14d snapshot is a lower-bound; that's fine for "trending" detection
-            // since we want recent behaviour, not the full window history.
-            var msgs = ctx14d.MessageCounts.GetValueOrDefault(member.Id, 0);
-            var voiceHours = ctx14d.VoiceSeconds.GetValueOrDefault(member.Id, 0d) / 3600.0;
+            var ctx = ResolveWindowActivity(activityByWindow, windowDays);
+            if (ctx is null) continue;   // no activity loaded for this window — nothing to say
+
+            var msgs = ctx.MessageCounts.GetValueOrDefault(member.Id, 0);
+            var voiceHours = ctx.VoiceSeconds.GetValueOrDefault(member.Id, 0d) / 3600.0;
 
             var msgRatio = _config.MinMessages > 0
                 ? (double)msgs / _config.MinMessages
@@ -596,6 +611,24 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
         }
 
         return Task.FromResult(watch);
+    }
+
+    // Picks the loaded BatchActivity for a member's window. Exact hit is the
+    // norm (the dictionary is built from the same two config values that
+    // GetWindowDaysForRoles returns). The fallback only matters if config is
+    // changed mid-run: prefer the largest loaded window that doesn't exceed
+    // the member's, else the smallest available, so we never over-count.
+    private static BatchActivity? ResolveWindowActivity(
+        IReadOnlyDictionary<int, BatchActivity> activityByWindow, int windowDays)
+    {
+        if (activityByWindow.TryGetValue(windowDays, out var exact))
+            return exact;
+        if (activityByWindow.Count == 0)
+            return null;
+
+        var below = activityByWindow.Keys.Where(k => k <= windowDays).ToList();
+        var key = below.Count > 0 ? below.Max() : activityByWindow.Keys.Min();
+        return activityByWindow[key];
     }
 
     // ── Spotlight ───────────────────────────────────────────────────────
