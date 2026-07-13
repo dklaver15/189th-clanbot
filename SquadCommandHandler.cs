@@ -47,6 +47,26 @@ namespace ClanGuardBot.Handlers;
 /// ephemeral messages are only visible to the invoker, so by construction
 /// nobody else can press the button.
 ///
+/// ── Copy / Post ──
+/// Discord gives bots no clipboard API, so "copy" is done the only way it
+/// can be: 📋 Copy Text replies (ephemerally) with the draw wrapped in a
+/// fenced code block. Discord renders a native copy icon on multi-line code
+/// blocks, so it's one click to grab the raw markdown, and pasting it into
+/// any channel renders the **bold** squad headers properly.
+/// 📢 Post to Current Channel skips the round trip and posts the draw
+/// publicly in the channel the command was run from.
+///
+/// Both buttons rebuild the roster by PARSING the embed currently attached
+/// to the ephemeral message (see ParseSquadsFromEmbed) rather than caching
+/// the draw in memory — that keeps them working across a bot restart and
+/// guarantees they act on exactly the draw the officer is looking at
+/// (i.e. the latest reroll), not a stale one.
+///
+/// Copy/Post render PLAIN display names, not mentions: the whole point is a
+/// message the officer can drop in a channel, and 30 pings for a squad draw
+/// would be noise. (SyncWithMemory: event rosters render plain text for the
+/// same reason.)
+///
 /// ── Permissions ──
 /// Officer+ (ManageRoles or Administrator, plus members of any exempt
 /// role per BotConfig.ExemptRoles). Mirrors SlashCommandHandler's
@@ -80,6 +100,25 @@ public class SquadCommandHandler
     /// can see (and therefore press) the button in the first place.
     /// </summary>
     private const string RerollButtonPrefix = "squads_reroll:";
+
+    /// <summary>
+    /// Custom id for the 📋 Copy Text button. No state encoded — the handler
+    /// re-reads the squads out of the embed on the message the button is
+    /// attached to, so it always copies the draw the officer is looking at.
+    /// </summary>
+    private const string CopyButtonId = "squads_copy";
+
+    /// <summary>
+    /// Custom id for the 📢 Post to Current Channel button. Same "read the embed"
+    /// approach as <see cref="CopyButtonId"/>.
+    /// </summary>
+    private const string PostButtonId = "squads_post";
+
+    /// <summary>
+    /// Discord's hard cap on message content. The copy payload gets a fenced
+    /// code block plus a short lead-in, so leave headroom before truncating.
+    /// </summary>
+    private const int MaxCopyContentLength = 1900;
 
     private readonly ILogger<SquadCommandHandler> _logger;
     private readonly BotConfig _config;
@@ -123,15 +162,21 @@ public class SquadCommandHandler
 
     private async Task OnButtonExecutedAsync(SocketMessageComponent component)
     {
-        if (!component.Data.CustomId.StartsWith(RerollButtonPrefix, StringComparison.Ordinal)) return;
+        var id = component.Data.CustomId;
+        var isReroll = id.StartsWith(RerollButtonPrefix, StringComparison.Ordinal);
+        var isCopy = id == CopyButtonId;
+        var isPost = id == PostButtonId;
+        if (!isReroll && !isCopy && !isPost) return;
 
         try
         {
-            await HandleRerollAsync(component);
+            if (isReroll) await HandleRerollAsync(component);
+            else if (isCopy) await HandleCopyAsync(component);
+            else await HandlePostAsync(component);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error handling /squads reroll button");
+            _logger.LogError(ex, "Error handling /squads button {CustomId}", id);
             try { await component.RespondAsync("Something went wrong. Check the bot logs.", ephemeral: true); }
             catch { /* already responded */ }
         }
@@ -227,6 +272,157 @@ public class SquadCommandHandler
         _logger.LogInformation(
             "/squads reroll: {Caller} re-drew {SquadCount} squad(s) of {SquadSize} from {PlayerCount} player(s)",
             caller.Username, squads.Count, squadSize, players.Count);
+    }
+
+    /// <summary>
+    /// 📋 Copy Text — replies (ephemerally, so it never leaks into the channel)
+    /// with the current draw wrapped in a fenced code block. Discord puts a
+    /// native copy icon on multi-line code blocks, so the officer clicks it once
+    /// and pastes the raw markdown wherever they want; the ** ** headers render
+    /// on paste.
+    /// </summary>
+    private async Task HandleCopyAsync(SocketMessageComponent component)
+    {
+        var guild = (component.Channel as SocketGuildChannel)?.Guild;
+        if (guild is null) return;
+
+        var squads = ParseSquadsFromEmbed(component.Message.Embeds.FirstOrDefault(), guild);
+        if (squads.Count == 0)
+        {
+            await component.RespondAsync(
+                "Nothing to copy — draw some squads first (🎲 Reroll).",
+                ephemeral: true);
+            return;
+        }
+
+        var text = BuildPlainText(squads);
+        var wrapped = $"```\n{text}\n```";
+        if (wrapped.Length > MaxCopyContentLength)
+        {
+            // Very large draws (huge VC + size:1) could blow the 2000-char cap.
+            // Trim from the end and say so rather than throwing.
+            var budget = MaxCopyContentLength - "```\n\n```\n… (truncated)".Length;
+            wrapped = $"```\n{text[..Math.Max(0, budget)]}\n```\n… (truncated)";
+        }
+
+        await component.RespondAsync(
+            $"Copy this and paste it into any channel:\n{wrapped}",
+            ephemeral: true);
+
+        _logger.LogInformation("/squads copy: {Caller} copied {SquadCount} squad(s)",
+            component.User.Username, squads.Count);
+    }
+
+    /// <summary>
+    /// 📢 Post to Current Channel — posts the draw publicly in the channel the
+    /// command was invoked from, using the same gold embed but with plain names.
+    /// </summary>
+    private async Task HandlePostAsync(SocketMessageComponent component)
+    {
+        var guild = (component.Channel as SocketGuildChannel)?.Guild;
+        if (guild is null) return;
+
+        if (component.Channel is not IMessageChannel channel)
+        {
+            await component.RespondAsync("Can't post here — try running `/squads` in a text channel.", ephemeral: true);
+            return;
+        }
+
+        var squads = ParseSquadsFromEmbed(component.Message.Embeds.FirstOrDefault(), guild);
+        if (squads.Count == 0)
+        {
+            await component.RespondAsync(
+                "Nothing to post — draw some squads first (🎲 Reroll).",
+                ephemeral: true);
+            return;
+        }
+
+        var caller = component.User as SocketGuildUser;
+        var totalPlayers = squads.Sum(s => s.Count);
+
+        var embed = new EmbedBuilder()
+            .WithTitle("🎲 Squad Draw")
+            .WithDescription(BuildPlainText(squads))
+            .WithColor(new Color(201, 166, 71)) // 0xC9A647 — 189th gold
+            .WithFooter($"{totalPlayers} player{(totalPlayers == 1 ? "" : "s")} • Drawn by {caller?.DisplayName ?? component.User.Username}")
+            .WithCurrentTimestamp()
+            .Build();
+
+        await channel.SendMessageAsync(embed: embed);
+        await component.RespondAsync($"✅ Posted to <#{component.Channel.Id}>.", ephemeral: true);
+
+        _logger.LogInformation("/squads post: {Caller} posted {SquadCount} squad(s) to #{Channel}",
+            component.User.Username, squads.Count, component.Channel.Name);
+    }
+
+    /// <summary>
+    /// Rebuilds the squad roster from the embed on the ephemeral message.
+    /// Lines look like "**Squad 1**" followed by "• &lt;@123&gt;" bullets (see
+    /// <see cref="BuildEmbed"/>) — SyncWithBuilder: if BuildEmbed's line format
+    /// changes, this parser must change with it.
+    ///
+    /// Mentions are resolved back to display names via the guild cache; an
+    /// unresolvable id (member left mid-draw) falls back to the raw mention so
+    /// the name still renders client-side rather than vanishing.
+    /// </summary>
+    private static List<List<string>> ParseSquadsFromEmbed(IEmbed? embed, SocketGuild guild)
+    {
+        var squads = new List<List<string>>();
+        var description = embed?.Description;
+        if (string.IsNullOrWhiteSpace(description)) return squads;
+
+        foreach (var raw in description.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0) continue;
+
+            if (line.StartsWith("**Squad ", StringComparison.Ordinal))
+            {
+                squads.Add(new List<string>());
+                continue;
+            }
+
+            if (!line.StartsWith("• ", StringComparison.Ordinal)) continue;
+            if (squads.Count == 0) squads.Add(new List<string>());
+
+            var entry = line[2..].Trim();
+            squads[^1].Add(ResolveDisplayName(entry, guild));
+        }
+
+        return squads.Where(s => s.Count > 0).ToList();
+    }
+
+    /// <summary>
+    /// Turns "&lt;@123&gt;" (or "&lt;@!123&gt;") into the member's display name.
+    /// Anything else is passed through untouched.
+    /// </summary>
+    private static string ResolveDisplayName(string entry, SocketGuild guild)
+    {
+        if (!entry.StartsWith("<@", StringComparison.Ordinal) || !entry.EndsWith('>'))
+            return entry;
+
+        var inner = entry[2..^1].TrimStart('!');
+        if (!ulong.TryParse(inner, out var userId)) return entry;
+
+        return guild.GetUser(userId)?.DisplayName ?? entry;
+    }
+
+    /// <summary>
+    /// Renders the draw as plain Discord markdown — the exact text the officer
+    /// copies or that gets posted. Bold squad headers, bullet-listed names, a
+    /// blank line between squads.
+    /// </summary>
+    private static string BuildPlainText(List<List<string>> squads)
+    {
+        var sb = new StringBuilder();
+        for (int i = 0; i < squads.Count; i++)
+        {
+            sb.AppendLine($"**Squad {i + 1}**");
+            foreach (var name in squads[i])
+                sb.AppendLine($"• {name}");
+            sb.AppendLine();
+        }
+        return sb.ToString().TrimEnd();
     }
 
     /// <summary>
@@ -328,9 +524,16 @@ public class SquadCommandHandler
             .Build();
     }
 
+    /// <summary>
+    /// Reroll + Copy + Post, one row. Squad size rides along on the reroll id so
+    /// rerolls keep the size the officer picked; Copy/Post need no state because
+    /// they read the draw back off the embed.
+    /// </summary>
     private static MessageComponent BuildRerollButton(int squadSize) =>
         new ComponentBuilder()
             .WithButton("🎲 Reroll", RerollButtonPrefix + squadSize, ButtonStyle.Secondary)
+            .WithButton("📋 Copy Text", CopyButtonId, ButtonStyle.Secondary)
+            .WithButton("📢 Post to Current Channel", PostButtonId, ButtonStyle.Primary)
             .Build();
 
     /// <summary>
