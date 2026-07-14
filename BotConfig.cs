@@ -1536,10 +1536,11 @@ public class BotConfig
     public bool PalworldFeedEnabled { get; set; } = true;
 
     /// <summary>
-    /// Channel for the Palworld join/leave feed. 0 disables the feed (sessions are
-    /// still tracked).
+    /// Channel for the Palworld join/leave feed (the #palworld channel). 0 disables
+    /// the feed — sessions and playtime are still tracked either way, so turning it
+    /// off only silences the chatter.
     /// </summary>
-    public ulong PalworldFeedChannelId { get; set; } = default;
+    public ulong PalworldFeedChannelId { get; set; } = 1526389577277771886;
 
     /// <summary>
     /// Role permitted to use /palworld-admin (announce, kick, ban, unban, save,
