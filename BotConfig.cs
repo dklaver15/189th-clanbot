@@ -1480,6 +1480,91 @@ public class BotConfig
     /// </summary>
     public string UfcDefaultImageUrl { get; set; } = string.Empty;
 
+    // ─── Palworld server ─────────────────────────────────────────────
+    /// <summary>
+    /// Master switch for the Palworld integration (presence feed, playtime
+    /// tracking, /palworld-* commands, and the in-game event-reminder bridge).
+    /// Default false — nothing runs until the server details are configured.
+    /// Everything additionally requires PalworldBaseUrl + PalworldAdminPassword;
+    /// see <see cref="Services.PalworldApiService.IsConfigured"/>.
+    /// </summary>
+    public bool PalworldEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Base URL of the Palworld server's REST API, scheme and port included —
+    /// e.g. "http://flywheel.dathost.net:29324". No trailing path: the client
+    /// appends /v1/api itself.
+    ///
+    /// On DatHost the port is allocated automatically once the "Enable REST API"
+    /// toggle is switched on in the server's Settings tab; hover the server IP in
+    /// the panel and the REST API row shows the port (it sits just past the
+    /// game/query/RCON ports). We use REST, not RCON: Pocketpair has deprecated
+    /// RCON and it will stop working in a future update.
+    /// </summary>
+    public string PalworldBaseUrl { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The server's Admin Password — the REST API credential (HTTP Basic, with the
+    /// literal username "admin").
+    ///
+    /// ⚠️ This is NOT the "Server Password" players type to join (that one sits
+    /// directly above it in the DatHost Settings tab and is fine to share). This
+    /// one grants kick/ban/save/shutdown over the whole server, and DatHost exposes
+    /// the REST port to the open internet with no IP allowlisting, so this password
+    /// is the ONLY thing protecting the server. It must be a long random string.
+    ///
+    /// ── How to set ──
+    /// Never commit it. docker-compose maps:
+    ///   BotConfig__PalworldAdminPassword=${PALWORLD_ADMIN_PASSWORD}
+    /// Add PALWORLD_ADMIN_PASSWORD=... to the droplet's .env file.
+    /// </summary>
+    public string PalworldAdminPassword { get; set; } = string.Empty;
+
+    /// <summary>
+    /// How often PalworldPresenceService polls /players, in seconds. Default 60.
+    /// Polling is not a design choice — the Palworld REST API has no webhooks, so
+    /// joins/leaves can only be found by diffing snapshots. This also bounds the
+    /// accuracy of recorded playtime. Clamped to 15–3600s.
+    /// </summary>
+    public int PalworldPollIntervalSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// Whether join/leave messages are posted to <see cref="PalworldFeedChannelId"/>.
+    /// Turning this off still records sessions/playtime — it only silences the chat
+    /// feed. Default true.
+    /// </summary>
+    public bool PalworldFeedEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Channel for the Palworld join/leave feed. 0 disables the feed (sessions are
+    /// still tracked).
+    /// </summary>
+    public ulong PalworldFeedChannelId { get; set; } = default;
+
+    /// <summary>
+    /// Role permitted to use /palworld-admin (announce, kick, ban, unban, save,
+    /// restart). The dedicated "Palworld Mod" role: HQ plus the server's owner, who
+    /// isn't in HQ but does own the box. Administrator always bypasses; 0 locks the
+    /// command to Administrators only (fail closed, never fail open).
+    ///
+    /// Deliberately a ROLE ID rather than a rank floor: these commands can shut the
+    /// game server down, so the people who can run them should be an explicit list,
+    /// not "everyone at or above rank X" — a rank ladder would silently widen the
+    /// blast radius every time someone gets promoted. And deliberately its own role
+    /// rather than TicketHqRoleId, because the membership genuinely differs.
+    /// SyncWithHandlers: PalworldCommandHandler.HasAdminRole.
+    /// </summary>
+    public ulong PalworldAdminRoleId { get; set; } = 1526650435396571266;
+
+    /// <summary>
+    /// When true, an event reminder also broadcasts in-game to whoever is on the
+    /// Palworld server (via the REST /announce endpoint), so members deep in a Pal
+    /// run don't miss an event just because they aren't looking at Discord. Default
+    /// true; a no-op unless the Palworld feature is enabled and configured.
+    /// SyncWithHandlers: EventReminderService.AnnounceInGameAsync.
+    /// </summary>
+    public bool PalworldEventAnnounceEnabled { get; set; } = true;
+
     // ─── SQLite Backup Settings ──────────────────────────────────────
     /// <summary>
     /// Master switch for SqliteBackupService. When false, the service exits

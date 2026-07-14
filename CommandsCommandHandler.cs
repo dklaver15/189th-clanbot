@@ -538,6 +538,17 @@ public class CommandsCommandHandler
             return user.Roles.Any(r => r.Id == cfg.TicketHqRoleId);
         };
 
+        // SyncWithHandlers: PalworldCommandHandler.HasAdminRole
+        // The dedicated "Palworld Mod" role — NOT TicketHqRoleId. Its membership is
+        // HQ plus the server's owner, so it has to be its own key. Fails closed when
+        // unset.
+        Func<SocketGuildUser, BotConfig, bool> palworldMod = (user, cfg) =>
+        {
+            if (user.GuildPermissions.Administrator) return true;
+            if (cfg.PalworldAdminRoleId == 0) return false;
+            return user.Roles.Any(r => r.Id == cfg.PalworldAdminRoleId);
+        };
+
         // SyncWithHandlers: SetNickCommandHandler.HasPermission
         Func<SocketGuildUser, BotConfig, bool> officerOrManageNicknames = (user, cfg) =>
         {
@@ -602,6 +613,14 @@ public class CommandsCommandHandler
             new("lookup", "Look up someone's gamertags from the roster",
                 "Everyone", everyone),
             new("my-invites", "Show invites you created with use counts and attribution",
+                "Everyone", everyone),
+            new("palworld-status", "Live status of the clan's Palworld server — who's on, uptime, in-game day",
+                "Everyone", everyone),
+            new("palworld-playtime", "How long someone has played on the clan's Palworld server",
+                "Everyone", everyone),
+            new("palworld-leaderboard", "Top Palworld players by playtime, level, or buildings",
+                "Everyone", everyone),
+            new("palworld-link", "Link your Discord account to your Palworld character (be online in-game)",
                 "Everyone", everyone),
             new("patrol", "Toggle your visibility on Patrol Watch embeds (off/on/info)",
                 "Everyone", everyone),
@@ -669,6 +688,9 @@ public class CommandsCommandHandler
 
             new("ticket-panel", "Post (or re-post) the ticket panel to the tickets channel",
                 "HQ", ticketHq),   // SyncWithHandlers: TicketPanelCommandHandler.InvokerHasPermission
+
+            new("palworld-admin", "Administer the Palworld server — announce, kick, ban, unban, save, restart",
+                "Palworld Mod", palworldMod),   // SyncWithHandlers: PalworldCommandHandler.HasAdminRole
 
             new("purge-user", "Delete a member's recent messages server-wide (dry-run unless confirm:true)",
                 "Admin", (user, _) => user.GuildPermissions.Administrator),   // SyncWithHandlers: PurgeUserCommandHandler

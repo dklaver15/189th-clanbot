@@ -57,6 +57,7 @@ public class DiscordBotService : IHostedService
     private readonly PollGatewayVoteHandler _pollGatewayVoteHandler;
     private readonly UfcCommandHandler _ufcCommandHandler;
     private readonly FinalsCommandHandler _finalsCommandHandler;
+    private readonly PalworldCommandHandler _palworldCommandHandler;
     private readonly PromoteCommandHandler _promoteHandler;
     private readonly DemoteCommandHandler _demoteHandler;
     private readonly SetNickCommandHandler _setNickHandler;
@@ -132,6 +133,7 @@ public class DiscordBotService : IHostedService
         PollGatewayVoteHandler pollGatewayVoteHandler,
         UfcCommandHandler ufcCommandHandler,
         FinalsCommandHandler finalsCommandHandler,
+        PalworldCommandHandler palworldCommandHandler,
         PromoteCommandHandler promoteHandler,
         DemoteCommandHandler demoteHandler,
         SetNickCommandHandler setNickHandler,
@@ -206,6 +208,7 @@ public class DiscordBotService : IHostedService
         _pollGatewayVoteHandler      = pollGatewayVoteHandler;
         _ufcCommandHandler           = ufcCommandHandler;
         _finalsCommandHandler        = finalsCommandHandler;
+        _palworldCommandHandler      = palworldCommandHandler;
         _promoteHandler              = promoteHandler;
         _demoteHandler               = demoteHandler;
         _setNickHandler              = setNickHandler;
@@ -300,6 +303,7 @@ public class DiscordBotService : IHostedService
         _pollGatewayVoteHandler.Register(_client);
         _ufcCommandHandler.Register(_client);
         _finalsCommandHandler.Register(_client);
+        _palworldCommandHandler.Register(_client);
         _promoteHandler.Register(_client);
         _demoteHandler.Register(_client);
         _setNickHandler.Register(_client);
@@ -454,6 +458,21 @@ public class DiscordBotService : IHostedService
                 // public reply; gated by BotConfig.FinalsEnabled. Same handler as
                 // /finals-rank. NOTE: keep CommandsCommandHandler.BuildCatalog in sync.
                 FinalsCommandHandler.BuildClubCommand(),
+
+                // /palworld-* — the clan's Palworld server on DatHost, via the
+                // game's built-in REST API (RCON is deprecated upstream and unused).
+                // status/playtime/leaderboard/link are open to all members;
+                // /palworld-admin (announce, kick, ban, unban, save, restart) is
+                // gated to the "Palworld Mod" role (BotConfig.PalworldAdminRoleId)
+                // so the mods can moderate the game server without anyone holding
+                // the Admin Password. All are runtime-gated by BotConfig.PalworldEnabled.
+                // Handled by PalworldCommandHandler. NOTE: keep
+                // CommandsCommandHandler.BuildCatalog in sync when changing these.
+                PalworldCommandHandler.BuildStatusCommand(),
+                PalworldCommandHandler.BuildPlaytimeCommand(),
+                PalworldCommandHandler.BuildLeaderboardCommand(),
+                PalworldCommandHandler.BuildLinkCommand(),
+                PalworldCommandHandler.BuildAdminCommand(),
 
                 new SlashCommandBuilder()
                     .WithName("promote")

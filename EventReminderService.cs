@@ -32,17 +32,20 @@ public sealed class EventReminderService : BackgroundService
     private readonly DiscordSocketClient _client;
     private readonly BotConfig _config;
     private readonly ILogger<EventReminderService> _logger;
+    private readonly PalworldApiService _palworld;
 
     public EventReminderService(
         IServiceProvider services,
         DiscordSocketClient client,
         IOptions<BotConfig> config,
-        ILogger<EventReminderService> logger)
+        ILogger<EventReminderService> logger,
+        PalworldApiService palworld)
     {
         _services = services;
         _client   = client;
         _config   = config.Value;
         _logger   = logger;
+        _palworld = palworld;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -112,6 +115,7 @@ public sealed class EventReminderService : BackgroundService
             var fire = due.Min();
             var mentions = await BuildMentionsAsync(db, ev, pingStatuses, ct);
             await PostReminderAsync(ev, mentions);
+            await AnnounceInGameAsync(ev, fire, ct);
 
             foreach (var L in due) fired.Add(L);
             ev.RemindersSentCsv = string.Join(",", fired.OrderByDescending(x => x));
@@ -228,6 +232,58 @@ public sealed class EventReminderService : BackgroundService
             {
                 _logger.LogWarning(ex, "Failed to post reminder for '{Title}' after retry", ev.Title);
             }
+        }
+    }
+
+    /// <summary>
+    /// Mirrors the Discord reminder as an in-game broadcast on the clan's Palworld
+    /// server, so members mid-session don't miss an event just because they aren't
+    /// looking at Discord. Fires on the same lead times as the Discord post.
+    ///
+    /// ── Why this is safe to bolt on here ──
+    /// Deliberately best-effort and non-fatal: the Palworld client swallows every
+    /// failure and returns false, and we additionally wrap the call so nothing about
+    /// a game server being down can interfere with the Discord reminder — which has
+    /// already been posted by the time we get here. The lead is marked sent by the
+    /// caller regardless, so a missed announce is never retried into a loop.
+    ///
+    /// No-op unless the Palworld feature is enabled AND configured AND
+    /// PalworldEventAnnounceEnabled is on. The API's /announce is the only
+    /// Discord→game channel that exists; there is no chat relay in the other
+    /// direction.
+    ///
+    /// SyncWithHandlers: BotConfig.PalworldEventAnnounceEnabled.
+    /// </summary>
+    private async Task AnnounceInGameAsync(ClanEvent ev, int leadMinutes, CancellationToken ct)
+    {
+        if (!_config.PalworldEnabled
+            || !_config.PalworldEventAnnounceEnabled
+            || !_palworld.IsConfigured)
+            return;
+
+        try
+        {
+            // Announcements are plain text — no markdown, no timestamps. State the
+            // lead in words rather than pasting a Discord <t:…> stamp, which would
+            // render as literal garbage in game.
+            var when = leadMinutes >= 60 && leadMinutes % 60 == 0
+                ? $"{leadMinutes / 60}h"
+                : $"{leadMinutes} min";
+
+            var ok = await _palworld.AnnounceAsync($"[189th] Event starting in {when}: {ev.Title}", ct);
+
+            if (ok)
+                _logger.LogInformation(
+                    "Announced '{Title}' in-game on the Palworld server ({Lead} min lead)", ev.Title, leadMinutes);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // A game server hiccup must never affect event reminders.
+            _logger.LogDebug(ex, "In-game Palworld announce failed for '{Title}'", ev.Title);
         }
     }
 

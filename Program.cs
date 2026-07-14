@@ -515,6 +515,21 @@ try
     builder.Services.AddSingleton<FinalsCommandHandler>();
     builder.Services.AddHostedService<FinalsLeaderboardService>();
 
+    // ── Palworld (DatHost) ───────────────────────────────────────────
+    // PalworldApiService is the REST client for the game server's built-in API
+    // (basic auth with the Admin Password; RCON is deprecated by Pocketpair and
+    // deliberately unused). PalworldCommandHandler owns /palworld-status,
+    // -playtime, -leaderboard, -link and the rank-gated /palworld-admin
+    // (Register() called from DiscordBotService). PalworldPresenceService polls
+    // /players to derive the join/leave feed and playtime — the API has no
+    // webhooks, so diffing snapshots is the only presence mechanism available.
+    // EventReminderService also injects the API client for the in-game event
+    // announce bridge. All gated by BotConfig.Palworld* — idle until
+    // PalworldEnabled + a base URL + an admin password are set.
+    builder.Services.AddSingleton<PalworldApiService>();
+    builder.Services.AddSingleton<PalworldCommandHandler>();
+    builder.Services.AddHostedService<PalworldPresenceService>();
+
     // ── Hosted Services ──────────────────────────────────────────────
     builder.Services.AddHostedService<DiscordBotService>();
     builder.Services.AddHostedService<HistoryBackfillService>();

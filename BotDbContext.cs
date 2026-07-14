@@ -49,6 +49,9 @@ public class BotDbContext : DbContext
     // ── Support tickets ──
     public DbSet<SupportTicket>        SupportTickets        => Set<SupportTicket>();
     public DbSet<SupportTicketMessage> SupportTicketMessages => Set<SupportTicketMessage>();
+    // ── Palworld server ──
+    public DbSet<PalworldSession>      PalworldSessions      => Set<PalworldSession>();
+    public DbSet<PalworldLink>         PalworldLinks         => Set<PalworldLink>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -550,6 +553,34 @@ public class BotDbContext : DbContext
             e.Property(m => m.Direction).HasConversion<int>();
             // Transcript render: all messages for a ticket in send order.
             e.HasIndex(m => new { m.TicketId, m.SentUtc });
+        });
+
+        // ── Palworld sessions ─────────────────────────────────────────
+        // Three read patterns, all hit on every 60s poll:
+        //   • The poller's own "which sessions are still open?" query. Filtered
+        //     to the open rows so the index stays tiny (a handful of rows) no
+        //     matter how many thousands of closed sessions accumulate.
+        //   • Per-player history — /palworld-playtime sums every session for one
+        //     PalworldUserId, and the poller closes the newest open one on leave.
+        //   • Name lookup, for the `name:` path of /palworld-playtime (which
+        //     deliberately does NOT require a Discord link, so it works for
+        //     people who never joined the server).
+        modelBuilder.Entity<PalworldSession>(e =>
+        {
+            e.HasIndex(s => s.EndedUtc).HasFilter("\"EndedUtc\" IS NULL");
+            e.HasIndex(s => new { s.PalworldUserId, s.StartedUtc });
+            e.HasIndex(s => s.PlayerName);
+        });
+
+        // ── Palworld ↔ Discord links ──────────────────────────────────
+        // Unique in BOTH directions: one Discord account per Palworld identity
+        // and vice versa. The handler deletes the other side before inserting,
+        // so these indexes are the structural backstop preventing two members
+        // from both claiming the same character.
+        modelBuilder.Entity<PalworldLink>(e =>
+        {
+            e.HasIndex(l => new { l.GuildId, l.DiscordUserId }).IsUnique();
+            e.HasIndex(l => new { l.GuildId, l.PalworldUserId }).IsUnique();
         });
     }
 }
