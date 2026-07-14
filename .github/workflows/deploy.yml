@@ -2,6 +2,24 @@ name: Deploy to Droplet
 on:
   push:
     branches: [main]
+
+# Deploys run one at a time. Two pushes in quick succession used to start two
+# concurrent SSH deploys against the SAME droplet, each running
+# `docker compose build --no-cache` for all three images — they contended for the
+# box's CPU and the Docker daemon and took far longer than 2x a single deploy.
+#
+# cancel-in-progress is deliberately FALSE. Cancelling the GitHub job only kills
+# the SSH session; the `docker compose build` it kicked off keeps running on the
+# droplet regardless. So "cancel" would leave the orphaned build going AND start a
+# second one — precisely the contention we're trying to prevent. Queuing instead
+# means the second deploy waits its turn and then resets to the newest main, so
+# the extra wait costs nothing: both deploys would have landed on the same commit
+# anyway (the script does `git reset --hard origin/main`, not a checkout of the
+# pushed SHA).
+concurrency:
+  group: deploy-droplet
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
