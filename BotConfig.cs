@@ -1543,6 +1543,17 @@ public class BotConfig
     public ulong PalworldFeedChannelId { get; set; } = 1526389577277771886;
 
     /// <summary>
+    /// Whether the whole-server up/down notice is posted (as a green/red embed) to
+    /// the feed channel when the server comes online or goes offline. Default true.
+    /// Independent of the per-player join/leave feed — this can be silenced on its
+    /// own. Still needs PalworldFeedEnabled + a channel (it shares the feed
+    /// channel), and only fires after the same multi-poll offline delay the session
+    /// logic uses, so a brief DatHost reboot won't trigger a down/up pair.
+    /// SyncWithHandlers: PalworldPresenceService.PostServerStatusAsync.
+    /// </summary>
+    public bool PalworldServerStatusAnnounceEnabled { get; set; } = true;
+
+    /// <summary>
     /// Role permitted to use /palworld-admin (announce, kick, ban, unban, save,
     /// restart). The dedicated "Palworld Mod" role: HQ plus the server's owner, who
     /// isn't in HQ but does own the box. Administrator always bypasses; 0 locks the

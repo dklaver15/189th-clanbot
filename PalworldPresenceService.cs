@@ -71,7 +71,20 @@ public sealed class PalworldPresenceService : BackgroundService
     private readonly Dictionary<string, PalworldPlayer> _online = new(StringComparer.Ordinal);
 
     private int _consecutiveFailures;
-    private bool _reportedOffline;
+
+    /// <summary>
+    /// What we've last ANNOUNCED about the whole server's reachability.
+    /// null  = unknown (haven't reached a verdict yet, e.g. just booted).
+    /// true  = we believe it's up.
+    /// false = we've announced it's down.
+    ///
+    /// The null start is what stops a "server is online!" post every time the bot
+    /// restarts while the server was already up: we only announce online on a
+    /// false→true transition (a real recovery), never null→true (first contact).
+    /// Likewise offline only fires true→false, never null→false, so booting the bot
+    /// while the server happens to be down stays quiet.
+    /// </summary>
+    private bool? _serverOnline;
 
     public PalworldPresenceService(
         IServiceProvider services,
@@ -178,18 +191,29 @@ public sealed class PalworldPresenceService : BackgroundService
         {
             _consecutiveFailures++;
 
-            if (_consecutiveFailures == OfflinePollsBeforeClose && _online.Count > 0)
+            // The "== threshold" (not ">=") makes this fire exactly once, on the
+            // poll that crosses the line — everything past that point is already
+            // handled. A brief DatHost reboot that recovers in under
+            // OfflinePollsBeforeClose polls never reaches here, so it produces no
+            // offline announcement AND no matching "online" post on recovery: short
+            // blips stay silent, which is the point of the delay.
+            if (_consecutiveFailures == OfflinePollsBeforeClose)
             {
-                await CloseAllOpenSessionsAsync(ct);
-                _logger.LogInformation(
-                    "Palworld server unreachable for {Polls} consecutive polls; closed open sessions at their last-seen time",
-                    _consecutiveFailures);
-            }
+                if (_online.Count > 0)
+                {
+                    await CloseAllOpenSessionsAsync(ct);
+                    _logger.LogInformation(
+                        "Palworld server unreachable for {Polls} consecutive polls; closed open sessions at their last-seen time",
+                        _consecutiveFailures);
+                }
 
-            if (!_reportedOffline && _consecutiveFailures >= OfflinePollsBeforeClose)
-            {
-                _reportedOffline = true;
                 _logger.LogWarning("Palworld server appears offline ({Failures} failed polls)", _consecutiveFailures);
+
+                // Announce only if we'd previously confirmed it UP. A null verdict
+                // (bot booted into an already-down server) flips to false quietly.
+                if (_serverOnline == true)
+                    await PostServerStatusAsync(online: false, ct);
+                _serverOnline = false;
             }
 
             return;
@@ -199,8 +223,13 @@ public sealed class PalworldPresenceService : BackgroundService
         {
             _logger.LogInformation("Palworld server reachable again after {Failures} failed poll(s)", _consecutiveFailures);
             _consecutiveFailures = 0;
-            _reportedOffline = false;
         }
+
+        // Announce recovery only on a real false→true flip. First contact (null)
+        // just records the state — the server didn't "come up", it was already up.
+        if (_serverOnline == false)
+            await PostServerStatusAsync(online: true, ct);
+        _serverOnline = true;
 
         var seen = new Dictionary<string, PalworldPlayer>(StringComparer.Ordinal);
         foreach (var p in players)
@@ -331,7 +360,7 @@ public sealed class PalworldPresenceService : BackgroundService
 
     private static string JoinMessage(PalworldPlayer p, int onlineCount) =>
         $"🟢 **{Escape(p.Name)}** joined the Palworld server" +
-        $"{(p.Level > 0 ? $" — level {p.Level}" : "")}  ·  {onlineCount} online";
+        $"{(p.Level > 0 ? $" — level **{p.Level}**" : "")}  ·  {onlineCount} online";
 
     private static string LeaveMessage(PalworldPlayer p, TimeSpan? played, int onlineCount) =>
         $"🔴 **{Escape(p.Name)}** left the Palworld server" +
@@ -341,18 +370,11 @@ public sealed class PalworldPresenceService : BackgroundService
     {
         if (!_config.PalworldFeedEnabled || _config.PalworldFeedChannelId == 0) return;
 
+        var channel = await ResolveFeedChannelAsync(ct);
+        if (channel is null) return;
+
         try
         {
-            var channel = _client.GetChannel(_config.PalworldFeedChannelId) as IMessageChannel
-                          ?? await _client.Rest.GetChannelAsync(_config.PalworldFeedChannelId) as IMessageChannel;
-
-            if (channel is null)
-            {
-                _logger.LogWarning("PalworldPresenceService: could not resolve feed channel {ChannelId}",
-                    _config.PalworldFeedChannelId);
-                return;
-            }
-
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(30));
 
@@ -370,6 +392,86 @@ public sealed class PalworldPresenceService : BackgroundService
             // A failed feed post must never cost us the session write.
             _logger.LogWarning(ex, "PalworldPresenceService: failed to post feed message");
         }
+    }
+
+    /// <summary>
+    /// Posts the whole-server up/down notice as a green/red embed — a rare, one-off
+    /// event (maybe once or twice a day, gated behind the same offline delay as the
+    /// session logic), which is exactly the kind of thing an embed suits, unlike the
+    /// high-volume join/leave lines that stay plain text on purpose.
+    ///
+    /// Shares the feed channel, and is gated by BOTH the feed switch (a channel is
+    /// needed either way) and its own PalworldServerStatusAnnounceEnabled, so the
+    /// up/down pings can be silenced without losing the join/leave feed. Best-effort
+    /// — a failed post is logged and dropped, never propagated into the poll loop.
+    /// </summary>
+    private async Task PostServerStatusAsync(bool online, CancellationToken ct)
+    {
+        if (!_config.PalworldServerStatusAnnounceEnabled) return;
+        if (!_config.PalworldFeedEnabled || _config.PalworldFeedChannelId == 0) return;
+
+        var channel = await ResolveFeedChannelAsync(ct);
+        if (channel is null) return;
+
+        // Enrich the "online" post with the server name when we can get it; purely
+        // cosmetic, so a failure here just omits the footer.
+        string? serverName = null;
+        if (online)
+        {
+            try { serverName = (await _api.GetInfoAsync(ct))?.ServerName; }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch { /* cosmetic only */ }
+        }
+
+        var embed = new EmbedBuilder()
+            .WithColor(online ? Color.Green : Color.Red)
+            .WithTitle(online ? "🟢 Palworld server is online" : "🔴 Palworld server went offline")
+            .WithDescription(online
+                ? "The clan's Palworld server is up — hop on!"
+                : "The clan's Palworld server stopped responding. It may be restarting or down.")
+            .WithCurrentTimestamp();
+
+        if (!string.IsNullOrWhiteSpace(serverName))
+            embed.WithFooter(serverName);
+
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(30));
+
+            await channel.SendMessageAsync(
+                embed: embed.Build(),
+                allowedMentions: AllowedMentions.None,
+                options: new RequestOptions { CancelToken = cts.Token });
+
+            _logger.LogInformation("Posted Palworld server {State} announcement", online ? "online" : "offline");
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "PalworldPresenceService: failed to post server {State} announcement",
+                online ? "online" : "offline");
+        }
+    }
+
+    /// <summary>
+    /// Resolves the feed channel from the gateway cache, falling back to a REST
+    /// lookup so an uncached channel still resolves. Null (logged) when it can't be
+    /// found — callers treat that as "skip the post".
+    /// </summary>
+    private async Task<IMessageChannel?> ResolveFeedChannelAsync(CancellationToken ct)
+    {
+        var channel = _client.GetChannel(_config.PalworldFeedChannelId) as IMessageChannel
+                      ?? await _client.Rest.GetChannelAsync(_config.PalworldFeedChannelId, new RequestOptions { CancelToken = ct }) as IMessageChannel;
+
+        if (channel is null)
+            _logger.LogWarning("PalworldPresenceService: could not resolve feed channel {ChannelId}",
+                _config.PalworldFeedChannelId);
+
+        return channel;
     }
 
     /// <summary>
