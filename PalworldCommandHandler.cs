@@ -206,8 +206,8 @@ public class PalworldCommandHandler
 
     private async Task HandleStatusAsync(SocketSlashCommand command)
     {
+        if (!await PassesMemberGateAsync(command)) return;
         await command.DeferAsync(ephemeral: true);
-        if (!await EnsureEnabledAsync(command)) return;
 
         var info = await _api.GetInfoAsync();
         var metrics = await _api.GetMetricsAsync();
@@ -257,8 +257,8 @@ public class PalworldCommandHandler
 
     private async Task HandlePlaytimeAsync(SocketSlashCommand command)
     {
+        if (!await PassesMemberGateAsync(command)) return;
         await command.DeferAsync(ephemeral: true);
-        if (!await EnsureEnabledAsync(command)) return;
 
         if (command.GuildId is not ulong guildId)
         {
@@ -335,8 +335,10 @@ public class PalworldCommandHandler
 
     private async Task HandleLeaderboardAsync(SocketSlashCommand command)
     {
+        // Gate BEFORE the (public) defer, so a denial is a private response and
+        // never leaves a stray public "thinking…" in the channel.
+        if (!await PassesMemberGateAsync(command)) return;
         await command.DeferAsync();
-        if (!await EnsureEnabledAsync(command, ephemeral: false)) return;
 
         var sort = command.Data.Options.FirstOrDefault(o => o.Name == "sort")?.Value as string ?? "playtime";
 
@@ -391,8 +393,8 @@ public class PalworldCommandHandler
 
     private async Task HandleLinkAsync(SocketSlashCommand command)
     {
+        if (!await PassesMemberGateAsync(command)) return;
         await command.DeferAsync(ephemeral: true);
-        if (!await EnsureEnabledAsync(command)) return;
 
         if (command.GuildId is not ulong guildId || command.User is not SocketGuildUser caller)
         {
@@ -657,6 +659,52 @@ public class PalworldCommandHandler
 
     // ─── Shared ──────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// The member-facing gate for /palworld-status, -playtime, -leaderboard and
+    /// -link: feature enabled + configured, in a guild, and at or above
+    /// <see cref="BotConfig.PalworldMinRank"/> (default PFC). Administrator bypasses.
+    ///
+    /// Runs BEFORE the handler defers and replies with RespondAsync (not Followup),
+    /// so a denial is a clean ephemeral message with no dangling deferred response —
+    /// which matters for /palworld-leaderboard, whose defer is public.
+    ///
+    /// /palworld-admin does NOT use this — it has its own role gate
+    /// (<see cref="HasAdminRole"/>) that is independent of the rank ladder, because
+    /// the server's owner holds the mod role without holding a clan rank.
+    /// </summary>
+    private async Task<bool> PassesMemberGateAsync(SocketSlashCommand command)
+    {
+        if (!_config.PalworldEnabled || !_api.IsConfigured)
+        {
+            await command.RespondAsync(
+                "The Palworld integration isn't set up yet (`PalworldEnabled` / `PalworldBaseUrl` / " +
+                "`PalworldAdminPassword`). Ask an admin.",
+                ephemeral: true);
+            return false;
+        }
+
+        if (command.User is not SocketGuildUser caller)
+        {
+            await command.RespondAsync("This command can only be used in a server.", ephemeral: true);
+            return false;
+        }
+
+        if (!HasMinRank(caller))
+        {
+            await command.RespondAsync(
+                $"❌ You need to be **{_config.PalworldMinRank}+** to use the Palworld commands.",
+                ephemeral: true);
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Enabled-only check retained for /palworld-admin (which gates on the mod role,
+    /// not rank, so it can't reuse <see cref="PassesMemberGateAsync"/>). Deferred
+    /// first, so this uses a followup.
+    /// </summary>
     private async Task<bool> EnsureEnabledAsync(SocketSlashCommand command, bool ephemeral = true)
     {
         if (_config.PalworldEnabled && _api.IsConfigured) return true;
@@ -666,6 +714,29 @@ public class PalworldCommandHandler
             "`PalworldAdminPassword`). Ask an admin.",
             ephemeral: ephemeral);
         return false;
+    }
+
+    /// <summary>
+    /// Rank floor for the member-facing commands: Administrator bypasses, otherwise
+    /// any role at or above <see cref="BotConfig.PalworldMinRank"/> in the RankRoles
+    /// ladder. An unrecognized configured rank fails CLOSED (nobody but Admins),
+    /// same conservative default as the other rank gates.
+    /// SyncWithHandlers: CommandsCommandHandler.BuildCatalog (MinRank(PalworldMinRank)).
+    /// </summary>
+    private bool HasMinRank(SocketGuildUser user)
+    {
+        if (user.GuildPermissions.Administrator) return true;
+
+        var rankRoles = _config.GetRankRolesList();
+        var minIndex = rankRoles.FindIndex(r =>
+            r.Equals(_config.PalworldMinRank, StringComparison.OrdinalIgnoreCase));
+        if (minIndex < 0) return false;
+
+        return user.Roles.Any(role =>
+        {
+            var roleIndex = rankRoles.FindIndex(r => r.Equals(role.Name, StringComparison.OrdinalIgnoreCase));
+            return roleIndex >= minIndex;
+        });
     }
 
     private static async Task ReportAsync(SocketSlashCommand command, bool ok, string success, string failure) =>
