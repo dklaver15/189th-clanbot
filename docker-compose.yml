@@ -29,6 +29,14 @@ services:
       # exposes the REST port publicly with no IP allowlist, so it is the only
       # thing protecting the server: keep it long, random, and out of git.
       - BotConfig__PalworldAdminPassword=${PALWORLD_ADMIN_PASSWORD}
+      # -- Satisfactory Dedicated Server --
+      # A credential for the game's HTTPS API. Set ONE of these: the Admin Password
+      # (exchanged for a token via PasswordLogin), or a pre-generated Application
+      # token from `server.GenerateAPIToken`. Either grants save/shutdown/run-command,
+      # so keep it out of git. Base URL is the same IP:port players use in-game,
+      # prefixed https:// (set BotConfig__SatisfactoryBaseUrl in appsettings/env).
+      - BotConfig__SatisfactoryAdminPassword=${SATISFACTORY_ADMIN_PASSWORD}
+      - BotConfig__SatisfactoryApiToken=${SATISFACTORY_API_TOKEN}
       # -- Meeting recording (recorder sidecar) --
       - BotConfig__MeetingRecorderBaseUrl=http://recorder:8080
       - BotConfig__MeetingRecorderSharedSecret=${RECORDER_SHARED_SECRET}

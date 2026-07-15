@@ -1543,6 +1543,16 @@ public class BotConfig
     public ulong PalworldFeedChannelId { get; set; } = 1526389577277771886;
 
     /// <summary>
+    /// Minimum rank to use the member-facing Palworld commands (/palworld-status,
+    /// -playtime, -leaderboard, -link). Default PFC — keeps brand-new recruits
+    /// (RCT) out while opening it to essentially the whole membership. Administrator
+    /// bypasses. Does NOT apply to /palworld-admin, which is gated on
+    /// PalworldAdminRoleId instead.
+    /// SyncWithHandlers: PalworldCommandHandler.HasMinRank.
+    /// </summary>
+    public string PalworldMinRank { get; set; } = "PFC";
+
+    /// <summary>
     /// Whether the whole-server up/down notice is posted (as a green/red embed) to
     /// the feed channel when the server comes online or goes offline. Default true.
     /// Independent of the per-player join/leave feed — this can be silenced on its
@@ -1576,6 +1586,94 @@ public class BotConfig
     /// SyncWithHandlers: EventReminderService.AnnounceInGameAsync.
     /// </summary>
     public bool PalworldEventAnnounceEnabled { get; set; } = true;
+
+    // ─── Satisfactory server ─────────────────────────────────────────
+    /// <summary>
+    /// Master switch for the Satisfactory integration (status command, presence
+    /// feed, /satisfactory-* commands). Default false — nothing runs until the
+    /// server details are configured. Everything additionally requires
+    /// SatisfactoryBaseUrl plus a credential (an admin password OR a pre-generated
+    /// API token); see <see cref="Services.SatisfactoryApiService.IsConfigured"/>.
+    /// </summary>
+    public bool SatisfactoryEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Base URL of the Satisfactory Dedicated Server's HTTPS API, scheme + host +
+    /// port, no trailing path — e.g. "https://1.2.3.4:7777". The client appends
+    /// "/api/v1" itself.
+    ///
+    /// ── Where the port comes from ──
+    /// Unlike Palworld, Satisfactory's API is NOT on a separate allocated port: it
+    /// rides the SAME port players type into the game to connect (the game port,
+    /// 7777 by default). So the IP:port your members enter in-game IS this URL —
+    /// just prefix "https://". The scheme MUST be https: the API is always TLS, even
+    /// when the server uses a self-signed certificate (which the client accepts; see
+    /// <see cref="Services.SatisfactoryApiService"/>).
+    /// </summary>
+    public string SatisfactoryBaseUrl { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The server's Admin Password. The bot exchanges it for a short-lived Bearer
+    /// token via the API's PasswordLogin function (privilege level Administrator),
+    /// caches that token, and silently re-logs in when it expires. Leave blank if you
+    /// instead set <see cref="SatisfactoryApiToken"/>.
+    ///
+    /// ⚠️ This grants save/shutdown/run-command over the whole server. Never commit
+    /// it. docker-compose maps:
+    ///   BotConfig__SatisfactoryAdminPassword=${SATISFACTORY_ADMIN_PASSWORD}
+    /// Add SATISFACTORY_ADMIN_PASSWORD=... to the droplet's .env file.
+    /// </summary>
+    public string SatisfactoryAdminPassword { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Optional pre-generated Application API token, an alternative to
+    /// <see cref="SatisfactoryAdminPassword"/>. Generated once on the server console
+    /// with <c>server.GenerateAPIToken</c>; unlike a password login it never expires
+    /// and needs no re-authentication. When set, it takes precedence over the admin
+    /// password. Same secret-handling rules: never commit it, inject from the
+    /// environment. Leave blank to use the admin password instead.
+    /// </summary>
+    public string SatisfactoryApiToken { get; set; } = string.Empty;
+
+    /// <summary>
+    /// How often SatisfactoryPresenceService polls the server state, in seconds.
+    /// Default 60. Like Palworld, the API has no webhooks, so up/down and player-count
+    /// changes can only be found by polling. Clamped to 15–3600s.
+    /// </summary>
+    public int SatisfactoryPollIntervalSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// Whether the presence feed (server up/down + player-count changes) is posted to
+    /// <see cref="SatisfactoryFeedChannelId"/>. Default true. Note the Satisfactory
+    /// API exposes only a player COUNT, not names, so this feed reports "N players
+    /// online", never per-player join/leave lines like the Palworld feed does.
+    /// </summary>
+    public bool SatisfactoryFeedEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Channel for the Satisfactory presence feed. 0 disables the feed. Set this to
+    /// the #satisfactory channel id.
+    /// </summary>
+    public ulong SatisfactoryFeedChannelId { get; set; } = 0;
+
+    /// <summary>
+    /// Whether the whole-server up/down notice (green/red embed) is posted to the
+    /// feed channel. Default true. Shares the feed channel and only fires after the
+    /// same multi-poll offline delay the presence logic uses, so a brief host reboot
+    /// won't trigger a down/up pair.
+    /// SyncWithHandlers: SatisfactoryPresenceService.PostServerStatusAsync.
+    /// </summary>
+    public bool SatisfactoryServerStatusAnnounceEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Role permitted to use /satisfactory-admin (save, restart, run-command).
+    /// Administrator always bypasses; 0 locks the command to Administrators only
+    /// (fail closed, never fail open). Deliberately a role id, not a rank floor:
+    /// these commands can shut the game server down, so the people who can run them
+    /// should be an explicit group.
+    /// SyncWithHandlers: SatisfactoryCommandHandler.HasAdminRole.
+    /// </summary>
+    public ulong SatisfactoryAdminRoleId { get; set; } = 0;
 
     // ─── SQLite Backup Settings ──────────────────────────────────────
     /// <summary>

@@ -58,6 +58,7 @@ public class DiscordBotService : IHostedService
     private readonly UfcCommandHandler _ufcCommandHandler;
     private readonly FinalsCommandHandler _finalsCommandHandler;
     private readonly PalworldCommandHandler _palworldCommandHandler;
+    private readonly SatisfactoryCommandHandler _satisfactoryCommandHandler;
     private readonly PromoteCommandHandler _promoteHandler;
     private readonly DemoteCommandHandler _demoteHandler;
     private readonly SetNickCommandHandler _setNickHandler;
@@ -134,6 +135,7 @@ public class DiscordBotService : IHostedService
         UfcCommandHandler ufcCommandHandler,
         FinalsCommandHandler finalsCommandHandler,
         PalworldCommandHandler palworldCommandHandler,
+        SatisfactoryCommandHandler satisfactoryCommandHandler,
         PromoteCommandHandler promoteHandler,
         DemoteCommandHandler demoteHandler,
         SetNickCommandHandler setNickHandler,
@@ -209,6 +211,7 @@ public class DiscordBotService : IHostedService
         _ufcCommandHandler           = ufcCommandHandler;
         _finalsCommandHandler        = finalsCommandHandler;
         _palworldCommandHandler      = palworldCommandHandler;
+        _satisfactoryCommandHandler  = satisfactoryCommandHandler;
         _promoteHandler              = promoteHandler;
         _demoteHandler               = demoteHandler;
         _setNickHandler              = setNickHandler;
@@ -304,6 +307,7 @@ public class DiscordBotService : IHostedService
         _ufcCommandHandler.Register(_client);
         _finalsCommandHandler.Register(_client);
         _palworldCommandHandler.Register(_client);
+        _satisfactoryCommandHandler.Register(_client);
         _promoteHandler.Register(_client);
         _demoteHandler.Register(_client);
         _setNickHandler.Register(_client);
@@ -473,6 +477,16 @@ public class DiscordBotService : IHostedService
                 PalworldCommandHandler.BuildLeaderboardCommand(),
                 PalworldCommandHandler.BuildLinkCommand(),
                 PalworldCommandHandler.BuildAdminCommand(),
+
+                // /satisfactory-* — the clan's Satisfactory Dedicated Server via its
+                // built-in HTTPS API (same port as the game, self-signed cert). status
+                // is open to all members; /satisfactory-admin (save, restart, run a
+                // console command) is gated to the "Satisfactory Mod" role
+                // (BotConfig.SatisfactoryAdminRoleId). Runtime-gated by
+                // BotConfig.SatisfactoryEnabled. Handled by SatisfactoryCommandHandler.
+                // NOTE: keep CommandsCommandHandler.BuildCatalog in sync.
+                SatisfactoryCommandHandler.BuildStatusCommand(),
+                SatisfactoryCommandHandler.BuildAdminCommand(),
 
                 new SlashCommandBuilder()
                     .WithName("promote")

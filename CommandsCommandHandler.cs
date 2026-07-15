@@ -549,6 +549,15 @@ public class CommandsCommandHandler
             return user.Roles.Any(r => r.Id == cfg.PalworldAdminRoleId);
         };
 
+        // SyncWithHandlers: SatisfactoryCommandHandler.HasAdminRole
+        // The "Satisfactory Mod" role. Fails closed (Administrators only) when unset.
+        Func<SocketGuildUser, BotConfig, bool> satisfactoryMod = (user, cfg) =>
+        {
+            if (user.GuildPermissions.Administrator) return true;
+            if (cfg.SatisfactoryAdminRoleId == 0) return false;
+            return user.Roles.Any(r => r.Id == cfg.SatisfactoryAdminRoleId);
+        };
+
         // SyncWithHandlers: SetNickCommandHandler.HasPermission
         Func<SocketGuildUser, BotConfig, bool> officerOrManageNicknames = (user, cfg) =>
         {
@@ -588,6 +597,7 @@ public class CommandsCommandHandler
         var compEventLbl     = $"{config.CompEventMinRank}+";
         var awolKickLbl      = $"{config.AwolKickMinRank}+";
         var briefingLbl      = $"{config.BriefingNowMinRank}+";
+        var palworldLbl      = $"{config.PalworldMinRank}+";
         const string eventCreditLbl   = "CPT+";   // SyncWithHandlers: EventCreditCommandHandler.MinRankFloor
         const string attendanceLbl    = "MAJ+";   // SyncWithHandlers: AttendanceCommandHandler.MinRankFloor
         const string securityAuditLbl = "BG+";    // SyncWithHandlers: SecurityAuditCommandHandler.MinRankFloor
@@ -614,13 +624,7 @@ public class CommandsCommandHandler
                 "Everyone", everyone),
             new("my-invites", "Show invites you created with use counts and attribution",
                 "Everyone", everyone),
-            new("palworld-status", "Live status of the clan's Palworld server — who's on, uptime, in-game day",
-                "Everyone", everyone),
-            new("palworld-playtime", "How long someone has played on the clan's Palworld server",
-                "Everyone", everyone),
-            new("palworld-leaderboard", "Top Palworld players by playtime, level, or buildings",
-                "Everyone", everyone),
-            new("palworld-link", "Link your Discord account to your Palworld character (be online in-game)",
+            new("satisfactory-status", "Live status of the clan's Satisfactory server — players on, session, tier, tick rate",
                 "Everyone", everyone),
             new("patrol", "Toggle your visibility on Patrol Watch embeds (off/on/info)",
                 "Everyone", everyone),
@@ -689,8 +693,20 @@ public class CommandsCommandHandler
             new("ticket-panel", "Post (or re-post) the ticket panel to the tickets channel",
                 "HQ", ticketHq),   // SyncWithHandlers: TicketPanelCommandHandler.InvokerHasPermission
 
+            new("palworld-status", "Live status of the clan's Palworld server — who's on, uptime, in-game day",
+                palworldLbl, MinRank(config.PalworldMinRank)),   // SyncWithHandlers: PalworldCommandHandler.HasMinRank
+            new("palworld-playtime", "How long someone has played on the clan's Palworld server",
+                palworldLbl, MinRank(config.PalworldMinRank)),
+            new("palworld-leaderboard", "Top Palworld players by playtime, level, or buildings",
+                palworldLbl, MinRank(config.PalworldMinRank)),
+            new("palworld-link", "Link your Discord account to your Palworld character (be online in-game)",
+                palworldLbl, MinRank(config.PalworldMinRank)),
+
             new("palworld-admin", "Administer the Palworld server — announce, kick, ban, unban, save, restart",
                 "Palworld Mod", palworldMod),   // SyncWithHandlers: PalworldCommandHandler.HasAdminRole
+
+            new("satisfactory-admin", "Administer the Satisfactory server — save, restart, run a console command",
+                "Satisfactory Mod", satisfactoryMod),   // SyncWithHandlers: SatisfactoryCommandHandler.HasAdminRole
 
             new("purge-user", "Delete a member's recent messages server-wide (dry-run unless confirm:true)",
                 "Admin", (user, _) => user.GuildPermissions.Administrator),   // SyncWithHandlers: PurgeUserCommandHandler

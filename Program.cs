@@ -530,6 +530,27 @@ try
     builder.Services.AddSingleton<PalworldCommandHandler>();
     builder.Services.AddHostedService<PalworldPresenceService>();
 
+    // ── Satisfactory (Dedicated Server HTTPS API) ────────────────────
+    // SatisfactoryApiService is the client for the game's built-in HTTPS API, which
+    // rides the SAME port players connect to (7777) and presents a SELF-SIGNED cert —
+    // hence the dedicated named HttpClient below that accepts any server certificate
+    // (trust scoped to this one client only). Auth is a Bearer token, from either a
+    // pre-generated Application token or an Admin-password login the client caches.
+    // SatisfactoryCommandHandler owns /satisfactory-status and the role-gated
+    // /satisfactory-admin (Register() called from DiscordBotService).
+    // SatisfactoryPresenceService polls QueryServerState for the up/down + player-count
+    // feed — the API has no webhooks and no player-list, so only a COUNT is available.
+    // All gated by BotConfig.Satisfactory* — idle until SatisfactoryEnabled + a base
+    // URL + a credential are set.
+    builder.Services.AddHttpClient(SatisfactoryApiService.HttpClientName)
+        .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+        {
+            ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator,
+        });
+    builder.Services.AddSingleton<SatisfactoryApiService>();
+    builder.Services.AddSingleton<SatisfactoryCommandHandler>();
+    builder.Services.AddHostedService<SatisfactoryPresenceService>();
+
     // ── Hosted Services ──────────────────────────────────────────────
     builder.Services.AddHostedService<DiscordBotService>();
     builder.Services.AddHostedService<HistoryBackfillService>();
