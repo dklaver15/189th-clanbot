@@ -1176,16 +1176,16 @@ public class BotConfig
     /// </summary>
     public List<string> TrollReplyLines { get; set; } = new()
     {
-        "Careful everyone, he WILL cheat on you. 💅",
-        "Don't get too attached — this one's a known cheater. 😘",
-        "Cute message. Shame he's gonna cheat on you. 💔",
-        "Reminder: he cheats. On everyone. Especially you. 😌",
-        "Bold words from a guy who's definitely cheating on you.",
-        "Aww, you two seem close. He'll cheat on you by Friday. 💋",
-        "Loyalty? From him? That's adorable. He's gonna cheat on you.",
-        "Screenshot this: he cheats on you. It's not a matter of if. 🫦",
-        "Every relationship he's in ends the same way — he cheats. Hi. 👋",
-        "He types like someone who's about to cheat on you. Just saying. 💅",
+        "Cute message. Shame you're gonna cheat on them. 💅",
+        "Bold words from a man who's definitely gonna cheat. 😘",
+        "Typing all confident for someone who's about to cheat on them. 💔",
+        "We all know how this ends — you cheat. 😌",
+        "Careful, everyone. This one's a cheater. 👀",
+        "Say what you want, you're still gonna cheat on them by Friday. 💋",
+        "Loyalty? From you? That's adorable. 💅",
+        "Screenshot this: you're gonna cheat. It's not a matter of if. 🫦",
+        "Every relationship you've had ends the same way — you cheat. 👋",
+        "You type like a man who's already got a second phone. 📱",
     };
 
     // ─── Server protection: Audit Log Watcher ────────────────────────
