@@ -52,6 +52,19 @@ public sealed class TrollReplyHandler
     private readonly object _cooldownLock = new();
     private DateTime _lastReplyUtc = DateTime.MinValue;
 
+    // ── Line selection: shuffle bag ──────────────────────────────────────
+    // Naive Random.Next(count) picks WITH replacement, so it happily
+    // repeats the same line several times in a row. Instead we deal from a
+    // shuffled "bag": every line is used exactly once before any repeats,
+    // and on reshuffle we make sure the new first line isn't the one we
+    // just played, so there's no repeat across bag boundaries either.
+    // The bag is rebuilt whenever the configured line list changes (count
+    // or content), so editing TrollReplyLines takes effect cleanly.
+    private readonly object _bagLock = new();
+    private readonly List<string> _bag = new();
+    private List<string> _bagSource = new();
+    private string? _lastLine;
+
     public TrollReplyHandler(
         ILogger<TrollReplyHandler> logger,
         IOptions<BotConfig> config)
@@ -100,14 +113,10 @@ public sealed class TrollReplyHandler
                 _lastReplyUtc = DateTime.UtcNow;
             }
 
-            // ── Pick a line ───────────────────────────────────────────────
+            // ── Pick a line (shuffle bag — no immediate repeats) ──────────
             var lines = _config.TrollReplyLines;
             if (lines is null || lines.Count == 0) return;
-            string line;
-            lock (_random)
-            {
-                line = lines[_random.Next(lines.Count)];
-            }
+            var line = NextLine(lines);
 
             // ── Reply ─────────────────────────────────────────────────────
             // MessageReference threads the reply under the victim's message.
@@ -127,6 +136,64 @@ public sealed class TrollReplyHandler
         {
             _logger.LogError(ex,
                 "Troll reply handler crashed for message {MessageId}", message.Id);
+        }
+    }
+
+    /// <summary>
+    /// Returns the next line using a shuffle-bag: every line is dealt once
+    /// before any repeats. When the bag empties it's reshuffled, and the
+    /// reshuffle guarantees the new first line differs from the one just
+    /// played (when there's more than one line) so we never repeat across
+    /// bag boundaries. The bag is rebuilt if the source list changed, so
+    /// config edits to TrollReplyLines take effect immediately.
+    /// </summary>
+    private string NextLine(List<string> lines)
+    {
+        lock (_bagLock)
+        {
+            // Rebuild if the configured lines changed (count or content).
+            if (!_bagSource.SequenceEqual(lines))
+            {
+                _bagSource = new List<string>(lines);
+                _bag.Clear();
+            }
+
+            if (_bag.Count == 0)
+            {
+                Refill(lines);
+            }
+
+            // Deal from the end (cheap removal).
+            var line = _bag[^1];
+            _bag.RemoveAt(_bag.Count - 1);
+            _lastLine = line;
+            return line;
+        }
+    }
+
+    /// <summary>
+    /// Refills and Fisher-Yates shuffles the bag. If there's more than one
+    /// distinct line, ensures the line dealt next (the last element, since
+    /// we deal from the end) isn't the one we just played.
+    /// </summary>
+    private void Refill(List<string> lines)
+    {
+        _bag.Clear();
+        _bag.AddRange(lines);
+
+        // Fisher-Yates.
+        for (int i = _bag.Count - 1; i > 0; i--)
+        {
+            int j = _random.Next(i + 1);
+            (_bag[i], _bag[j]) = (_bag[j], _bag[i]);
+        }
+
+        // Avoid a cross-bag repeat: if the next line to be dealt (last
+        // element) matches the previous line, swap it with another slot.
+        if (_lastLine is not null && _bag.Count > 1 && _bag[^1] == _lastLine)
+        {
+            int swap = _random.Next(_bag.Count - 1); // any slot but the last
+            (_bag[^1], _bag[swap]) = (_bag[swap], _bag[^1]);
         }
     }
 }
