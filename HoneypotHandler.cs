@@ -347,7 +347,8 @@ public sealed class HoneypotHandler
             {
                 await WriteAuditAsync(guild, author, member, ctx,
                     action: "BanSkippedOwner", purged: 0, channelsTouched: 0,
-                    error: "server owner — cannot be banned by a bot");
+                    error: "server owner — cannot be banned by a bot",
+                    postedContent: FormatPostedContentForAudit(trigger));
                 await PostAlertAsync(guild, author, member, ctx,
                     enforced: true, banned: false, purged: 0,
                     error: "server owner — cannot be banned by a bot",
@@ -377,7 +378,8 @@ public sealed class HoneypotHandler
         {
             // AlertOnly: observe only. No delete, no ban, no counter move.
             await WriteAuditAsync(guild, author, member, ctx,
-                action: "Alerted", purged: 0, channelsTouched: 0, error: null);
+                action: "Alerted", purged: 0, channelsTouched: 0, error: null,
+                postedContent: FormatPostedContentForAudit(trigger));
             await PostAlertAsync(guild, author, member, ctx,
                 enforced: false, banned: false, purged: 0, error: null,
                 postedContent: FormatPostedContent(trigger));
@@ -435,7 +437,8 @@ public sealed class HoneypotHandler
                     "{Feature} cannot ban {User} ({Id}) — member's top role is at/above the bot's. " +
                     "Falling back to alert only.", ctx.Feature, username, userId);
                 await WriteAuditAsync(guild, trigger.Author, member, ctx,
-                    action: "BanSkippedHierarchy", purged: 0, channelsTouched: 0, error: null);
+                    action: "BanSkippedHierarchy", purged: 0, channelsTouched: 0, error: null,
+                    postedContent: FormatPostedContentForAudit(trigger));
                 await PostAlertAsync(guild, trigger.Author, member, ctx,
                     enforced: true, banned: false, purged: 0, error: "bot role too low to ban",
                     postedContent: FormatPostedContent(trigger));
@@ -483,7 +486,8 @@ public sealed class HoneypotHandler
 
         await WriteAuditAsync(guild, trigger.Author, member, ctx,
             action: banned ? "Banned" : "BanFailed",
-            purged: purged, channelsTouched: channelsTouched, error: banError);
+            purged: purged, channelsTouched: channelsTouched, error: banError,
+            postedContent: FormatPostedContentForAudit(trigger));
 
         await PostAlertAsync(guild, trigger.Author, member, ctx,
             enforced: true, banned: banned, purged: purged, error: banError,
@@ -585,7 +589,7 @@ public sealed class HoneypotHandler
 
     private async Task WriteAuditAsync(
         SocketGuild guild, SocketUser author, SocketGuildUser? member, TrapHit ctx,
-        string action, int purged, int channelsTouched, string? error)
+        string action, int purged, int channelsTouched, string? error, string? postedContent = null)
     {
         try
         {
@@ -599,6 +603,8 @@ public sealed class HoneypotHandler
             if (action is "Banned" or "BanFailed")
                 details.Append($"PurgedMessages={purged}. ChannelsTouched={channelsTouched}. ");
             details.Append($"PurgeWindowMinutes={_config.HoneypotPurgeWindowMinutes}.");
+            if (!string.IsNullOrWhiteSpace(postedContent))
+                details.Append($" Posted=\"{postedContent}\"");
 
             db.SecurityAuditRecords.Add(new SecurityAuditRecord
             {
@@ -719,6 +725,34 @@ public sealed class HoneypotHandler
 
         var result = sb.ToString();
         return result.Length > 1024 ? result[..1021] + "…" : result;
+    }
+
+    /// <summary>
+    /// Plain single-string rendering of the triggering message for the
+    /// SecurityAuditRecord.Details field (no code fences — this is stored, not
+    /// re-rendered in Discord). Newlines collapsed, truncated, attachment info
+    /// appended.
+    /// </summary>
+    private static string FormatPostedContentForAudit(SocketUserMessage msg)
+    {
+        const int MaxLen = 500;
+
+        var parts = new List<string>();
+
+        var text = (msg.Content ?? string.Empty).Replace('\n', ' ').Replace('\r', ' ').Trim();
+        if (!string.IsNullOrWhiteSpace(text))
+            parts.Add(text);
+
+        if (msg.Attachments.Count > 0)
+            parts.AddRange(msg.Attachments.Select(a => $"[attachment: {a.Filename} {a.Url}]"));
+        if (msg.Stickers.Count > 0)
+            parts.AddRange(msg.Stickers.Select(s => $"[sticker: {s.Name}]"));
+
+        if (parts.Count == 0)
+            return "(no text — embed/attachment-only message)";
+
+        var result = string.Join(" ", parts);
+        return result.Length > MaxLen ? result[..MaxLen] + "…" : result;
     }
 
     // ── Warning embed ──────────────────────────────────────────────────
