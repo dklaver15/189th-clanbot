@@ -33,7 +33,6 @@ public class DiscordBotService : IHostedService
     private readonly MemberRosterReconciler _memberRosterReconciler;
     private readonly AccountAgeGateHandler _accountAgeGateHandler;
     private readonly InviteLinkFilterHandler _inviteLinkFilterHandler;
-    private readonly TrollReplyHandler _trollReplyHandler;
     private readonly AuditLogWatcherHandler _auditLogWatcherHandler;
     private readonly NicknameImpersonationHandler _nicknameImpersonationHandler;
     private readonly WebhookAuditCommandHandler _webhookAuditCommandHandler;
@@ -111,7 +110,6 @@ public class DiscordBotService : IHostedService
         MemberRosterReconciler memberRosterReconciler,
         AccountAgeGateHandler accountAgeGateHandler,
         InviteLinkFilterHandler inviteLinkFilterHandler,
-        TrollReplyHandler trollReplyHandler,
         AuditLogWatcherHandler auditLogWatcherHandler,
         NicknameImpersonationHandler nicknameImpersonationHandler,
         WebhookAuditCommandHandler webhookAuditCommandHandler,
@@ -188,7 +186,6 @@ public class DiscordBotService : IHostedService
         _memberRosterReconciler      = memberRosterReconciler;
         _accountAgeGateHandler       = accountAgeGateHandler;
         _inviteLinkFilterHandler     = inviteLinkFilterHandler;
-        _trollReplyHandler           = trollReplyHandler;
         _auditLogWatcherHandler      = auditLogWatcherHandler;
         _nicknameImpersonationHandler = nicknameImpersonationHandler;
         _webhookAuditCommandHandler   = webhookAuditCommandHandler;
@@ -270,7 +267,6 @@ public class DiscordBotService : IHostedService
         _memberRosterReconciler.Register(_client);
         _accountAgeGateHandler.Register(_client);
         _inviteLinkFilterHandler.Register(_client);
-        _trollReplyHandler.Register(_client);
         _auditLogWatcherHandler.Register(_client);
         _nicknameImpersonationHandler.Register(_client);
         _webhookAuditCommandHandler.Register(_client);

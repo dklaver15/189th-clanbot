@@ -1142,52 +1142,6 @@ public class BotConfig
     /// </summary>
     public string InviteLinkFilterExemptMinRank { get; set; } = "MAJ";
 
-    // ─── Fun: Troll Reply ────────────────────────────────────────────
-    /// <summary>
-    /// Master switch for the troll-reply gag. When false the handler is
-    /// completely inert (early-returns before touching anything).
-    /// Default false so the feature never fires unless explicitly turned
-    /// on — this is a targeted joke, not something that should quietly
-    /// come alive after a config reload.
-    /// </summary>
-    public bool TrollReplyEnabled { get; set; } = false;
-
-    /// <summary>
-    /// Discord user ID of the (good-natured) victim. Every user-authored
-    /// message this account posts in a guild channel gets a snarky reply
-    /// from a random line in <see cref="TrollReplyLines"/>. 0 disables
-    /// the feature regardless of <see cref="TrollReplyEnabled"/>.
-    /// </summary>
-    public ulong TrollReplyTargetUserId { get; set; } = 0;
-
-    /// <summary>
-    /// Minimum seconds between troll replies to the same target, to keep
-    /// the bot from flooding a channel (and tripping Discord rate limits)
-    /// when the victim is mid-conversation. 0 = reply to literally every
-    /// message. Default 60 — snarky but not a firehose. The cooldown is
-    /// in-memory, so it resets on restart.
-    /// </summary>
-    public int TrollReplyCooldownSeconds { get; set; } = 60;
-
-    /// <summary>
-    /// The pool of sassy lines. One is chosen at random per reply. Fully
-    /// config-overridable so the gag can be retuned without a redeploy.
-    /// Defaults below all riff on the "he's gonna cheat on you" bit.
-    /// </summary>
-    public List<string> TrollReplyLines { get; set; } = new()
-    {
-        "Cute message. Shame you're gonna cheat on them. 💅",
-        "Bold words from a man who's definitely gonna cheat. 😘",
-        "Typing all confident for someone who's about to cheat on them. 💔",
-        "We all know how this ends — you cheat. 😌",
-        "Careful, everyone. This one's a cheater. 👀",
-        "Say what you want, you're still gonna cheat on them by Friday. 💋",
-        "Loyalty? From you? That's adorable. 💅",
-        "Screenshot this: you're gonna cheat. It's not a matter of if. 🫦",
-        "Every relationship you've had ends the same way — you cheat. 👋",
-        "You type like a man who's already got a second phone. 📱",
-    };
-
     // ─── Server protection: Audit Log Watcher ────────────────────────
     /// <summary>
     /// Operating mode for the audit-log watcher on Discord's

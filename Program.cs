@@ -139,13 +139,6 @@ try
     // called from DiscordBotService.
     builder.Services.AddSingleton<InviteLinkFilterHandler>();
 
-    // TrollReplyHandler: fun gag. Hooks MessageReceived and, when
-    // BotConfig.TrollReplyEnabled is true, replies to every message from
-    // BotConfig.TrollReplyTargetUserId with a random sassy line from
-    // BotConfig.TrollReplyLines. Throttled by TrollReplyCooldownSeconds.
-    // Off by default. Register() is called from DiscordBotService.
-    builder.Services.AddSingleton<TrollReplyHandler>();
-
     // AuditLogWatcherHandler: server-protection feature #3. Hooks
     // Discord's AuditLogCreated gateway event, filters to high-signal
     // structural actions (channel deletes, bans, bot adds, role changes,
