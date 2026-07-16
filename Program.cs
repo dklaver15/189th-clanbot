@@ -551,6 +551,14 @@ try
     builder.Services.AddSingleton<SatisfactoryCommandHandler>();
     builder.Services.AddHostedService<SatisfactoryPresenceService>();
 
+    // NitradoApiService AUGMENTS the Satisfactory feature with host-panel data from
+    // api.nitrado.net (valid TLS cert, so the default HttpClient is fine): authoritative
+    // up/down status that distinguishes a restart from a crash, the game build, and the
+    // rental expiry date. Read-only (no power control). Injected into
+    // SatisfactoryPresenceService and SatisfactoryCommandHandler; idle unless
+    // BotConfig.NitradoEnabled + an access token are set.
+    builder.Services.AddSingleton<NitradoApiService>();
+
     // ── Hosted Services ──────────────────────────────────────────────
     builder.Services.AddHostedService<DiscordBotService>();
     builder.Services.AddHostedService<HistoryBackfillService>();

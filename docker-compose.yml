@@ -37,6 +37,10 @@ services:
       # prefixed https:// (set BotConfig__SatisfactoryBaseUrl in appsettings/env).
       - BotConfig__SatisfactoryAdminPassword=${SATISFACTORY_ADMIN_PASSWORD}
       - BotConfig__SatisfactoryApiToken=${SATISFACTORY_API_TOKEN}
+      # -- Nitrado (host panel API, augments Satisfactory status) --
+      # Bearer access token from a Nitrado account with access to the service.
+      # Read-only usage, but treat as a secret. Keep out of git.
+      - BotConfig__NitradoAccessToken=${NITRADO_ACCESS_TOKEN}
       # -- Meeting recording (recorder sidecar) --
       - BotConfig__MeetingRecorderBaseUrl=http://recorder:8080
       - BotConfig__MeetingRecorderSharedSecret=${RECORDER_SHARED_SECRET}

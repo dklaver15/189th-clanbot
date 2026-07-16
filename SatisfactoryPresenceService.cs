@@ -8,81 +8,82 @@ using Microsoft.Extensions.Options;
 namespace ClanGuardBot.Services;
 
 /// <summary>
-/// Watches the clan's Satisfactory server by polling QueryServerState and posting a
-/// lightweight presence feed to <see cref="BotConfig.SatisfactoryFeedChannelId"/>:
-/// server up/down notices, plus a line whenever the connected-player COUNT changes.
+/// Watches the clan's Satisfactory server and posts a presence feed to
+/// <see cref="BotConfig.SatisfactoryFeedChannelId"/>: server up/down/maintenance
+/// notices, a line whenever the connected-player COUNT changes, and (via Nitrado) a
+/// heads-up before the rental lapses.
+///
+/// ── Two status sources ──
+/// Up/down comes from whichever is available, in priority order:
+///   1. Nitrado's host status (when <see cref="BotConfig.NitradoEnabled"/> + a token) —
+///      authoritative and, crucially, able to distinguish a planned restart/update
+///      (amber "maintenance") from a real outage (red "offline").
+///   2. Fallback: the game's own HTTPS API timing out. This can't tell WHY the server
+///      is unreachable, so it uses a multi-poll grace before declaring a red outage.
+/// Either way the player COUNT always comes from the game API — Nitrado's query count
+/// is unreliable for Satisfactory.
 ///
 /// ── Why only a count ──
-/// Satisfactory's HTTPS API has no player-list function — it reports
-/// NumConnectedPlayers and nothing that names who is on. So this feed can say
-/// "3 → 4 players", but never "Alice joined". That's an API limitation, not a
-/// design choice, and it's why there's no session table, playtime, or link command
-/// here (contrast <see cref="PalworldPresenceService"/>, whose API does list players).
+/// Satisfactory's HTTPS API has no player-list function, so this feed reports
+/// "3 → 4 players", never "Alice joined". Hence no session table or playtime here.
 ///
-/// ── The failure mode this is built around ──
-/// A null from <see cref="SatisfactoryApiService.GetServerStateAsync"/> means
-/// "unreachable", NOT "empty". Conflating them would fire a fake outage every time
-/// the server restarts. So a single failed poll changes nothing; only after
-/// <see cref="OfflinePollsBeforeClose"/> consecutive failures do we accept the server
-/// is down and post the offline notice.
-///
-/// ── Restart-safe by omission ──
-/// All state is in-memory and starts empty, and up/down is only announced on a real
-/// transition (false→true or true→false), never from the null starting verdict. So
-/// restarting the bot while the server is already up (or already down) stays quiet —
-/// no phantom "server online!" on every deploy.
+/// ── Quiet on boot ──
+/// State is in-memory and starts <see cref="ServerAvailability.Unknown"/>; the first
+/// determination is recorded silently. Notices only fire on a real change between
+/// known states, so restarting the bot never emits a phantom "online!".
 ///
 /// ── Gating ──
-/// Idle unless <see cref="BotConfig.SatisfactoryEnabled"/> is true and the API client
-/// is configured. The feed is separately gated by
-/// <see cref="BotConfig.SatisfactoryFeedEnabled"/> + a channel id.
+/// Idle unless <see cref="BotConfig.SatisfactoryEnabled"/> is true and the game API is
+/// configured. Nitrado is an optional augmentation on top.
 /// </summary>
 public sealed class SatisfactoryPresenceService : BackgroundService
 {
     private static readonly TimeSpan StartupGrace = TimeSpan.FromSeconds(45);
 
-    /// <summary>
-    /// Consecutive unreachable polls before we conclude the server is really down.
-    /// 5 × the poll interval (default 60s) ≈ 5 minutes, enough to ride out a host
-    /// restart or update without posting a spurious outage.
-    /// </summary>
+    /// <summary>Only used by the game-API fallback: consecutive unreachable polls before a red outage.</summary>
     private const int OfflinePollsBeforeClose = 5;
+
+    /// <summary>Throttle for the (relatively expensive) rental-expiry check.</summary>
+    private static readonly TimeSpan ExpiryCheckInterval = TimeSpan.FromHours(1);
+
+    private enum ServerAvailability { Unknown, Up, Maintenance, Down }
 
     private readonly DiscordSocketClient _client;
     private readonly SatisfactoryApiService _api;
+    private readonly NitradoApiService _nitrado;
     private readonly BotConfig _config;
     private readonly ILogger<SatisfactoryPresenceService> _logger;
 
-    private int _consecutiveFailures;
+    /// <summary>Last availability we ANNOUNCED. Unknown until the first determination.</summary>
+    private ServerAvailability _announced = ServerAvailability.Unknown;
 
-    /// <summary>
-    /// Last reachability verdict we ACTED on.
-    /// null  = undecided (just booted); true = up; false = announced down.
-    /// The null start is what suppresses an "online!" post on every bot restart:
-    /// online only fires false→true, offline only true→false.
-    /// </summary>
-    private bool? _serverOnline;
+    /// <summary>Game-API fallback failure counter (unused while Nitrado is answering).</summary>
+    private int _gameApiFailures;
 
-    /// <summary>
-    /// Last player count seen while the server was up; null when unknown/offline.
-    /// A change posts a feed line; first contact just records the baseline silently.
-    /// </summary>
+    /// <summary>Last player count seen while up; null when unknown/down.</summary>
     private int? _lastPlayerCount;
+
+    private bool _expiryWarned;
+    private DateTime _lastExpiryCheckUtc = DateTime.MinValue;
 
     public SatisfactoryPresenceService(
         DiscordSocketClient client,
         SatisfactoryApiService api,
+        NitradoApiService nitrado,
         IOptions<BotConfig> config,
         ILogger<SatisfactoryPresenceService> logger)
     {
         _client = client;
         _api = api;
+        _nitrado = nitrado;
         _config = config.Value;
         _logger = logger;
     }
 
     private TimeSpan PollInterval =>
         TimeSpan.FromSeconds(Math.Clamp(_config.SatisfactoryPollIntervalSeconds, 15, 3600));
+
+    private bool NitradoActive => _config.NitradoEnabled && _nitrado.IsConfigured;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -104,8 +105,8 @@ public sealed class SatisfactoryPresenceService : BackgroundService
         }
 
         _logger.LogInformation(
-            "SatisfactoryPresenceService started; polling every {Seconds}s, feed={Feed} (channel {ChannelId})",
-            (int)PollInterval.TotalSeconds, _config.SatisfactoryFeedEnabled, _config.SatisfactoryFeedChannelId);
+            "SatisfactoryPresenceService started; polling every {Seconds}s, feed={Feed} (channel {ChannelId}), nitrado={Nitrado}",
+            (int)PollInterval.TotalSeconds, _config.SatisfactoryFeedEnabled, _config.SatisfactoryFeedChannelId, NitradoActive);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -129,43 +130,89 @@ public sealed class SatisfactoryPresenceService : BackgroundService
 
     private async Task TickAsync(CancellationToken ct)
     {
-        var state = await _api.GetServerStateAsync(ct);
+        var (avail, gs) = await DetermineAvailabilityAsync(ct);
 
-        // ── Unreachable ──  null is "unknown", never "empty". Hold and wait it out.
-        if (state is null)
+        await HandleAvailabilityAsync(avail, gs, ct);
+
+        // Player-count feed only makes sense while the server is up, and always comes
+        // from the game API (Nitrado's count is unreliable for Satisfactory).
+        if (avail == ServerAvailability.Up)
+            await PollPlayerCountAsync(ct);
+        else
+            _lastPlayerCount = null;
+
+        if (NitradoActive)
+            await MaybeCheckExpiryAsync(ct);
+    }
+
+    /// <summary>
+    /// Resolves current availability. Prefers Nitrado's authoritative host status;
+    /// falls back to probing the game API (with the multi-poll grace) when Nitrado is
+    /// off or unreachable. Returns <see cref="ServerAvailability.Unknown"/> to mean
+    /// "hold the last announced state" (e.g. within the fallback grace window).
+    /// </summary>
+    private async Task<(ServerAvailability, NitradoGameServer?)> DetermineAvailabilityAsync(CancellationToken ct)
+    {
+        if (NitradoActive)
         {
-            _consecutiveFailures++;
-
-            // Fire exactly once, on the poll that crosses the threshold. A blip that
-            // recovers sooner produces neither an offline post nor a matching online
-            // one — short outages stay silent, which is the whole point of the delay.
-            if (_consecutiveFailures == OfflinePollsBeforeClose)
+            var gs = await _nitrado.GetGameServerAsync(ct);
+            if (gs is not null)
             {
-                _logger.LogWarning("Satisfactory server appears offline ({Failures} failed polls)", _consecutiveFailures);
-
-                if (_serverOnline == true)
-                    await PostServerStatusAsync(online: false, sessionName: null, ct);
-
-                _serverOnline = false;
-                _lastPlayerCount = null;
+                _gameApiFailures = 0;
+                return (MapNitradoStatus(gs.Status), gs);
             }
+            // Nitrado unreachable — fall through to the game-API probe rather than go blind.
+        }
 
+        var state = await _api.GetServerStateAsync(ct);
+        if (state is not null)
+        {
+            _gameApiFailures = 0;
+            return (ServerAvailability.Up, null);
+        }
+
+        _gameApiFailures++;
+        return _gameApiFailures >= OfflinePollsBeforeClose
+            ? (ServerAvailability.Down, null)     // sustained failure: declare a real outage
+            : (ServerAvailability.Unknown, null); // brief blip: hold the last state
+    }
+
+    private static ServerAvailability MapNitradoStatus(string status)
+    {
+        var s = (status ?? "").ToLowerInvariant();
+        if (s == "started") return ServerAvailability.Up;
+        if (s is "stopped" or "suspended" or "deleted" or "error") return ServerAvailability.Down;
+        // restarting / stopping / updating / installing / restoring / backup… — a known
+        // transient. Treat unrecognized states as maintenance too, to avoid a false red.
+        return ServerAvailability.Maintenance;
+    }
+
+    /// <summary>Posts the up/down/maintenance embed on a real transition between known states.</summary>
+    private async Task HandleAvailabilityAsync(ServerAvailability current, NitradoGameServer? gs, CancellationToken ct)
+    {
+        if (current == ServerAvailability.Unknown) return;   // undetermined — hold
+        if (current == _announced) return;
+
+        var previous = _announced;
+        _announced = current;
+
+        // First contact after boot: record the state, don't announce it (the server
+        // didn't just change — we only now looked).
+        if (previous == ServerAvailability.Unknown)
+        {
+            _logger.LogInformation("Satisfactory initial availability: {State}", current);
             return;
         }
 
-        if (_consecutiveFailures > 0)
-        {
-            _logger.LogInformation("Satisfactory server reachable again after {Failures} failed poll(s)", _consecutiveFailures);
-            _consecutiveFailures = 0;
-        }
+        _logger.LogInformation("Satisfactory availability {Prev} → {Now}", previous, current);
+        await PostStatusEmbedAsync(current, gs, ct);
+    }
 
-        // Announce recovery only on a real false→true flip. First contact (null) just
-        // records the state — the server didn't "come up", it was already up.
-        if (_serverOnline == false)
-            await PostServerStatusAsync(online: true, sessionName: state.ActiveSessionName, ct);
-        _serverOnline = true;
+    private async Task PollPlayerCountAsync(CancellationToken ct)
+    {
+        var state = await _api.GetServerStateAsync(ct);
+        if (state is null) return;   // couldn't read this tick; leave the count as-is
 
-        // ── Player-count feed ──
         var count = state.NumConnectedPlayers;
         if (_lastPlayerCount is int prev && prev != count)
             await PostFeedAsync(CountChangeMessage(prev, count, state), ct);
@@ -181,57 +228,119 @@ public sealed class SatisfactoryPresenceService : BackgroundService
         return $"{arrow} **{session}** — **{prev} → {now}** {noun} online ({now}/{state.PlayerLimit})";
     }
 
-    private async Task PostFeedAsync(string message, CancellationToken ct)
+    // ─── Rental expiry ─────────────────────────────────────────────────────────
+
+    private async Task MaybeCheckExpiryAsync(CancellationToken ct)
     {
-        if (!_config.SatisfactoryFeedEnabled || _config.SatisfactoryFeedChannelId == 0) return;
+        if (_config.NitradoExpiryWarningDays <= 0) return;
+        if (DateTime.UtcNow - _lastExpiryCheckUtc < ExpiryCheckInterval) return;
+        _lastExpiryCheckUtc = DateTime.UtcNow;
 
-        var channel = await ResolveFeedChannelAsync(ct);
-        if (channel is null) return;
+        var svc = await _nitrado.GetServiceAsync(ct);
+        if (svc is null) return;
 
-        try
+        // Auto-renewing service: nothing to warn about, and re-arm for the future.
+        if (svc.AutoExtension || svc.SuspendDate is not DateTimeOffset suspend)
         {
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(TimeSpan.FromSeconds(30));
-
-            await channel.SendMessageAsync(
-                text: message,
-                allowedMentions: AllowedMentions.None,
-                options: new RequestOptions { CancelToken = cts.Token });
+            _expiryWarned = false;
+            return;
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+
+        var daysLeft = (suspend - DateTimeOffset.UtcNow).TotalDays;
+        if (daysLeft > 0 && daysLeft <= _config.NitradoExpiryWarningDays)
         {
-            throw;
+            if (!_expiryWarned)
+            {
+                await PostExpiryWarningAsync(suspend, ct);
+                _expiryWarned = true;
+            }
         }
-        catch (Exception ex)
+        else
         {
-            _logger.LogWarning(ex, "SatisfactoryPresenceService: failed to post feed message");
+            // Renewed (or comfortably far out): re-arm so the next approach warns again.
+            _expiryWarned = false;
         }
     }
 
-    /// <summary>
-    /// Posts the whole-server up/down notice as a green/red embed — a rare event,
-    /// gated behind the same offline delay as the feed and its own
-    /// SatisfactoryServerStatusAnnounceEnabled switch, so up/down pings can be silenced
-    /// without losing the count feed. Best-effort — a failed post is logged and dropped.
-    /// </summary>
-    private async Task PostServerStatusAsync(bool online, string? sessionName, CancellationToken ct)
+    private async Task PostExpiryWarningAsync(DateTimeOffset suspend, CancellationToken ct)
     {
-        if (!_config.SatisfactoryServerStatusAnnounceEnabled) return;
         if (!_config.SatisfactoryFeedEnabled || _config.SatisfactoryFeedChannelId == 0) return;
-
         var channel = await ResolveFeedChannelAsync(ct);
         if (channel is null) return;
 
         var embed = new EmbedBuilder()
-            .WithColor(online ? Color.Green : Color.Red)
-            .WithTitle(online ? "🟢 Satisfactory server is online" : "🔴 Satisfactory server went offline")
-            .WithDescription(online
-                ? "The clan's Satisfactory server is up — get back to the factory!"
-                : "The clan's Satisfactory server stopped responding. It may be restarting or down.")
+            .WithColor(new Color(0xF1C40F))
+            .WithTitle("⚠️ Satisfactory server rental is expiring")
+            .WithDescription(
+                $"The server's Nitrado rental lapses <t:{suspend.ToUnixTimeSeconds()}:R> " +
+                $"(<t:{suspend.ToUnixTimeSeconds()}:f>). Renew it before then to avoid the world going offline.")
             .WithCurrentTimestamp();
 
-        if (online && !string.IsNullOrWhiteSpace(sessionName))
-            embed.WithFooter($"Session: {sessionName}");
+        await SendAsync(channel, e => e.Embed = embed.Build(), ct, "expiry warning");
+    }
+
+    // ─── Feed posting ───────────────────────────────────────────────────────────
+
+    private async Task PostFeedAsync(string message, CancellationToken ct)
+    {
+        if (!_config.SatisfactoryFeedEnabled || _config.SatisfactoryFeedChannelId == 0) return;
+        var channel = await ResolveFeedChannelAsync(ct);
+        if (channel is null) return;
+
+        await SendAsync(channel, e => e.Text = message, ct, "feed message");
+    }
+
+    /// <summary>
+    /// Posts the green/amber/red status embed. Gated by
+    /// SatisfactoryServerStatusAnnounceEnabled + the feed channel. Best-effort.
+    /// </summary>
+    private async Task PostStatusEmbedAsync(ServerAvailability state, NitradoGameServer? gs, CancellationToken ct)
+    {
+        if (!_config.SatisfactoryServerStatusAnnounceEnabled) return;
+        if (!_config.SatisfactoryFeedEnabled || _config.SatisfactoryFeedChannelId == 0) return;
+        var channel = await ResolveFeedChannelAsync(ct);
+        if (channel is null) return;
+
+        var embed = new EmbedBuilder().WithCurrentTimestamp();
+        switch (state)
+        {
+            case ServerAvailability.Up:
+                embed.WithColor(Color.Green)
+                     .WithTitle("🟢 Satisfactory server is online")
+                     .WithDescription("The clan's Satisfactory server is up — get back to the factory!");
+                break;
+
+            case ServerAvailability.Maintenance:
+                embed.WithColor(new Color(0xF1C40F))
+                     .WithTitle("🔧 Satisfactory server is restarting")
+                     .WithDescription($"The server is {MaintenanceReason(gs)} — it should be back shortly. Not a crash.");
+                break;
+
+            default: // Down
+                embed.WithColor(Color.Red)
+                     .WithTitle("🔴 Satisfactory server went offline")
+                     .WithDescription("The clan's Satisfactory server stopped responding. It may be down or was stopped.");
+                break;
+        }
+
+        await SendAsync(channel, e => e.Embed = embed.Build(), ct, $"{state} announcement");
+    }
+
+    private static string MaintenanceReason(NitradoGameServer? gs)
+    {
+        var s = (gs?.Status ?? "").ToLowerInvariant();
+        var u = (gs?.UpdateStatus ?? "").ToLowerInvariant();
+        if (s.Contains("updat") || u.Contains("updat")) return "updating";
+        if (s.Contains("install")) return "installing";
+        if (s.Contains("restor") || s.Contains("backup")) return "restoring a backup";
+        return "restarting";
+    }
+
+    /// <summary>One place for the send + timeout + swallow-and-log pattern.</summary>
+    private async Task SendAsync(IMessageChannel channel, Action<SendSpec> configure, CancellationToken ct, string what)
+    {
+        var spec = new SendSpec();
+        configure(spec);
 
         try
         {
@@ -239,11 +348,10 @@ public sealed class SatisfactoryPresenceService : BackgroundService
             cts.CancelAfter(TimeSpan.FromSeconds(30));
 
             await channel.SendMessageAsync(
-                embed: embed.Build(),
+                text: spec.Text,
+                embed: spec.Embed,
                 allowedMentions: AllowedMentions.None,
                 options: new RequestOptions { CancelToken = cts.Token });
-
-            _logger.LogInformation("Posted Satisfactory server {State} announcement", online ? "online" : "offline");
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -251,9 +359,14 @@ public sealed class SatisfactoryPresenceService : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "SatisfactoryPresenceService: failed to post server {State} announcement",
-                online ? "online" : "offline");
+            _logger.LogWarning(ex, "SatisfactoryPresenceService: failed to post {What}", what);
         }
+    }
+
+    private sealed class SendSpec
+    {
+        public string? Text { get; set; }
+        public Embed? Embed { get; set; }
     }
 
     private async Task<IMessageChannel?> ResolveFeedChannelAsync(CancellationToken ct)
@@ -269,9 +382,8 @@ public sealed class SatisfactoryPresenceService : BackgroundService
     }
 
     /// <summary>
-    /// The session name comes from the server and is builder-controlled text landing
-    /// in a Discord message. Neutralize markdown so it can't forge formatting or a
-    /// mass-ping. AllowedMentions.None already blocks the ping; this blocks the markup.
+    /// The session name is builder-controlled text landing in a Discord message.
+    /// Neutralize markdown so it can't forge formatting or a mass-ping.
     /// </summary>
     private static string Escape(string s) =>
         string.IsNullOrWhiteSpace(s)
