@@ -350,7 +350,8 @@ public sealed class HoneypotHandler
                     error: "server owner — cannot be banned by a bot");
                 await PostAlertAsync(guild, author, member, ctx,
                     enforced: true, banned: false, purged: 0,
-                    error: "server owner — cannot be banned by a bot");
+                    error: "server owner — cannot be banned by a bot",
+                    postedContent: FormatPostedContent(trigger));
             }
             return;
         }
@@ -378,7 +379,8 @@ public sealed class HoneypotHandler
             await WriteAuditAsync(guild, author, member, ctx,
                 action: "Alerted", purged: 0, channelsTouched: 0, error: null);
             await PostAlertAsync(guild, author, member, ctx,
-                enforced: false, banned: false, purged: 0, error: null);
+                enforced: false, banned: false, purged: 0, error: null,
+                postedContent: FormatPostedContent(trigger));
         }
     }
 
@@ -435,7 +437,8 @@ public sealed class HoneypotHandler
                 await WriteAuditAsync(guild, trigger.Author, member, ctx,
                     action: "BanSkippedHierarchy", purged: 0, channelsTouched: 0, error: null);
                 await PostAlertAsync(guild, trigger.Author, member, ctx,
-                    enforced: true, banned: false, purged: 0, error: "bot role too low to ban");
+                    enforced: true, banned: false, purged: 0, error: "bot role too low to ban",
+                    postedContent: FormatPostedContent(trigger));
                 return;
             }
         }
@@ -483,7 +486,8 @@ public sealed class HoneypotHandler
             purged: purged, channelsTouched: channelsTouched, error: banError);
 
         await PostAlertAsync(guild, trigger.Author, member, ctx,
-            enforced: true, banned: banned, purged: purged, error: banError);
+            enforced: true, banned: banned, purged: purged, error: banError,
+            postedContent: FormatPostedContent(trigger));
     }
 
     /// <summary>
@@ -620,7 +624,7 @@ public sealed class HoneypotHandler
 
     private async Task PostAlertAsync(
         SocketGuild guild, SocketUser author, SocketGuildUser? member, TrapHit ctx,
-        bool enforced, bool banned, int purged, string? error)
+        bool enforced, bool banned, int purged, string? error, string? postedContent = null)
     {
         var alerts = ResolveSecurityAlertsChannel(guild);
         if (alerts is null)
@@ -651,6 +655,9 @@ public sealed class HoneypotHandler
         if (!string.IsNullOrWhiteSpace(ctx.ExtraDetail))
             builder.AddField("Detected", ctx.ExtraDetail, inline: false);
 
+        if (!string.IsNullOrWhiteSpace(postedContent))
+            builder.AddField("Posted", postedContent, inline: false);
+
         var embed = builder
             .AddField("Account age", $"{ageDays:F1} days", inline: true)
             .AddField("In server",
@@ -660,11 +667,58 @@ public sealed class HoneypotHandler
             .WithCurrentTimestamp()
             .Build();
 
-        try { await alerts.SendMessageAsync(embed: embed); }
+        // AllowedMentions.None so a payload full of @everyone / role pings that
+        // we're quoting back can never re-ping the mod channel.
+        try { await alerts.SendMessageAsync(embed: embed, allowedMentions: AllowedMentions.None); }
         catch (Exception ex)
         {
             _logger.LogError(ex, "{Feature}: failed to post alert to #{Channel}.", ctx.Feature, alerts.Name);
         }
+    }
+
+    /// <summary>
+    /// Builds a safe, log-friendly rendering of the message that tripped the
+    /// trap for the "Posted" field of the mod-log embed: mentions neutralised
+    /// so quoting it back can't ping anyone, code-fenced, truncated to fit an
+    /// embed field (1024 char cap), with a fallback to attachment/sticker info
+    /// when the message carries no text (image/link-only spam is common).
+    /// </summary>
+    private static string FormatPostedContent(SocketUserMessage msg)
+    {
+        const int MaxTextLen = 900; // leave room for the code fence + attachments.
+
+        var sb = new StringBuilder();
+
+        var text = msg.Content ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(text))
+        {
+            // Neutralise @everyone / @here (belt-and-braces alongside AllowedMentions.None).
+            text = text.Replace("@everyone", "@​everyone")
+                       .Replace("@here", "@​here");
+            if (text.Length > MaxTextLen)
+                text = text[..MaxTextLen] + "…";
+            // Break any backticks so the content can't escape our own code fence.
+            text = text.Replace("```", "ˋˋˋ");
+            sb.Append("```\n").Append(text).Append("\n```");
+        }
+
+        // Attachments / stickers are often the actual payload.
+        var extras = new List<string>();
+        if (msg.Attachments.Count > 0)
+            extras.AddRange(msg.Attachments.Select(a => $"📎 {a.Filename} — {a.Url}"));
+        if (msg.Stickers.Count > 0)
+            extras.AddRange(msg.Stickers.Select(s => $"🏷️ sticker: {s.Name}"));
+        if (extras.Count > 0)
+        {
+            if (sb.Length > 0) sb.Append('\n');
+            sb.Append(string.Join("\n", extras));
+        }
+
+        if (sb.Length == 0)
+            return "*(no text — embed/attachment-only message)*";
+
+        var result = sb.ToString();
+        return result.Length > 1024 ? result[..1021] + "…" : result;
     }
 
     // ── Warning embed ──────────────────────────────────────────────────
