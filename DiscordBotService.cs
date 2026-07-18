@@ -476,6 +476,7 @@ public class DiscordBotService : IHostedService
                 PalworldCommandHandler.BuildPlaytimeCommand(),
                 PalworldCommandHandler.BuildLeaderboardCommand(),
                 PalworldCommandHandler.BuildLinkCommand(),
+                PalworldCommandHandler.BuildPerformanceCommand(),
                 PalworldCommandHandler.BuildAdminCommand(),
 
                 // /satisfactory-* — the clan's Satisfactory Dedicated Server via its

@@ -46,6 +46,7 @@ public class PalworldCommandHandler
         "palworld-playtime",
         "palworld-leaderboard",
         "palworld-link",
+        "palworld-performance",
         "palworld-admin",
     };
 
@@ -108,6 +109,14 @@ public class PalworldCommandHandler
                 "Your in-game character name, exactly as it appears in game", isRequired: true)
             .AddOption("user", ApplicationCommandOptionType.User,
                 "Link on someone else's behalf (officers only)", isRequired: false)
+            .Build();
+
+    public static SlashCommandProperties BuildPerformanceCommand() =>
+        new SlashCommandBuilder()
+            .WithName("palworld-performance")
+            .WithDescription("Server FPS history — is the lag caused by player count or by uptime?")
+            .AddOption("hours", ApplicationCommandOptionType.Integer,
+                "How far back to look (default 24, max 168)", isRequired: false)
             .Build();
 
     public static SlashCommandProperties BuildAdminCommand() =>
@@ -198,6 +207,7 @@ public class PalworldCommandHandler
             case "palworld-playtime":    await HandlePlaytimeAsync(command); break;
             case "palworld-leaderboard": await HandleLeaderboardAsync(command); break;
             case "palworld-link":        await HandleLinkAsync(command); break;
+            case "palworld-performance": await HandlePerformanceAsync(command); break;
             case "palworld-admin":       await HandleAdminAsync(command); break;
         }
     }
@@ -474,6 +484,151 @@ public class PalworldCommandHandler
             $"✅ Linked <@{targetId}> to **{Escape(match.Name)}** (level {match.Level}). " +
             "`/palworld-playtime` will track them from here.",
             ephemeral: true);
+    }
+
+    // ─── /palworld-performance ───────────────────────────────────────────────
+
+    /// <summary>
+    /// Turns "it feels laggy when a lot of people are on" into a testable answer by
+    /// bucketing recorded server FPS two ways:
+    ///
+    ///   • by PLAYER COUNT — if FPS falls as the bucket grows, the bottleneck is
+    ///     simulation load (Palworld's main thread is single-threaded), and the fix
+    ///     is fewer worker Pals / bases: BaseCampWorkerMaxNum, BaseCampMaxNumInGuild.
+    ///
+    ///   • by HOURS SINCE RESTART — if FPS falls the longer the server has been up
+    ///     REGARDLESS of load, that's the well-documented Palworld memory leak, and
+    ///     the fix is a shorter restart cadence, not settings.
+    ///
+    /// Those two have opposite remedies, which is the entire reason this exists.
+    /// Both can of course be true at once.
+    /// </summary>
+    private async Task HandlePerformanceAsync(SocketSlashCommand command)
+    {
+        if (!await PassesMemberGateAsync(command)) return;
+        await command.DeferAsync(ephemeral: true);
+
+        var hours = 24;
+        if (command.Data.Options.FirstOrDefault(o => o.Name == "hours")?.Value is long h)
+            hours = (int)Math.Clamp(h, 1, 168);
+
+        var since = DateTime.UtcNow.AddHours(-hours);
+
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+        var samples = await db.PalworldMetricSamples
+            .Where(s => s.SampledUtc >= since)
+            .ToListAsync();
+
+        if (samples.Count == 0)
+        {
+            await command.FollowupAsync(
+                $"No health samples in the last {hours}h yet. The bot records one per minute while the " +
+                "server is up, so give it a little time (or check that the server has been online).",
+                ephemeral: true);
+            return;
+        }
+
+        var avgFps = samples.Average(s => s.ServerFps);
+        var minFps = samples.Min(s => s.ServerFps);
+        var peakPlayers = samples.Max(s => s.PlayerCount);
+
+        var embed = new EmbedBuilder()
+            .WithTitle("🌴 Palworld server performance")
+            .WithColor(avgFps >= 50 ? Color.Green : avgFps >= 35 ? new Color(0xE67E22) : Color.Red)
+            .WithDescription($"Last **{hours}h** · {samples.Count} samples · peak {peakPlayers} players online")
+            .AddField("Average FPS", $"{avgFps:0.0}", true)
+            .AddField("Worst FPS", minFps.ToString(), true)
+            .AddField("Base camps", samples.Last().BaseCampCount.ToString(), true);
+
+        // ── By player count ──
+        var byPlayers = BucketLines(samples, new (string Label, Func<PalworldMetricSample, bool> Match)[]
+        {
+            ("0–5 players",   s => s.PlayerCount <= 5),
+            ("6–10 players",  s => s.PlayerCount is >= 6 and <= 10),
+            ("11–15 players", s => s.PlayerCount is >= 11 and <= 15),
+            ("16+ players",   s => s.PlayerCount >= 16),
+        });
+        if (byPlayers.Count > 0)
+            embed.AddField("FPS by player count", string.Join("\n", byPlayers));
+
+        // ── By uptime ──
+        var byUptime = BucketLines(samples, new (string Label, Func<PalworldMetricSample, bool> Match)[]
+        {
+            ("Under 3h up",  s => s.UptimeSeconds < 3 * 3600),
+            ("3–6h up",      s => s.UptimeSeconds >= 3 * 3600 && s.UptimeSeconds < 6 * 3600),
+            ("6–12h up",     s => s.UptimeSeconds >= 6 * 3600 && s.UptimeSeconds < 12 * 3600),
+            ("Over 12h up",  s => s.UptimeSeconds >= 12 * 3600),
+        });
+        if (byUptime.Count > 0)
+            embed.AddField("FPS by time since restart", string.Join("\n", byUptime));
+
+        embed.AddField("How to read this", Interpret(samples));
+
+        await command.FollowupAsync(embed: embed.Build(), ephemeral: true);
+    }
+
+    /// <summary>
+    /// Renders one "label — avg FPS (n samples)" line per non-empty bucket. Empty
+    /// buckets are dropped rather than shown as zero, which would read as a
+    /// catastrophic FPS reading instead of "no data".
+    /// </summary>
+    private static List<string> BucketLines(
+        List<PalworldMetricSample> samples,
+        (string Label, Func<PalworldMetricSample, bool> Match)[] buckets)
+    {
+        var lines = new List<string>();
+        foreach (var (label, match) in buckets)
+        {
+            var rows = samples.Where(match).ToList();
+            if (rows.Count == 0) continue;
+            lines.Add($"`{rows.Average(r => r.ServerFps),4:0.0}` FPS — {label}  _({rows.Count} samples)_");
+        }
+        return lines;
+    }
+
+    /// <summary>
+    /// Compares the best and worst buckets on each axis and names the likelier
+    /// culprit. Deliberately hedged: this is a correlation over a small sample, not
+    /// a diagnosis, and both causes can be present at once.
+    /// </summary>
+    private static string Interpret(List<PalworldMetricSample> samples)
+    {
+        static double? Spread(List<PalworldMetricSample> rows, Func<PalworldMetricSample, int> axis)
+        {
+            // Compare the lowest-axis third against the highest-axis third; needs a
+            // real spread on that axis to mean anything.
+            var ordered = rows.OrderBy(axis).ToList();
+            if (ordered.Count < 12) return null;
+            if (axis(ordered[^1]) - axis(ordered[0]) <= 0) return null;
+
+            var third = ordered.Count / 3;
+            var low = ordered.Take(third).Average(r => r.ServerFps);
+            var high = ordered.Skip(ordered.Count - third).Average(r => r.ServerFps);
+            return low - high;   // positive => FPS drops as the axis rises
+        }
+
+        var byLoad = Spread(samples, s => s.PlayerCount);
+        var byAge = Spread(samples, s => s.UptimeSeconds);
+
+        if (byLoad is null && byAge is null)
+            return "Not enough variation yet — check back after a busy session.";
+
+        var notes = new List<string>();
+
+        if (byLoad is > 8)
+            notes.Add("📉 FPS drops noticeably as more players join — that points at **simulation load**. " +
+                      "Lowering `BaseCampWorkerMaxNum` and `BaseCampMaxNumInGuild` is the usual fix.");
+        if (byAge is > 8)
+            notes.Add("⏳ FPS also degrades the longer the server has been up — the classic Palworld " +
+                      "**memory leak**. More frequent restarts help more than settings here.");
+
+        if (notes.Count == 0)
+            notes.Add("✅ No strong correlation with either player count or uptime so far. " +
+                      "If people still report lag, it may be client-side or network rather than the server.");
+
+        return string.Join("\n\n", notes);
     }
 
     // ─── /palworld-admin ─────────────────────────────────────────────────────

@@ -701,6 +701,8 @@ public class CommandsCommandHandler
                 palworldLbl, MinRank(config.PalworldMinRank)),
             new("palworld-link", "Link your Discord account to your Palworld character (be online in-game)",
                 palworldLbl, MinRank(config.PalworldMinRank)),
+            new("palworld-performance", "Palworld server FPS history — is lag from player count or uptime?",
+                palworldLbl, MinRank(config.PalworldMinRank)),
 
             new("palworld-admin", "Administer the Palworld server — announce, kick, ban, unban, save, restart",
                 "Palworld Mod", palworldMod),   // SyncWithHandlers: PalworldCommandHandler.HasAdminRole

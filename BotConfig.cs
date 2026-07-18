@@ -1543,6 +1543,48 @@ public class BotConfig
     public ulong PalworldFeedChannelId { get; set; } = 1526389577277771886;
 
     /// <summary>
+    /// Whether each poll also records a <see cref="PalworldMetricSample"/> (server
+    /// FPS, player count, uptime). Default true. This is what powers
+    /// /palworld-performance and the lag alerts; with it off, both go blind.
+    /// </summary>
+    public bool PalworldMetricsSamplingEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Days of health samples to keep. Default 30 (~43k rows at a 60s cadence —
+    /// negligible for SQLite). Older rows are pruned periodically. 0 disables
+    /// pruning entirely (rows accumulate forever).
+    /// </summary>
+    public int PalworldMetricsRetentionDays { get; set; } = 30;
+
+    /// <summary>
+    /// Whether a lag alert is posted to the feed channel when server FPS stays
+    /// below <see cref="PalworldLagAlertFpsThreshold"/>. Default true.
+    /// </summary>
+    public bool PalworldLagAlertEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Server FPS at or below which the server is considered to be struggling.
+    /// Default 30 — half of the ~60 a healthy Palworld server holds, and low enough
+    /// that players will already be feeling it.
+    /// </summary>
+    public int PalworldLagAlertFpsThreshold { get; set; } = 30;
+
+    /// <summary>
+    /// Consecutive low-FPS samples required before alerting. Default 3, i.e. ~3
+    /// minutes at the default poll interval. A single bad tick is meaningless —
+    /// a world save or a raid spawn can dip FPS for one sample — so the alert is
+    /// deliberately about SUSTAINED degradation.
+    /// </summary>
+    public int PalworldLagAlertConsecutiveSamples { get; set; } = 3;
+
+    /// <summary>
+    /// Minimum minutes between lag alerts, so a server that spends an evening
+    /// hovering at the threshold posts once rather than continuously. Default 60.
+    /// The recovery notice is not rate-limited (it can only follow an alert).
+    /// </summary>
+    public int PalworldLagAlertCooldownMinutes { get; set; } = 60;
+
+    /// <summary>
     /// Minimum rank to use the member-facing Palworld commands (/palworld-status,
     /// -playtime, -leaderboard, -link). Default PFC — keeps brand-new recruits
     /// (RCT) out while opening it to essentially the whole membership. Administrator

@@ -86,6 +86,15 @@ public sealed class PalworldPresenceService : BackgroundService
     /// </summary>
     private bool? _serverOnline;
 
+    /// <summary>Consecutive samples at or below the FPS threshold. Reset by any healthy sample.</summary>
+    private int _consecutiveLowFps;
+
+    /// <summary>True once a lag alert has been posted, until performance recovers.</summary>
+    private bool _inLagState;
+
+    private DateTime _lastLagAlertUtc = DateTime.MinValue;
+    private DateTime _lastPruneUtc = DateTime.MinValue;
+
     public PalworldPresenceService(
         IServiceProvider services,
         DiscordSocketClient client,
@@ -231,6 +240,11 @@ public sealed class PalworldPresenceService : BackgroundService
             await PostServerStatusAsync(online: true, ct);
         _serverOnline = true;
 
+        // Health sampling rides on this same tick rather than running its own poll
+        // loop — one extra request a minute, and it reuses the reachability verdict
+        // above so we never record a sample for an unreachable server.
+        await SampleHealthAsync(ct);
+
         var seen = new Dictionary<string, PalworldPlayer>(StringComparer.Ordinal);
         foreach (var p in players)
         {
@@ -358,6 +372,178 @@ public sealed class PalworldPresenceService : BackgroundService
         _online.Clear();
     }
 
+    // ─── Health sampling + lag alerting ──────────────────────────────────────
+
+    /// <summary>
+    /// Records one <see cref="PalworldMetricSample"/> and evaluates the lag alert.
+    /// Called only on a reachable tick.
+    ///
+    /// Entirely best-effort: any failure here is logged and swallowed, because
+    /// performance telemetry must never be able to disrupt presence tracking, which
+    /// is the feature people actually notice.
+    /// </summary>
+    private async Task SampleHealthAsync(CancellationToken ct)
+    {
+        if (!_config.PalworldMetricsSamplingEnabled) return;
+
+        try
+        {
+            var m = await _api.GetMetricsAsync(ct);
+            if (m is null) return;   // transient; the next tick will try again
+
+            using var scope = _services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+            var now = DateTime.UtcNow;
+
+            db.PalworldMetricSamples.Add(new PalworldMetricSample
+            {
+                SampledUtc = now,
+                ServerFps = m.ServerFps,
+                FrameTimeMs = m.ServerFrameTime,
+                PlayerCount = m.CurrentPlayerNum,
+                MaxPlayerCount = m.MaxPlayerNum,
+                UptimeSeconds = m.Uptime,
+                BaseCampCount = m.BaseCampNum,
+                InGameDay = m.Days,
+            });
+
+            await db.SaveChangesAsync(ct);
+
+            await EvaluateLagAlertAsync(m, ct);
+            await PruneOldSamplesAsync(db, now, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "PalworldPresenceService: health sampling failed");
+        }
+    }
+
+    /// <summary>
+    /// Posts a lag alert once FPS has stayed at/below the threshold for
+    /// <see cref="BotConfig.PalworldLagAlertConsecutiveSamples"/> consecutive
+    /// samples, and a recovery notice when it climbs back.
+    ///
+    /// ── Why the debounce and the cooldown ──
+    /// A single low sample is noise: a world save, an autosave, or a raid spawning
+    /// can dip FPS for one tick. Requiring sustained lows means the alert tracks
+    /// something players are actually feeling. The cooldown then stops an evening
+    /// spent hovering near the threshold from becoming a stream of near-identical
+    /// posts.
+    ///
+    /// Samples with nobody online are ignored: an idle server dipping isn't
+    /// actionable, and alerting on it would fire overnight when no one cares.
+    /// </summary>
+    private async Task EvaluateLagAlertAsync(PalworldMetrics m, CancellationToken ct)
+    {
+        if (!_config.PalworldLagAlertEnabled) return;
+
+        var threshold = Math.Max(1, _config.PalworldLagAlertFpsThreshold);
+        var needed = Math.Max(1, _config.PalworldLagAlertConsecutiveSamples);
+
+        var struggling = m.ServerFps <= threshold && m.CurrentPlayerNum > 0;
+
+        if (!struggling)
+        {
+            // Recovered: only worth announcing if we'd actually alerted.
+            if (_inLagState && m.ServerFps > threshold)
+            {
+                _inLagState = false;
+                _consecutiveLowFps = 0;
+                await PostLagRecoveredAsync(m, ct);
+            }
+            else
+            {
+                _consecutiveLowFps = 0;
+            }
+            return;
+        }
+
+        _consecutiveLowFps++;
+
+        if (_inLagState) return;                        // already reported this episode
+        if (_consecutiveLowFps < needed) return;        // not yet sustained
+
+        var cooldown = TimeSpan.FromMinutes(Math.Max(0, _config.PalworldLagAlertCooldownMinutes));
+        if (DateTime.UtcNow - _lastLagAlertUtc < cooldown)
+        {
+            // Still inside the quiet period. Mark the episode as reported anyway so
+            // we don't fire the instant the cooldown lapses on the same slump.
+            _inLagState = true;
+            return;
+        }
+
+        _inLagState = true;
+        _lastLagAlertUtc = DateTime.UtcNow;
+        await PostLagAlertAsync(m, ct);
+    }
+
+    private async Task PostLagAlertAsync(PalworldMetrics m, CancellationToken ct)
+    {
+        var embed = new EmbedBuilder()
+            .WithColor(new Color(0xE67E22))   // amber: degraded, not down
+            .WithTitle("⚠️ Palworld server is struggling")
+            .WithDescription(
+                $"Server FPS has been at or below **{_config.PalworldLagAlertFpsThreshold}** for " +
+                $"{_consecutiveLowFps} straight checks. Expect rubber-banding and delayed actions.")
+            .AddField("Server FPS", m.ServerFps.ToString(), true)
+            .AddField("Players", $"{m.CurrentPlayerNum}/{m.MaxPlayerNum}", true)
+            .AddField("Up for", Humanize(TimeSpan.FromSeconds(m.Uptime)), true)
+            .WithFooter("Run /palworld-performance to see whether this tracks player count or uptime.")
+            .WithCurrentTimestamp();
+
+        await PostEmbedAsync(embed.Build(), "lag alert", ct);
+
+        _logger.LogWarning(
+            "Palworld lag alert: {Fps} FPS with {Players} players, uptime {Uptime}s",
+            m.ServerFps, m.CurrentPlayerNum, m.Uptime);
+    }
+
+    private async Task PostLagRecoveredAsync(PalworldMetrics m, CancellationToken ct)
+    {
+        var embed = new EmbedBuilder()
+            .WithColor(Color.Green)
+            .WithTitle("✅ Palworld server performance recovered")
+            .WithDescription($"Server FPS is back up to **{m.ServerFps}**.")
+            .AddField("Players", $"{m.CurrentPlayerNum}/{m.MaxPlayerNum}", true)
+            .AddField("Up for", Humanize(TimeSpan.FromSeconds(m.Uptime)), true)
+            .WithCurrentTimestamp();
+
+        await PostEmbedAsync(embed.Build(), "lag recovery", ct);
+
+        _logger.LogInformation("Palworld performance recovered: {Fps} FPS", m.ServerFps);
+    }
+
+    /// <summary>
+    /// Drops samples past the retention window. Runs at most every 6 hours rather
+    /// than on every tick — the table is small and the delete is pure housekeeping,
+    /// so there's no reason to touch it 1,440 times a day.
+    /// </summary>
+    private async Task PruneOldSamplesAsync(BotDbContext db, DateTime now, CancellationToken ct)
+    {
+        if (_config.PalworldMetricsRetentionDays <= 0) return;
+        if (now - _lastPruneUtc < TimeSpan.FromHours(6)) return;
+
+        _lastPruneUtc = now;
+
+        var cutoff = now.AddDays(-_config.PalworldMetricsRetentionDays);
+        var stale = await db.PalworldMetricSamples
+            .Where(s => s.SampledUtc < cutoff)
+            .ToListAsync(ct);
+
+        if (stale.Count == 0) return;
+
+        db.PalworldMetricSamples.RemoveRange(stale);
+        await db.SaveChangesAsync(ct);
+
+        _logger.LogInformation("Pruned {Count} Palworld health sample(s) older than {Days}d",
+            stale.Count, _config.PalworldMetricsRetentionDays);
+    }
+
     private static string JoinMessage(PalworldPlayer p, int onlineCount) =>
         $"🟢 **{Escape(p.Name)}** joined the Palworld server" +
         $"{(p.Level > 0 ? $" — level **{p.Level}**" : "")}  ·  {onlineCount} online";
@@ -410,9 +596,6 @@ public sealed class PalworldPresenceService : BackgroundService
         if (!_config.PalworldServerStatusAnnounceEnabled) return;
         if (!_config.PalworldFeedEnabled || _config.PalworldFeedChannelId == 0) return;
 
-        var channel = await ResolveFeedChannelAsync(ct);
-        if (channel is null) return;
-
         // Enrich the "online" post with the server name when we can get it; purely
         // cosmetic, so a failure here just omits the footer.
         string? serverName = null;
@@ -434,17 +617,32 @@ public sealed class PalworldPresenceService : BackgroundService
         if (!string.IsNullOrWhiteSpace(serverName))
             embed.WithFooter(serverName);
 
+        await PostEmbedAsync(embed.Build(), $"server {(online ? "online" : "offline")} announcement", ct);
+
+        _logger.LogInformation("Posted Palworld server {State} announcement", online ? "online" : "offline");
+    }
+
+    /// <summary>
+    /// Sends an embed to the feed channel. Best-effort: resolution and send failures
+    /// are logged and swallowed, never propagated into the poll loop.
+    /// <paramref name="what"/> is used only for the failure log line.
+    /// </summary>
+    private async Task PostEmbedAsync(Embed embed, string what, CancellationToken ct)
+    {
+        if (!_config.PalworldFeedEnabled || _config.PalworldFeedChannelId == 0) return;
+
+        var channel = await ResolveFeedChannelAsync(ct);
+        if (channel is null) return;
+
         try
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(30));
 
             await channel.SendMessageAsync(
-                embed: embed.Build(),
+                embed: embed,
                 allowedMentions: AllowedMentions.None,
                 options: new RequestOptions { CancelToken = cts.Token });
-
-            _logger.LogInformation("Posted Palworld server {State} announcement", online ? "online" : "offline");
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -452,8 +650,7 @@ public sealed class PalworldPresenceService : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "PalworldPresenceService: failed to post server {State} announcement",
-                online ? "online" : "offline");
+            _logger.LogWarning(ex, "PalworldPresenceService: failed to post {What}", what);
         }
     }
 

@@ -52,6 +52,7 @@ public class BotDbContext : DbContext
     // ── Palworld server ──
     public DbSet<PalworldSession>      PalworldSessions      => Set<PalworldSession>();
     public DbSet<PalworldLink>         PalworldLinks         => Set<PalworldLink>();
+    public DbSet<PalworldMetricSample> PalworldMetricSamples => Set<PalworldMetricSample>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -581,6 +582,14 @@ public class BotDbContext : DbContext
         {
             e.HasIndex(l => new { l.GuildId, l.DiscordUserId }).IsUnique();
             e.HasIndex(l => new { l.GuildId, l.PalworldUserId }).IsUnique();
+        });
+
+        // ── Palworld health samples ───────────────────────────────────
+        // Every read is a time-window scan ("the last N hours"), and the retention
+        // prune deletes by age, so a single index on SampledUtc covers both.
+        modelBuilder.Entity<PalworldMetricSample>(e =>
+        {
+            e.HasIndex(s => s.SampledUtc);
         });
     }
 }
