@@ -30,8 +30,9 @@ namespace ClanGuardBot.Services;
 public sealed class PollPublisher
 {
     public const int MaxOptions = 10;
-    public const int MaxQuestionLength = 300; // Discord native poll question cap
-    public const int MaxOptionLength = 55;    // Discord native poll answer cap (applied to both modes)
+    public const int MaxQuestionLength = 300;  // Discord native poll question cap
+    public const int MaxMessageLength = 2000;  // Discord message-content cap (holds the overflow description)
+    public const int MaxOptionLength = 55;     // Discord native poll answer cap (applied to both modes)
     public const int MinDurationHours = 1;
     public const int MaxDurationHours = 768;  // Discord native poll cap (32 days)
 
@@ -75,6 +76,12 @@ public sealed class PollPublisher
             }
         }
 
+        // The poll question itself is capped at Discord's 300 chars; any longer
+        // context the creator wants lives in the optional Description field, which
+        // rides as ordinary message text above the poll (Discord renders content
+        // over the poll object). Null/blank description → just the poll, nothing above.
+        var description = string.IsNullOrWhiteSpace(d.Description) ? null : Trim(d.Description, MaxMessageLength);
+
         var pollProps = new PollProperties
         {
             Question = new PollMediaProperties { Text = Trim(d.Question, MaxQuestionLength) },
@@ -90,7 +97,7 @@ public sealed class PollPublisher
             LayoutType       = PollLayout.Default,
         };
 
-        var posted = await channel.SendMessageAsync(poll: pollProps);
+        var posted = await channel.SendMessageAsync(text: description, poll: pollProps);
 
         var poll = await PersistAsync(d, channel, posted.Id, now, closesAt);
         _logger.LogInformation("Posted native poll {PollId} '{Q}' (msg {MsgId}), closes {Close:o}",
@@ -123,16 +130,19 @@ public sealed class PollPublisher
         var embed = PollEmbedBuilder.BuildEmbed(
             preview, previewOptions, new Dictionary<int, int>(), totalVoters: 0, fileName);
 
-        // 2) Post the embed (no buttons yet) to obtain a real message id.
+        // 2) Post the embed (no buttons yet) to obtain a real message id. Any
+        //    optional description rides as message text above the embed; later
+        //    vote/close re-renders only touch the embed + components, so it stays.
+        var description = string.IsNullOrWhiteSpace(d.Description) ? null : Trim(d.Description, MaxMessageLength);
         IUserMessage posted;
         if (banner is { } b)
         {
             using var fa = new FileAttachment(new MemoryStream(b.Bytes), b.FileName);
-            posted = await channel.SendFileAsync(fa, embed: embed);
+            posted = await channel.SendFileAsync(fa, text: description, embed: embed);
         }
         else
         {
-            posted = await channel.SendMessageAsync(embed: embed);
+            posted = await channel.SendMessageAsync(text: description, embed: embed);
         }
 
         // 3) Persist poll + options now that we have the message id.
@@ -234,6 +244,14 @@ public sealed class PollDraft
     public string CreatorName { get; init; } = string.Empty;
 
     public string Question { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Optional longer context posted as ordinary message text above the poll
+    /// (the creator's own words, from the <c>/poll</c> <c>description</c> field).
+    /// Null/blank means no leading message — just the poll itself.
+    /// </summary>
+    public string? Description { get; init; }
+
     public PollKind Kind { get; init; } = PollKind.Native;
     public bool AllowMultiselect { get; init; }
     public bool AnnounceOnClose { get; init; } = true;

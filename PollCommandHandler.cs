@@ -42,10 +42,30 @@ public sealed class PollCommandHandler
     {
         var builder = new SlashCommandBuilder()
             .WithName(CommandName)
-            .WithDescription("Create a poll — native by default, or anonymous")
-            .AddOption("question", ApplicationCommandOptionType.String, "The poll question", isRequired: true)
-            .AddOption("option1", ApplicationCommandOptionType.String, "First choice (optional leading emoji, e.g. 🔥 Build a base)", isRequired: true)
-            .AddOption("option2", ApplicationCommandOptionType.String, "Second choice", isRequired: true);
+            .WithDescription("Create a poll — native by default, or anonymous");
+
+        // Fields are shown in this order: question, then description, then the
+        // answers. Question is required (Discord enforces it); it comes first so an
+        // optional field never precedes a required one. Options are optional at the
+        // Discord level — the handler enforces "at least 2" and replies with a
+        // friendly error otherwise. MaxLength caps let Discord reject an over-long
+        // question/description at input time, so nothing is ever silently truncated.
+        builder
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("question")
+                .WithDescription("The poll question (max 300 characters)")
+                .WithType(ApplicationCommandOptionType.String)
+                .WithMinLength(1)
+                .WithMaxLength(PollPublisher.MaxQuestionLength)
+                .WithRequired(true))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("description")
+                .WithDescription("Optional context posted above the poll (details, rules, timing, etc.)")
+                .WithType(ApplicationCommandOptionType.String)
+                .WithMaxLength(PollPublisher.MaxMessageLength)
+                .WithRequired(false))
+            .AddOption("option1", ApplicationCommandOptionType.String, "First choice (optional leading emoji, e.g. 🔥 Build a base)", isRequired: false)
+            .AddOption("option2", ApplicationCommandOptionType.String, "Second choice", isRequired: false);
 
         for (var i = 3; i <= MaxOptions; i++)
             builder.AddOption($"option{i}", ApplicationCommandOptionType.String, $"Choice {i}", isRequired: false);
@@ -107,9 +127,13 @@ public sealed class PollCommandHandler
         var question = (Opt("question") ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(question))
         {
-            await command.FollowupAsync("The poll needs a question.", ephemeral: true);
+            await command.FollowupAsync("The poll needs a **question**. (Put any longer context in the optional **description** field.)", ephemeral: true);
             return;
         }
+
+        // Optional longer context, posted as a message above the poll. Blank → none.
+        var description = Opt("description")?.Trim();
+        if (string.IsNullOrWhiteSpace(description)) description = null;
 
         // Collect option1..optionN in order, parsing an optional leading emoji.
         var options = new List<PollOptionDraft>();
@@ -140,6 +164,7 @@ public sealed class PollCommandHandler
             CreatorId        = command.User.Id,
             CreatorName      = (command.User as SocketGuildUser)?.DisplayName ?? command.User.GlobalName ?? command.User.Username,
             Question         = question,
+            Description      = description,
             Kind             = anonymous ? PollKind.Anonymous : PollKind.Native,
             AllowMultiselect = multiselect,
             AnnounceOnClose  = announce,
