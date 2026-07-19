@@ -91,14 +91,16 @@ public class PalworldCommandHandler
         new SlashCommandBuilder()
             .WithName("palworld-leaderboard")
             .WithDescription("Top Palworld players in the clan by playtime or level")
+            // NOTE: building_count is intentionally not a sort option — Palworld
+            // attributes structures to the guild, not the individual, so it reads 0
+            // for every player on a shared-guild clan server. See PalworldSession.
             .AddOption(new SlashCommandOptionBuilder()
                 .WithName("sort")
                 .WithDescription("What to rank by (default playtime)")
                 .WithType(ApplicationCommandOptionType.String)
                 .WithRequired(false)
                 .AddChoice("playtime", "playtime")
-                .AddChoice("level", "level")
-                .AddChoice("bases", "bases"))
+                .AddChoice("level", "level"))
             .Build();
 
     public static SlashCommandProperties BuildLinkCommand() =>
@@ -371,7 +373,6 @@ public class PalworldCommandHandler
                 Name = g.OrderByDescending(s => s.LastSeenUtc).First().PlayerName,
                 Total = g.Aggregate(TimeSpan.Zero, (acc, s) => acc + s.Duration),
                 Level = g.Max(s => s.Level),
-                Bases = g.OrderByDescending(s => s.LastSeenUtc).First().BuildingCount,
             })
             .ToList();
 
@@ -379,8 +380,6 @@ public class PalworldCommandHandler
         {
             "level" => ("🏅 Highest level",
                 players.OrderByDescending(p => p.Level).ThenByDescending(p => p.Total).ToList()),
-            "bases" => ("🏠 Most buildings",
-                players.OrderByDescending(p => p.Bases).ThenByDescending(p => p.Total).ToList()),
             _ => ("⏱️ Most playtime",
                 players.OrderByDescending(p => p.Total).ToList()),
         };
@@ -388,7 +387,7 @@ public class PalworldCommandHandler
         var lines = ranked
             .Take(MaxLeaderboardRows)
             .Select((p, i) => $"`{i + 1,2}.` **{Escape(p.Name)}** — " +
-                              $"{PalworldPresenceService.Humanize(p.Total)}  ·  lvl {p.Level}  ·  {p.Bases} buildings");
+                              $"{PalworldPresenceService.Humanize(p.Total)}  ·  lvl {p.Level}");
 
         var embed = new EmbedBuilder()
             .WithTitle($"🌴 Palworld leaderboard — {title}")

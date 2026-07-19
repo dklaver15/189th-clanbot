@@ -697,7 +697,7 @@ public class CommandsCommandHandler
                 palworldLbl, MinRank(config.PalworldMinRank)),   // SyncWithHandlers: PalworldCommandHandler.HasMinRank
             new("palworld-playtime", "How long someone has played on the clan's Palworld server",
                 palworldLbl, MinRank(config.PalworldMinRank)),
-            new("palworld-leaderboard", "Top Palworld players by playtime, level, or buildings",
+            new("palworld-leaderboard", "Top Palworld players by playtime or level",
                 palworldLbl, MinRank(config.PalworldMinRank)),
             new("palworld-link", "Link your Discord account to your Palworld character (be online in-game)",
                 palworldLbl, MinRank(config.PalworldMinRank)),
