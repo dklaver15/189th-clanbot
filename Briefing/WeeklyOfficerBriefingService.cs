@@ -16,8 +16,18 @@ namespace ClanGuardBot.Briefing;
 
 public sealed class WeeklyBriefingOptions
 {
-    /// <summary>Discord channel ID where the briefing is posted.</summary>
+    /// <summary>Discord channel ID where the HQ officer briefing is posted.</summary>
     public ulong OfficerChannelId { get; set; }
+
+    /// <summary>
+    /// Discord channel ID where the recruitment-team briefing is posted — the
+    /// recruiting-funnel slice (recruitment sources, recruit leads, and
+    /// retention as aggregate numbers). The recruitment team is officers + NCOs.
+    /// 0 (unset) disables the second briefing entirely, so only the HQ briefing
+    /// runs; this lets the feature be rolled out or paused from config alone.
+    /// Uses the same model / effort / thinking / DryRun settings as the HQ run.
+    /// </summary>
+    public ulong RecruitmentChannelId { get; set; }
 
     /// <summary>Day of week to run, in UTC. Default: Sunday.</summary>
     public DayOfWeek RunOnDayUtc { get; set; } = DayOfWeek.Sunday;
@@ -188,9 +198,17 @@ public sealed class WeeklyOfficerBriefingService(
     }
 
     /// <summary>
-    /// Core run: collect the snapshot for [weekStart, weekEnd), generate the
-    /// briefing (with transient-aware retry), and either post it or log it in
-    /// dry-run. Throws on unrecoverable failure (e.g. 401) so the caller can
+    /// Core run: collect the snapshot once for [weekStart, weekEnd), then
+    /// generate and post TWO briefings from that same snapshot:
+    ///   • the HQ officer briefing → <see cref="WeeklyBriefingOptions.OfficerChannelId"/>
+    ///   • the recruitment-team briefing → <see cref="WeeklyBriefingOptions.RecruitmentChannelId"/>
+    ///     (skipped when that channel id is 0/unset)
+    ///
+    /// Both completions are generated (with transient-aware retry) BEFORE either
+    /// is posted, so the common failure — an AI error or an empty completion —
+    /// throws before anything is posted and leaves the slot unstamped for a clean
+    /// catch-up re-run, rather than posting one briefing and then failing on the
+    /// second. Throws on unrecoverable failure (e.g. 401) so the caller can
     /// decide whether to stamp the slot complete.
     /// </summary>
     private async Task RunBriefingForWindowAsync(DateTime weekStartUtc, DateTime weekEndUtc, CancellationToken ct)
@@ -200,35 +218,60 @@ public sealed class WeeklyOfficerBriefingService(
 
         logger.LogDebug("Briefing prompt payload: {Bytes} bytes", userMessage.Length);
 
-        var result = await GenerateWithRetryAsync(userMessage, ct);
+        // ── Generate first, post second ──
+        // HQ briefing (always). GenerateWithRetryAsync already throws on an empty
+        // completion; the guard below is defense in depth — posting a 0-byte
+        // briefing and stamping the week complete is exactly the silent failure
+        // this feature must never produce.
+        var hqResult = await GenerateWithRetryAsync(BriefingPrompts.HqSystemPrompt, userMessage, ct);
+        if (string.IsNullOrWhiteSpace(hqResult.Text))
+            throw new EmptyCompletionException("blank HQ briefing text post-generation");
 
-        // Defense in depth: GenerateWithRetryAsync already throws on an empty
-        // completion, so we should never get here with blank text. Guard anyway
-        // — posting a 0-byte briefing (embed + empty attachment) and then
-        // stamping the week complete is exactly the silent failure this feature
-        // must never produce. Throw so the slot stays unstamped for catch-up.
-        if (string.IsNullOrWhiteSpace(result.Text))
-            throw new EmptyCompletionException("blank text post-generation");
+        // Recruitment briefing (optional — only when a channel is configured).
+        var runRecruitment = _options.RecruitmentChannelId != 0;
+        AiResult? recruitmentResult = null;
+        if (runRecruitment)
+        {
+            recruitmentResult = await GenerateWithRetryAsync(BriefingPrompts.RecruitmentSystemPrompt, userMessage, ct);
+            if (string.IsNullOrWhiteSpace(recruitmentResult.Text))
+                throw new EmptyCompletionException("blank recruitment briefing text post-generation");
+        }
+        else
+        {
+            logger.LogInformation(
+                "WeeklyBriefing:RecruitmentChannelId is unset — skipping the recruitment briefing (HQ only).");
+        }
 
         if (_options.DryRun)
         {
             logger.LogInformation(
-                "[DRY RUN] Briefing not posted. Model: {Model}. Cost ~{Cost:C4}.\n{Briefing}",
-                result.Model, result.EstimatedCostUsd, result.Text);
+                "[DRY RUN] HQ briefing not posted. Model: {Model}. Cost ~{Cost:C4}.\n{Briefing}",
+                hqResult.Model, hqResult.EstimatedCostUsd, hqResult.Text);
+            if (recruitmentResult is not null)
+                logger.LogInformation(
+                    "[DRY RUN] Recruitment briefing not posted. Model: {Model}. Cost ~{Cost:C4}.\n{Briefing}",
+                    recruitmentResult.Model, recruitmentResult.EstimatedCostUsd, recruitmentResult.Text);
             return;
         }
 
-        await PostToDiscordAsync(result.Text, result.Model, weekStartUtc, weekEndUtc, ct);
+        await PostToDiscordAsync(
+            _options.OfficerChannelId, "Weekly Officer Briefing", "briefing",
+            hqResult.Text, hqResult.Model, weekStartUtc, weekEndUtc, ct);
+
+        if (recruitmentResult is not null)
+            await PostToDiscordAsync(
+                _options.RecruitmentChannelId, "Weekly Recruitment Briefing", "recruitment-briefing",
+                recruitmentResult.Text, recruitmentResult.Model, weekStartUtc, weekEndUtc, ct);
     }
 
     /// <summary>
-    /// Calls the AI service, retrying only on transient failures (HTTP 429,
-    /// 5xx, or a network/timeout with no response). Non-transient failures —
-    /// most importantly 401 invalid-api-key and other 4xx — throw on the first
-    /// attempt: they will not fix themselves within the run, and retrying them
-    /// only delays the inevitable and floods the log.
+    /// Calls the AI service for the given system prompt, retrying only on
+    /// transient failures (HTTP 429, 5xx, or a network/timeout with no response).
+    /// Non-transient failures — most importantly 401 invalid-api-key and other
+    /// 4xx — throw on the first attempt: they will not fix themselves within the
+    /// run, and retrying them only delays the inevitable and floods the log.
     /// </summary>
-    private async Task<AiResult> GenerateWithRetryAsync(string userMessage, CancellationToken ct)
+    private async Task<AiResult> GenerateWithRetryAsync(string systemPrompt, string userMessage, CancellationToken ct)
     {
         var attempts = Math.Max(1, _options.MaxGenerateAttempts);
 
@@ -237,7 +280,7 @@ public sealed class WeeklyOfficerBriefingService(
             try
             {
                 return await ai.GenerateAsync(
-                    BriefingPrompts.SystemPrompt, userMessage, _options.MaxOutputTokens, ct,
+                    systemPrompt, userMessage, _options.MaxOutputTokens, ct,
                     effort: _options.Effort, enableThinking: _options.EnableThinking);
             }
             catch (Exception ex) when (attempt < attempts && IsTransient(ex, ct))
@@ -274,28 +317,32 @@ public sealed class WeeklyOfficerBriefingService(
     };
 
     /// <summary>
-    /// Posts the briefing to the briefings channel as TWO adjacent messages:
+    /// Posts a briefing to <paramref name="channelId"/> as TWO adjacent messages:
     ///   1. An embed acting as a per-week reference card (date range + model footer).
     ///   2. The full markdown briefing as a .md attachment.
     ///
     /// They are split because Discord's renderer always places attachments above
     /// embeds within a single message — there is no flag to reverse that. Sending
     /// the embed first as its own message keeps the card visually on top, which
-    /// makes scrollback easier to scan.
+    /// makes scrollback easier to scan. <paramref name="titlePrefix"/> and
+    /// <paramref name="filenamePrefix"/> distinguish the HQ vs recruitment posts.
     /// </summary>
     private async Task PostToDiscordAsync(
+        ulong channelId,
+        string titlePrefix,
+        string filenamePrefix,
         string content,
         string model,
         DateTime weekStartUtc,
         DateTime weekEndUtc,
         CancellationToken ct)
     {
-        var rawChannel = await discord.GetChannelAsync(_options.OfficerChannelId);
+        var rawChannel = await discord.GetChannelAsync(channelId);
         if (rawChannel is not IMessageChannel channel)
         {
             logger.LogError(
-                "Officer channel {Id} not found or not a message channel",
-                _options.OfficerChannelId);
+                "Briefing channel {Id} not found or not a message channel",
+                channelId);
             return;
         }
 
@@ -308,10 +355,10 @@ public sealed class WeeklyOfficerBriefingService(
 
         // Filename uses week-ending date in ET so it sorts naturally and lines
         // up with the title. Short form keeps the attachment label compact in Discord.
-        var filename = $"briefing-{weekEndEt:yyyy-MM-dd}.md";
+        var filename = $"{filenamePrefix}-{weekEndEt:yyyy-MM-dd}.md";
 
         var embed = new EmbedBuilder()
-            .WithTitle($"Weekly Officer Briefing — {dateRange}")
+            .WithTitle($"{titlePrefix} — {dateRange}")
             .WithColor(new Color(0x2B6CB0))
             .WithFooter($"Model: {model}")
             .WithTimestamp(DateTimeOffset.UtcNow)
@@ -331,7 +378,7 @@ public sealed class WeeklyOfficerBriefingService(
 
         logger.LogInformation(
             "Posted weekly briefing to channel {Id} (embed + attachment '{Filename}')",
-            _options.OfficerChannelId, filename);
+            channelId, filename);
     }
 
     private async Task WaitForDiscordReadyAsync(CancellationToken ct)

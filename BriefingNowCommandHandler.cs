@@ -129,10 +129,14 @@ public class BriefingNowCommandHandler
                 await _briefing.RunBriefingNowAsync();
 
             // <#id> renders as a clickable channel link in the ephemeral, so the
-            // invoker can jump straight to the post they just triggered.
-            var channelMention = $"<#{_briefingOptions.OfficerChannelId}>";
+            // invoker can jump straight to the post they just triggered. The run
+            // posts the HQ briefing and — when RecruitmentChannelId is set — the
+            // recruitment briefing too, so mention both channels.
+            var channelsNote = _briefingOptions.RecruitmentChannelId != 0
+                ? $"<#{_briefingOptions.OfficerChannelId}> and <#{_briefingOptions.RecruitmentChannelId}>"
+                : $"<#{_briefingOptions.OfficerChannelId}>";
             await cmd.FollowupAsync(
-                $"✅ Briefing run complete. Check {channelMention} " +
+                $"✅ Briefing run complete. Check {channelsNote} " +
                 "(or the bot logs if `DryRun` is enabled in config).",
                 ephemeral: true);
 
