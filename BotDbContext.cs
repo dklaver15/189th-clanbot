@@ -31,6 +31,7 @@ public class BotDbContext : DbContext
     public DbSet<RedditLead>          RedditLeads         => Set<RedditLead>();
     public DbSet<CommandUsage>        CommandUsages       => Set<CommandUsage>();
     public DbSet<PatrolWatchOptOut>   PatrolWatchOptOuts  => Set<PatrolWatchOptOut>();
+    public DbSet<PatrolWatchNameOverride> PatrolWatchNameOverrides => Set<PatrolWatchNameOverride>();
     public DbSet<CalendarOutbox>      CalendarOutbox      => Set<CalendarOutbox>();
     public DbSet<OfficerApplication>  OfficerApplications => Set<OfficerApplication>();
     public DbSet<DiscordStatusIncidentUpdate> DiscordStatusIncidentUpdates => Set<DiscordStatusIncidentUpdate>();
@@ -417,6 +418,16 @@ public class BotDbContext : DbContext
             // never want two opt-out rows for the same (guild, user) — /patrol off
             // checks for an existing row before inserting, but the index is the
             // structural backstop.
+            e.HasIndex(o => new { o.GuildId, o.UserId }).IsUnique();
+        });
+
+        // ── Patrol Watch name overrides ───────────────────────────────
+        // One canonical display name per (guild, member), set by /patrol-name and
+        // read on every recompute alongside the opt-out query. Unique on
+        // (GuildId, UserId): the command upserts on this key, so a member has at
+        // most one override; the index is the structural backstop.
+        modelBuilder.Entity<PatrolWatchNameOverride>(e =>
+        {
             e.HasIndex(o => new { o.GuildId, o.UserId }).IsUnique();
         });
 

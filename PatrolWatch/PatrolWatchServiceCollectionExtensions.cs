@@ -36,9 +36,10 @@ public static class PatrolWatchServiceCollectionExtensions
         // The watcher itself. Hosted so it starts/stops with the bot.
         services.AddHostedService<PatrolWatchService>();
 
-        // Slash-command handler — singleton so DiscordBotService.Register can
+        // Slash-command handlers — singletons so DiscordBotService.Register can
         // call .Register(client). Same pattern as RedditLeadsCommandHandler.
         services.AddSingleton<PatrolWatchCommandHandler>();
+        services.AddSingleton<PatrolNameCommandHandler>();
 
         return services;
     }

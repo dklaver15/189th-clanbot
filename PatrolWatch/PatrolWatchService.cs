@@ -426,13 +426,18 @@ public sealed class PatrolWatchService : IHostedService
             if (game != null) matched.Add(new MatchedMember(member, game));
         }
 
-        // 3. Drop opt-outs (one batched DB query rather than per-member).
+        // 3. Drop opt-outs and load name overrides in the SAME scope (both are
+        //    keyed by the matched member set, so we pay one round-trip for the two).
+        //    nameOverrides is captured out here so it stays in scope for the embed
+        //    build below, after the DB scope has been disposed.
+        var nameOverrides = EmptyOverrides;
         if (matched.Count > 0)
         {
             using var scope = _services.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
             var memberIds = matched.Select(m => m.User.Id).ToList();
+
             var optedOutIds = await db.PatrolWatchOptOuts
                 .Where(o => o.GuildId == channel.Guild.Id && memberIds.Contains(o.UserId))
                 .Select(o => o.UserId)
@@ -442,6 +447,15 @@ public sealed class PatrolWatchService : IHostedService
             {
                 var optedOutSet = optedOutIds.ToHashSet();
                 matched = matched.Where(m => !optedOutSet.Contains(m.User.Id)).ToList();
+            }
+
+            // Canonical-name overrides for whoever survived the opt-out filter.
+            var remainingIds = matched.Select(m => m.User.Id).ToList();
+            if (remainingIds.Count > 0)
+            {
+                nameOverrides = await db.PatrolWatchNameOverrides
+                    .Where(n => n.GuildId == channel.Guild.Id && remainingIds.Contains(n.UserId))
+                    .ToDictionaryAsync(n => n.UserId, n => n.CanonicalName);
             }
         }
 
@@ -465,9 +479,16 @@ public sealed class PatrolWatchService : IHostedService
 
             var dominantGame = dominantGroup.First().Game;
 
-            var rosterForEmbed = dominantGroup
-                .Select(m => m.User)
-                .OrderBy(u => u.DisplayName, StringComparer.OrdinalIgnoreCase)
+            var rosterUnsorted = dominantGroup.Select(m => m.User).ToList();
+
+            // Resolve every member's display name ONCE — override → live nickname
+            // (REST-refetched when the cache lost it) → global → username — then use
+            // that map for both the sort key and the rendered line so they can't
+            // disagree. Async because the fallback may hit the REST API.
+            var resolvedNames = await ResolveNamesAsync(rosterUnsorted, nameOverrides);
+
+            var rosterForEmbed = rosterUnsorted
+                .OrderBy(u => resolvedNames[u.Id], StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
             // Re-check threshold after filtering to dominant game.
@@ -479,9 +500,9 @@ public sealed class PatrolWatchService : IHostedService
             }
 
             if (existingState == null)
-                await CreateEmbedAsync(channel, rosterForEmbed, dominantGame);
+                await CreateEmbedAsync(channel, rosterForEmbed, dominantGame, resolvedNames);
             else if (RosterChanged(existingState, rosterForEmbed, dominantGame.DisplayName))
-                await EditEmbedAsync(channel, existingState, rosterForEmbed, dominantGame);
+                await EditEmbedAsync(channel, existingState, rosterForEmbed, dominantGame, resolvedNames);
         }
         else
         {
@@ -554,13 +575,14 @@ public sealed class PatrolWatchService : IHostedService
     private async Task CreateEmbedAsync(
         SocketVoiceChannel voiceChannel,
         List<SocketGuildUser> roster,
-        MatchedGame game)
+        MatchedGame game,
+        IReadOnlyDictionary<ulong, string> resolvedNames)
     {
         var lfgChannel = ResolveLfgChannel(voiceChannel.Guild);
         if (lfgChannel == null) return;
 
         var startedAt = DateTime.UtcNow;
-        var embed = BuildEmbed(roster, game, voiceChannel, startedAt);
+        var embed = BuildEmbed(roster, game, voiceChannel, startedAt, resolvedNames);
 
         try
         {
@@ -591,12 +613,13 @@ public sealed class PatrolWatchService : IHostedService
         SocketVoiceChannel voiceChannel,
         PatrolState state,
         List<SocketGuildUser> roster,
-        MatchedGame game)
+        MatchedGame game,
+        IReadOnlyDictionary<ulong, string> resolvedNames)
     {
         var lfgChannel = ResolveLfgChannel(voiceChannel.Guild);
         if (lfgChannel == null) return;
 
-        var embed = BuildEmbed(roster, game, voiceChannel, state.StartedAtUtc);
+        var embed = BuildEmbed(roster, game, voiceChannel, state.StartedAtUtc, resolvedNames);
 
         try
         {
@@ -676,12 +699,14 @@ public sealed class PatrolWatchService : IHostedService
         List<SocketGuildUser> roster,
         MatchedGame game,
         SocketVoiceChannel voiceChannel,
-        DateTime startedAtUtc)
+        DateTime startedAtUtc,
+        IReadOnlyDictionary<ulong, string> resolvedNames)
     {
         // Vertical bullet roster — scales much better than inline-comma joins
-        // for 4+ members and reads more like a deployment manifest.
+        // for 4+ members and reads more like a deployment manifest. Names were
+        // resolved upstream (override → live nick → global → username).
         var rosterLines = string.Join("\n",
-            roster.Select(u => $"- **{u.DisplayName}**"));
+            roster.Select(u => $"- **{NameFor(u, resolvedNames)}**"));
 
         // Discord's <t:unix:R> renders as a live-updating "X minutes ago"
         // string that the client refreshes on its own — we don't have to
@@ -758,6 +783,96 @@ public sealed class PatrolWatchService : IHostedService
         }
         return ch;
     }
+
+    /// <summary>
+    /// Shared empty map so the no-override path allocates nothing.
+    /// </summary>
+    private static readonly IReadOnlyDictionary<ulong, string> EmptyOverrides =
+        new Dictionary<ulong, string>();
+
+    /// <summary>
+    /// Builds the id→display-name map used for both the roster line and the sort,
+    /// applying this precedence per member:
+    ///
+    ///   1. Canonical override (<see cref="PatrolWatchNameOverride"/>) — an officer
+    ///      forced this exact string; always wins.
+    ///   2. Cached guild nickname, when present.
+    ///   3. A REST refetch of the member — the fix for the observed bug: under some
+    ///      presence payloads (Palworld on native Mac + Game Center) the cached
+    ///      member's Nickname comes back null, so <c>DisplayName</c> silently
+    ///      degrades to the GLOBAL name ("Dklaver"). A fresh REST read returns the
+    ///      true nickname, so this preserves the live, rank-prefixed nick that other
+    ///      games already show — instead of freezing a static override that would
+    ///      go stale on the next promotion.
+    ///   4. Whatever <c>DisplayName</c> resolves to (global → username) if the
+    ///      refetch fails or the member genuinely has no nickname.
+    ///
+    /// The REST call fires ONLY when there's no override and the cached nick is
+    /// null — i.e. exactly the degraded members — so a normal squad (nicks cached)
+    /// makes zero extra calls. Failures fall back silently; a name is never worth
+    /// blocking the embed over.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<ulong, string>> ResolveNamesAsync(
+        List<SocketGuildUser> roster,
+        IReadOnlyDictionary<ulong, string> overrides)
+    {
+        var resolved = new Dictionary<ulong, string>(roster.Count);
+
+        foreach (var user in roster)
+        {
+            if (overrides.TryGetValue(user.Id, out var ov) && !string.IsNullOrWhiteSpace(ov))
+            {
+                resolved[user.Id] = ov;
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(user.Nickname))
+            {
+                resolved[user.Id] = user.Nickname;
+                continue;
+            }
+
+            // Cache lost the nickname — go straight to REST. NB: a cache-mode
+            // GetUserAsync would just hand back the same stale object (the member
+            // IS cached, only its nick is null), so we must hit the API directly.
+            string name = user.DisplayName;
+            try
+            {
+                var fresh = await _client.Rest.GetGuildUserAsync(user.Guild.Id, user.Id);
+                if (fresh is not null)
+                {
+                    if (!string.IsNullOrWhiteSpace(fresh.Nickname))
+                    {
+                        name = fresh.Nickname;
+                        _logger.LogInformation(
+                            "PatrolWatch re-resolved nickname for {User} via REST: cache had null nick (DisplayName='{Cached}'), fresh nick='{Fresh}'",
+                            user.Id, user.DisplayName, fresh.Nickname);
+                    }
+                    else
+                    {
+                        // Genuinely no nickname — the global/username fallback is correct.
+                        name = fresh.DisplayName;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex,
+                    "PatrolWatch nickname refetch failed for {User}; using cached DisplayName '{Cached}'",
+                    user.Id, user.DisplayName);
+            }
+
+            resolved[user.Id] = name;
+        }
+
+        return resolved;
+    }
+
+    /// <summary>Lookup into the resolved-name map, defaulting to DisplayName if a member is somehow missing.</summary>
+    private static string NameFor(SocketGuildUser user, IReadOnlyDictionary<ulong, string> resolved) =>
+        resolved.TryGetValue(user.Id, out var name) && !string.IsNullOrWhiteSpace(name)
+            ? name
+            : user.DisplayName;
 
     private static bool RosterChanged(PatrolState state, List<SocketGuildUser> roster, string game)
     {

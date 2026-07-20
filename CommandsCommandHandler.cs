@@ -648,6 +648,8 @@ public class CommandsCommandHandler
                 "Officer+", officer),
             new("setnick", "Change a member's nickname",
                 "Officer+", officerOrManageNicknames),
+            new("patrol-name", "Set/clear the name a member shows as on Patrol Watch embeds",
+                "Manage Nicknames", (user, _) => user.GuildPermissions.ManageNicknames || user.GuildPermissions.Administrator),   // SyncWithHandlers: PatrolNameCommandHandler.HasPermission
             new("squads", "Randomize everyone in the events VC into squads (default 4 per squad, or set size:)",
                 "Officer+", officer),
             new("timeline", "Show a member's complete history — joins, ranks, AWOL, applications, events",
