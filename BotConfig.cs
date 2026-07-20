@@ -362,6 +362,23 @@ public class BotConfig
     /// </summary>
     public ulong QotdChannelId { get; set; } = 1421928902963494922;
 
+    // ──────────────────────────────────────────────────────────────────────
+    //  Joke of the Day (/jotd)
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Minimum rank required to post a Joke of the Day via /jotd. Must match a
+    /// rank name in RankRoles (case-insensitive). Default "SGT". Admins / users
+    /// with Manage Roles always pass regardless of rank.
+    /// </summary>
+    public string JotdMinRank { get; set; } = "SGT";
+
+    /// <summary>
+    /// Channel the /jotd embed is posted to. Defaults to the same channel as
+    /// /qotd (the clan's general channel).
+    /// </summary>
+    public ulong JotdChannelId { get; set; } = 1421928902963494922;
+
     /// <summary>
     /// Master switch for the pinned "Upcoming Events" board maintained by
     /// <see cref="Services.UpcomingEventsBoardService"/>. When false the service

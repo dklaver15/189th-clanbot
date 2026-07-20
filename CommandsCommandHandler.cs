@@ -667,6 +667,9 @@ public class CommandsCommandHandler
             new("qotd", "Post a Question of the Day — set it up in DMs",
                 $"{config.QotdMinRank}+", MinRank(config.QotdMinRank)),   // SyncWithHandlers: QotdCommandHandler.HasPermission
 
+            new("jotd", "Post a Joke of the Day — set it up in DMs",
+                $"{config.JotdMinRank}+", MinRank(config.JotdMinRank)),   // SyncWithHandlers: JotdCommandHandler.HasPermission
+
             new("add-event-credit", "Manually add 1 event credit at member's current rank",
                 eventCreditLbl, MinRank("CPT")),
             new("remove-event-credit", "Remove 1 manual event credit at member's current rank",

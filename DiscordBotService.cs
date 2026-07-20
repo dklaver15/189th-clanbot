@@ -52,6 +52,7 @@ public class DiscordBotService : IHostedService
     private readonly EventManagementHandler _eventMgmtHandler;
     private readonly EventTemplateHandler _eventTemplateHandler;
     private readonly QotdCommandHandler _qotdCommandHandler;
+    private readonly JotdCommandHandler _jotdCommandHandler;
     private readonly PollCommandHandler _pollCommandHandler;
     private readonly PollVoteInteractionHandler _pollVoteHandler;
     private readonly PollGatewayVoteHandler _pollGatewayVoteHandler;
@@ -129,6 +130,7 @@ public class DiscordBotService : IHostedService
         EventManagementHandler eventMgmtHandler,
         EventTemplateHandler eventTemplateHandler,
         QotdCommandHandler qotdCommandHandler,
+        JotdCommandHandler jotdCommandHandler,
         PollCommandHandler pollCommandHandler,
         PollVoteInteractionHandler pollVoteHandler,
         PollGatewayVoteHandler pollGatewayVoteHandler,
@@ -205,6 +207,7 @@ public class DiscordBotService : IHostedService
         _eventMgmtHandler            = eventMgmtHandler;
         _eventTemplateHandler        = eventTemplateHandler;
         _qotdCommandHandler          = qotdCommandHandler;
+        _jotdCommandHandler          = jotdCommandHandler;
         _pollCommandHandler          = pollCommandHandler;
         _pollVoteHandler             = pollVoteHandler;
         _pollGatewayVoteHandler      = pollGatewayVoteHandler;
@@ -301,6 +304,7 @@ public class DiscordBotService : IHostedService
         _eventMgmtHandler.Register(_client);
         _eventTemplateHandler.Register(_client);
         _qotdCommandHandler.Register(_client);
+        _jotdCommandHandler.Register(_client);
         _pollCommandHandler.Register(_client);
         _pollVoteHandler.Register(_client);
         _pollGatewayVoteHandler.Register(_client);
@@ -442,6 +446,12 @@ public class DiscordBotService : IHostedService
                 // embed with the 189th logo to QotdChannelId. NOTE: keep
                 // CommandsCommandHandler.BuildCatalog in sync.
                 QotdCommandHandler.BuildCommand(_config.QotdMinRank),
+
+                // /jotd — Joke of the Day. Opens a DM wizard (gated by
+                // JotdMinRank, default SGT) to collect the joke, then posts an
+                // embed with the 189th logo to JotdChannelId. NOTE: keep
+                // CommandsCommandHandler.BuildCatalog in sync.
+                JotdCommandHandler.BuildCommand(_config.JotdMinRank),
 
                 // /poll — native + anonymous hybrid poll, open to all members.
                 PollCommandHandler.BuildCommand(),
