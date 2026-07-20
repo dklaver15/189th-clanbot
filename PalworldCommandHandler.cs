@@ -47,6 +47,7 @@ public class PalworldCommandHandler
         "palworld-leaderboard",
         "palworld-link",
         "palworld-performance",
+        "palworld-name",
         "palworld-admin",
     };
 
@@ -119,6 +120,26 @@ public class PalworldCommandHandler
             .WithDescription("Server FPS history — is the lag caused by player count or by uptime?")
             .AddOption("hours", ApplicationCommandOptionType.Integer,
                 "How far back to look (default 24, max 168)", isRequired: false)
+            .Build();
+
+    public static SlashCommandProperties BuildNameCommand() =>
+        new SlashCommandBuilder()
+            .WithName("palworld-name")
+            .WithDescription("Pin a canonical name for a Palworld player across the feed, playtime & leaderboard (Palworld Mod)")
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("set")
+                .WithDescription("Pin the name shown for a player")
+                .WithType(ApplicationCommandOptionType.SubCommand)
+                .AddOption("player", ApplicationCommandOptionType.String,
+                    "In-game name of an online player, or a raw user id", isRequired: true)
+                .AddOption("tag", ApplicationCommandOptionType.String,
+                    "Exactly how their name should appear", isRequired: true))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("clear")
+                .WithDescription("Remove a player's pinned name (back to the in-game name)")
+                .WithType(ApplicationCommandOptionType.SubCommand)
+                .AddOption("player", ApplicationCommandOptionType.String,
+                    "In-game name of an online player, or a raw user id", isRequired: true))
             .Build();
 
     public static SlashCommandProperties BuildAdminCommand() =>
@@ -210,6 +231,7 @@ public class PalworldCommandHandler
             case "palworld-leaderboard": await HandleLeaderboardAsync(command); break;
             case "palworld-link":        await HandleLinkAsync(command); break;
             case "palworld-performance": await HandlePerformanceAsync(command); break;
+            case "palworld-name":        await HandleNameAsync(command); break;
             case "palworld-admin":       await HandleAdminAsync(command); break;
         }
     }
@@ -286,6 +308,9 @@ public class PalworldCommandHandler
 
         string label;
         List<PalworldSession> sessions;
+        string? keyUserId;          // the Palworld account to resolve the canonical name against
+        ulong? linkedDiscordId = null;
+        string rawDisplay;          // the name to show before applying any override
 
         if (!string.IsNullOrWhiteSpace(rawName))
         {
@@ -295,7 +320,8 @@ public class PalworldCommandHandler
             sessions = await db.PalworldSessions
                 .Where(s => s.PlayerName == name)
                 .ToListAsync();
-            label = $"**{Escape(name)}**";
+            keyUserId = sessions.FirstOrDefault()?.PalworldUserId;
+            rawDisplay = name;
         }
         else
         {
@@ -316,8 +342,26 @@ public class PalworldCommandHandler
             sessions = await db.PalworldSessions
                 .Where(s => s.PalworldUserId == link.PalworldUserId)
                 .ToListAsync();
-            label = $"<@{discordId}> (**{Escape(link.PalworldName)}**)";
+            keyUserId = link.PalworldUserId;
+            linkedDiscordId = discordId;
+            rawDisplay = link.PalworldName;
         }
+
+        // Prefer the pinned canonical gamertag over whatever name the session/link
+        // captured, so playtime reads the same as the feed and leaderboard.
+        var displayName = rawDisplay;
+        if (!string.IsNullOrEmpty(keyUserId))
+        {
+            var canonical = await db.PalworldNameOverrides
+                .Where(o => o.PalworldUserId == keyUserId)
+                .Select(o => o.CanonicalName)
+                .FirstOrDefaultAsync();
+            if (!string.IsNullOrWhiteSpace(canonical)) displayName = canonical;
+        }
+
+        label = linkedDiscordId is ulong did
+            ? $"<@{did}> (**{Escape(displayName)}**)"
+            : $"**{Escape(displayName)}**";
 
         if (sessions.Count == 0)
         {
@@ -364,13 +408,21 @@ public class PalworldCommandHandler
             return;
         }
 
-        // Group on the stable user id, but display the most RECENT name — a rename
-        // shouldn't split someone into two leaderboard rows.
+        // Canonical-name overrides, keyed by PalworldUserId. The table is tiny (one
+        // row per corrected account), so load it whole and map in memory.
+        var overrides = await db.PalworldNameOverrides
+            .ToDictionaryAsync(o => o.PalworldUserId, o => o.CanonicalName);
+
+        // Group on the stable user id. Display the pinned canonical name if one is
+        // set, else the most RECENT reported name — a rename (or a Steam-vs-Game
+        // Center flip) shouldn't split someone into two rows.
         var players = sessions
             .GroupBy(s => s.PalworldUserId)
             .Select(g => new
             {
-                Name = g.OrderByDescending(s => s.LastSeenUtc).First().PlayerName,
+                Name = overrides.TryGetValue(g.Key, out var canonical) && !string.IsNullOrWhiteSpace(canonical)
+                    ? canonical
+                    : g.OrderByDescending(s => s.LastSeenUtc).First().PlayerName,
                 Total = g.Aggregate(TimeSpan.Zero, (acc, s) => acc + s.Duration),
                 Level = g.Max(s => s.Level),
             })
@@ -482,6 +534,108 @@ public class PalworldCommandHandler
         await command.FollowupAsync(
             $"✅ Linked <@{targetId}> to **{Escape(match.Name)}** (level {match.Level}). " +
             "`/palworld-playtime` will track them from here.",
+            ephemeral: true);
+    }
+
+    // ─── /palworld-name ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Pins a canonical display name for a Palworld account (keyed by the stable
+    /// PalworldUserId), applied by the join/leave feed, /palworld-playtime and
+    /// /palworld-leaderboard. Fixes the case where the server reports a different
+    /// identity per session (Steam name vs Game Center name) for the same account.
+    ///
+    /// Gated on the Palworld Mod role — same authority as /palworld-admin, since
+    /// it's Palworld-server curation. The player is identified the same way the
+    /// admin actions identify targets: an online player's name, or a raw user id.
+    /// </summary>
+    private async Task HandleNameAsync(SocketSlashCommand command)
+    {
+        await command.DeferAsync(ephemeral: true);
+        if (!await EnsureEnabledAsync(command)) return;
+
+        if (command.User is not SocketGuildUser caller)
+        {
+            await command.FollowupAsync("This command can only be used in a server.", ephemeral: true);
+            return;
+        }
+
+        if (!HasAdminRole(caller))
+        {
+            await command.FollowupAsync(
+                "❌ You don't have permission to use this command (requires the Palworld Mod role).",
+                ephemeral: true);
+            return;
+        }
+
+        var sub = command.Data.Options.FirstOrDefault();
+        var opts = sub?.Options?.ToList() ?? new List<SocketSlashCommandDataOption>();
+        var playerInput = opts.FirstOrDefault(o => o.Name == "player")?.Value as string ?? "";
+
+        var (userId, display, err) = await ResolveTargetAsync(playerInput);
+        if (err is not null) { await command.FollowupAsync(err, ephemeral: true); return; }
+
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+        if (sub?.Name == "clear")
+        {
+            var row = await db.PalworldNameOverrides.FirstOrDefaultAsync(o => o.PalworldUserId == userId);
+            if (row is null)
+            {
+                await command.FollowupAsync(
+                    $"**{Escape(display!)}** has no pinned name — nothing to clear.", ephemeral: true);
+                return;
+            }
+
+            db.PalworldNameOverrides.Remove(row);
+            await db.SaveChangesAsync();
+
+            _logger.LogInformation("Palworld name override cleared: {UserId} by {Caller}", userId, caller.Id);
+            await command.FollowupAsync(
+                $"✅ Cleared. That player will show with their in-game name again.", ephemeral: true);
+            return;
+        }
+
+        // set
+        var tag = (opts.FirstOrDefault(o => o.Name == "tag")?.Value as string ?? "").Trim();
+        if (tag.Length == 0)
+        {
+            await command.FollowupAsync(
+                "The name can't be blank. To remove a pin use `/palworld-name clear`.", ephemeral: true);
+            return;
+        }
+        if (tag.Length > 40)
+        {
+            await command.FollowupAsync(
+                $"That name is too long ({tag.Length} chars). Keep it to 40 or fewer.", ephemeral: true);
+            return;
+        }
+
+        var existing = await db.PalworldNameOverrides.FirstOrDefaultAsync(o => o.PalworldUserId == userId);
+        if (existing is null)
+        {
+            db.PalworldNameOverrides.Add(new PalworldNameOverride
+            {
+                PalworldUserId = userId!,
+                CanonicalName  = tag,
+                SetByUserId    = caller.Id,
+                UpdatedAtUtc   = DateTime.UtcNow,
+            });
+        }
+        else
+        {
+            existing.CanonicalName = tag;
+            existing.SetByUserId   = caller.Id;
+            existing.UpdatedAtUtc  = DateTime.UtcNow;
+        }
+
+        await db.SaveChangesAsync();
+
+        _logger.LogInformation("Palworld name override set: {UserId} → '{Tag}' by {Caller}", userId, tag, caller.Id);
+        await command.FollowupAsync(
+            $"✅ Pinned **{Escape(tag)}** for that player. The feed, playtime and leaderboard will use it " +
+            "regardless of what name the server reports per session.",
             ephemeral: true);
     }
 

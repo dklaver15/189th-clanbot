@@ -709,6 +709,9 @@ public class CommandsCommandHandler
             new("palworld-performance", "Palworld server FPS history — is lag from player count or uptime?",
                 palworldLbl, MinRank(config.PalworldMinRank)),
 
+            new("palworld-name", "Pin a canonical name for a Palworld player across the feed, playtime & leaderboard",
+                "Palworld Mod", palworldMod),   // SyncWithHandlers: PalworldCommandHandler.HasAdminRole (HandleNameAsync)
+
             new("palworld-admin", "Administer the Palworld server — announce, kick, ban, unban, save, restart",
                 "Palworld Mod", palworldMod),   // SyncWithHandlers: PalworldCommandHandler.HasAdminRole
 

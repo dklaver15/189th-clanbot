@@ -269,6 +269,21 @@ public sealed class PalworldPresenceService : BackgroundService
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
+        // Canonical-name overrides for whoever joined or left this tick, so the feed
+        // shows a member's pinned clan gamertag rather than whatever identity the
+        // server reported this session (Steam name vs Game Center name). Sessions
+        // still STORE the raw reported name; only the feed label is corrected.
+        var affectedIds = joined.Select(kv => kv.Value.UserId)
+            .Concat(left.Select(kv => kv.Value.UserId))
+            .Where(id => !string.IsNullOrEmpty(id))
+            .Distinct()
+            .ToList();
+        var overrides = affectedIds.Count == 0
+            ? new Dictionary<string, string>()
+            : await db.PalworldNameOverrides
+                .Where(o => affectedIds.Contains(o.PalworldUserId))
+                .ToDictionaryAsync(o => o.PalworldUserId, o => o.CanonicalName, ct);
+
         // ── Leaves ──
         foreach (var (key, player) in left)
         {
@@ -286,7 +301,7 @@ public sealed class PalworldPresenceService : BackgroundService
             }
 
             _online.Remove(key);
-            await PostFeedAsync(LeaveMessage(player, played, seen.Count), ct);
+            await PostFeedAsync(LeaveMessage(FeedName(player, overrides), played, seen.Count), ct);
         }
 
         // ── Joins ──
@@ -306,7 +321,7 @@ public sealed class PalworldPresenceService : BackgroundService
             });
 
             _online[key] = player;
-            await PostFeedAsync(JoinMessage(player, seen.Count), ct);
+            await PostFeedAsync(JoinMessage(FeedName(player, overrides), player.Level, seen.Count), ct);
         }
 
         await db.SaveChangesAsync(ct);
@@ -544,13 +559,25 @@ public sealed class PalworldPresenceService : BackgroundService
             stale.Count, _config.PalworldMetricsRetentionDays);
     }
 
-    private static string JoinMessage(PalworldPlayer p, int onlineCount) =>
-        $"🟢 **{Escape(p.Name)}** joined the Palworld server" +
-        $"{(p.Level > 0 ? $" — level **{p.Level}**" : "")}  ·  {onlineCount} online";
+    private static string JoinMessage(string displayName, int level, int onlineCount) =>
+        $"🟢 **{Escape(displayName)}** joined the Palworld server" +
+        $"{(level > 0 ? $" — level **{level}**" : "")}  ·  {onlineCount} online";
 
-    private static string LeaveMessage(PalworldPlayer p, TimeSpan? played, int onlineCount) =>
-        $"🔴 **{Escape(p.Name)}** left the Palworld server" +
+    private static string LeaveMessage(string displayName, TimeSpan? played, int onlineCount) =>
+        $"🔴 **{Escape(displayName)}** left the Palworld server" +
         $"{(played is { TotalMinutes: >= 1 } d ? $" — played {Humanize(d)}" : "")}  ·  {onlineCount} online";
+
+    /// <summary>
+    /// The name to show in the feed: the canonical override for this player's
+    /// PalworldUserId when one is set, otherwise the raw in-game name the server
+    /// reported. Single point of resolution shared by joins and leaves.
+    /// </summary>
+    private static string FeedName(PalworldPlayer p, IReadOnlyDictionary<string, string> overrides) =>
+        !string.IsNullOrEmpty(p.UserId)
+        && overrides.TryGetValue(p.UserId, out var canonical)
+        && !string.IsNullOrWhiteSpace(canonical)
+            ? canonical
+            : p.Name;
 
     private async Task PostFeedAsync(string message, CancellationToken ct)
     {

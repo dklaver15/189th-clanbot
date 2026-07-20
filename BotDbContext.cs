@@ -54,6 +54,7 @@ public class BotDbContext : DbContext
     public DbSet<PalworldSession>      PalworldSessions      => Set<PalworldSession>();
     public DbSet<PalworldLink>         PalworldLinks         => Set<PalworldLink>();
     public DbSet<PalworldMetricSample> PalworldMetricSamples => Set<PalworldMetricSample>();
+    public DbSet<PalworldNameOverride> PalworldNameOverrides => Set<PalworldNameOverride>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -601,6 +602,16 @@ public class BotDbContext : DbContext
         modelBuilder.Entity<PalworldMetricSample>(e =>
         {
             e.HasIndex(s => s.SampledUtc);
+        });
+
+        // ── Palworld display-name overrides ───────────────────────────
+        // One canonical name per Palworld account. Unique on PalworldUserId: the
+        // /palworld-name command upserts on it, and every display surface looks up
+        // by it, so at most one row per account. Server-global (no GuildId), like
+        // PalworldSession.
+        modelBuilder.Entity<PalworldNameOverride>(e =>
+        {
+            e.HasIndex(o => o.PalworldUserId).IsUnique();
         });
     }
 }
