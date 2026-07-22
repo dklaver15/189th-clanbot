@@ -74,13 +74,23 @@ public sealed class ReminderCreationWizard
 
     // ─── Entry points (called by ReminderCommandHandler) ───────────────────
 
-    /// <summary>Opens a DM and starts a fresh create wizard. False if DMs are closed.</summary>
-    public Task<bool> StartCreateAsync(IUser user, ulong guildId) => StartAsync(user, guildId, existing: null);
+    /// <summary>
+    /// Opens a DM and starts a fresh create wizard. The channel (and any starter
+    /// ping) come from the native pickers on /reminder create — DMs can't render
+    /// guild pickers — and are seeded here, so the DM skips the channel step.
+    /// False if DMs are closed.
+    /// </summary>
+    public Task<bool> StartCreateAsync(
+        IUser user, ulong guildId, ulong channelId, string channelName,
+        List<ulong>? seedRoleIds = null, List<ulong>? seedUserIds = null) =>
+        StartAsync(user, guildId, existing: null, channelId, channelName, seedRoleIds, seedUserIds);
 
     /// <summary>Opens a DM and starts the wizard pre-seeded to EDIT an existing reminder.</summary>
     public Task<bool> StartEditAsync(IUser user, ClanReminder existing) => StartAsync(user, existing.GuildId, existing);
 
-    private async Task<bool> StartAsync(IUser user, ulong guildId, ClanReminder? existing)
+    private async Task<bool> StartAsync(
+        IUser user, ulong guildId, ClanReminder? existing,
+        ulong channelId = 0, string channelName = "", List<ulong>? seedRoleIds = null, List<ulong>? seedUserIds = null)
     {
         PruneExpired();
 
@@ -127,6 +137,15 @@ public sealed class ReminderCreationWizard
             draft.PingHere      = existing.PingHere;
             draft.ImageBytes    = existing.ImageBytes;
             draft.ImageFileName = existing.ImageFileName;
+        }
+        else
+        {
+            // Create: channel came from the native picker; an optional starter
+            // ping (a single role or member) may have too.
+            draft.ChannelId    = channelId;
+            draft.ChannelName  = channelName;
+            draft.PingRoleIds  = seedRoleIds ?? new();
+            draft.PingUserIds  = seedUserIds ?? new();
         }
 
         var session = new ReminderCreationSession
@@ -420,12 +439,12 @@ public sealed class ReminderCreationWizard
 
     private async Task HandleLinkAsync(ReminderCreationSession s, string text)
     {
-        if (IsKeep(s, text)) { await PromptChannelAsync(s); return; }
+        if (IsKeep(s, text)) { await AdvanceAfterLinkAsync(s); return; }
 
         if (IsSkip(text))
         {
             s.Draft.Url = null;
-            await PromptChannelAsync(s);
+            await AdvanceAfterLinkAsync(s);
             return;
         }
 
@@ -444,7 +463,20 @@ public sealed class ReminderCreationWizard
         }
 
         s.Draft.Url = text;
-        await PromptChannelAsync(s);
+        await AdvanceAfterLinkAsync(s);
+    }
+
+    /// <summary>
+    /// After the link step: on a fresh create the channel is already set (from the
+    /// command's native picker), so jump to the ping step; when editing, offer the
+    /// channel step so it can be changed.
+    /// </summary>
+    private async Task AdvanceAfterLinkAsync(ReminderCreationSession s)
+    {
+        if (s.Draft.EditingReminderId is null)
+            await PromptPingAsync(s);
+        else
+            await PromptChannelAsync(s);
     }
 
     private async Task PromptChannelAsync(ReminderCreationSession s)
@@ -496,24 +528,38 @@ public sealed class ReminderCreationWizard
     private async Task PromptPingAsync(ReminderCreationSession s)
     {
         s.Step = ReminderWizardStep.Ping;
-        var cur = s.Draft.EditingReminderId is not null
-            ? $" Current: {DescribePings(s.Draft)} — type `keep` to leave it."
-            : string.Empty;
-        await s.Dm.SendMessageAsync(embed: Form("🔔 Tag anyone? (optional)",
-            "Who should get pinged when this posts? You can list **roles**, **members**, `@everyone`, and/or `@here` " +
-            "— by name, id, or mention, separated by spaces or commas. Type `skip` for no ping." + cur));
+        if (HasPings(s.Draft))
+        {
+            await s.Dm.SendMessageAsync(embed: Form("🔔 Tagging",
+                $"Currently tagging: {DescribePings(s.Draft)}.\n\n" +
+                "List more **roles**/**members**/`@everyone`/`@here` to **add**, type `clear` to tag no one, " +
+                "or `skip` to keep it as-is."));
+        }
+        else
+        {
+            await s.Dm.SendMessageAsync(embed: Form("🔔 Tag anyone? (optional)",
+                "Who should get pinged when this posts? List **roles**, **members**, `@everyone`, and/or `@here` " +
+                "— by name, id, or mention, separated by spaces or commas. Type `skip` for no ping."));
+        }
     }
 
     private async Task HandlePingAsync(ReminderCreationSession s, string text)
     {
-        if (IsKeep(s, text)) { await PromptRecurrenceAsync(s); return; }
+        // "skip"/"keep" leave the current selection as-is (which may be a starter
+        // ping from the command, or the existing pings when editing).
+        if (IsKeep(s, text) || IsSkip(text) || text.Equals("no", StringComparison.OrdinalIgnoreCase))
+        {
+            await PromptRecurrenceAsync(s);
+            return;
+        }
 
-        if (IsSkip(text) || text.Equals("none", StringComparison.OrdinalIgnoreCase) || text.Equals("no", StringComparison.OrdinalIgnoreCase))
+        if (text.Equals("clear", StringComparison.OrdinalIgnoreCase))
         {
             s.Draft.PingRoleIds = new();
             s.Draft.PingUserIds = new();
             s.Draft.PingEveryone = false;
             s.Draft.PingHere = false;
+            await s.Dm.SendMessageAsync("Cleared — this reminder won't ping anyone.");
             await PromptRecurrenceAsync(s);
             return;
         }
@@ -533,16 +579,20 @@ public sealed class ReminderCreationWizard
             return;
         }
 
-        s.Draft.PingRoleIds  = parsed.RoleIds;
-        s.Draft.PingUserIds  = parsed.UserIds;
-        s.Draft.PingEveryone = parsed.Everyone;
-        s.Draft.PingHere     = parsed.Here;
+        // Merge onto whatever's already selected (a starter ping, or edit's existing).
+        foreach (var rid in parsed.RoleIds) if (!s.Draft.PingRoleIds.Contains(rid)) s.Draft.PingRoleIds.Add(rid);
+        foreach (var uid in parsed.UserIds) if (!s.Draft.PingUserIds.Contains(uid)) s.Draft.PingUserIds.Add(uid);
+        s.Draft.PingEveryone |= parsed.Everyone;
+        s.Draft.PingHere     |= parsed.Here;
 
         if (parsed.Unresolved.Count > 0)
             await s.Dm.SendMessageAsync($"⚠️ I couldn't match **{string.Join(", ", parsed.Unresolved)}** — I'll ping the rest.");
 
         await PromptRecurrenceAsync(s);
     }
+
+    private static bool HasPings(ReminderDraft d) =>
+        d.PingRoleIds.Count > 0 || d.PingUserIds.Count > 0 || d.PingEveryone || d.PingHere;
 
     private async Task HandleRecurrenceUntilAsync(ReminderCreationSession s, string text)
     {
@@ -742,11 +792,60 @@ public sealed class ReminderCreationWizard
         row.ImageFileName  = d.ImageFileName;
         row.CancelledAt    = null;
 
+        // Post (or refresh) the "reminder scheduled" status card in the target
+        // channel so members can see it exists — the reminder analogue of an
+        // event's RSVP post. Best-effort; stamps row.AnnouncementMessageId, which
+        // the SaveChanges below persists.
+        await PostOrUpdateCardAsync(row, isEdit: d.EditingReminderId is not null);
+
         await db.SaveChangesAsync();
 
         _logger.LogInformation(
             "{Verb} reminder {Id} '{Title}' → channel {Channel}, first fire {Fire:o} UTC (freq={Freq})",
             d.EditingReminderId is null ? "Created" : "Updated", row.Id, row.Title, row.ChannelId, row.NextFireUtc, row.Frequency);
+    }
+
+    /// <summary>
+    /// Posts a fresh status card to the reminder's channel (and, when editing,
+    /// removes the previous card first so the details/image/channel always match).
+    /// Never pings — posts with <see cref="AllowedMentions.None"/>. Best-effort;
+    /// stamps <see cref="ClanReminder.AnnouncementMessageId"/> on success.
+    /// </summary>
+    private async Task PostOrUpdateCardAsync(ClanReminder row, bool isEdit)
+    {
+        try
+        {
+            var channel = _client.GetChannel(row.ChannelId) as IMessageChannel
+                          ?? await _client.Rest.GetChannelAsync(row.ChannelId) as IMessageChannel;
+            if (channel is null) return;
+
+            // On edit, drop the old card so a changed image/channel/details can't
+            // leave a stale one behind, then repost.
+            if (isEdit && row.AnnouncementMessageId != 0)
+            {
+                try { await channel.DeleteMessageAsync(row.AnnouncementMessageId); }
+                catch (Exception ex) { _logger.LogDebug(ex, "Couldn't delete prior reminder card {Msg}", row.AnnouncementMessageId); }
+                row.AnnouncementMessageId = 0;
+            }
+
+            var embed = ReminderCard.Build(row, cancelled: false);
+            IUserMessage posted;
+            if (row.ImageBytes is { Length: > 0 } && !string.IsNullOrWhiteSpace(row.ImageFileName))
+            {
+                using var fa = new FileAttachment(new MemoryStream(row.ImageBytes), row.ImageFileName);
+                posted = await channel.SendFileAsync(fa, text: null, embed: embed, allowedMentions: AllowedMentions.None);
+            }
+            else
+            {
+                posted = await channel.SendMessageAsync(text: null, embed: embed, allowedMentions: AllowedMentions.None);
+            }
+
+            row.AnnouncementMessageId = posted.Id;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Couldn't post reminder status card for '{Title}'", row.Title);
+        }
     }
 
     private async Task FinalizeConfirmAsync(SocketMessageComponent c, string content)

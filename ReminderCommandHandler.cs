@@ -58,7 +58,19 @@ public sealed class ReminderCommandHandler
             .AddOption(new SlashCommandOptionBuilder()
                 .WithName("create")
                 .WithDescription($"Create a reminder — walks you through it in DMs ({minRank}+ only)")
-                .WithType(ApplicationCommandOptionType.SubCommand))
+                .WithType(ApplicationCommandOptionType.SubCommand)
+                .AddOption(new SlashCommandOptionBuilder()
+                    .WithName("channel")
+                    .WithDescription("Channel to post the reminder in")
+                    .WithType(ApplicationCommandOptionType.Channel)
+                    .WithRequired(true)
+                    .AddChannelType(ChannelType.Text)
+                    .AddChannelType(ChannelType.News))
+                .AddOption(new SlashCommandOptionBuilder()
+                    .WithName("ping")
+                    .WithDescription("A role or member to tag (add more, or @everyone/@here, in DMs)")
+                    .WithType(ApplicationCommandOptionType.Mentionable)
+                    .WithRequired(false)))
             .AddOption(new SlashCommandOptionBuilder()
                 .WithName("list")
                 .WithDescription("Show upcoming scheduled reminders")
@@ -117,9 +129,46 @@ public sealed class ReminderCommandHandler
     {
         await command.DeferAsync(ephemeral: true);
 
-        var started = await _wizard.StartCreateAsync(command.User, command.GuildId!.Value);
+        var guildUser = (SocketGuildUser)command.User;
+        var guild = guildUser.Guild;
+
+        // The channel + optional ping come from native pickers on the command
+        // itself — DMs can't render guild pickers, so these two fields live here
+        // and are seeded into the DM wizard.
+        var createOpt = command.Data.Options.FirstOrDefault();
+        var channelOptValue = createOpt?.Options?.FirstOrDefault(o => o.Name == "channel")?.Value;
+        var pingOptValue    = createOpt?.Options?.FirstOrDefault(o => o.Name == "ping")?.Value;
+
+        if (channelOptValue is not IChannel picked || guild.GetTextChannel(picked.Id) is not { } channel)
+        {
+            await command.FollowupAsync("Please pick a text channel to post the reminder in.", ephemeral: true);
+            return;
+        }
+
+        var perms = guild.CurrentUser.GetPermissions(channel);
+        if (!perms.ViewChannel || !perms.SendMessages)
+        {
+            await command.FollowupAsync(
+                $"❌ I can't post in <#{channel.Id}> — I'm missing View Channel / Send Messages there. Fix that or pick another channel.",
+                ephemeral: true);
+            return;
+        }
+
+        // A Mentionable resolves to either a role or a member.
+        var seedRoleIds = new List<ulong>();
+        var seedUserIds = new List<ulong>();
+        switch (pingOptValue)
+        {
+            case IRole role: seedRoleIds.Add(role.Id); break;
+            case IUser user: seedUserIds.Add(user.Id); break;
+        }
+
+        var started = await _wizard.StartCreateAsync(
+            command.User, guild.Id, channel.Id, channel.Name, seedRoleIds, seedUserIds);
         if (started)
-            await command.FollowupAsync("📬 Check your DMs — I'll walk you through creating the reminder there.", ephemeral: true);
+            await command.FollowupAsync(
+                $"📬 Check your DMs — I'll walk you through the rest. This one will post to <#{channel.Id}>.",
+                ephemeral: true);
         else
             await command.FollowupAsync(
                 "I couldn't DM you. Enable **Direct Messages** from server members (Privacy Settings) and try again.",
@@ -228,6 +277,10 @@ public sealed class ReminderCommandHandler
                 reminder.CancelledAt = DateTime.UtcNow;
                 await db.SaveChangesAsync();
 
+                // Flip the "scheduled" status card in the channel to cancelled so
+                // anyone who saw it knows it's off (best-effort).
+                await TryFlipCardCancelledAsync(reminder);
+
                 await component.UpdateAsync(m =>
                 {
                     m.Content    = $"🗑️ Cancelled **{reminder.Title}** — it won't post.";
@@ -271,6 +324,24 @@ public sealed class ReminderCommandHandler
     {
         var client = _services.GetRequiredService<DiscordSocketClient>();
         return client.GetGuild(guildId)?.GetTextChannel(channelId)?.Name ?? channelId.ToString();
+    }
+
+    /// <summary>Best-effort: edit the channel status card to its cancelled state.</summary>
+    private async Task TryFlipCardCancelledAsync(ClanReminder r)
+    {
+        if (r.AnnouncementMessageId == 0) return;
+        try
+        {
+            var client = _services.GetRequiredService<DiscordSocketClient>();
+            if (client.GetChannel(r.ChannelId) is not IMessageChannel ch) return;
+            if (await ch.GetMessageAsync(r.AnnouncementMessageId) is not IUserMessage msg) return;
+            var embed = ReminderCard.Build(r, cancelled: true);
+            await msg.ModifyAsync(m => m.Embed = embed);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Couldn't flip reminder {Id} status card to cancelled", r.Id);
+        }
     }
 
     /// <summary>

@@ -116,6 +116,16 @@ public class ClanReminder
     public byte[]? ImageBytes { get; set; }
     public string? ImageFileName { get; set; }
 
+    /// <summary>
+    /// Message id of the "reminder scheduled" status card posted to
+    /// <see cref="ChannelId"/> at creation (so members see the reminder exists —
+    /// the same idea as an event's RSVP post). 0 if none. Edited to reflect the
+    /// new time on each recurring fire, flipped to a cancelled state on cancel,
+    /// and deleted when a one-off fires (the real announcement replaces it).
+    /// Persisted so the edit/delete still happen after a restart.
+    /// </summary>
+    public ulong AnnouncementMessageId { get; set; }
+
     public DateTime CreatedAt { get; set; }
 
     /// <summary>Stamped when Status flips to Cancelled.</summary>

@@ -114,6 +114,11 @@ public sealed class ReminderSchedulerService : BackgroundService
             reminder.LastFiredAt = DateTime.UtcNow;
 
             AdvanceOrComplete(reminder, DateTime.UtcNow);
+
+            // Keep the "scheduled" status card in sync: delete it once a one-off
+            // is done (the real announcement replaces it), or refresh its
+            // next-post time for a recurring reminder.
+            await HandleCardAfterFireAsync(reminder);
         }
 
         await db.SaveChangesAsync(ct);
@@ -195,6 +200,37 @@ public sealed class ReminderSchedulerService : BackgroundService
     {
         try { return await _client.Rest.GetChannelAsync(channelId) as IMessageChannel; }
         catch { return null; }
+    }
+
+    /// <summary>
+    /// After a fire: delete the status card for a completed one-off (its real
+    /// announcement now stands in the channel), or refresh the card's next-post
+    /// time for a still-scheduled recurring reminder. Best-effort.
+    /// </summary>
+    private async Task HandleCardAfterFireAsync(ClanReminder r)
+    {
+        if (r.AnnouncementMessageId == 0) return;
+        try
+        {
+            var channel = _client.GetChannel(r.ChannelId) as IMessageChannel
+                          ?? await SafeRestChannelAsync(r.ChannelId);
+            if (channel is null) return;
+
+            if (r.Status == ClanReminderStatus.Completed)
+            {
+                try { await channel.DeleteMessageAsync(r.AnnouncementMessageId); }
+                catch (Exception ex) { _logger.LogDebug(ex, "Couldn't delete finished reminder card {Msg}", r.AnnouncementMessageId); }
+                r.AnnouncementMessageId = 0;
+            }
+            else if (await channel.GetMessageAsync(r.AnnouncementMessageId) is IUserMessage msg)
+            {
+                await msg.ModifyAsync(m => m.Embed = ReminderCard.Build(r, cancelled: false));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Couldn't update reminder {Id} status card after fire", r.Id);
+        }
     }
 
     /// <summary>
