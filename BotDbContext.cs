@@ -42,6 +42,7 @@ public class BotDbContext : DbContext
     public DbSet<ClanEvent>           ClanEvents          => Set<ClanEvent>();
     public DbSet<ClanEventSeries>     ClanEventSeries     => Set<ClanEventSeries>();
     public DbSet<ClanEventTemplate>   ClanEventTemplates  => Set<ClanEventTemplate>();
+    public DbSet<ClanReminder>        ClanReminders       => Set<ClanReminder>();
     public DbSet<EventRsvp>           EventRsvps          => Set<EventRsvp>();
     public DbSet<UserTimeZone>        UserTimeZones       => Set<UserTimeZone>();
     public DbSet<Poll>                Polls               => Set<Poll>();
@@ -494,6 +495,12 @@ public class BotDbContext : DbContext
             // Listing/picking is always scoped to the guild. Name uniqueness is
             // enforced case-insensitively in the save flow (see ClanEventTemplate.Name).
             entity.HasIndex(e => e.GuildId);
+        });
+
+        modelBuilder.Entity<ClanReminder>(entity =>
+        {
+            entity.HasIndex(e => new { e.GuildId, e.Status });   // /reminder list + pickers
+            entity.HasIndex(e => new { e.Status, e.NextFireUtc }); // scheduler: Scheduled & due
         });
 
         modelBuilder.Entity<UserTimeZone>(entity =>

@@ -666,6 +666,9 @@ public class CommandsCommandHandler
             new("comp-event", "Create a competitive division event on the calendar",
                 compEventLbl, MinRank(config.CompEventMinRank)),
 
+            new("reminder", "Schedule a one-off or recurring announcement",
+                $"{config.ReminderCommandMinRank}+", MinRank(config.ReminderCommandMinRank)),
+
             new("qotd", "Post a Question of the Day — set it up in DMs",
                 $"{config.QotdMinRank}+", MinRank(config.QotdMinRank)),   // SyncWithHandlers: QotdCommandHandler.HasPermission
 

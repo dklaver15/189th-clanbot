@@ -471,6 +471,20 @@ try
     builder.Services.AddSingleton<UpcomingEventsBoardService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<UpcomingEventsBoardService>()); // pinned upcoming-events board
 
+    // ── /reminder (scheduled announcements) ──────────────────────────────
+    // A leaner sibling of the event system: officer-gated DM wizard that
+    // schedules a one-off or recurring announcement (title, time, image, link,
+    // target channel, optional role/user/@everyone/@here ping), stored as a
+    // single self-rescheduling ClanReminder row. ReminderCreationWizard owns the
+    // DM flow (self-registers MessageReceived + ButtonExecuted); ReminderCommandHandler
+    // owns /reminder create|list|cancel|edit (Register() called from
+    // DiscordBotService); ReminderSchedulerService posts due reminders and advances
+    // recurrence DST-safely. Gated by BotConfig.RemindersEnabled +
+    // ReminderCommandMinRank. NOTE: keep CommandsCommandHandler.BuildCatalog in sync.
+    builder.Services.AddSingleton<ReminderCreationWizard>();
+    builder.Services.AddSingleton<ReminderCommandHandler>();
+    builder.Services.AddHostedService<ReminderSchedulerService>();
+
     // /qotd — Question of the Day. Self-contained handler: gated SGT+, opens a
     // DM to collect the question, previews + confirms, then posts an embed (with
     // the 189th logo) to BotConfig.QotdChannelId. Self-registers slash + DM +

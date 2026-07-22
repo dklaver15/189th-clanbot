@@ -330,6 +330,23 @@ public class BotConfig
     /// </summary>
     public string EventTemplateManageMinRank { get; set; } = "CPT";
 
+    // ── /reminder (scheduled announcements) ──
+
+    /// <summary>
+    /// Minimum rank that can schedule/manage reminders via /reminder. Default
+    /// "2ndLT" — the same "any officer" floor as <see cref="EventCommandMinRank"/>.
+    /// Administrator / Manage Roles always pass. Matched against a role name in
+    /// RankRoles (case-insensitive).
+    /// </summary>
+    public string ReminderCommandMinRank { get; set; } = "2ndLT";
+
+    /// <summary>
+    /// Master switch for the reminder scheduler. When false,
+    /// ReminderSchedulerService idles and no reminders post (rows are still
+    /// created; they just don't fire until re-enabled).
+    /// </summary>
+    public bool RemindersEnabled { get; set; } = true;
+
     /// <summary>
     /// Channel that ClanGuard-created event embeds are posted to. 0 falls back
     /// to EventsTextChannelId. Kept separate from EventsTextChannelId on purpose:

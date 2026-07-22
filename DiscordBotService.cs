@@ -48,6 +48,8 @@ public class DiscordBotService : IHostedService
     private readonly CompEventCommandHandler _compEventHandler;
     private readonly EventCommandHandler _eventCommandHandler;
     private readonly EventCreationWizard _eventWizard;
+    private readonly ReminderCommandHandler _reminderCommandHandler;
+    private readonly ReminderCreationWizard _reminderWizard;
     private readonly EventRsvpInteractionHandler _eventRsvpHandler;
     private readonly EventManagementHandler _eventMgmtHandler;
     private readonly EventTemplateHandler _eventTemplateHandler;
@@ -127,6 +129,8 @@ public class DiscordBotService : IHostedService
         CompEventCommandHandler compEventHandler,
         EventCommandHandler eventCommandHandler,
         EventCreationWizard eventWizard,
+        ReminderCommandHandler reminderCommandHandler,
+        ReminderCreationWizard reminderWizard,
         EventRsvpInteractionHandler eventRsvpHandler,
         EventManagementHandler eventMgmtHandler,
         EventTemplateHandler eventTemplateHandler,
@@ -205,6 +209,8 @@ public class DiscordBotService : IHostedService
         _compEventHandler            = compEventHandler;
         _eventCommandHandler         = eventCommandHandler;
         _eventWizard                 = eventWizard;
+        _reminderCommandHandler      = reminderCommandHandler;
+        _reminderWizard              = reminderWizard;
         _eventRsvpHandler            = eventRsvpHandler;
         _eventMgmtHandler            = eventMgmtHandler;
         _eventTemplateHandler        = eventTemplateHandler;
@@ -303,6 +309,8 @@ public class DiscordBotService : IHostedService
         _compEventHandler.Register(_client);
         _eventCommandHandler.Register(_client);
         _eventWizard.Register(_client);
+        _reminderCommandHandler.Register(_client);
+        _reminderWizard.Register(_client);
         _eventRsvpHandler.Register(_client);
         _eventMgmtHandler.Register(_client);
         _eventTemplateHandler.Register(_client);
@@ -444,6 +452,11 @@ public class DiscordBotService : IHostedService
                 // zone used to read each member's event-time input.
                 EventCommandHandler.BuildEventCommand(_config.EventCommandMinRank, _config.EventTemplateManageMinRank),
                 EventCommandHandler.BuildTimezoneCommand(),
+
+                // /reminder — officer-gated scheduled announcements
+                // (create/list/cancel/edit). DM wizard + ReminderSchedulerService.
+                // NOTE: keep CommandsCommandHandler.BuildCatalog in sync.
+                ReminderCommandHandler.BuildCommand(_config.ReminderCommandMinRank),
 
                 // /qotd — Question of the Day. Opens a DM wizard (gated by
                 // QotdMinRank, default SGT) to collect the question, then posts an
