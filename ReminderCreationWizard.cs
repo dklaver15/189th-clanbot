@@ -82,15 +82,17 @@ public sealed class ReminderCreationWizard
     /// </summary>
     public Task<bool> StartCreateAsync(
         IUser user, ulong guildId, ulong channelId, string channelName,
-        List<ulong>? seedRoleIds = null, List<ulong>? seedUserIds = null) =>
-        StartAsync(user, guildId, existing: null, channelId, channelName, seedRoleIds, seedUserIds);
+        List<ulong>? seedRoleIds = null, List<ulong>? seedUserIds = null,
+        bool seedEveryone = false, bool seedHere = false) =>
+        StartAsync(user, guildId, existing: null, channelId, channelName, seedRoleIds, seedUserIds, seedEveryone, seedHere);
 
     /// <summary>Opens a DM and starts the wizard pre-seeded to EDIT an existing reminder.</summary>
     public Task<bool> StartEditAsync(IUser user, ClanReminder existing) => StartAsync(user, existing.GuildId, existing);
 
     private async Task<bool> StartAsync(
         IUser user, ulong guildId, ClanReminder? existing,
-        ulong channelId = 0, string channelName = "", List<ulong>? seedRoleIds = null, List<ulong>? seedUserIds = null)
+        ulong channelId = 0, string channelName = "", List<ulong>? seedRoleIds = null, List<ulong>? seedUserIds = null,
+        bool seedEveryone = false, bool seedHere = false)
     {
         PruneExpired();
 
@@ -146,6 +148,8 @@ public sealed class ReminderCreationWizard
             draft.ChannelName  = channelName;
             draft.PingRoleIds  = seedRoleIds ?? new();
             draft.PingUserIds  = seedUserIds ?? new();
+            draft.PingEveryone = seedEveryone;
+            draft.PingHere     = seedHere;
         }
 
         var session = new ReminderCreationSession
@@ -222,7 +226,6 @@ public sealed class ReminderCreationWizard
                 case ReminderWizardStep.Image:           await HandleImageAsync(s, message, text);    break;
                 case ReminderWizardStep.Link:            await HandleLinkAsync(s, text);              break;
                 case ReminderWizardStep.Channel:         await HandleChannelAsync(s, text);           break;
-                case ReminderWizardStep.Ping:            await HandlePingAsync(s, text);              break;
                 case ReminderWizardStep.RecurrenceUntil: await HandleRecurrenceUntilAsync(s, text);   break;
                 // Recurrence / Confirm are button steps — ignore stray text.
             }
@@ -474,7 +477,7 @@ public sealed class ReminderCreationWizard
     private async Task AdvanceAfterLinkAsync(ReminderCreationSession s)
     {
         if (s.Draft.EditingReminderId is null)
-            await PromptPingAsync(s);
+            await PromptRecurrenceAsync(s);
         else
             await PromptChannelAsync(s);
     }
@@ -493,7 +496,7 @@ public sealed class ReminderCreationWizard
     {
         if (IsKeep(s, text) && s.Draft.ChannelId != 0)
         {
-            await PromptPingAsync(s);
+            await PromptRecurrenceAsync(s);
             return;
         }
 
@@ -522,77 +525,8 @@ public sealed class ReminderCreationWizard
 
         s.Draft.ChannelId   = channel.Id;
         s.Draft.ChannelName = channel.Name;
-        await PromptPingAsync(s);
-    }
-
-    private async Task PromptPingAsync(ReminderCreationSession s)
-    {
-        s.Step = ReminderWizardStep.Ping;
-        if (HasPings(s.Draft))
-        {
-            await s.Dm.SendMessageAsync(embed: Form("🔔 Tagging",
-                $"Currently tagging: {DescribePings(s.Draft)}.\n\n" +
-                "List more **roles**/**members**/`@everyone`/`@here` to **add**, type `clear` to tag no one, " +
-                "or `skip` to keep it as-is."));
-        }
-        else
-        {
-            await s.Dm.SendMessageAsync(embed: Form("🔔 Tag anyone? (optional)",
-                "Who should get pinged when this posts? List **roles**, **members**, `@everyone`, and/or `@here` " +
-                "— by name, id, or mention, separated by spaces or commas. Type `skip` for no ping."));
-        }
-    }
-
-    private async Task HandlePingAsync(ReminderCreationSession s, string text)
-    {
-        // "skip"/"keep" leave the current selection as-is (which may be a starter
-        // ping from the command, or the existing pings when editing).
-        if (IsKeep(s, text) || IsSkip(text) || text.Equals("no", StringComparison.OrdinalIgnoreCase))
-        {
-            await PromptRecurrenceAsync(s);
-            return;
-        }
-
-        if (text.Equals("clear", StringComparison.OrdinalIgnoreCase))
-        {
-            s.Draft.PingRoleIds = new();
-            s.Draft.PingUserIds = new();
-            s.Draft.PingEveryone = false;
-            s.Draft.PingHere = false;
-            await s.Dm.SendMessageAsync("Cleared — this reminder won't ping anyone.");
-            await PromptRecurrenceAsync(s);
-            return;
-        }
-
-        var guild = _client.GetGuild(s.Draft.GuildId);
-        if (guild is null)
-        {
-            await s.Dm.SendMessageAsync(embed: Form("Hmm", "I can't reach that server right now. Try again, or type `skip`."));
-            return;
-        }
-
-        var parsed = ReminderTargets.ParsePings(guild, text);
-        if (!parsed.Any && parsed.Unresolved.Count > 0)
-        {
-            await s.Dm.SendMessageAsync(embed: Form("🔔 Couldn't match those",
-                $"I couldn't find: **{string.Join(", ", parsed.Unresolved)}**. Try role/member names, ids, mentions, `@everyone`, or `@here` — or type `skip`."));
-            return;
-        }
-
-        // Merge onto whatever's already selected (a starter ping, or edit's existing).
-        foreach (var rid in parsed.RoleIds) if (!s.Draft.PingRoleIds.Contains(rid)) s.Draft.PingRoleIds.Add(rid);
-        foreach (var uid in parsed.UserIds) if (!s.Draft.PingUserIds.Contains(uid)) s.Draft.PingUserIds.Add(uid);
-        s.Draft.PingEveryone |= parsed.Everyone;
-        s.Draft.PingHere     |= parsed.Here;
-
-        if (parsed.Unresolved.Count > 0)
-            await s.Dm.SendMessageAsync($"⚠️ I couldn't match **{string.Join(", ", parsed.Unresolved)}** — I'll ping the rest.");
-
         await PromptRecurrenceAsync(s);
     }
-
-    private static bool HasPings(ReminderDraft d) =>
-        d.PingRoleIds.Count > 0 || d.PingUserIds.Count > 0 || d.PingEveryone || d.PingHere;
 
     private async Task HandleRecurrenceUntilAsync(ReminderCreationSession s, string text)
     {

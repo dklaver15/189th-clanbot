@@ -68,8 +68,18 @@ public sealed class ReminderCommandHandler
                     .AddChannelType(ChannelType.News))
                 .AddOption(new SlashCommandOptionBuilder()
                     .WithName("ping")
-                    .WithDescription("A role or member to tag (add more, or @everyone/@here, in DMs)")
+                    .WithDescription("A role or member to tag when it posts")
                     .WithType(ApplicationCommandOptionType.Mentionable)
+                    .WithRequired(false))
+                .AddOption(new SlashCommandOptionBuilder()
+                    .WithName("ping_everyone")
+                    .WithDescription("Also ping @everyone when it posts")
+                    .WithType(ApplicationCommandOptionType.Boolean)
+                    .WithRequired(false))
+                .AddOption(new SlashCommandOptionBuilder()
+                    .WithName("ping_here")
+                    .WithDescription("Also ping @here when it posts")
+                    .WithType(ApplicationCommandOptionType.Boolean)
                     .WithRequired(false)))
             .AddOption(new SlashCommandOptionBuilder()
                 .WithName("list")
@@ -138,6 +148,8 @@ public sealed class ReminderCommandHandler
         var createOpt = command.Data.Options.FirstOrDefault();
         var channelOptValue = createOpt?.Options?.FirstOrDefault(o => o.Name == "channel")?.Value;
         var pingOptValue    = createOpt?.Options?.FirstOrDefault(o => o.Name == "ping")?.Value;
+        var pingEveryone    = createOpt?.Options?.FirstOrDefault(o => o.Name == "ping_everyone")?.Value as bool? ?? false;
+        var pingHere        = createOpt?.Options?.FirstOrDefault(o => o.Name == "ping_here")?.Value as bool? ?? false;
 
         if (channelOptValue is not IChannel picked || guild.GetTextChannel(picked.Id) is not { } channel)
         {
@@ -164,7 +176,7 @@ public sealed class ReminderCommandHandler
         }
 
         var started = await _wizard.StartCreateAsync(
-            command.User, guild.Id, channel.Id, channel.Name, seedRoleIds, seedUserIds);
+            command.User, guild.Id, channel.Id, channel.Name, seedRoleIds, seedUserIds, pingEveryone, pingHere);
         if (started)
             await command.FollowupAsync(
                 $"📬 Check your DMs — I'll walk you through the rest. This one will post to <#{channel.Id}>.",
