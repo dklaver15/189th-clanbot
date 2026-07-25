@@ -39,21 +39,16 @@ public class SatisfactoryCommandHandler
     private readonly ILogger<SatisfactoryCommandHandler> _logger;
     private readonly BotConfig _config;
     private readonly SatisfactoryApiService _api;
-    private readonly NitradoApiService _nitrado;
 
     public SatisfactoryCommandHandler(
         ILogger<SatisfactoryCommandHandler> logger,
         IOptions<BotConfig> config,
-        SatisfactoryApiService api,
-        NitradoApiService nitrado)
+        SatisfactoryApiService api)
     {
         _logger = logger;
         _config = config.Value;
         _api = api;
-        _nitrado = nitrado;
     }
-
-    private bool NitradoActive => _config.NitradoEnabled && _nitrado.IsConfigured;
 
     // ─── Command definitions ─────────────────────────────────────────────────
 
@@ -138,21 +133,11 @@ public class SatisfactoryCommandHandler
         var state = await _api.GetServerStateAsync();
         var health = await _api.GetHealthAsync();
 
-        // Host-level view from Nitrado, when enabled. Lets us report "restarting"
-        // instead of a bare "not responding", and adds build/expiry info.
-        var host = NitradoActive ? await _nitrado.GetGameServerAsync() : null;
-        var svc = NitradoActive ? await _nitrado.GetServiceAsync() : null;
-
-        // A null game read is "unreachable". If Nitrado can still tell us why (e.g. a
-        // restart), say that; otherwise fall back to the generic offline line.
+        // A null game read is "unreachable" — and with no host-panel API there is no
+        // second opinion available, so we can't say whether it crashed or is just
+        // mid-restart. Say so rather than guessing.
         if (state is null && health is null)
         {
-            if (host is not null)
-            {
-                await command.FollowupAsync(embed: HostOnlyEmbed(host, svc), ephemeral: true);
-                return;
-            }
-
             await command.FollowupAsync(
                 "🔴 The Satisfactory server isn't responding — it's most likely offline or restarting.",
                 ephemeral: true);
@@ -172,15 +157,6 @@ public class SatisfactoryCommandHandler
             embed.AddField("Tick rate", $"{state.AverageTickRate:0.0} tps", true);
             embed.AddField("State", state.IsGamePaused ? "⏸️ Paused" : state.IsGameRunning ? "▶️ Running" : "⏳ Awaiting session", true);
         }
-
-        // Nitrado extras: host status, game build, and rental expiry.
-        if (host is not null)
-        {
-            embed.AddField("Host status", PrettyHostStatus(host.Status), true);
-            if (!string.IsNullOrWhiteSpace(host.Version))
-                embed.AddField("Build", Escape(host.Version), true);
-        }
-        AddRentalField(embed, svc);
 
         if (!string.IsNullOrWhiteSpace(health))
             embed.WithFooter(health.Equals("healthy", StringComparison.OrdinalIgnoreCase)
@@ -336,58 +312,6 @@ public class SatisfactoryCommandHandler
 
         var m = Regex.Match(phase, @"Phase[_\s]?(\d+)", RegexOptions.IgnoreCase);
         return m.Success ? $"Phase {m.Groups[1].Value}" : "In progress";
-    }
-
-    /// <summary>
-    /// Fallback embed when the game API is unreachable but Nitrado can still describe
-    /// the host — turns a bare "not responding" into "it's restarting".
-    /// </summary>
-    private Embed HostOnlyEmbed(NitradoGameServer host, NitradoService? svc)
-    {
-        var started = string.Equals(host.Status, "started", StringComparison.OrdinalIgnoreCase);
-        var embed = new EmbedBuilder()
-            .WithTitle("🏭 Satisfactory server")
-            .WithColor(started ? new Color(0xE59344) : new Color(0xF1C40F))
-            .WithDescription(started
-                ? "The host reports the server as **started**, but its game API isn't answering yet — it may still be loading the save."
-                : $"The game isn't reachable right now — host status is **{PrettyHostStatus(host.Status)}**.")
-            .AddField("Host status", PrettyHostStatus(host.Status), true);
-
-        if (!string.IsNullOrWhiteSpace(host.Version))
-            embed.AddField("Build", Escape(host.Version), true);
-        AddRentalField(embed, svc);
-
-        return embed.Build();
-    }
-
-    /// <summary>Prettifies Nitrado's raw status token for display.</summary>
-    private static string PrettyHostStatus(string status)
-    {
-        var s = (status ?? "").ToLowerInvariant();
-        return s switch
-        {
-            "started" => "🟢 Started",
-            "stopped" => "🔴 Stopped",
-            "suspended" => "🔴 Suspended (rental lapsed?)",
-            "restarting" => "🔧 Restarting",
-            "stopping" => "🔧 Stopping",
-            "updating" => "🔧 Updating",
-            "installing" => "🔧 Installing",
-            "" => "Unknown",
-            _ => "🔧 " + char.ToUpperInvariant(s[0]) + s[1..],
-        };
-    }
-
-    /// <summary>Adds a rental-expiry field from the Nitrado service, if we have a date.</summary>
-    private static void AddRentalField(EmbedBuilder embed, NitradoService? svc)
-    {
-        if (svc?.SuspendDate is not DateTimeOffset suspend) return;
-
-        embed.AddField("Rental",
-            svc.AutoExtension
-                ? $"Auto-renews (next <t:{suspend.ToUnixTimeSeconds()}:R>)"
-                : $"Expires <t:{suspend.ToUnixTimeSeconds()}:R>",
-            true);
     }
 
     /// <summary>"2h 14m" / "47m". Local copy so the command doesn't depend on the poller.</summary>

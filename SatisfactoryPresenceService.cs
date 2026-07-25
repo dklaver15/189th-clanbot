@@ -9,19 +9,20 @@ namespace ClanGuardBot.Services;
 
 /// <summary>
 /// Watches the clan's Satisfactory server and posts a presence feed to
-/// <see cref="BotConfig.SatisfactoryFeedChannelId"/>: server up/down/maintenance
-/// notices, a line whenever the connected-player COUNT changes, and (via Nitrado) a
-/// heads-up before the rental lapses.
+/// <see cref="BotConfig.SatisfactoryFeedChannelId"/>: server up/down notices and a
+/// line whenever the connected-player COUNT changes.
 ///
-/// ── Two status sources ──
-/// Up/down comes from whichever is available, in priority order:
-///   1. Nitrado's host status (when <see cref="BotConfig.NitradoEnabled"/> + a token) —
-///      authoritative and, crucially, able to distinguish a planned restart/update
-///      (amber "maintenance") from a real outage (red "offline").
-///   2. Fallback: the game's own HTTPS API timing out. This can't tell WHY the server
-///      is unreachable, so it uses a multi-poll grace before declaring a red outage.
-/// Either way the player COUNT always comes from the game API — Nitrado's query count
-/// is unreliable for Satisfactory.
+/// ── How up/down is decided ──
+/// The game's own HTTPS API is the only signal: reachable = up, sustained
+/// unreachability = down. That can't distinguish a planned restart from a crash, so
+/// a real outage is only declared after <see cref="OfflinePollsBeforeClose"/>
+/// consecutive failed polls — short blips stay silent rather than producing an
+/// offline/online pair every time the host bounces.
+///
+/// A Nitrado control-panel client used to supply authoritative host status here,
+/// which COULD tell "restarting" apart from "crashed". The clan moved off Nitrado to
+/// indifferent broccoli in July 2026 and that code is gone. If the new host ever
+/// exposes a panel API, <see cref="DetermineAvailability"/> is where it slots back in.
 ///
 /// ── Why only a count ──
 /// Satisfactory's HTTPS API has no player-list function, so this feed reports
@@ -34,56 +35,45 @@ namespace ClanGuardBot.Services;
 ///
 /// ── Gating ──
 /// Idle unless <see cref="BotConfig.SatisfactoryEnabled"/> is true and the game API is
-/// configured. Nitrado is an optional augmentation on top.
+/// configured.
 /// </summary>
 public sealed class SatisfactoryPresenceService : BackgroundService
 {
     private static readonly TimeSpan StartupGrace = TimeSpan.FromSeconds(45);
 
-    /// <summary>Only used by the game-API fallback: consecutive unreachable polls before a red outage.</summary>
+    /// <summary>Consecutive unreachable polls before a real outage is declared.</summary>
     private const int OfflinePollsBeforeClose = 5;
 
-    /// <summary>Throttle for the (relatively expensive) rental-expiry check.</summary>
-    private static readonly TimeSpan ExpiryCheckInterval = TimeSpan.FromHours(1);
-
-    private enum ServerAvailability { Unknown, Up, Maintenance, Down }
+    private enum ServerAvailability { Unknown, Up, Down }
 
     private readonly DiscordSocketClient _client;
     private readonly SatisfactoryApiService _api;
-    private readonly NitradoApiService _nitrado;
     private readonly BotConfig _config;
     private readonly ILogger<SatisfactoryPresenceService> _logger;
 
     /// <summary>Last availability we ANNOUNCED. Unknown until the first determination.</summary>
     private ServerAvailability _announced = ServerAvailability.Unknown;
 
-    /// <summary>Game-API fallback failure counter (unused while Nitrado is answering).</summary>
+    /// <summary>Consecutive failed reads of the game API.</summary>
     private int _gameApiFailures;
 
     /// <summary>Last player count seen while up; null when unknown/down.</summary>
     private int? _lastPlayerCount;
 
-    private bool _expiryWarned;
-    private DateTime _lastExpiryCheckUtc = DateTime.MinValue;
-
     public SatisfactoryPresenceService(
         DiscordSocketClient client,
         SatisfactoryApiService api,
-        NitradoApiService nitrado,
         IOptions<BotConfig> config,
         ILogger<SatisfactoryPresenceService> logger)
     {
         _client = client;
         _api = api;
-        _nitrado = nitrado;
         _config = config.Value;
         _logger = logger;
     }
 
     private TimeSpan PollInterval =>
         TimeSpan.FromSeconds(Math.Clamp(_config.SatisfactoryPollIntervalSeconds, 15, 3600));
-
-    private bool NitradoActive => _config.NitradoEnabled && _nitrado.IsConfigured;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -105,8 +95,8 @@ public sealed class SatisfactoryPresenceService : BackgroundService
         }
 
         _logger.LogInformation(
-            "SatisfactoryPresenceService started; polling every {Seconds}s, feed={Feed} (channel {ChannelId}), nitrado={Nitrado}",
-            (int)PollInterval.TotalSeconds, _config.SatisfactoryFeedEnabled, _config.SatisfactoryFeedChannelId, NitradoActive);
+            "SatisfactoryPresenceService started; polling every {Seconds}s, feed={Feed} (channel {ChannelId})",
+            (int)PollInterval.TotalSeconds, _config.SatisfactoryFeedEnabled, _config.SatisfactoryFeedChannelId);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -130,65 +120,49 @@ public sealed class SatisfactoryPresenceService : BackgroundService
 
     private async Task TickAsync(CancellationToken ct)
     {
-        var (avail, gs) = await DetermineAvailabilityAsync(ct);
+        // ONE read per tick: the same server state decides availability and feeds the
+        // player-count line. It used to be read twice — once for availability, once in
+        // the count poll — which was wasted load on an API that runs on the game thread.
+        var state = await _api.GetServerStateAsync(ct);
+        var avail = DetermineAvailability(state);
 
-        await HandleAvailabilityAsync(avail, gs, ct);
+        await HandleAvailabilityAsync(avail, ct);
 
-        // Player-count feed only makes sense while the server is up, and always comes
-        // from the game API (Nitrado's count is unreliable for Satisfactory).
-        if (avail == ServerAvailability.Up)
-            await PollPlayerCountAsync(ct);
+        // The count feed only makes sense while the server is confirmed up. Anything
+        // else (down, or inside the blip grace window) forgets the last count, so
+        // recovery doesn't post a bogus "5 → 2" spanning the outage.
+        if (avail == ServerAvailability.Up && state is not null)
+        {
+            var message = TrackPlayerCount(state);
+            if (message is not null) await PostFeedAsync(message, ct);
+        }
         else
+        {
             _lastPlayerCount = null;
-
-        if (NitradoActive)
-            await MaybeCheckExpiryAsync(ct);
+        }
     }
 
     /// <summary>
-    /// Resolves current availability. Prefers Nitrado's authoritative host status;
-    /// falls back to probing the game API (with the multi-poll grace) when Nitrado is
-    /// off or unreachable. Returns <see cref="ServerAvailability.Unknown"/> to mean
-    /// "hold the last announced state" (e.g. within the fallback grace window).
+    /// Maps a server-state read to availability. Returns
+    /// <see cref="ServerAvailability.Unknown"/> to mean "hold the last announced
+    /// state" — used inside the grace window, so a brief blip announces nothing.
     /// </summary>
-    private async Task<(ServerAvailability, NitradoGameServer?)> DetermineAvailabilityAsync(CancellationToken ct)
+    private ServerAvailability DetermineAvailability(SatisfactoryServerState? state)
     {
-        if (NitradoActive)
-        {
-            var gs = await _nitrado.GetGameServerAsync(ct);
-            if (gs is not null)
-            {
-                _gameApiFailures = 0;
-                return (MapNitradoStatus(gs.Status), gs);
-            }
-            // Nitrado unreachable — fall through to the game-API probe rather than go blind.
-        }
-
-        var state = await _api.GetServerStateAsync(ct);
         if (state is not null)
         {
             _gameApiFailures = 0;
-            return (ServerAvailability.Up, null);
+            return ServerAvailability.Up;
         }
 
         _gameApiFailures++;
         return _gameApiFailures >= OfflinePollsBeforeClose
-            ? (ServerAvailability.Down, null)     // sustained failure: declare a real outage
-            : (ServerAvailability.Unknown, null); // brief blip: hold the last state
+            ? ServerAvailability.Down      // sustained failure: declare a real outage
+            : ServerAvailability.Unknown;  // brief blip: hold the last state
     }
 
-    private static ServerAvailability MapNitradoStatus(string status)
-    {
-        var s = (status ?? "").ToLowerInvariant();
-        if (s == "started") return ServerAvailability.Up;
-        if (s is "stopped" or "suspended" or "deleted" or "error") return ServerAvailability.Down;
-        // restarting / stopping / updating / installing / restoring / backup… — a known
-        // transient. Treat unrecognized states as maintenance too, to avoid a false red.
-        return ServerAvailability.Maintenance;
-    }
-
-    /// <summary>Posts the up/down/maintenance embed on a real transition between known states.</summary>
-    private async Task HandleAvailabilityAsync(ServerAvailability current, NitradoGameServer? gs, CancellationToken ct)
+    /// <summary>Posts the up/down embed on a real transition between known states.</summary>
+    private async Task HandleAvailabilityAsync(ServerAvailability current, CancellationToken ct)
     {
         if (current == ServerAvailability.Unknown) return;   // undetermined — hold
         if (current == _announced) return;
@@ -205,19 +179,24 @@ public sealed class SatisfactoryPresenceService : BackgroundService
         }
 
         _logger.LogInformation("Satisfactory availability {Prev} → {Now}", previous, current);
-        await PostStatusEmbedAsync(current, gs, ct);
+        await PostStatusEmbedAsync(current, ct);
     }
 
-    private async Task PollPlayerCountAsync(CancellationToken ct)
+    /// <summary>
+    /// Records the current player count and returns a feed line if it changed, else
+    /// null. Always updates <see cref="_lastPlayerCount"/>, so the bookkeeping can't
+    /// be skipped by a caller that decides not to post.
+    /// </summary>
+    private string? TrackPlayerCount(SatisfactoryServerState state)
     {
-        var state = await _api.GetServerStateAsync(ct);
-        if (state is null) return;   // couldn't read this tick; leave the count as-is
-
         var count = state.NumConnectedPlayers;
+
+        string? message = null;
         if (_lastPlayerCount is int prev && prev != count)
-            await PostFeedAsync(CountChangeMessage(prev, count, state), ct);
+            message = CountChangeMessage(prev, count, state);
 
         _lastPlayerCount = count;
+        return message;
     }
 
     private static string CountChangeMessage(int prev, int now, SatisfactoryServerState state)
@@ -226,57 +205,6 @@ public sealed class SatisfactoryPresenceService : BackgroundService
         var session = string.IsNullOrWhiteSpace(state.ActiveSessionName) ? "the Satisfactory server" : Escape(state.ActiveSessionName);
         var noun = now == 1 ? "player" : "players";
         return $"{arrow} **{session}** — **{prev} → {now}** {noun} online ({now}/{state.PlayerLimit})";
-    }
-
-    // ─── Rental expiry ─────────────────────────────────────────────────────────
-
-    private async Task MaybeCheckExpiryAsync(CancellationToken ct)
-    {
-        if (_config.NitradoExpiryWarningDays <= 0) return;
-        if (DateTime.UtcNow - _lastExpiryCheckUtc < ExpiryCheckInterval) return;
-        _lastExpiryCheckUtc = DateTime.UtcNow;
-
-        var svc = await _nitrado.GetServiceAsync(ct);
-        if (svc is null) return;
-
-        // Auto-renewing service: nothing to warn about, and re-arm for the future.
-        if (svc.AutoExtension || svc.SuspendDate is not DateTimeOffset suspend)
-        {
-            _expiryWarned = false;
-            return;
-        }
-
-        var daysLeft = (suspend - DateTimeOffset.UtcNow).TotalDays;
-        if (daysLeft > 0 && daysLeft <= _config.NitradoExpiryWarningDays)
-        {
-            if (!_expiryWarned)
-            {
-                await PostExpiryWarningAsync(suspend, ct);
-                _expiryWarned = true;
-            }
-        }
-        else
-        {
-            // Renewed (or comfortably far out): re-arm so the next approach warns again.
-            _expiryWarned = false;
-        }
-    }
-
-    private async Task PostExpiryWarningAsync(DateTimeOffset suspend, CancellationToken ct)
-    {
-        if (!_config.SatisfactoryFeedEnabled || _config.SatisfactoryFeedChannelId == 0) return;
-        var channel = await ResolveFeedChannelAsync(ct);
-        if (channel is null) return;
-
-        var embed = new EmbedBuilder()
-            .WithColor(new Color(0xF1C40F))
-            .WithTitle("⚠️ Satisfactory server rental is expiring")
-            .WithDescription(
-                $"The server's Nitrado rental lapses <t:{suspend.ToUnixTimeSeconds()}:R> " +
-                $"(<t:{suspend.ToUnixTimeSeconds()}:f>). Renew it before then to avoid the world going offline.")
-            .WithCurrentTimestamp();
-
-        await SendAsync(channel, e => e.Embed = embed.Build(), ct, "expiry warning");
     }
 
     // ─── Feed posting ───────────────────────────────────────────────────────────
@@ -291,10 +219,10 @@ public sealed class SatisfactoryPresenceService : BackgroundService
     }
 
     /// <summary>
-    /// Posts the green/amber/red status embed. Gated by
+    /// Posts the green/red status embed. Gated by
     /// SatisfactoryServerStatusAnnounceEnabled + the feed channel. Best-effort.
     /// </summary>
-    private async Task PostStatusEmbedAsync(ServerAvailability state, NitradoGameServer? gs, CancellationToken ct)
+    private async Task PostStatusEmbedAsync(ServerAvailability state, CancellationToken ct)
     {
         if (!_config.SatisfactoryServerStatusAnnounceEnabled) return;
         if (!_config.SatisfactoryFeedEnabled || _config.SatisfactoryFeedChannelId == 0) return;
@@ -302,38 +230,24 @@ public sealed class SatisfactoryPresenceService : BackgroundService
         if (channel is null) return;
 
         var embed = new EmbedBuilder().WithCurrentTimestamp();
-        switch (state)
+
+        if (state == ServerAvailability.Up)
         {
-            case ServerAvailability.Up:
-                embed.WithColor(Color.Green)
-                     .WithTitle("🟢 Satisfactory server is online")
-                     .WithDescription("The clan's Satisfactory server is up — get back to the factory!");
-                break;
-
-            case ServerAvailability.Maintenance:
-                embed.WithColor(new Color(0xF1C40F))
-                     .WithTitle("🔧 Satisfactory server is restarting")
-                     .WithDescription($"The server is {MaintenanceReason(gs)} — it should be back shortly. Not a crash.");
-                break;
-
-            default: // Down
-                embed.WithColor(Color.Red)
-                     .WithTitle("🔴 Satisfactory server went offline")
-                     .WithDescription("The clan's Satisfactory server stopped responding. It may be down or was stopped.");
-                break;
+            embed.WithColor(Color.Green)
+                 .WithTitle("🟢 Satisfactory server is online")
+                 .WithDescription("The clan's Satisfactory server is up — get back to the factory!");
+        }
+        else
+        {
+            embed.WithColor(Color.Red)
+                 .WithTitle("🔴 Satisfactory server went offline")
+                 .WithDescription(
+                     "The clan's Satisfactory server stopped responding. It may have crashed, been " +
+                     "stopped, or be mid-restart — without a host panel API this feed can't tell " +
+                     "those apart.");
         }
 
         await SendAsync(channel, e => e.Embed = embed.Build(), ct, $"{state} announcement");
-    }
-
-    private static string MaintenanceReason(NitradoGameServer? gs)
-    {
-        var s = (gs?.Status ?? "").ToLowerInvariant();
-        var u = (gs?.UpdateStatus ?? "").ToLowerInvariant();
-        if (s.Contains("updat") || u.Contains("updat")) return "updating";
-        if (s.Contains("install")) return "installing";
-        if (s.Contains("restor") || s.Contains("backup")) return "restoring a backup";
-        return "restarting";
     }
 
     /// <summary>One place for the send + timeout + swallow-and-log pattern.</summary>

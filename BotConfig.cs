@@ -1751,47 +1751,6 @@ public class BotConfig
     /// </summary>
     public ulong SatisfactoryAdminRoleId { get; set; } = 0;
 
-    // ─── Nitrado (host control-panel API) ────────────────────────────
-    /// <summary>
-    /// Master switch for the Nitrado augmentation of the Satisfactory feature. When
-    /// on (and a token is set), the presence poller uses Nitrado's host-level status
-    /// (started / restarting / stopped / updating…) as the authoritative up/down
-    /// signal — which can tell a planned restart apart from a real crash — and
-    /// /satisfactory-status gains host status, game build, and rental-expiry fields.
-    ///
-    /// This is purely additive: with it off, the Satisfactory feature behaves exactly
-    /// as before (up/down inferred from the game API timing out). Requires
-    /// <see cref="SatisfactoryEnabled"/> too — Nitrado only augments that feature.
-    /// </summary>
-    public bool NitradoEnabled { get; set; } = false;
-
-    /// <summary>
-    /// Nitrado API access token (Bearer). Generated from a Nitrado account that has
-    /// been granted access to the game server (Brandt can invite our account as a
-    /// sub-admin on the service, the same pattern used for DatHost/Palworld). A
-    /// service-scoped token is preferred over a full-account one.
-    ///
-    /// ⚠️ Secret — never commit. docker-compose maps:
-    ///   BotConfig__NitradoAccessToken=${NITRADO_ACCESS_TOKEN}
-    /// Add NITRADO_ACCESS_TOKEN=... to the droplet's .env file.
-    /// </summary>
-    public string NitradoAccessToken { get; set; } = string.Empty;
-
-    /// <summary>
-    /// The Nitrado service id of the Satisfactory server (the number in the panel
-    /// URL). 0 = auto-discover: the client lists the token's services and picks the
-    /// Satisfactory game server. Set it explicitly if the account holds more than one
-    /// Satisfactory server, or to skip the discovery call.
-    /// </summary>
-    public long NitradoServiceId { get; set; } = 0;
-
-    /// <summary>
-    /// How many days before the server's rental suspend date to post a one-time
-    /// expiry warning to the feed channel. Default 7. 0 disables the warning. Skipped
-    /// entirely when the service has auto-extension enabled (nothing to warn about).
-    /// </summary>
-    public int NitradoExpiryWarningDays { get; set; } = 7;
-
     // ─── SQLite Backup Settings ──────────────────────────────────────
     /// <summary>
     /// Master switch for SqliteBackupService. When false, the service exits
