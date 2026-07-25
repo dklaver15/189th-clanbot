@@ -1,9 +1,6 @@
-using ClanGuardBot.Data;
 using ClanGuardBot.Models;
 using Discord;
 using Discord.WebSocket;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -43,15 +40,12 @@ public sealed class SatisfactoryFactoryService : BackgroundService
 {
     private static readonly TimeSpan StartupGrace = TimeSpan.FromSeconds(60);
 
-    /// <summary>How far back "recently active" looks for the digest's player list.</summary>
-    private static readonly TimeSpan DigestPlayerWindow = TimeSpan.FromDays(7);
-
     /// <summary>Hysteresis on the battery alert, in percentage points.</summary>
     private const double BatteryRecoveryMargin = 10;
 
     private readonly DiscordSocketClient _client;
     private readonly FrmApiService _frm;
-    private readonly IServiceProvider _services;
+    private readonly SatisfactoryDigestBuilder _digest;
     private readonly BotConfig _config;
     private readonly ILogger<SatisfactoryFactoryService> _logger;
 
@@ -73,13 +67,13 @@ public sealed class SatisfactoryFactoryService : BackgroundService
     public SatisfactoryFactoryService(
         DiscordSocketClient client,
         FrmApiService frm,
-        IServiceProvider services,
+        SatisfactoryDigestBuilder digest,
         IOptions<BotConfig> config,
         ILogger<SatisfactoryFactoryService> logger)
     {
         _client = client;
         _frm = frm;
-        _services = services;
+        _digest = digest;
         _config = config.Value;
         _logger = logger;
     }
@@ -303,155 +297,14 @@ public sealed class SatisfactoryFactoryService : BackgroundService
 
     private async Task PostDigestAsync(CancellationToken ct)
     {
-        // Read everything first: a digest missing half its fields because one
-        // endpoint was slow is worse than no digest.
-        var session = await _frm.GetSessionInfoAsync(ct);
-        if (session is null)
+        var embed = await _digest.BuildAsync(ct);
+        if (embed is null)
         {
             _logger.LogInformation("Satisfactory digest skipped — server unreachable");
             return;
         }
 
-        var power = await _frm.GetPowerAsync(ct);
-        var sink = await _frm.GetResourceSinkAsync(ct);
-        var elevators = await _frm.GetSpaceElevatorAsync(ct);
-        var prod = await _frm.GetProdStatsAsync(ct);
-
-        var embed = new EmbedBuilder()
-            .WithTitle($"🏭 Factory report — {Escape(session.SessionName)}")
-            .WithColor(new Color(0xE59344))
-            .WithCurrentTimestamp();
-
-        embed.AddField("Day", session.PassedDays.ToString(), true);
-        embed.AddField("Total playtime", session.TotalPlayDurationText, true);
-        embed.AddField("Deaths", session.NumberOfDaysSinceLastDeath == 0
-            ? "someone died today"
-            : $"{session.NumberOfDaysSinceLastDeath} day(s) clean", true);
-
-        AddPowerField(embed, power);
-        AddProductionField(embed, prod);
-        AddSinkField(embed, sink);
-        AddElevatorField(embed, elevators);
-        await AddPlayersFieldAsync(embed, ct);
-
-        embed.WithFooter("Live figures from the server at the time of posting.");
-
-        await PostDigestEmbedAsync(embed.Build(), ct);
-    }
-
-    private static void AddPowerField(EmbedBuilder embed, IReadOnlyList<FrmPowerCircuit>? power)
-    {
-        if (power is null || power.Count == 0) return;
-
-        var production = power.Sum(c => c.PowerProduction);
-        var consumed = power.Sum(c => c.PowerConsumed);
-        var capacity = power.Sum(c => c.PowerCapacity);
-        var tripped = power.Count(c => c.FuseTriggered);
-
-        var text = $"{consumed:0.#} / {capacity:0.#} MW used\n{production:0.#} MW produced across {power.Count} circuit(s)";
-        if (tripped > 0) text += $"\n⚡ **{tripped} tripped fuse(s)**";
-
-        embed.AddField("Power", text, false);
-    }
-
-    /// <summary>
-    /// Top items by current output, with how hard each line is running.
-    ///
-    /// getProdStats lists every item the save knows about, and in an early-game
-    /// factory most of them sit at zero — so this filters to things actually
-    /// producing, and says nothing at all rather than printing a wall of "0.0".
-    /// </summary>
-    private static void AddProductionField(EmbedBuilder embed, IReadOnlyList<FrmProdStat>? prod)
-    {
-        if (prod is null) return;
-
-        var producing = prod
-            .Where(p => p.CurrentProd > 0.01)
-            .OrderByDescending(p => p.CurrentProd)
-            .Take(5)
-            .ToList();
-
-        if (producing.Count == 0) return;
-
-        var lines = producing.Select(p =>
-        {
-            // MaxProd is 0 for consume-only items, and can be 0 transiently —
-            // never divide without this guard.
-            var pct = p.MaxProd > 0 ? $" ({100.0 * p.CurrentProd / p.MaxProd:0}% of max)" : "";
-            return $"• **{Escape(p.Name)}** — {p.CurrentProd:0.#}/min{pct}";
-        });
-
-        embed.AddField("Top production", string.Join("\n", lines), false);
-    }
-
-    private static void AddSinkField(EmbedBuilder embed, IReadOnlyList<FrmResourceSink>? sink)
-    {
-        var s = sink?.FirstOrDefault();
-        if (s is null) return;
-
-        embed.AddField("AWESOME Sink",
-            $"{s.NumCoupon} coupon(s) · {s.TotalPoints:N0} points\nNext coupon at {s.PointsToCoupon:N0} ({s.Percent:0.#}%)",
-            false);
-    }
-
-    /// <summary>
-    /// Space-elevator progress, when there is one. The clan had none as of
-    /// 2026-07-25 (phase 0), so this field is usually absent — and the shape of
-    /// <see cref="FrmSpaceElevator"/> is still unverified against real data.
-    /// </summary>
-    private static void AddElevatorField(EmbedBuilder embed, IReadOnlyList<FrmSpaceElevator>? elevators)
-    {
-        var e = elevators?.FirstOrDefault();
-        if (e is null) return;
-
-        if (e.CurrentPhase is null || e.CurrentPhase.Count == 0)
-        {
-            embed.AddField("Space elevator", e.FullyUpgraded ? "Fully upgraded" : "No phase in progress", false);
-            return;
-        }
-
-        var lines = e.CurrentPhase
-            .OrderByDescending(i => i.TotalCost == 0 ? 0 : (double)i.RemainingCost / i.TotalCost)
-            .Take(5)
-            .Select(i =>
-            {
-                var done = i.TotalCost - i.RemainingCost;
-                var pct = i.TotalCost == 0 ? 100 : (int)(100.0 * done / i.TotalCost);
-                return $"• {Escape(i.Name)} — {done:N0}/{i.TotalCost:N0} ({pct}%)";
-            });
-
-        embed.AddField("Space elevator phase", string.Join("\n", lines), false);
-    }
-
-    /// <summary>
-    /// Who's been on lately, from our own session table rather than the live
-    /// player list — the digest is about the period, not the moment.
-    ///
-    /// Approximation: a session counts if it STARTED inside the window, so a
-    /// marathon that began before the cutoff is excluded rather than
-    /// part-counted. Good enough for a daily summary, and it never
-    /// double-counts.
-    /// </summary>
-    private async Task AddPlayersFieldAsync(EmbedBuilder embed, CancellationToken ct)
-    {
-        using var scope = _services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-
-        var cutoff = DateTime.UtcNow - DigestPlayerWindow;
-        var recent = await db.SatisfactorySessions
-            .Where(s => s.StartedUtc >= cutoff)
-            .ToListAsync(ct);
-
-        if (recent.Count == 0) return;
-
-        var lines = recent
-            .GroupBy(s => s.PlayerName, StringComparer.Ordinal)
-            .Select(g => new { Name = g.Key, Total = g.Aggregate(TimeSpan.Zero, (acc, s) => acc + s.Duration) })
-            .OrderByDescending(p => p.Total)
-            .Take(5)
-            .Select(p => $"• **{Escape(p.Name)}** — {SatisfactoryPresenceService.Humanize(p.Total)}");
-
-        embed.AddField("Most active (7 days)", string.Join("\n", lines), false);
+        await PostDigestEmbedAsync(embed, ct);
     }
 
     // ─── Posting ─────────────────────────────────────────────────────────────

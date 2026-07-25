@@ -611,6 +611,13 @@ try
     // presence poller (different cadence, different data), and each half is
     // separately switchable via BotConfig.SatisfactoryAlertsEnabled /
     // SatisfactoryDigestEnabled.
+    //
+    // The report embed itself is built by SatisfactoryDigestBuilder, registered
+    // separately because TWO things need it: the daily post above, and the
+    // on-demand /satisfactory-report. Keeping it a plain injectable service
+    // avoids resolving the hosted service to call into it, which would
+    // construct a second instance of it.
+    builder.Services.AddSingleton<SatisfactoryDigestBuilder>();
     builder.Services.AddHostedService<SatisfactoryFactoryService>();
 
     // (A NitradoApiService used to be registered here to augment the above with

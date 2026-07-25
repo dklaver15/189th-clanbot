@@ -637,6 +637,8 @@ public class CommandsCommandHandler
                 "Everyone", everyone),
             new("satisfactory-mods", "List the mods installed on the clan's Satisfactory server, with versions",
                 "Everyone", everyone),
+            new("satisfactory-report", "Factory report — power, production, AWESOME Sink, and who's been playing",
+                "Everyone", everyone),
             new("satisfactory-playtime", "How long someone has spent on the clan's Satisfactory server",
                 "Everyone", everyone),
             new("satisfactory-leaderboard", "Who's put the most hours into the clan's Satisfactory server",

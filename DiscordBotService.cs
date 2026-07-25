@@ -546,6 +546,7 @@ public class DiscordBotService : IHostedService
                 // NOTE: keep CommandsCommandHandler.BuildCatalog in sync.
                 SatisfactoryCommandHandler.BuildStatusCommand(),
                 SatisfactoryCommandHandler.BuildModsCommand(),
+                SatisfactoryCommandHandler.BuildReportCommand(),
                 SatisfactoryCommandHandler.BuildPlaytimeCommand(),
                 SatisfactoryCommandHandler.BuildLeaderboardCommand(),
                 SatisfactoryCommandHandler.BuildLinkCommand(),

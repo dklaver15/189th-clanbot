@@ -16,6 +16,7 @@ namespace ClanGuardBot.Handlers;
 ///
 ///   • /satisfactory-status      — live server state (players, session, tier, tick rate)  (everyone)
 ///   • /satisfactory-mods        — the server's exact modpack + versions                  (everyone)
+///   • /satisfactory-report      — factory report: power, production, sink, players       (everyone)
 ///   • /satisfactory-playtime    — one player's total hours and last-seen                 (everyone)
 ///   • /satisfactory-leaderboard — most playtime, public                                  (everyone)
 ///   • /satisfactory-link        — bind a Discord account to an in-game name              (everyone; others = Satisfactory Mod)
@@ -44,6 +45,7 @@ public class SatisfactoryCommandHandler
     {
         "satisfactory-status",
         "satisfactory-mods",
+        "satisfactory-report",
         "satisfactory-playtime",
         "satisfactory-leaderboard",
         "satisfactory-link",
@@ -57,6 +59,7 @@ public class SatisfactoryCommandHandler
     private readonly BotConfig _config;
     private readonly SatisfactoryApiService _api;
     private readonly FrmApiService _frm;
+    private readonly SatisfactoryDigestBuilder _digest;
     private readonly IServiceProvider _services;
 
     public SatisfactoryCommandHandler(
@@ -64,12 +67,14 @@ public class SatisfactoryCommandHandler
         IOptions<BotConfig> config,
         SatisfactoryApiService api,
         FrmApiService frm,
+        SatisfactoryDigestBuilder digest,
         IServiceProvider services)
     {
         _logger = logger;
         _config = config.Value;
         _api = api;
         _frm = frm;
+        _digest = digest;
         _services = services;
     }
 
@@ -93,6 +98,20 @@ public class SatisfactoryCommandHandler
         new SlashCommandBuilder()
             .WithName("satisfactory-mods")
             .WithDescription("List the mods installed on the clan's Satisfactory server, with versions")
+            .Build();
+
+    /// <summary>
+    /// /satisfactory-report — the same embed the daily digest posts, on demand.
+    ///
+    /// Shares <see cref="SatisfactoryDigestBuilder"/> with
+    /// <see cref="SatisfactoryFactoryService"/>, so what you see here is exactly
+    /// what lands in the channel at the scheduled hour — which also makes the
+    /// digest testable without waiting for the clock.
+    /// </summary>
+    public static SlashCommandProperties BuildReportCommand() =>
+        new SlashCommandBuilder()
+            .WithName("satisfactory-report")
+            .WithDescription("Factory report — power, production, AWESOME Sink, and who's been playing")
             .Build();
 
     public static SlashCommandProperties BuildPlaytimeCommand() =>
@@ -183,6 +202,7 @@ public class SatisfactoryCommandHandler
         {
             case "satisfactory-status": await HandleStatusAsync(command); break;
             case "satisfactory-mods":   await HandleModsAsync(command); break;
+            case "satisfactory-report": await HandleReportAsync(command); break;
             case "satisfactory-playtime":    await HandlePlaytimeAsync(command); break;
             case "satisfactory-leaderboard": await HandleLeaderboardAsync(command); break;
             case "satisfactory-link":        await HandleLinkAsync(command); break;
@@ -310,6 +330,40 @@ public class SatisfactoryCommandHandler
     private static bool IsPlatformEntry(string smrName) =>
         smrName.Equals("FactoryGame", StringComparison.OrdinalIgnoreCase) ||
         smrName.Equals("SML", StringComparison.OrdinalIgnoreCase);
+
+    // ─── /satisfactory-report ────────────────────────────────────────────────
+
+    private async Task HandleReportAsync(SocketSlashCommand command)
+    {
+        // Public, like /satisfactory-leaderboard: a factory report is worth the
+        // whole channel seeing, not just whoever typed the command.
+        await command.DeferAsync();
+
+        // Failures stay PRIVATE though — "the integration isn't configured" is
+        // noise for everyone except the person who asked, and a public error
+        // embed is worse than no embed.
+        if (!_frm.IsConfigured)
+        {
+            await command.FollowupAsync(
+                "The factory report needs the Ficsit Remote Monitoring integration, which isn't set up yet " +
+                "(`FrmEnabled` / `FrmBaseUrl`). Ask an admin.",
+                ephemeral: true);
+            return;
+        }
+
+        // Five FRM reads plus a database query — deferred above, because this is
+        // comfortably past Discord's 3-second initial-response window.
+        var embed = await _digest.BuildAsync();
+        if (embed is null)
+        {
+            await command.FollowupAsync(
+                "⚠️ Couldn't build the report — the server may be offline, or FRM's web server didn't start.",
+                ephemeral: true);
+            return;
+        }
+
+        await command.FollowupAsync(embed: embed);
+    }
 
     // ─── /satisfactory-playtime ──────────────────────────────────────────────
 
