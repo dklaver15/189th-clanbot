@@ -56,6 +56,11 @@ public class BotDbContext : DbContext
     public DbSet<PalworldLink>         PalworldLinks         => Set<PalworldLink>();
     public DbSet<PalworldMetricSample> PalworldMetricSamples => Set<PalworldMetricSample>();
     public DbSet<PalworldNameOverride> PalworldNameOverrides => Set<PalworldNameOverride>();
+    // ── XP ladder ──
+    public DbSet<XpSeason>             XpSeasons             => Set<XpSeason>();
+    public DbSet<XpAward>              XpAwards              => Set<XpAward>();
+    public DbSet<XpMemberSeason>       XpMemberSeasons       => Set<XpMemberSeason>();
+    public DbSet<XpMemberTotal>        XpMemberTotals        => Set<XpMemberTotal>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -619,6 +624,50 @@ public class BotDbContext : DbContext
         modelBuilder.Entity<PalworldNameOverride>(e =>
         {
             e.HasIndex(o => o.PalworldUserId).IsUnique();
+        });
+
+        // ── XP: seasons ───────────────────────────────────────────────
+        // Every read is "the active season for this guild" or "season N of this
+        // guild", and the number is the human-facing identity, so it must be
+        // unique per guild — two "Season 3"s would make the ledger unreadable.
+        modelBuilder.Entity<XpSeason>(e =>
+        {
+            e.Property(s => s.Status).HasConversion<int>();
+            e.HasIndex(s => new { s.GuildId, s.Number }).IsUnique();
+            e.HasIndex(s => new { s.GuildId, s.Status });
+        });
+
+        // ── XP: the award ledger ──────────────────────────────────────
+        // The unique index is load-bearing, not just an optimisation.
+        // XpAccrualService re-derives XP from the same activity rows on every
+        // cycle, so without it a member would be paid for the same op every ten
+        // minutes forever. (GuildId, UserId, Source, SourceKey) is the identity
+        // of "the thing being paid for" — see XpAward for the key formats.
+        //
+        // The second index serves the two hot aggregate reads: a member's season
+        // total (leaderboard rollup) and their lifetime total (/xp card).
+        modelBuilder.Entity<XpAward>(e =>
+        {
+            e.Property(a => a.Source).HasConversion<int>();
+            e.HasIndex(a => new { a.GuildId, a.UserId, a.Source, a.SourceKey }).IsUnique();
+            e.HasIndex(a => new { a.GuildId, a.SeasonId, a.UserId });
+        });
+
+        // ── XP: per-member season rollup ──────────────────────────────
+        // One row per member per season (the upsert in RecomputeMemberAsync
+        // depends on that). The second index is the leaderboard's ORDER BY —
+        // descending XP with LastEarnedUtc as the "reached it first" tiebreak.
+        modelBuilder.Entity<XpMemberSeason>(e =>
+        {
+            e.HasIndex(m => new { m.GuildId, m.SeasonId, m.UserId }).IsUnique();
+            e.HasIndex(m => new { m.GuildId, m.SeasonId, m.Xp });
+        });
+
+        // ── XP: lifetime totals ───────────────────────────────────────
+        // One row per member, ever. Survives season resets by design.
+        modelBuilder.Entity<XpMemberTotal>(e =>
+        {
+            e.HasIndex(t => new { t.GuildId, t.UserId }).IsUnique();
         });
     }
 }

@@ -60,6 +60,7 @@ public class DiscordBotService : IHostedService
     private readonly PollGatewayVoteHandler _pollGatewayVoteHandler;
     private readonly UfcCommandHandler _ufcCommandHandler;
     private readonly FinalsCommandHandler _finalsCommandHandler;
+    private readonly XpCommandHandler _xpCommandHandler;
     private readonly PalworldCommandHandler _palworldCommandHandler;
     private readonly SatisfactoryCommandHandler _satisfactoryCommandHandler;
     private readonly PromoteCommandHandler _promoteHandler;
@@ -141,6 +142,7 @@ public class DiscordBotService : IHostedService
         PollGatewayVoteHandler pollGatewayVoteHandler,
         UfcCommandHandler ufcCommandHandler,
         FinalsCommandHandler finalsCommandHandler,
+        XpCommandHandler xpCommandHandler,
         PalworldCommandHandler palworldCommandHandler,
         SatisfactoryCommandHandler satisfactoryCommandHandler,
         PromoteCommandHandler promoteHandler,
@@ -221,6 +223,7 @@ public class DiscordBotService : IHostedService
         _pollGatewayVoteHandler      = pollGatewayVoteHandler;
         _ufcCommandHandler           = ufcCommandHandler;
         _finalsCommandHandler        = finalsCommandHandler;
+        _xpCommandHandler            = xpCommandHandler;
         _palworldCommandHandler      = palworldCommandHandler;
         _satisfactoryCommandHandler  = satisfactoryCommandHandler;
         _promoteHandler              = promoteHandler;
@@ -321,6 +324,7 @@ public class DiscordBotService : IHostedService
         _pollGatewayVoteHandler.Register(_client);
         _ufcCommandHandler.Register(_client);
         _finalsCommandHandler.Register(_client);
+        _xpCommandHandler.Register(_client);
         _palworldCommandHandler.Register(_client);
         _satisfactoryCommandHandler.Register(_client);
         _promoteHandler.Register(_client);
@@ -489,6 +493,23 @@ public class DiscordBotService : IHostedService
                 // public reply; gated by BotConfig.FinalsEnabled. Same handler as
                 // /finals-rank. NOTE: keep CommandsCommandHandler.BuildCatalog in sync.
                 FinalsCommandHandler.BuildClubCommand(),
+
+                // /xp, /xp-leaderboard — the seasonal clan XP ladder. Open to all
+                // members. XP is a recognition/engagement layer only: it does NOT
+                // feed promotions, which stay on event-attendance credit and
+                // officer judgement. Runtime-gated by BotConfig.XpEnabled.
+                // NOTE: keep CommandsCommandHandler.BuildCatalog in sync.
+                XpCommandHandler.BuildXpCommand(),
+                XpCommandHandler.BuildLeaderboardCommand(),
+
+                // /xp-season — status is open to all; start/end is gated to
+                // XpAdminMinRank (default MAJ) and requires confirm:true because
+                // it resets everyone's season XP. /xp-adjust is a manual grant or
+                // deduction with a mandatory reason, same gate. Both handled by
+                // XpCommandHandler. NOTE: keep CommandsCommandHandler.BuildCatalog
+                // in sync.
+                XpCommandHandler.BuildSeasonCommand(_config.XpAdminMinRank),
+                XpCommandHandler.BuildAdjustCommand(_config.XpAdminMinRank),
 
                 // /palworld-* — the clan's Palworld server on DatHost, via the
                 // game's built-in REST API (RCON is deprecated upstream and unused).

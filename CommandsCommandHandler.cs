@@ -598,6 +598,7 @@ public class CommandsCommandHandler
         var awolKickLbl      = $"{config.AwolKickMinRank}+";
         var briefingLbl      = $"{config.BriefingNowMinRank}+";
         var palworldLbl      = $"{config.PalworldMinRank}+";
+        var xpAdminLbl       = $"{config.XpAdminMinRank}+";
         const string eventCreditLbl   = "CPT+";   // SyncWithHandlers: EventCreditCommandHandler.MinRankFloor
         const string attendanceLbl    = "MAJ+";   // SyncWithHandlers: AttendanceCommandHandler.MinRankFloor
         const string securityAuditLbl = "BG+";    // SyncWithHandlers: SecurityAuditCommandHandler.MinRankFloor
@@ -619,6 +620,12 @@ public class CommandsCommandHandler
             new("finals-rank", "Look up a player's rank on THE FINALS leaderboard",
                 "Everyone", everyone),
             new("finals-club", "Show a club's ranked players on THE FINALS leaderboard",
+                "Everyone", everyone),
+            new("xp", "Your clan XP card — level, season standing, and where the XP came from",
+                "Everyone", everyone),
+            new("xp-leaderboard", "Full XP standings for the current season",
+                "Everyone", everyone),
+            new("xp-season", "Show the current XP season (start/end is officer-only)",
                 "Everyone", everyone),
             new("lookup", "Look up someone's gamertags from the roster",
                 "Everyone", everyone),
@@ -674,6 +681,9 @@ public class CommandsCommandHandler
 
             new("jotd", "Post a Joke of the Day — set it up in DMs",
                 $"{config.JotdMinRank}+", MinRank(config.JotdMinRank)),   // SyncWithHandlers: JotdCommandHandler.HasPermission
+
+            new("xp-adjust", "Grant or deduct clan XP manually, with a reason",
+                xpAdminLbl, MinRank(config.XpAdminMinRank)),   // SyncWithHandlers: XpCommandHandler.HasAdminPermission
 
             new("add-event-credit", "Manually add 1 event credit at member's current rank",
                 eventCreditLbl, MinRank("CPT")),

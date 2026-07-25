@@ -535,6 +535,33 @@ try
     builder.Services.AddSingleton<FinalsCommandHandler>();
     builder.Services.AddHostedService<FinalsLeaderboardService>();
 
+    // ── XP ladder / seasonal leaderboard ─────────────────────────────
+    // XpService is the stateless rules engine (level maths, season lifecycle,
+    // the idempotent award ledger) shared by everything below.
+    // XpAccrualService derives XP on a timer from tables the bot already
+    // maintains — EventAttendances, MeetingAttendances, VoiceSessions,
+    // MessageEvents — rather than hooking the gateway a second time.
+    // XpLeaderboardService owns the pinned board; it's singleton + hosted so
+    // /xp-season and /xp-adjust can force an immediate refresh.
+    // XpLeaderboardRenderer draws the board, the rates card and the season
+    // results card as PNGs via SkiaSharp (same approach as
+    // MemberActivityChartRenderer; returns null on failure so callers fall back
+    // to text). XpCommandHandler owns /xp, /xp-leaderboard, /xp-season and
+    // /xp-adjust plus the board's pagination buttons (Register() called from
+    // DiscordBotService).
+    //
+    // Seasons are 100% manual: nothing starts, ends or rolls over on its own, and
+    // no XP accrues while no season is running.
+    //
+    // Recognition only — nothing here feeds PromotionService or
+    // AutoPromotionService. All gated by BotConfig.XpEnabled.
+    builder.Services.AddSingleton<XpService>();
+    builder.Services.AddSingleton<XpLeaderboardRenderer>();
+    builder.Services.AddSingleton<XpLeaderboardService>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<XpLeaderboardService>());
+    builder.Services.AddHostedService<XpAccrualService>();
+    builder.Services.AddSingleton<XpCommandHandler>();
+
     // ── Palworld (DatHost) ───────────────────────────────────────────
     // PalworldApiService is the REST client for the game server's built-in API
     // (basic auth with the Admin Password; RCON is deprecated by Pocketpair and

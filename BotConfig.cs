@@ -1934,6 +1934,221 @@ public class BotConfig
     /// </summary>
     public int GatewayWatchdogCheckSeconds { get; set; } = 30;
 
+    // ─── XP ladder / seasonal leaderboard ────────────────────────────
+    //
+    // A recognition-and-engagement layer, NOT a promotion mechanism. The clan
+    // reviewed both options (see XP_Promotion_Handout.pdf) and chose Proposal B:
+    // XP drives levels, a seasonal leaderboard and bragging rights, while
+    // promotions stay with event-attendance credit and officer judgement. No XP
+    // value here is read by PromotionService or AutoPromotionService.
+    //
+    // ── How the economy is balanced ──
+    // Events dominate by design. At the defaults an active member (2 ops/week,
+    // a meeting a fortnight, ~4h of voice, 5 messages/day) earns ~1,455 XP/week,
+    // of which ~84% comes from ops. Someone who never attends anything but maxes
+    // out chat AND idles in voice every single day tops out around 380 XP/week —
+    // so grinding chat can never overtake simply showing up. Retune with that
+    // ratio in mind: if the chat + voice ceilings ever approach XpPerEvent × 2,
+    // the leaderboard stops measuring participation and starts measuring screen
+    // time.
+
+    /// <summary>
+    /// Master switch for the whole XP feature (accrual, the board, and the /xp
+    /// commands). Default true; the board additionally needs XpBoardChannelId.
+    /// </summary>
+    public bool XpEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Channel the auto-updating XP leaderboard is maintained in. 0 disables the
+    /// board (accrual and /xp still work). This channel should be locked so only
+    /// the bot can post — the board is edited in place and pinned, and any member
+    /// message in here pushes it out of view until the next refresh.
+    /// </summary>
+    public ulong XpBoardChannelId { get; set; } = default;
+
+    /// <summary>Whether the leaderboard board is maintained. Default true.</summary>
+    public bool XpBoardEnabled { get; set; } = true;
+
+    /// <summary>How often (minutes) the board is rebuilt. Default 10; floored to 2.</summary>
+    public int XpBoardRefreshIntervalMinutes { get; set; } = 10;
+
+    /// <summary>
+    /// How many members appear per leaderboard page. Default 25. The pinned board
+    /// always shows page 1; the buttons under it open a PRIVATE paged view, so
+    /// this is also the page size for /xp-leaderboard.
+    /// </summary>
+    public int XpBoardPageSize { get; set; } = 25;
+
+    /// <summary>
+    /// Draw members' Discord avatars on the rendered board. Default true. Turning
+    /// this off skips all avatar fetching (one HTTP call per new avatar, cached
+    /// by URL) and draws plain discs instead — faster, and one less thing that can
+    /// fail, at the cost of a much less personal board.
+    /// </summary>
+    public bool XpBoardShowAvatars { get; set; } = true;
+
+    /// <summary>
+    /// Maintain the pinned "how to earn XP" guide directly above the leaderboard.
+    /// Default true. The guide is posted FIRST so it sits above the board —
+    /// Discord has no way to hold a message at the top of a channel, so the order
+    /// comes purely from post order and the service repairs it if it inverts.
+    /// </summary>
+    public bool XpGuideEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Hide members who have left the server from the board. Default true — a
+    /// board topped by people who are gone reads as a memorial, not a contest.
+    /// Their ledger rows and lifetime totals are kept either way.
+    /// </summary>
+    public bool XpBoardCurrentMembersOnly { get; set; } = true;
+
+    /// <summary>
+    /// Channel for level-up announcements. 0 disables them. Must NOT be
+    /// XpBoardChannelId — level-up posts there would bury the board, so the
+    /// service refuses and logs a warning if the two match.
+    /// </summary>
+    public ulong XpLevelUpAnnounceChannelId { get; set; } = default;
+
+    /// <summary>
+    /// Announce a level-up only when the member crosses a multiple of this many
+    /// levels. Default 10, so posts land at Level 10, 20, 30 and so on. Set to 1
+    /// to announce every single level.
+    ///
+    /// ── Why the default isn't 1 ──
+    /// Mid-season a level costs roughly 900–1,200 XP and an op is worth ~650 with
+    /// bonuses, so an active member levels up about once per op. Across forty
+    /// members that's ~80 pings a week, which turns a celebration into a tax on
+    /// the channel. At 10 it's about three posts per member per season.
+    /// </summary>
+    public int XpLevelUpAnnounceEveryLevels { get; set; } = 10;
+
+    /// <summary>
+    /// Announce when a new member takes first place on the leaderboard. Default
+    /// true. Posts to XpLevelUpAnnounceChannelId (and is skipped entirely if that
+    /// is unset, or is the same channel as the board).
+    ///
+    /// A first sighting after startup, and the first cycle of a new season, both
+    /// seed the tracked leader silently — otherwise every restart would crown
+    /// whoever happens to be ahead, and every new season would crown someone on
+    /// zero XP.
+    /// </summary>
+    public bool XpLeaderChangeAnnounceEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Minimum gap between "new #1" announcements, in minutes. Default 60.
+    /// Bounds the worst case where two members sit within a few XP of each other
+    /// and trade the lead back and forth. The tracked leader still updates during
+    /// the cooldown — only the post is suppressed. 0 disables the cooldown.
+    /// </summary>
+    public int XpLeaderChangeCooldownMinutes { get; set; } = 60;
+
+    /// <summary>How often (minutes) XP is derived from activity tables. Default 10; floored to 1.</summary>
+    public int XpAccrualIntervalMinutes { get; set; } = 10;
+
+    /// <summary>
+    /// How many days back each accrual pass re-derives. Default 3. This is the
+    /// self-healing window: anything missed while the bot was down is picked up
+    /// as long as it happened within this many days. Raising it costs a little
+    /// query time per cycle and nothing else — awards are idempotent.
+    /// </summary>
+    public int XpAccrualLookbackDays { get; set; } = 3;
+
+    /// <summary>XP for attending a clan event. The dominant source — default 500.</summary>
+    public int XpPerEvent { get; set; } = 500;
+
+    /// <summary>XP for attending a clan meeting. Default 250.</summary>
+    public int XpPerMeeting { get; set; } = 250;
+
+    /// <summary>
+    /// Bonus for RSVPing "Going" and then actually showing up. Default 50. Only
+    /// ever additive — nobody is docked for missing an event they RSVP'd to,
+    /// since a penalty would just train people to stop RSVPing.
+    /// </summary>
+    public int XpRsvpHonoredBonus { get; set; } = 50;
+
+    /// <summary>Bonus every 3rd consecutive event attended. Default 150. 0 disables.</summary>
+    public int XpStreak3Bonus { get; set; } = 150;
+
+    /// <summary>Bonus every 5th consecutive event attended. Default 400. 0 disables.</summary>
+    public int XpStreak5Bonus { get; set; } = 400;
+
+    /// <summary>XP per completed 15 minutes in voice (outside events). Default 10. 0 disables voice XP.</summary>
+    public int XpVoicePer15Minutes { get; set; } = 10;
+
+    /// <summary>
+    /// Maximum voice XP per member per UTC day. Default 60 (= 1.5h credited).
+    /// This cap is what stops an idler from out-earning an attendee. 0 = uncapped
+    /// (not recommended).
+    /// </summary>
+    public int XpVoiceDailyCap { get; set; } = 60;
+
+    /// <summary>
+    /// Voice sessions shorter than this many minutes earn nothing. Default 15 —
+    /// kills the join/leave-repeatedly exploit.
+    /// </summary>
+    public int XpVoiceMinSessionMinutes { get; set; } = 15;
+
+    /// <summary>
+    /// Exclude the events category, the events VC and the meeting VC from voice
+    /// XP. Default true: that time already pays as event/meeting attendance, and
+    /// paying twice blurs the "one op ≈ seven hours of hanging out" ratio the
+    /// economy is built on. The guild's AFK channel is always excluded regardless.
+    /// </summary>
+    public bool XpVoiceExcludeEventChannels { get; set; } = true;
+
+    /// <summary>
+    /// Extra voice channel IDs that earn no XP, comma-separated. For music/bot
+    /// channels or anywhere else idling is expected.
+    /// </summary>
+    public string XpVoiceExcludedChannelIds { get; set; } = string.Empty;
+
+    /// <summary>XP per chat message. Default 2 — deliberately trivial.</summary>
+    public int XpPerMessage { get; set; } = 2;
+
+    /// <summary>
+    /// Messages that earn XP per member per UTC day. Default 10, so the chat
+    /// ceiling is 20 XP/day. A full week of maxed chat is worth ~28% of one op.
+    /// </summary>
+    public int XpMessageDailyCap { get; set; } = 10;
+
+    /// <summary>
+    /// XP cost of the first level step (1→2). Default 150. The curve is linear:
+    /// step(L) = XpLevelBase + XpLevelStep·(L−1).
+    /// </summary>
+    public int XpLevelBase { get; set; } = 150;
+
+    /// <summary>
+    /// How much each level step costs over the previous one. Default 40. Linear
+    /// (not geometric) on purpose — a geometric curve makes late-season levels
+    /// unreachable and the ladder stops motivating anyone once the leaders pull
+    /// clear.
+    /// </summary>
+    public int XpLevelStep { get; set; } = 40;
+
+    /// <summary>
+    /// Level ceiling. Default 100 — far above a realistic season (an active
+    /// member lands around Level 28 in a 13-week season), so it functions as a
+    /// sanity bound rather than a goal.
+    /// </summary>
+    public int XpMaxLevel { get; set; } = 100;
+
+    /// <summary>
+    /// DEFAULT planned length in days for a new season, used when /xp-season start
+    /// is run without a days: option. Default 30 (a one-month trial run).
+    ///
+    /// This is DISPLAY ONLY. It sets the "12 days to go" line on the board and
+    /// nothing else — the season does not end when it elapses, and the board
+    /// switches to "past its planned end" rather than pretending it closed. 0 =
+    /// no target date at all.
+    /// </summary>
+    public int XpSeasonLengthDays { get; set; } = 30;
+
+    /// <summary>
+    /// Minimum rank to run /xp-season start and /xp-adjust. Default MAJ.
+    /// Administrator or Manage Roles always passes.
+    /// </summary>
+    public string XpAdminMinRank { get; set; } = "MAJ";
+
     // ─── Helpers ─────────────────────────────────────────────────────
 
     /// <summary>
@@ -1978,6 +2193,25 @@ public class BotConfig
 
     public List<string> GetRankRolesList() =>
         RankRoles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+
+    /// <summary>
+    /// Parses XpVoiceExcludedChannelIds into channel IDs. Unparseable entries are
+    /// skipped rather than throwing, so one typo can't stop voice XP accruing for
+    /// the whole server.
+    /// </summary>
+    public List<ulong> GetXpVoiceExcludedChannelIdsList()
+    {
+        var result = new List<ulong>();
+        if (string.IsNullOrWhiteSpace(XpVoiceExcludedChannelIds)) return result;
+
+        foreach (var raw in XpVoiceExcludedChannelIds.Split(',',
+                     StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (ulong.TryParse(raw, out var id) && id != 0) result.Add(id);
+        }
+
+        return result;
+    }
 
     /// <summary>
     /// Parses TicketCategoriesCsv into a list of TicketCategoryDef. Each entry
