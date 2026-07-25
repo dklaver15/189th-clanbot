@@ -2010,6 +2010,16 @@ public class BotConfig
     public ulong XpLevelUpAnnounceChannelId { get; set; } = default;
 
     /// <summary>
+    /// DM a member privately EVERY time they gain a level. Default true.
+    ///
+    /// This is the counterpart to XpLevelUpAnnounceEveryLevels: the member gets
+    /// the frequent signal (that's the feedback loop the ladder runs on), while
+    /// the channel only sees the rare milestone. Best-effort — a member with DMs
+    /// closed simply doesn't get it, which doubles as a self-service opt-out.
+    /// </summary>
+    public bool XpLevelUpDmEnabled { get; set; } = true;
+
+    /// <summary>
     /// Announce a level-up only when the member crosses a multiple of this many
     /// levels. Default 10, so posts land at Level 10, 20, 30 and so on. Set to 1
     /// to announce every single level.

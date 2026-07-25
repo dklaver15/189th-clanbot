@@ -1,3 +1,4 @@
+using System.Text;
 using ClanGuardBot.Data;
 using ClanGuardBot.Models;
 using Discord;
@@ -49,6 +50,9 @@ public sealed class XpAccrualService : BackgroundService
 {
     private static readonly TimeSpan StartupGrace = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan NoSeasonWarnInterval = TimeSpan.FromHours(6);
+
+    /// <summary>Hard cap on a single level-up DM attempt (open channel + send). See TrySendLevelUpDmAsync.</summary>
+    private static readonly TimeSpan DmTimeout = TimeSpan.FromSeconds(5);
 
     /// <summary>
     /// When the "no season running" warning was last logged. Throttles what would
@@ -514,36 +518,44 @@ public sealed class XpAccrualService : BackgroundService
     // ─── Announcements ───────────────────────────────────────────────────────
 
     /// <summary>
-    /// Posts MILESTONE level-ups to XpLevelUpAnnounceChannelId.
+    /// Handles both level-up surfaces:
     ///
-    /// ── Why milestones and not every level ──
-    /// Mid-season a level costs roughly 900–1,200 XP and an op is worth ~650 with
-    /// bonuses, so an active member levels up about once per op they attend. Across
-    /// a clan of forty that is ~80 pings a week, which turns a celebration into a
-    /// tax on the channel. Announcing only on multiples of
-    /// XpLevelUpAnnounceEveryLevels (default 10) reduces that to roughly three
-    /// posts per member per season — rare enough that each one still means
-    /// something. Set the interval to 1 to announce every level.
+    ///   • a DM to the member on EVERY level they gain (private, opt-outable by
+    ///     the member simply having DMs closed);
+    ///   • a public post to XpLevelUpAnnounceChannelId only when they cross a
+    ///     multiple of XpLevelUpAnnounceEveryLevels (default 10).
     ///
-    /// Only the HIGHEST milestone crossed is announced. If a member somehow clears
-    /// two at once, they get one post rather than a burst.
+    /// ── Why the split ──
+    /// Mid-season a level costs roughly 900\u20131,200 XP and an event is worth ~650
+    /// with bonuses, so an active member levels about once per event. Posting all
+    /// of those publicly is ~80 messages a week across a clan of forty, which
+    /// turns a celebration into a tax on the channel. But the member themselves
+    /// does want to know every time \u2014 that is the feedback loop the whole ladder
+    /// runs on. So the frequent signal goes privately and only the rare one is
+    /// public.
     ///
-    /// This intentionally never posts to the leaderboard channel: the board is
-    /// meant to sit alone as the newest message there, and a stream of level-up
-    /// pings would bury it.
+    /// Only the HIGHEST milestone crossed is posted publicly, and a multi-level
+    /// jump produces a single DM naming the level they landed on, so neither
+    /// surface can burst.
+    ///
+    /// The public post intentionally never goes to the leaderboard channel: the
+    /// board is meant to sit alone as the newest message there.
     /// </summary>
     private async Task AnnounceLevelUpsAsync(
         BotDbContext db, SocketGuild guild, XpSeason season, HashSet<ulong> changed, CancellationToken ct)
     {
         var channelId = _config.XpLevelUpAnnounceChannelId;
-        if (channelId == 0) return;
-        if (channelId == _config.XpBoardChannelId)
-        {
+
+        var channel = channelId != 0 && channelId != _config.XpBoardChannelId
+            ? guild.GetChannel(channelId) as SocketTextChannel
+            : null;
+
+        if (channelId != 0 && channelId == _config.XpBoardChannelId)
             _logger.LogWarning(
-                "XP: XpLevelUpAnnounceChannelId matches XpBoardChannelId — level-ups suppressed so they don't bury the leaderboard.");
-            return;
-        }
-        if (guild.GetChannel(channelId) is not SocketTextChannel channel) return;
+                "XP: XpLevelUpAnnounceChannelId matches XpBoardChannelId \u2014 public level-ups suppressed so they don't bury the leaderboard.");
+
+        // Nothing to do at all if neither surface is available.
+        if (channel is null && !_config.XpLevelUpDmEnabled) return;
 
         var userIds = changed.ToList();
         var rows = await db.XpMemberSeasons
@@ -560,24 +572,29 @@ public sealed class XpAccrualService : BackgroundService
         foreach (var row in rows)
         {
             var newLevel = row.Level;
+            var previousLevel = row.LastAnnouncedLevel;
 
-            // Integer division floors each level to the milestone it sits at or
-            // above, so crossing from 19 to 23 moves the milestone 10 → 20 and
-            // fires once. Levels that don't cross one move the mark silently.
-            var previousMilestone = row.LastAnnouncedLevel / every * every;
+            // Integer division floors each level to the milestone at or below it,
+            // so crossing from 19 to 23 moves the milestone 10 \u2192 20 and fires
+            // once. Levels that don't cross one move the mark silently.
+            var previousMilestone = previousLevel / every * every;
             var newMilestone = newLevel / every * every;
 
-            // Raise the high-water mark regardless of whether the post succeeds,
-            // so a permissions problem doesn't turn into a retry storm that spams
-            // the channel the moment it's fixed.
+            // Raise the high-water mark regardless of whether either send
+            // succeeds, so a permissions problem or a member with closed DMs
+            // can't turn into a retry storm the moment it's fixed.
             row.LastAnnouncedLevel = newLevel;
 
+            if (_config.XpLevelUpDmEnabled)
+                await TrySendLevelUpDmAsync(guild, row, season, previousLevel, ct);
+
+            if (channel is null) continue;
             if (newMilestone <= previousMilestone || newMilestone < every) continue;
 
             var embed = new EmbedBuilder()
-                .WithTitle("⬆️ Level Up")
+                .WithTitle("\u2b06\ufe0f Level Up")
                 .WithColor(new Color(0x57F287))
-                .WithDescription($"<@{row.UserId}> reached **Level {newMilestone}** — {row.Xp:N0} XP this season.")
+                .WithDescription($"<@{row.UserId}> reached **Level {newMilestone}** \u2014 {row.Xp:N0} XP this season.")
                 .WithFooter(XpService.SeasonLabel(season))
                 .Build();
 
@@ -595,6 +612,74 @@ public sealed class XpAccrualService : BackgroundService
         }
 
         await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Best-effort private level-up notice. Never throws, never blocks the
+    /// accrual cycle.
+    ///
+    /// \u2500\u2500 Why the two guards \u2500\u2500
+    /// This is the exact shape that froze /kick-awols on 2026-06-19. Opening a DM
+    /// channel (POST /users/@me/channels) is a heavily rate-limited route in its
+    /// own bucket, and under Discord.NET's default RetryMode.RetryRateLimit a 429
+    /// is silently AWAITED rather than thrown \u2014 parking the whole loop on one
+    /// await, with the try/catch none the wiser because a 429-wait isn't an error.
+    /// A cycle where twenty members level at once would hit exactly that.
+    ///
+    /// So: RetryMode.AlwaysFail makes a 429 throw immediately, and a
+    /// CancellationTokenSource caps the total attempt. A cancellation that ISN'T
+    /// ours is host shutdown and is re-thrown so the service stops cleanly.
+    /// </summary>
+    private async Task TrySendLevelUpDmAsync(
+        SocketGuild guild, XpMemberSeason row, XpSeason season, int previousLevel, CancellationToken ct)
+    {
+        var member = guild.GetUser(row.UserId);
+        if (member is null || member.IsBot) return;
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(DmTimeout);
+
+        var dmOptions = new RequestOptions
+        {
+            RetryMode   = RetryMode.AlwaysFail,
+            CancelToken = cts.Token,
+        };
+
+        var gained = row.Level - previousLevel;
+        var (into, width) = _xp.LevelProgress(row.Xp);
+
+        var body = new StringBuilder();
+        body.Append(gained > 1
+            ? $"You gained **{gained} levels** and are now **Level {row.Level}**."
+            : $"You're now **Level {row.Level}**.");
+        body.Append($"\n\n**{row.Xp:N0} XP** this season.");
+        if (width > 0)
+            body.Append($"\n**{width - into:N0} XP** to Level {row.Level + 1}.");
+
+        var embed = new EmbedBuilder()
+            .WithTitle("\u2b06\ufe0f Level Up")
+            .WithColor(new Color(0x57F287))
+            .WithDescription(body.ToString())
+            .WithFooter($"{XpService.SeasonLabel(season)} \u2022 /xp for your full card \u2022 XP doesn't affect promotions")
+            .Build();
+
+        try
+        {
+            var dm = await member.CreateDMChannelAsync(dmOptions);
+            await dm.SendMessageAsync(embed: embed, options: dmOptions);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Host shutdown, not our timeout \u2014 let the service stop cleanly.
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Closed DMs, blocked bot, rate-limited, timed out. All expected and
+            // all fine: the member simply doesn't get the notice. Debug level so
+            // a clan full of closed DMs doesn't fill the log.
+            _logger.LogDebug(ex, "XP: skipped level-up DM to {User} \u2014 {Reason}", row.UserId, ex.Message);
+        }
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────
