@@ -240,3 +240,29 @@ public class XpMemberTotal
 
     public DateTime UpdatedAt { get; set; }
 }
+
+/// <summary>
+/// A member who has asked not to receive level-up DMs.
+///
+/// ── Why a row per opt-out rather than a flag per member ──
+/// The overwhelming majority of members will never opt out, so a table that only
+/// holds the exceptions stays tiny and needs no backfill — absence of a row means
+/// "still opted in", which is the correct default for a feature nobody asked to
+/// be enrolled in but everybody benefits from by default.
+///
+/// Written by the "Stop these DMs" button on the DM itself, and by
+/// <c>/xp-dms</c>. Deleted when they turn DMs back on, so the table only ever
+/// contains people who currently want silence.
+///
+/// Scoped per guild for consistency with every other XP table, even though the
+/// bot serves one clan today.
+/// </summary>
+public class XpDmOptOut
+{
+    public int Id { get; set; }
+    public ulong GuildId { get; set; }
+    public ulong UserId { get; set; }
+
+    /// <summary>When they opted out. Kept for support questions ("I never turned these off").</summary>
+    public DateTime OptedOutAtUtc { get; set; }
+}

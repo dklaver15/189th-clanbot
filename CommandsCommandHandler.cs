@@ -627,6 +627,8 @@ public class CommandsCommandHandler
                 "Everyone", everyone),
             new("xp-season", "Show the current XP season (start/end is officer-only)",
                 "Everyone", everyone),
+            new("xp-dms", "Turn level-up DMs on or off for yourself",
+                "Everyone", everyone),
             new("lookup", "Look up someone's gamertags from the roster",
                 "Everyone", everyone),
             new("my-invites", "Show invites you created with use counts and attribution",

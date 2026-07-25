@@ -109,7 +109,8 @@ public static class XpGuide
     private static string BuildCommands() =>
         "`/xp` — your card, and exactly where your XP came from\n" +
         "`/xp member:@someone` — someone else's\n" +
-        "`/xp-leaderboard` — the full standings, privately\n\n" +
+        "`/xp-leaderboard` — the full standings, privately\n" +
+        "`/xp-dms` — turn level-up DMs on or off\n\n" +
         "Think something's off? Every point is logged — run `/xp`, check the breakdown, then grab an officer.";
 
     /// <summary>

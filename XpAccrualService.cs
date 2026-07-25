@@ -567,6 +567,15 @@ public sealed class XpAccrualService : BackgroundService
 
         if (rows.Count == 0) return;
 
+        // One indexed read for the whole cycle. The table only holds people who
+        // have actively opted out, so this is a handful of rows at most.
+        var optedOut = _config.XpLevelUpDmEnabled
+            ? (await db.XpDmOptOuts
+                .Where(o => o.GuildId == guild.Id)
+                .Select(o => o.UserId)
+                .ToListAsync(ct)).ToHashSet()
+            : new HashSet<ulong>();
+
         var every = Math.Max(1, _config.XpLevelUpAnnounceEveryLevels);
 
         foreach (var row in rows)
@@ -585,7 +594,7 @@ public sealed class XpAccrualService : BackgroundService
             // can't turn into a retry storm the moment it's fixed.
             row.LastAnnouncedLevel = newLevel;
 
-            if (_config.XpLevelUpDmEnabled)
+            if (_config.XpLevelUpDmEnabled && !optedOut.Contains(row.UserId))
                 await TrySendLevelUpDmAsync(guild, row, season, previousLevel, ct);
 
             if (channel is null) continue;
@@ -663,10 +672,17 @@ public sealed class XpAccrualService : BackgroundService
             .WithFooter($"{XpService.SeasonLabel(season)} \u2022 /xp for your full card \u2022 XP doesn't affect promotions")
             .Build();
 
+        // The guild id has to travel in the custom id: a button clicked inside a
+        // DM has no guild context, so SocketMessageComponent.GuildId is null and
+        // the handler would otherwise have nothing to scope the opt-out to.
+        var components = new ComponentBuilder()
+            .WithButton("Stop these DMs", $"xp:dmoff:{guild.Id}", ButtonStyle.Secondary)
+            .Build();
+
         try
         {
             var dm = await member.CreateDMChannelAsync(dmOptions);
-            await dm.SendMessageAsync(embed: embed, options: dmOptions);
+            await dm.SendMessageAsync(embed: embed, components: components, options: dmOptions);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {

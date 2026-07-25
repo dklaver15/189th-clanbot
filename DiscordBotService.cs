@@ -511,6 +511,12 @@ public class DiscordBotService : IHostedService
                 XpCommandHandler.BuildSeasonCommand(_config.XpAdminMinRank),
                 XpCommandHandler.BuildAdjustCommand(_config.XpAdminMinRank),
 
+                // /xp-dms — per-member switch for the level-up DM. Open to all
+                // members; the same thing the "Stop these DMs" button on the DM
+                // does, but usable to turn them back ON. NOTE: keep
+                // CommandsCommandHandler.BuildCatalog in sync.
+                XpCommandHandler.BuildDmsCommand(),
+
                 // /palworld-* — the clan's Palworld server on DatHost, via the
                 // game's built-in REST API (RCON is deprecated upstream and unused).
                 // status/playtime/leaderboard/link are open to all members;

@@ -51,6 +51,7 @@ public sealed class XpCommandHandler
     public const string LeaderboardCommandName = "xp-leaderboard";
     public const string SeasonCommandName = "xp-season";
     public const string AdjustCommandName = "xp-adjust";
+    public const string DmsCommandName = "xp-dms";
 
     /// <summary>Prefix for every button this handler owns. Keeps the filter cheap.</summary>
     private const string ButtonPrefix = "xp:";
@@ -140,11 +141,20 @@ public sealed class XpCommandHandler
                 "Why — shown in the ledger and on their /xp card", isRequired: true)
             .Build();
 
+    public static SlashCommandProperties BuildDmsCommand() =>
+        new SlashCommandBuilder()
+            .WithName(DmsCommandName)
+            .WithDescription("Turn level-up DMs on or off for yourself")
+            .AddOption("enabled", ApplicationCommandOptionType.Boolean,
+                "true to receive them, false to stop", isRequired: true)
+            .Build();
+
     // ─── Routing ─────────────────────────────────────────────────────────────
 
     private async Task OnSlashCommandAsync(SocketSlashCommand command)
     {
-        if (command.Data.Name is not (CommandName or LeaderboardCommandName or SeasonCommandName or AdjustCommandName))
+        if (command.Data.Name is not (CommandName or LeaderboardCommandName or SeasonCommandName
+            or AdjustCommandName or DmsCommandName))
             return;
 
         try
@@ -169,6 +179,7 @@ public sealed class XpCommandHandler
                 case LeaderboardCommandName: await HandleLeaderboardAsync(command); break;
                 case SeasonCommandName:      await HandleSeasonAsync(command); break;
                 case AdjustCommandName:      await HandleAdjustAsync(command); break;
+                case DmsCommandName:         await HandleDmsAsync(command); break;
             }
         }
         catch (Exception ex)
@@ -209,6 +220,16 @@ public sealed class XpCommandHandler
             if (id == "xp:noop")
             {
                 await component.DeferAsync();
+                return;
+            }
+
+            // Clicked from inside a DM, so there is no guild context on the
+            // interaction — the guild id rides in the custom id instead. This
+            // MUST be handled before the guild guard below, which would
+            // otherwise drop it silently.
+            if (id.StartsWith("xp:dmoff:", StringComparison.Ordinal))
+            {
+                await HandleDmOptOutButtonAsync(component, id);
                 return;
             }
 
@@ -306,6 +327,96 @@ public sealed class XpCommandHandler
             m.Components = render.Components;
             m.Attachments = new List<FileAttachment> { fa };
         });
+    }
+
+    // ─── Level-up DM opt-out ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// The "Stop these DMs" button carried on every level-up DM.
+    ///
+    /// Opting out from the DM itself is the only version of this that actually
+    /// gets used — asking someone to go back to the server and run a command to
+    /// stop an unwanted DM is how a bot gets muted instead.
+    ///
+    /// The button is edited away on success so the message can't be clicked
+    /// twice, and the confirmation names the command to undo it.
+    /// </summary>
+    private async Task HandleDmOptOutButtonAsync(SocketMessageComponent component, string id)
+    {
+        if (!ulong.TryParse(id.AsSpan("xp:dmoff:".Length), out var guildId) || guildId == 0) return;
+
+        await SetDmPreferenceAsync(guildId, component.User.Id, enabled: false);
+
+        var embed = new EmbedBuilder()
+            .WithTitle("🔕 Level-up DMs off")
+            .WithColor(new Color(0x8B96A8))
+            .WithDescription(
+                "You won't get these any more.\n\n" +
+                "Your XP still counts exactly the same — check it any time with `/xp`. " +
+                "To turn these back on, run `/xp-dms enabled:true` in the server.")
+            .Build();
+
+        try
+        {
+            // Replace the original DM so the button can't be pressed again.
+            await component.UpdateAsync(m =>
+            {
+                m.Embed = embed;
+                m.Components = new ComponentBuilder().Build();
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "XP: couldn't edit the level-up DM after opt-out for {User}", component.User.Id);
+        }
+
+        _logger.LogInformation("XP: {User} opted out of level-up DMs", component.User.Id);
+    }
+
+    private async Task HandleDmsAsync(SocketSlashCommand command)
+    {
+        await command.DeferAsync(ephemeral: true);
+
+        var enabled = command.Data.Options.FirstOrDefault(o => o.Name == "enabled")?.Value as bool? ?? true;
+        var guildId = command.GuildId!.Value;
+
+        await SetDmPreferenceAsync(guildId, command.User.Id, enabled);
+
+        await command.FollowupAsync(
+            enabled
+                ? "✅ Level-up DMs are **on**. You'll get a note each time you gain a level."
+                : "🔕 Level-up DMs are **off**. Your XP still counts the same — check it with `/xp`.",
+            ephemeral: true);
+    }
+
+    /// <summary>
+    /// Upserts the opt-out row. Absence of a row means "opted in", so turning
+    /// DMs back on deletes rather than flags — the table only ever holds people
+    /// who currently want silence.
+    /// </summary>
+    private async Task SetDmPreferenceAsync(ulong guildId, ulong userId, bool enabled)
+    {
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+        var existing = await db.XpDmOptOuts
+            .FirstOrDefaultAsync(o => o.GuildId == guildId && o.UserId == userId);
+
+        if (enabled)
+        {
+            if (existing is not null) db.XpDmOptOuts.Remove(existing);
+        }
+        else if (existing is null)
+        {
+            db.XpDmOptOuts.Add(new XpDmOptOut
+            {
+                GuildId       = guildId,
+                UserId        = userId,
+                OptedOutAtUtc = DateTime.UtcNow,
+            });
+        }
+
+        await db.SaveChangesAsync();
     }
 
     // ─── /xp ─────────────────────────────────────────────────────────────────

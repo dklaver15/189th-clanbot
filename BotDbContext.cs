@@ -61,6 +61,7 @@ public class BotDbContext : DbContext
     public DbSet<XpAward>              XpAwards              => Set<XpAward>();
     public DbSet<XpMemberSeason>       XpMemberSeasons       => Set<XpMemberSeason>();
     public DbSet<XpMemberTotal>        XpMemberTotals        => Set<XpMemberTotal>();
+    public DbSet<XpDmOptOut>           XpDmOptOuts           => Set<XpDmOptOut>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -668,6 +669,16 @@ public class BotDbContext : DbContext
         modelBuilder.Entity<XpMemberTotal>(e =>
         {
             e.HasIndex(t => new { t.GuildId, t.UserId }).IsUnique();
+        });
+
+        // ── XP: level-up DM opt-outs ──────────────────────────────────
+        // Exceptions only — no row means "still receiving them". Unique so the
+        // button and /xp-dms can both upsert without ever creating a duplicate,
+        // and so the accrual's per-cycle "who has opted out" load stays a single
+        // cheap indexed read.
+        modelBuilder.Entity<XpDmOptOut>(e =>
+        {
+            e.HasIndex(o => new { o.GuildId, o.UserId }).IsUnique();
         });
     }
 }
