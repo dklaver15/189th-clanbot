@@ -33,19 +33,22 @@ public sealed class EventReminderService : BackgroundService
     private readonly BotConfig _config;
     private readonly ILogger<EventReminderService> _logger;
     private readonly PalworldApiService _palworld;
+    private readonly FrmApiService _frm;
 
     public EventReminderService(
         IServiceProvider services,
         DiscordSocketClient client,
         IOptions<BotConfig> config,
         ILogger<EventReminderService> logger,
-        PalworldApiService palworld)
+        PalworldApiService palworld,
+        FrmApiService frm)
     {
         _services = services;
         _client   = client;
         _config   = config.Value;
         _logger   = logger;
         _palworld = palworld;
+        _frm      = frm;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -236,25 +239,91 @@ public sealed class EventReminderService : BackgroundService
     }
 
     /// <summary>
-    /// Mirrors the Discord reminder as an in-game broadcast on the clan's Palworld
-    /// server, so members mid-session don't miss an event just because they aren't
-    /// looking at Discord. Fires on the same lead times as the Discord post.
+    /// Mirrors the Discord reminder as an in-game broadcast on EVERY game server
+    /// the clan runs, so members mid-session don't miss an event just because
+    /// they aren't looking at Discord. Fires on the same lead times as the
+    /// Discord post.
     ///
     /// ── Why this is safe to bolt on here ──
-    /// Deliberately best-effort and non-fatal: the Palworld client swallows every
-    /// failure and returns false, and we additionally wrap the call so nothing about
-    /// a game server being down can interfere with the Discord reminder — which has
-    /// already been posted by the time we get here. The lead is marked sent by the
-    /// caller regardless, so a missed announce is never retried into a loop.
+    /// Deliberately best-effort and non-fatal: both game clients swallow every
+    /// failure and return false, and each announce is additionally wrapped so
+    /// nothing about a game server being down can interfere with the Discord
+    /// reminder — which has already been posted by the time we get here. The
+    /// lead is marked sent by the caller regardless, so a missed announce is
+    /// never retried into a loop. The two servers are independent: one failing
+    /// cannot stop the other.
     ///
-    /// No-op unless the Palworld feature is enabled AND configured AND
-    /// PalworldEventAnnounceEnabled is on. The API's /announce is the only
-    /// Discord→game channel that exists; there is no chat relay in the other
-    /// direction.
+    /// Both directions are Discord→game only. Neither game exposes a chat relay
+    /// back out.
+    ///
+    /// SyncWithHandlers: BotConfig.PalworldEventAnnounceEnabled,
+    /// BotConfig.SatisfactoryEventAnnounceEnabled.
+    /// </summary>
+    private async Task AnnounceInGameAsync(ClanEvent ev, int leadMinutes, CancellationToken ct)
+    {
+        // Announcements are plain text — no markdown, no timestamps. State the
+        // lead in words rather than pasting a Discord <t:…> stamp, which would
+        // render as literal garbage in game.
+        var lead = leadMinutes >= 60 && leadMinutes % 60 == 0
+            ? $"{leadMinutes / 60}h"
+            : $"{leadMinutes} min";
+
+        await AnnouncePalworldAsync(ev, lead, leadMinutes, ct);
+        await AnnounceSatisfactoryAsync(ev, lead, leadMinutes, ct);
+    }
+
+    /// <summary>
+    /// Satisfactory, via FRM's sendChatMessage.
+    ///
+    /// <para>Sent as an A.D.A. message rather than from a named sender, so it
+    /// appears in the voice the game already uses for announcements and reads as
+    /// part of the world rather than as a bot in the chat.</para>
+    ///
+    /// <para><b>Needs FrmAuthToken.</b> Every FRM read works without it; writes
+    /// do not. If it's unset this quietly does nothing, which is the one failure
+    /// mode here that looks like the feature simply not working — hence the
+    /// explicit debug line in the client.</para>
+    ///
+    /// <para>Announces EVERY event, not only Satisfactory ones, exactly as the
+    /// Palworld path does. There is no game field on ClanEvent to filter by, and
+    /// with four members the cross-game noise is not worth guessing at titles.</para>
+    ///
+    /// SyncWithHandlers: BotConfig.SatisfactoryEventAnnounceEnabled.
+    /// </summary>
+    private async Task AnnounceSatisfactoryAsync(ClanEvent ev, string lead, int leadMinutes, CancellationToken ct)
+    {
+        if (!_config.SatisfactoryEnabled
+            || !_config.FrmEnabled
+            || !_config.SatisfactoryEventAnnounceEnabled
+            || !_frm.IsConfigured)
+            return;
+
+        try
+        {
+            var ok = await _frm.SendChatMessageAsync($"[189th] Event starting in {lead}: {ev.Title}", ct: ct);
+
+            if (ok)
+                _logger.LogInformation(
+                    "Announced '{Title}' in-game on the Satisfactory server ({Lead} min lead)", ev.Title, leadMinutes);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // A game server hiccup must never affect event reminders.
+            _logger.LogDebug(ex, "In-game Satisfactory announce failed for '{Title}'", ev.Title);
+        }
+    }
+
+    /// <summary>
+    /// Palworld, via the REST API's /announce — the only Discord→game channel
+    /// it exposes.
     ///
     /// SyncWithHandlers: BotConfig.PalworldEventAnnounceEnabled.
     /// </summary>
-    private async Task AnnounceInGameAsync(ClanEvent ev, int leadMinutes, CancellationToken ct)
+    private async Task AnnouncePalworldAsync(ClanEvent ev, string lead, int leadMinutes, CancellationToken ct)
     {
         if (!_config.PalworldEnabled
             || !_config.PalworldEventAnnounceEnabled
@@ -263,14 +332,7 @@ public sealed class EventReminderService : BackgroundService
 
         try
         {
-            // Announcements are plain text — no markdown, no timestamps. State the
-            // lead in words rather than pasting a Discord <t:…> stamp, which would
-            // render as literal garbage in game.
-            var when = leadMinutes >= 60 && leadMinutes % 60 == 0
-                ? $"{leadMinutes / 60}h"
-                : $"{leadMinutes} min";
-
-            var ok = await _palworld.AnnounceAsync($"[189th] Event starting in {when}: {ev.Title}", ct);
+            var ok = await _palworld.AnnounceAsync($"[189th] Event starting in {lead}: {ev.Title}", ct);
 
             if (ok)
                 _logger.LogInformation(

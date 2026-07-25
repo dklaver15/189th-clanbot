@@ -1659,11 +1659,24 @@ public class BotConfig
     /// Palworld server (via the REST /announce endpoint), so members deep in a Pal
     /// run don't miss an event just because they aren't looking at Discord. Default
     /// true; a no-op unless the Palworld feature is enabled and configured.
-    /// SyncWithHandlers: EventReminderService.AnnounceInGameAsync.
+    /// SyncWithHandlers: EventReminderService.AnnouncePalworldAsync.
     /// </summary>
     public bool PalworldEventAnnounceEnabled { get; set; } = true;
 
     // ─── Satisfactory server ─────────────────────────────────────────
+
+    /// <summary>
+    /// The Palworld announce behaviour, for Satisfactory: an event reminder also
+    /// goes into the in-game chat via FRM's sendChatMessage, as an A.D.A.
+    /// message so it reads as part of the game rather than as another chat line.
+    ///
+    /// Default true, but a no-op unless Satisfactory and FRM are both enabled
+    /// AND <see cref="FrmAuthToken"/> is set — FRM rejects writes without it,
+    /// even though every read works fine. That case logs a warning once, because
+    /// it is otherwise indistinguishable from the feature not existing.
+    /// SyncWithHandlers: EventReminderService.AnnounceSatisfactoryAsync.
+    /// </summary>
+    public bool SatisfactoryEventAnnounceEnabled { get; set; } = true;
     /// <summary>
     /// Master switch for the Satisfactory integration (status command, presence
     /// feed, /satisfactory-* commands). Default false — nothing runs until the
