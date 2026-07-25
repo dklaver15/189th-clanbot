@@ -56,6 +56,9 @@ public class BotDbContext : DbContext
     public DbSet<PalworldLink>         PalworldLinks         => Set<PalworldLink>();
     public DbSet<PalworldMetricSample> PalworldMetricSamples => Set<PalworldMetricSample>();
     public DbSet<PalworldNameOverride> PalworldNameOverrides => Set<PalworldNameOverride>();
+    // ── Satisfactory server (via the Ficsit Remote Monitoring mod) ──
+    public DbSet<SatisfactorySession>  SatisfactorySessions  => Set<SatisfactorySession>();
+    public DbSet<SatisfactoryLink>     SatisfactoryLinks     => Set<SatisfactoryLink>();
     // ── XP ladder ──
     public DbSet<XpSeason>             XpSeasons             => Set<XpSeason>();
     public DbSet<XpAward>              XpAwards              => Set<XpAward>();
@@ -607,6 +610,30 @@ public class BotDbContext : DbContext
         {
             e.HasIndex(l => new { l.GuildId, l.DiscordUserId }).IsUnique();
             e.HasIndex(l => new { l.GuildId, l.PalworldUserId }).IsUnique();
+        });
+
+        // ── Satisfactory sessions ─────────────────────────────────────
+        // Same access shapes as the Palworld ones, but keyed on the player NAME
+        // rather than a platform id — Satisfactory's only stable-ish identifier
+        // across saves (see SatisfactorySession for the reasoning).
+        //   • The filtered EndedUtc index serves the poller's hot path: "which
+        //     sessions are still open?" runs on every tick.
+        //   • (PlayerName, StartedUtc) covers per-player history for
+        //     /satisfactory-playtime and closing the newest open row on leave.
+        modelBuilder.Entity<SatisfactorySession>(e =>
+        {
+            e.HasIndex(s => s.EndedUtc).HasFilter("\"EndedUtc\" IS NULL");
+            e.HasIndex(s => new { s.PlayerName, s.StartedUtc });
+        });
+
+        // ── Satisfactory ↔ Discord links ──────────────────────────────
+        // Unique in BOTH directions, same as Palworld: the handler clears the
+        // other side before inserting, and these indexes are the structural
+        // backstop against two members claiming the same in-game name.
+        modelBuilder.Entity<SatisfactoryLink>(e =>
+        {
+            e.HasIndex(l => new { l.GuildId, l.DiscordUserId }).IsUnique();
+            e.HasIndex(l => new { l.GuildId, l.SatisfactoryPlayerName }).IsUnique();
         });
 
         // ── Palworld health samples ───────────────────────────────────

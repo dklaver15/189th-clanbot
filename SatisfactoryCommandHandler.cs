@@ -1,8 +1,11 @@
 using System.Text.RegularExpressions;
+using ClanGuardBot.Data;
 using ClanGuardBot.Models;
 using ClanGuardBot.Services;
 using Discord;
 using Discord.WebSocket;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -11,9 +14,12 @@ namespace ClanGuardBot.Handlers;
 /// <summary>
 /// Owns the Satisfactory slash commands against the clan's Dedicated Server.
 ///
-///   • /satisfactory-status  — live server state (players, session, tier, tick rate)  (everyone)
-///   • /satisfactory-mods    — the server's exact modpack + versions                  (everyone)
-///   • /satisfactory-admin    — save / restart / run-command                          (Satisfactory Mod)
+///   • /satisfactory-status      — live server state (players, session, tier, tick rate)  (everyone)
+///   • /satisfactory-mods        — the server's exact modpack + versions                  (everyone)
+///   • /satisfactory-playtime    — one player's total hours and last-seen                 (everyone)
+///   • /satisfactory-leaderboard — most playtime, public                                  (everyone)
+///   • /satisfactory-link        — bind a Discord account to an in-game name              (everyone; others = Satisfactory Mod)
+///   • /satisfactory-admin       — save / restart / run-command                           (Satisfactory Mod)
 ///
 /// ── Two data sources ──
 /// <see cref="SatisfactoryApiService"/> is the game's own HTTPS API: authoritative
@@ -38,24 +44,33 @@ public class SatisfactoryCommandHandler
     {
         "satisfactory-status",
         "satisfactory-mods",
+        "satisfactory-playtime",
+        "satisfactory-leaderboard",
+        "satisfactory-link",
         "satisfactory-admin",
     };
+
+    /// <summary>Cap on leaderboard rows, so the embed can't blow the description limit.</summary>
+    private const int MaxLeaderboardRows = 15;
 
     private readonly ILogger<SatisfactoryCommandHandler> _logger;
     private readonly BotConfig _config;
     private readonly SatisfactoryApiService _api;
     private readonly FrmApiService _frm;
+    private readonly IServiceProvider _services;
 
     public SatisfactoryCommandHandler(
         ILogger<SatisfactoryCommandHandler> logger,
         IOptions<BotConfig> config,
         SatisfactoryApiService api,
-        FrmApiService frm)
+        FrmApiService frm,
+        IServiceProvider services)
     {
         _logger = logger;
         _config = config.Value;
         _api = api;
         _frm = frm;
+        _services = services;
     }
 
     // ─── Command definitions ─────────────────────────────────────────────────
@@ -78,6 +93,32 @@ public class SatisfactoryCommandHandler
         new SlashCommandBuilder()
             .WithName("satisfactory-mods")
             .WithDescription("List the mods installed on the clan's Satisfactory server, with versions")
+            .Build();
+
+    public static SlashCommandProperties BuildPlaytimeCommand() =>
+        new SlashCommandBuilder()
+            .WithName("satisfactory-playtime")
+            .WithDescription("How long someone has spent on the clan's Satisfactory server")
+            .AddOption("user", ApplicationCommandOptionType.User,
+                "Discord member to look up (defaults to you). Requires them to be linked.", isRequired: false)
+            .AddOption("name", ApplicationCommandOptionType.String,
+                "In-game name to look up instead — works even for people who aren't in Discord", isRequired: false)
+            .Build();
+
+    public static SlashCommandProperties BuildLeaderboardCommand() =>
+        new SlashCommandBuilder()
+            .WithName("satisfactory-leaderboard")
+            .WithDescription("Who's put the most hours into the clan's Satisfactory server")
+            .Build();
+
+    public static SlashCommandProperties BuildLinkCommand() =>
+        new SlashCommandBuilder()
+            .WithName("satisfactory-link")
+            .WithDescription("Link your Discord account to your Satisfactory in-game name (you must be online in-game)")
+            .AddOption("name", ApplicationCommandOptionType.String,
+                "Your in-game name, exactly as it appears in game", isRequired: true)
+            .AddOption("user", ApplicationCommandOptionType.User,
+                "Link on someone else's behalf (Satisfactory Mod only)", isRequired: false)
             .Build();
 
     public static SlashCommandProperties BuildAdminCommand() =>
@@ -142,6 +183,9 @@ public class SatisfactoryCommandHandler
         {
             case "satisfactory-status": await HandleStatusAsync(command); break;
             case "satisfactory-mods":   await HandleModsAsync(command); break;
+            case "satisfactory-playtime":    await HandlePlaytimeAsync(command); break;
+            case "satisfactory-leaderboard": await HandleLeaderboardAsync(command); break;
+            case "satisfactory-link":        await HandleLinkAsync(command); break;
             case "satisfactory-admin":  await HandleAdminAsync(command); break;
         }
     }
@@ -176,7 +220,7 @@ public class SatisfactoryCommandHandler
             embed.AddField("Players", $"{state.NumConnectedPlayers}/{state.PlayerLimit}", true);
             embed.AddField("Tech tier", state.TechTier.ToString(), true);
             embed.AddField("Game phase", PrettyPhase(state.GamePhase), true);
-            embed.AddField("Playtime", Humanize(TimeSpan.FromSeconds(state.TotalGameDurationSeconds)), true);
+            embed.AddField("Playtime", SatisfactoryPresenceService.Humanize(TimeSpan.FromSeconds(state.TotalGameDurationSeconds)), true);
             embed.AddField("Tick rate", $"{state.AverageTickRate:0.0} tps", true);
             embed.AddField("State", state.IsGamePaused ? "⏸️ Paused" : state.IsGameRunning ? "▶️ Running" : "⏳ Awaiting session", true);
         }
@@ -266,6 +310,238 @@ public class SatisfactoryCommandHandler
     private static bool IsPlatformEntry(string smrName) =>
         smrName.Equals("FactoryGame", StringComparison.OrdinalIgnoreCase) ||
         smrName.Equals("SML", StringComparison.OrdinalIgnoreCase);
+
+    // ─── /satisfactory-playtime ──────────────────────────────────────────────
+
+    private async Task HandlePlaytimeAsync(SocketSlashCommand command)
+    {
+        await command.DeferAsync(ephemeral: true);
+
+        if (command.GuildId is not ulong guildId)
+        {
+            await command.FollowupAsync("This command can only be used in a server.", ephemeral: true);
+            return;
+        }
+
+        var targetUser = command.Data.Options.FirstOrDefault(o => o.Name == "user")?.Value as SocketUser;
+        var rawName = command.Data.Options.FirstOrDefault(o => o.Name == "name")?.Value as string;
+
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+        string playerName;
+        ulong? linkedDiscordId = null;
+
+        if (!string.IsNullOrWhiteSpace(rawName))
+        {
+            // Name path: no link required, so it works for anyone who has ever
+            // played — including people who aren't in the Discord at all.
+            playerName = rawName.Trim();
+        }
+        else
+        {
+            var discordId = targetUser?.Id ?? command.User.Id;
+            var link = await db.SatisfactoryLinks
+                .FirstOrDefaultAsync(l => l.GuildId == guildId && l.DiscordUserId == discordId);
+
+            if (link is null)
+            {
+                var who = targetUser is null ? "You aren't" : $"<@{discordId}> isn't";
+                await command.FollowupAsync(
+                    $"{who} linked to a Satisfactory player yet. " +
+                    "Hop on the server and run `/satisfactory-link name:<your in-game name>`.",
+                    ephemeral: true);
+                return;
+            }
+
+            playerName = link.SatisfactoryPlayerName;
+            linkedDiscordId = discordId;
+        }
+
+        var sessions = await db.SatisfactorySessions
+            .Where(s => s.PlayerName == playerName)
+            .ToListAsync();
+
+        var label = linkedDiscordId is ulong did
+            ? $"<@{did}> (**{Escape(playerName)}**)"
+            : $"**{Escape(playerName)}**";
+
+        if (sessions.Count == 0)
+        {
+            await command.FollowupAsync(
+                $"{label} hasn't been seen on the Satisfactory server yet. " +
+                "Note that names are matched exactly, including capitalisation.",
+                ephemeral: true);
+            return;
+        }
+
+        // Duration is computed from LastSeenUtc, so an open session contributes
+        // only what's actually been observed — see SatisfactorySession.
+        var total = sessions.Aggregate(TimeSpan.Zero, (acc, s) => acc + s.Duration);
+        var lastSeen = sessions.Max(s => s.EndedUtc ?? s.LastSeenUtc);
+        var isOnline = sessions.Any(s => s.EndedUtc is null);
+
+        var embed = new EmbedBuilder()
+            .WithTitle("🏭 Satisfactory playtime")
+            .WithColor(isOnline ? Color.Green : new Color(0xE59344))
+            .WithDescription(label + (isOnline ? "  ·  🟢 online now" : ""))
+            .AddField("Total played", SatisfactoryPresenceService.Humanize(total), true)
+            .AddField("Sessions", sessions.Count.ToString(), true)
+            .AddField("Last seen", $"<t:{new DateTimeOffset(lastSeen, TimeSpan.Zero).ToUnixTimeSeconds()}:R>", true)
+            .WithFooter("Playtime is measured by polling the server, so it's accurate to about a minute.");
+
+        await command.FollowupAsync(embed: embed.Build(), ephemeral: true);
+    }
+
+    // ─── /satisfactory-leaderboard ───────────────────────────────────────────
+
+    private async Task HandleLeaderboardAsync(SocketSlashCommand command)
+    {
+        await command.DeferAsync();
+
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+        var sessions = await db.SatisfactorySessions.ToListAsync();
+        if (sessions.Count == 0)
+        {
+            await command.FollowupAsync("Nobody's played on the Satisfactory server yet.");
+            return;
+        }
+
+        // Duration is a computed property, so the aggregation happens in memory
+        // rather than in SQL. Fine at clan scale — this table gains a handful of
+        // rows a day — but it's the thing to revisit if it ever gets big.
+        var players = sessions
+            .GroupBy(s => s.PlayerName, StringComparer.Ordinal)
+            .Select(g => new
+            {
+                Name = g.Key,
+                Total = g.Aggregate(TimeSpan.Zero, (acc, s) => acc + s.Duration),
+                Sessions = g.Count(),
+                Online = g.Any(s => s.EndedUtc is null),
+            })
+            .OrderByDescending(p => p.Total)
+            .ToList();
+
+        var lines = players
+            .Take(MaxLeaderboardRows)
+            .Select((p, i) => $"`{i + 1,2}.` **{Escape(p.Name)}** — " +
+                              $"{SatisfactoryPresenceService.Humanize(p.Total)}  ·  {p.Sessions} session{(p.Sessions == 1 ? "" : "s")}" +
+                              (p.Online ? "  🟢" : ""));
+
+        var embed = new EmbedBuilder()
+            .WithTitle("🏭 Satisfactory leaderboard — most playtime")
+            .WithColor(new Color(0xE59344))
+            .WithDescription(string.Join("\n", lines))
+            .WithFooter($"{players.Count} player(s) tracked" +
+                        (players.Count > MaxLeaderboardRows ? $" · showing top {MaxLeaderboardRows}" : ""));
+
+        await command.FollowupAsync(embed: embed.Build());
+    }
+
+    // ─── /satisfactory-link ──────────────────────────────────────────────────
+
+    private async Task HandleLinkAsync(SocketSlashCommand command)
+    {
+        await command.DeferAsync(ephemeral: true);
+
+        if (command.GuildId is not ulong guildId || command.User is not SocketGuildUser caller)
+        {
+            await command.FollowupAsync("This command can only be used in a server.", ephemeral: true);
+            return;
+        }
+
+        if (!_frm.IsConfigured)
+        {
+            await command.FollowupAsync(
+                "Linking needs the Ficsit Remote Monitoring integration, which isn't set up yet " +
+                "(`FrmEnabled` / `FrmBaseUrl`). Ask an admin.",
+                ephemeral: true);
+            return;
+        }
+
+        var name = (command.Data.Options.FirstOrDefault(o => o.Name == "name")?.Value as string ?? "").Trim();
+        var onBehalfOf = command.Data.Options.FirstOrDefault(o => o.Name == "user")?.Value as SocketUser;
+
+        // Linking someone else is a moderator action — otherwise anyone could bind
+        // a teammate's character to their own account, or vice versa.
+        if (onBehalfOf is not null && onBehalfOf.Id != caller.Id && !HasAdminRole(caller))
+        {
+            await command.FollowupAsync(
+                "❌ Only Satisfactory Mods can link someone else. Leave `user` blank to link yourself.",
+                ephemeral: true);
+            return;
+        }
+
+        var targetId = onBehalfOf?.Id ?? caller.Id;
+
+        // Requiring the player to be ONLINE is the only verification available:
+        // there's no handshake between Discord and Satisfactory, so the live
+        // player list is the one thing that proves the name is really in use.
+        // Accepting a typed-in name unchecked would let anyone claim anyone's
+        // playtime.
+        var online = await _frm.GetOnlinePlayersAsync();
+        if (online is null)
+        {
+            await command.FollowupAsync(
+                "🔴 Can't reach the Satisfactory server right now, so I can't verify that name. Try again shortly.",
+                ephemeral: true);
+            return;
+        }
+
+        var match = online.FirstOrDefault(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase));
+        if (match is null)
+        {
+            var who = online.Count == 0
+                ? "_Nobody is online right now._"
+                : string.Join(", ", online.Select(p => $"`{p.Name}`"));
+            await command.FollowupAsync(
+                $"❌ No online player named **{Escape(name)}**. You have to be logged into the server when you link, " +
+                $"so I can see you.\n\nOnline now: {who}",
+                ephemeral: true);
+            return;
+        }
+
+        // Store the server's exact spelling, not what was typed: session rows are
+        // keyed on the name the server reports, and SQLite compares text
+        // case-sensitively, so a casing mismatch here would silently orphan the
+        // link from all the playtime it's supposed to point at.
+        var canonicalName = match.Name;
+
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+        // Re-linking overwrites in BOTH directions: one Discord account per
+        // in-game name and vice versa. Clearing the other side stops two members
+        // both claiming the same player.
+        var existing = await db.SatisfactoryLinks
+            .Where(l => l.GuildId == guildId
+                     && (l.DiscordUserId == targetId || l.SatisfactoryPlayerName == canonicalName))
+            .ToListAsync();
+        if (existing.Count > 0)
+            db.SatisfactoryLinks.RemoveRange(existing);
+
+        db.SatisfactoryLinks.Add(new SatisfactoryLink
+        {
+            GuildId = guildId,
+            DiscordUserId = targetId,
+            SatisfactoryPlayerName = canonicalName,
+            LinkedUtc = DateTime.UtcNow,
+            LinkedByUserId = caller.Id,
+        });
+
+        await db.SaveChangesAsync();
+
+        _logger.LogInformation("Satisfactory link: Discord {Target} → {PlayerName} by {Caller}",
+            targetId, canonicalName, caller.Id);
+
+        var forWhom = targetId == caller.Id ? "You're" : $"<@{targetId}> is";
+        await command.FollowupAsync(
+            $"✅ {forWhom} now linked to **{Escape(canonicalName)}**. " +
+            "Playtime from here on will show against that account.",
+            ephemeral: true);
+    }
 
     // ─── /satisfactory-admin ─────────────────────────────────────────────────
 
@@ -413,17 +689,6 @@ public class SatisfactoryCommandHandler
 
         var m = Regex.Match(phase, @"Phase[_\s]?(\d+)", RegexOptions.IgnoreCase);
         return m.Success ? $"Phase {m.Groups[1].Value}" : "In progress";
-    }
-
-    /// <summary>"2h 14m" / "47m". Local copy so the command doesn't depend on the poller.</summary>
-    private static string Humanize(TimeSpan d)
-    {
-        if (d.TotalMinutes < 1) return "under a minute";
-        var days = (int)d.TotalDays;
-        var hours = d.Hours;
-        var minutes = d.Minutes;
-        if (days > 0) return $"{days}d {hours}h";
-        return hours > 0 ? $"{hours}h {minutes}m" : $"{minutes}m";
     }
 
     private static string Truncate(string s, int max) =>

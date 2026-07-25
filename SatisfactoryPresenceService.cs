@@ -1,6 +1,9 @@
+using ClanGuardBot.Data;
 using ClanGuardBot.Models;
 using Discord;
 using Discord.WebSocket;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -9,33 +12,41 @@ namespace ClanGuardBot.Services;
 
 /// <summary>
 /// Watches the clan's Satisfactory server and posts a presence feed to
-/// <see cref="BotConfig.SatisfactoryFeedChannelId"/>: server up/down notices and a
-/// line whenever the connected-player COUNT changes.
+/// <see cref="BotConfig.SatisfactoryFeedChannelId"/>: server up/down notices, and
+/// either named join/leave lines (when the Ficsit Remote Monitoring mod is
+/// available) or a bare player-count line (when it isn't).
+///
+/// ── Two sources, two jobs ──
+/// <see cref="SatisfactoryApiService"/> (the game's own HTTPS API) decides
+/// whether the server is UP. It's authoritative for that and nothing else can
+/// replace it — but it exposes only a player COUNT, never a name.
+/// <see cref="FrmApiService"/> (the FRM mod) supplies the names, and therefore
+/// the sessions, playtime and join/leave feed. It's optional: with FRM off or
+/// unreachable, this degrades to the count feed it always had.
 ///
 /// ── How up/down is decided ──
-/// The game's own HTTPS API is the only signal: reachable = up, sustained
-/// unreachability = down. That can't distinguish a planned restart from a crash, so
-/// a real outage is only declared after <see cref="OfflinePollsBeforeClose"/>
-/// consecutive failed polls — short blips stay silent rather than producing an
-/// offline/online pair every time the host bounces.
+/// Reachable = up, sustained unreachability = down. That can't distinguish a
+/// planned restart from a crash, so a real outage is only declared after
+/// <see cref="OfflinePollsBeforeClose"/> consecutive failed polls — short blips
+/// stay silent rather than producing an offline/online pair every time the host
+/// bounces. (A Nitrado panel client used to give authoritative host status here;
+/// the clan moved to indifferent broccoli in July 2026 and it was removed.
+/// <see cref="DetermineAvailability"/> is where a replacement would slot in.)
 ///
-/// A Nitrado control-panel client used to supply authoritative host status here,
-/// which COULD tell "restarting" apart from "crashed". The clan moved off Nitrado to
-/// indifferent broccoli in July 2026 and that code is gone. If the new host ever
-/// exposes a panel API, <see cref="DetermineAvailability"/> is where it slots back in.
-///
-/// ── Why only a count ──
-/// Satisfactory's HTTPS API has no player-list function, so this feed reports
-/// "3 → 4 players", never "Alice joined". Hence no session table or playtime here.
+/// ── Sessions are keyed on the player NAME ──
+/// See <see cref="SatisfactorySession"/> for why: the character actor id resets
+/// on every new save, and the clan already wiped one moving hosts.
 ///
 /// ── Quiet on boot ──
-/// State is in-memory and starts <see cref="ServerAvailability.Unknown"/>; the first
-/// determination is recorded silently. Notices only fire on a real change between
-/// known states, so restarting the bot never emits a phantom "online!".
+/// Availability starts <see cref="ServerAvailability.Unknown"/> and the first
+/// determination is recorded silently, so restarting the bot never emits a
+/// phantom "online!". Open sessions left by the previous run are ADOPTED rather
+/// than restarted, so a restart doesn't re-announce everyone as joining or
+/// double-count their time.
 ///
 /// ── Gating ──
-/// Idle unless <see cref="BotConfig.SatisfactoryEnabled"/> is true and the game API is
-/// configured.
+/// Idle unless <see cref="BotConfig.SatisfactoryEnabled"/> is true and the game
+/// API is configured. FRM is a further, independent opt-in.
 /// </summary>
 public sealed class SatisfactoryPresenceService : BackgroundService
 {
@@ -48,6 +59,8 @@ public sealed class SatisfactoryPresenceService : BackgroundService
 
     private readonly DiscordSocketClient _client;
     private readonly SatisfactoryApiService _api;
+    private readonly FrmApiService _frm;
+    private readonly IServiceProvider _services;
     private readonly BotConfig _config;
     private readonly ILogger<SatisfactoryPresenceService> _logger;
 
@@ -57,23 +70,40 @@ public sealed class SatisfactoryPresenceService : BackgroundService
     /// <summary>Consecutive failed reads of the game API.</summary>
     private int _gameApiFailures;
 
-    /// <summary>Last player count seen while up; null when unknown/down.</summary>
+    /// <summary>Last player count seen while up; null when unknown/down. Only used in the FRM-less fallback.</summary>
     private int? _lastPlayerCount;
+
+    /// <summary>
+    /// Who we currently believe is online, keyed by player name.
+    ///
+    /// Ordinal (case-SENSITIVE) on purpose: these keys are compared against
+    /// SQLite text columns, whose default equality is also case-sensitive.
+    /// Matching in-memory case-insensitively while the database matches
+    /// case-sensitively would let a name that differs only in case create a
+    /// second session row while looking like the same person here.
+    /// </summary>
+    private readonly Dictionary<string, FrmPlayer> _online = new(StringComparer.Ordinal);
 
     public SatisfactoryPresenceService(
         DiscordSocketClient client,
         SatisfactoryApiService api,
+        FrmApiService frm,
+        IServiceProvider services,
         IOptions<BotConfig> config,
         ILogger<SatisfactoryPresenceService> logger)
     {
         _client = client;
         _api = api;
+        _frm = frm;
+        _services = services;
         _config = config.Value;
         _logger = logger;
     }
 
     private TimeSpan PollInterval =>
         TimeSpan.FromSeconds(Math.Clamp(_config.SatisfactoryPollIntervalSeconds, 15, 3600));
+
+    private bool FrmActive => _config.FrmEnabled && _frm.IsConfigured;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -94,9 +124,24 @@ public sealed class SatisfactoryPresenceService : BackgroundService
             return;
         }
 
+        if (FrmActive)
+        {
+            try
+            {
+                await AdoptOpenSessionsAsync(stoppingToken);
+            }
+            catch (Exception ex)
+            {
+                // A failed adopt would make the first tick re-announce everyone as
+                // joining. Log and continue rather than killing the poller.
+                _logger.LogError(ex, "SatisfactoryPresenceService: failed to adopt open sessions on boot");
+            }
+        }
+
         _logger.LogInformation(
-            "SatisfactoryPresenceService started; polling every {Seconds}s, feed={Feed} (channel {ChannelId})",
-            (int)PollInterval.TotalSeconds, _config.SatisfactoryFeedEnabled, _config.SatisfactoryFeedChannelId);
+            "SatisfactoryPresenceService started; polling every {Seconds}s, feed={Feed} (channel {ChannelId}), frm={Frm}",
+            (int)PollInterval.TotalSeconds, _config.SatisfactoryFeedEnabled,
+            _config.SatisfactoryFeedChannelId, FrmActive);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -118,27 +163,66 @@ public sealed class SatisfactoryPresenceService : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Rebuilds the in-memory online set from the open sessions left behind by
+    /// the previous run, so a restart doesn't re-announce everyone as joining.
+    /// The rows are trusted as-is; the first poll immediately corrects them
+    /// (anyone who actually left gets their session closed at LastSeenUtc).
+    /// </summary>
+    private async Task AdoptOpenSessionsAsync(CancellationToken ct)
+    {
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+        var open = await db.SatisfactorySessions
+            .Where(s => s.EndedUtc == null)
+            .ToListAsync(ct);
+
+        foreach (var s in open)
+        {
+            if (string.IsNullOrEmpty(s.PlayerName)) continue;
+            _online[s.PlayerName] = new FrmPlayer(
+                Id: s.PlayerId,
+                Name: s.PlayerName,
+                Online: true,
+                Dead: false,
+                PlayerHP: 0,
+                Location: null);
+        }
+
+        if (open.Count > 0)
+            _logger.LogInformation("Satisfactory: adopted {Count} open session(s) from the previous run", open.Count);
+    }
+
     private async Task TickAsync(CancellationToken ct)
     {
-        // ONE read per tick: the same server state decides availability and feeds the
-        // player-count line. It used to be read twice — once for availability, once in
-        // the count poll — which was wasted load on an API that runs on the game thread.
+        // ONE game-API read per tick: the same state decides availability and
+        // feeds the count fallback.
         var state = await _api.GetServerStateAsync(ct);
         var avail = DetermineAvailability(state);
 
         await HandleAvailabilityAsync(avail, ct);
 
-        // The count feed only makes sense while the server is confirmed up. Anything
-        // else (down, or inside the blip grace window) forgets the last count, so
-        // recovery doesn't post a bogus "5 → 2" spanning the outage.
-        if (avail == ServerAvailability.Up && state is not null)
+        if (avail != ServerAvailability.Up || state is null)
         {
-            var message = TrackPlayerCount(state);
-            if (message is not null) await PostFeedAsync(message, ct);
+            // Down, or inside the blip grace window. Forget the last count so
+            // recovery can't post a bogus "5 → 2" spanning the outage. Sessions
+            // are handled by the Up→Down transition, not here — a blip must not
+            // close anything.
+            _lastPlayerCount = null;
+            return;
+        }
+
+        if (FrmActive)
+        {
+            // Names supersede the count line entirely — posting both would say
+            // the same thing twice.
+            await PollPlayersAsync(ct);
         }
         else
         {
-            _lastPlayerCount = null;
+            var message = TrackPlayerCount(state);
+            if (message is not null) await PostFeedAsync(message, ct);
         }
     }
 
@@ -161,7 +245,10 @@ public sealed class SatisfactoryPresenceService : BackgroundService
             : ServerAvailability.Unknown;  // brief blip: hold the last state
     }
 
-    /// <summary>Posts the up/down embed on a real transition between known states.</summary>
+    /// <summary>
+    /// Posts the up/down embed on a real transition between known states, and
+    /// closes out open sessions when the server goes down.
+    /// </summary>
     private async Task HandleAvailabilityAsync(ServerAvailability current, CancellationToken ct)
     {
         if (current == ServerAvailability.Unknown) return;   // undetermined — hold
@@ -170,8 +257,16 @@ public sealed class SatisfactoryPresenceService : BackgroundService
         var previous = _announced;
         _announced = current;
 
-        // First contact after boot: record the state, don't announce it (the server
-        // didn't just change — we only now looked).
+        // Going down closes every open session at its own LastSeenUtc — whether
+        // or not we'd announced an up state before, because the rows may have
+        // been adopted from a previous run. Deliberately silent: the players
+        // didn't leave, we lost visibility, and a burst of leave lines for a
+        // server restart is exactly the noise this feature must not produce.
+        if (current == ServerAvailability.Down && FrmActive)
+            await CloseAllOpenSessionsAsync(ct);
+
+        // First contact after boot: record the state, don't announce it (the
+        // server didn't just change — we only now looked).
         if (previous == ServerAvailability.Unknown)
         {
             _logger.LogInformation("Satisfactory initial availability: {State}", current);
@@ -182,10 +277,174 @@ public sealed class SatisfactoryPresenceService : BackgroundService
         await PostStatusEmbedAsync(current, ct);
     }
 
+    // ─── Named presence (FRM) ───────────────────────────────────────────────
+
     /// <summary>
-    /// Records the current player count and returns a feed line if it changed, else
-    /// null. Always updates <see cref="_lastPlayerCount"/>, so the bookkeeping can't
-    /// be skipped by a caller that decides not to post.
+    /// Diffs the live player list against what we last saw, writes session rows,
+    /// and posts a join/leave line per change.
+    /// </summary>
+    private async Task PollPlayersAsync(CancellationToken ct)
+    {
+        var players = await _frm.GetOnlinePlayersAsync(ct);
+
+        // null is "unknown", never "empty". FRM can be down while the game API is
+        // fine — most likely its web server failed to bind its port — and that
+        // must not read as everyone leaving.
+        if (players is null) return;
+
+        var seen = new Dictionary<string, FrmPlayer>(StringComparer.Ordinal);
+        foreach (var p in players)
+        {
+            if (string.IsNullOrWhiteSpace(p.Name)) continue;   // unnamed = unusable as a key
+            seen[p.Name] = p;
+        }
+
+        var joined = seen.Where(kv => !_online.ContainsKey(kv.Key)).ToList();
+        var left = _online.Where(kv => !seen.ContainsKey(kv.Key)).ToList();
+
+        if (joined.Count == 0 && left.Count == 0)
+        {
+            // Steady state: still refresh the open rows so LastSeenUtc tracks
+            // reality. This is what makes an open session's duration trustworthy.
+            if (seen.Count > 0) await TouchOpenSessionsAsync(seen, ct);
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+        // Discord links for whoever changed this tick, so the feed can name the
+        // member rather than just the character. Mentions render without pinging
+        // because every send uses AllowedMentions.None.
+        var affected = joined.Select(kv => kv.Key).Concat(left.Select(kv => kv.Key)).Distinct().ToList();
+        var links = await db.SatisfactoryLinks
+            .Where(l => affected.Contains(l.SatisfactoryPlayerName))
+            .ToDictionaryAsync(l => l.SatisfactoryPlayerName, l => l.DiscordUserId, StringComparer.Ordinal, ct);
+
+        // ── Leaves ──
+        foreach (var (name, _) in left)
+        {
+            var session = await db.SatisfactorySessions
+                .Where(s => s.EndedUtc == null && s.PlayerName == name)
+                .OrderByDescending(s => s.StartedUtc)
+                .FirstOrDefaultAsync(ct);
+
+            TimeSpan? played = null;
+            if (session is not null)
+            {
+                session.EndedUtc = now;
+                session.LastSeenUtc = now;
+                played = session.Duration;
+            }
+
+            _online.Remove(name);
+            await PostFeedAsync(LeaveMessage(name, links, played, seen.Count), ct);
+        }
+
+        // ── Joins ──
+        foreach (var (name, player) in joined)
+        {
+            db.SatisfactorySessions.Add(new SatisfactorySession
+            {
+                PlayerName = name,
+                PlayerId = player.Id,
+                StartedUtc = now,
+                LastSeenUtc = now,
+                EndedUtc = null,
+            });
+
+            _online[name] = player;
+            await PostFeedAsync(JoinMessage(name, links, seen.Count), ct);
+        }
+
+        await db.SaveChangesAsync(ct);
+
+        // Refresh the survivors' rows in the same pass.
+        if (seen.Count > 0) await TouchOpenSessionsAsync(seen, ct);
+    }
+
+    /// <summary>
+    /// Bumps LastSeenUtc on every open session for a player we can still see,
+    /// and refreshes the recorded character id in case the save changed.
+    /// </summary>
+    private async Task TouchOpenSessionsAsync(Dictionary<string, FrmPlayer> seen, CancellationToken ct)
+    {
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+        var open = await db.SatisfactorySessions
+            .Where(s => s.EndedUtc == null)
+            .ToListAsync(ct);
+        if (open.Count == 0) return;
+
+        var now = DateTime.UtcNow;
+        var changed = false;
+
+        foreach (var s in open)
+        {
+            if (!seen.TryGetValue(s.PlayerName, out var p)) continue;
+
+            s.LastSeenUtc = now;
+            if (!string.IsNullOrEmpty(p.Id)) s.PlayerId = p.Id;
+            changed = true;
+        }
+
+        if (changed) await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Closes every open session at its own LastSeenUtc — used when the server
+    /// has been unreachable long enough to be considered down. Credits only what
+    /// was actually observed, never the outage.
+    /// </summary>
+    private async Task CloseAllOpenSessionsAsync(CancellationToken ct)
+    {
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+        var open = await db.SatisfactorySessions
+            .Where(s => s.EndedUtc == null)
+            .ToListAsync(ct);
+
+        foreach (var s in open)
+            s.EndedUtc = s.LastSeenUtc;
+
+        if (open.Count > 0)
+        {
+            await db.SaveChangesAsync(ct);
+            _logger.LogInformation(
+                "Satisfactory server unreachable; closed {Count} open session(s) at their last-seen time", open.Count);
+        }
+
+        _online.Clear();
+    }
+
+    // ─── Message shaping ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// "**Brandt** (@Dan)" when linked, else just the escaped name. The mention
+    /// is safe to include because sends use AllowedMentions.None.
+    /// </summary>
+    private static string FeedName(string name, IReadOnlyDictionary<string, ulong> links) =>
+        links.TryGetValue(name, out var discordId)
+            ? $"**{Escape(name)}** (<@{discordId}>)"
+            : $"**{Escape(name)}**";
+
+    private static string JoinMessage(string name, IReadOnlyDictionary<string, ulong> links, int onlineCount) =>
+        $"🟢 {FeedName(name, links)} joined the factory — {onlineCount} online";
+
+    private static string LeaveMessage(string name, IReadOnlyDictionary<string, ulong> links, TimeSpan? played, int onlineCount) =>
+        $"🔵 {FeedName(name, links)} left" +
+        (played is TimeSpan d && d > TimeSpan.Zero ? $" after {Humanize(d)}" : "") +
+        $" — {onlineCount} online";
+
+    // ─── Count fallback (no FRM) ────────────────────────────────────────────
+
+    /// <summary>
+    /// Records the current player count and returns a feed line if it changed,
+    /// else null. Only used when FRM is unavailable — with names, this is noise.
     /// </summary>
     private string? TrackPlayerCount(SatisfactoryServerState state)
     {
@@ -207,7 +466,7 @@ public sealed class SatisfactoryPresenceService : BackgroundService
         return $"{arrow} **{session}** — **{prev} → {now}** {noun} online ({now}/{state.PlayerLimit})";
     }
 
-    // ─── Feed posting ───────────────────────────────────────────────────────────
+    // ─── Feed posting ───────────────────────────────────────────────────────
 
     private async Task PostFeedAsync(string message, CancellationToken ct)
     {
@@ -295,9 +554,20 @@ public sealed class SatisfactoryPresenceService : BackgroundService
         return channel;
     }
 
+    /// <summary>"2h 14m" / "47m". Shared with SatisfactoryCommandHandler.</summary>
+    public static string Humanize(TimeSpan d)
+    {
+        if (d.TotalMinutes < 1) return "under a minute";
+        var days = (int)d.TotalDays;
+        var hours = d.Hours;
+        var minutes = d.Minutes;
+        if (days > 0) return $"{days}d {hours}h";
+        return hours > 0 ? $"{hours}h {minutes}m" : $"{minutes}m";
+    }
+
     /// <summary>
-    /// The session name is builder-controlled text landing in a Discord message.
-    /// Neutralize markdown so it can't forge formatting or a mass-ping.
+    /// Player and session names are builder-controlled text landing in a Discord
+    /// message. Neutralize markdown so they can't forge formatting or a mass-ping.
     /// </summary>
     private static string Escape(string s) =>
         string.IsNullOrWhiteSpace(s)
