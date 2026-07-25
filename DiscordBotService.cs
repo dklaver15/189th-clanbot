@@ -540,8 +540,12 @@ public class DiscordBotService : IHostedService
                 // console command) is gated to the "Satisfactory Mod" role
                 // (BotConfig.SatisfactoryAdminRoleId). Runtime-gated by
                 // BotConfig.SatisfactoryEnabled. Handled by SatisfactoryCommandHandler.
+                // /satisfactory-mods additionally needs the Ficsit Remote Monitoring
+                // mod (BotConfig.FrmEnabled + FrmBaseUrl) — the game API can't list
+                // mods — and says so rather than failing when FRM is off.
                 // NOTE: keep CommandsCommandHandler.BuildCatalog in sync.
                 SatisfactoryCommandHandler.BuildStatusCommand(),
+                SatisfactoryCommandHandler.BuildModsCommand(),
                 SatisfactoryCommandHandler.BuildAdminCommand(),
 
                 new SlashCommandBuilder()

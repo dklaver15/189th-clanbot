@@ -12,13 +12,17 @@ namespace ClanGuardBot.Handlers;
 /// Owns the Satisfactory slash commands against the clan's Dedicated Server.
 ///
 ///   • /satisfactory-status  — live server state (players, session, tier, tick rate)  (everyone)
+///   • /satisfactory-mods    — the server's exact modpack + versions                  (everyone)
 ///   • /satisfactory-admin    — save / restart / run-command                          (Satisfactory Mod)
 ///
-/// ── Why fewer commands than Palworld ──
-/// Satisfactory's HTTPS API exposes no player list, no in-game broadcast, and no
-/// kick/ban. So there's no announce, no per-player playtime, and no link command —
-/// the API simply can't back them. What remains is a status read and the admin
-/// verbs the API does support.
+/// ── Two data sources ──
+/// <see cref="SatisfactoryApiService"/> is the game's own HTTPS API: authoritative
+/// for server state and the only thing that can save/restart, but it exposes no
+/// player list — a COUNT is all it will ever give.
+/// <see cref="FrmApiService"/> is the Ficsit Remote Monitoring mod, which supplies
+/// what that can't: player NAMES and the mod list. It's optional, so every FRM
+/// read here is best-effort — a null result drops the extra field rather than
+/// failing the command, and /satisfactory-status still works with FRM switched off.
 ///
 /// ── Gateway safety ──
 /// Every command hits the network (the server's HTTPS API), and Discord.NET runs
@@ -33,21 +37,25 @@ public class SatisfactoryCommandHandler
     private static readonly string[] CommandNames =
     {
         "satisfactory-status",
+        "satisfactory-mods",
         "satisfactory-admin",
     };
 
     private readonly ILogger<SatisfactoryCommandHandler> _logger;
     private readonly BotConfig _config;
     private readonly SatisfactoryApiService _api;
+    private readonly FrmApiService _frm;
 
     public SatisfactoryCommandHandler(
         ILogger<SatisfactoryCommandHandler> logger,
         IOptions<BotConfig> config,
-        SatisfactoryApiService api)
+        SatisfactoryApiService api,
+        FrmApiService frm)
     {
         _logger = logger;
         _config = config.Value;
         _api = api;
+        _frm = frm;
     }
 
     // ─── Command definitions ─────────────────────────────────────────────────
@@ -56,6 +64,20 @@ public class SatisfactoryCommandHandler
         new SlashCommandBuilder()
             .WithName("satisfactory-status")
             .WithDescription("Live status of the clan's Satisfactory server — players on, session, tier, tick rate")
+            .Build();
+
+    /// <summary>
+    /// /satisfactory-mods — the server's exact modpack and versions.
+    ///
+    /// Exists because joining a modded server requires the client to match, and
+    /// the alternative is someone hand-listing mods in chat every time the pack
+    /// changes. Reads from FRM's getModList, so the answer is whatever the
+    /// server actually loaded, not what someone remembers installing.
+    /// </summary>
+    public static SlashCommandProperties BuildModsCommand() =>
+        new SlashCommandBuilder()
+            .WithName("satisfactory-mods")
+            .WithDescription("List the mods installed on the clan's Satisfactory server, with versions")
             .Build();
 
     public static SlashCommandProperties BuildAdminCommand() =>
@@ -119,6 +141,7 @@ public class SatisfactoryCommandHandler
         switch (command.Data.Name)
         {
             case "satisfactory-status": await HandleStatusAsync(command); break;
+            case "satisfactory-mods":   await HandleModsAsync(command); break;
             case "satisfactory-admin":  await HandleAdminAsync(command); break;
         }
     }
@@ -158,6 +181,16 @@ public class SatisfactoryCommandHandler
             embed.AddField("State", state.IsGamePaused ? "⏸️ Paused" : state.IsGameRunning ? "▶️ Running" : "⏳ Awaiting session", true);
         }
 
+        // Names, when FRM is available. The game API can only ever give a count,
+        // so this field is the entire reason the mod is wired up. Best-effort: a
+        // null read just omits the field rather than failing the command.
+        if (_frm.IsConfigured)
+        {
+            var online = await _frm.GetOnlinePlayersAsync();
+            if (online is { Count: > 0 })
+                embed.AddField("Who's on", string.Join(", ", online.Select(p => Escape(p.Name))), false);
+        }
+
         if (!string.IsNullOrWhiteSpace(health))
             embed.WithFooter(health.Equals("healthy", StringComparison.OrdinalIgnoreCase)
                 ? "Health: healthy"
@@ -165,6 +198,74 @@ public class SatisfactoryCommandHandler
 
         await command.FollowupAsync(embed: embed.Build(), ephemeral: true);
     }
+
+    // ─── /satisfactory-mods ──────────────────────────────────────────────────
+
+    private async Task HandleModsAsync(SocketSlashCommand command)
+    {
+        await command.DeferAsync(ephemeral: true);
+
+        if (!_frm.IsConfigured)
+        {
+            await command.FollowupAsync(
+                "The mod list needs the Ficsit Remote Monitoring integration, which isn't set up yet " +
+                "(`FrmEnabled` / `FrmBaseUrl`). Ask an admin.",
+                ephemeral: true);
+            return;
+        }
+
+        var mods = await _frm.GetModListAsync();
+        if (mods is null)
+        {
+            await command.FollowupAsync(
+                "⚠️ Couldn't reach the mod list — the server may be offline, or FRM's web server didn't start.",
+                ephemeral: true);
+            return;
+        }
+
+        // getModList includes pseudo-entries for the base game and the loader.
+        // Split them out: members need the actual mods to install, but the game
+        // build and SML version are exactly what a version mismatch turns on.
+        var platform = mods.Where(m => IsPlatformEntry(m.SmrName)).ToList();
+        var actual = mods.Where(m => !IsPlatformEntry(m.SmrName))
+                         .OrderBy(m => m.Name, StringComparer.OrdinalIgnoreCase)
+                         .ToList();
+
+        var embed = new EmbedBuilder()
+            .WithTitle("🧩 Satisfactory server mods")
+            .WithColor(new Color(0xE59344))
+            .WithCurrentTimestamp();
+
+        if (actual.Count == 0)
+        {
+            embed.WithDescription("The server reports no mods installed.");
+        }
+        else
+        {
+            // SMRName is what you type into Satisfactory Mod Manager, so lead
+            // with it; the friendly name is the parenthetical.
+            var lines = actual.Select(m =>
+                $"• `{Escape(m.SmrName)}` **{Escape(m.Version)}**" +
+                (string.Equals(m.Name, m.SmrName, StringComparison.OrdinalIgnoreCase) ? "" : $" — {Escape(m.Name)}") +
+                (m.RequiredOnRemote ? " *(required)*" : ""));
+
+            embed.WithDescription(Truncate(string.Join("\n", lines), 3800));
+            embed.WithFooter($"{actual.Count} mod{(actual.Count == 1 ? "" : "s")} · install these with Satisfactory Mod Manager to join");
+        }
+
+        foreach (var p in platform)
+            embed.AddField(Escape(p.Name), Escape(p.Version), true);
+
+        await command.FollowupAsync(embed: embed.Build(), ephemeral: true);
+    }
+
+    /// <summary>
+    /// getModList reports the base game and the mod loader alongside real mods.
+    /// They're useful to display but must not appear in the "install these" list.
+    /// </summary>
+    private static bool IsPlatformEntry(string smrName) =>
+        smrName.Equals("FactoryGame", StringComparison.OrdinalIgnoreCase) ||
+        smrName.Equals("SML", StringComparison.OrdinalIgnoreCase);
 
     // ─── /satisfactory-admin ─────────────────────────────────────────────────
 

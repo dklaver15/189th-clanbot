@@ -635,6 +635,8 @@ public class CommandsCommandHandler
                 "Everyone", everyone),
             new("satisfactory-status", "Live status of the clan's Satisfactory server — players on, session, tier, tick rate",
                 "Everyone", everyone),
+            new("satisfactory-mods", "List the mods installed on the clan's Satisfactory server, with versions",
+                "Everyone", everyone),
             new("patrol", "Toggle your visibility on Patrol Watch embeds (off/on/info)",
                 "Everyone", everyone),
             new("promo-eligibility", "Check a member's auto-promotion eligibility",

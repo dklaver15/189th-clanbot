@@ -598,6 +598,14 @@ try
     builder.Services.AddSingleton<SatisfactoryCommandHandler>();
     builder.Services.AddHostedService<SatisfactoryPresenceService>();
 
+    // FrmApiService talks to the Ficsit Remote Monitoring MOD's own HTTP server,
+    // which is a different host:port from the game API above — plain HTTP, plain
+    // GETs, no envelope, no TLS — so it uses the DEFAULT HttpClient and must NOT
+    // use the cert-bypass "satisfactory" one. It supplies what the game API
+    // cannot: player NAMES, production, power and the server's mod list. Gated by
+    // BotConfig.FrmEnabled + FrmBaseUrl; idle otherwise.
+    builder.Services.AddSingleton<FrmApiService>();
+
     // (A NitradoApiService used to be registered here to augment the above with
     // host-panel status. The clan moved off Nitrado to indifferent broccoli in July
     // 2026 and it was removed. If the new host exposes a panel API, an equivalent
