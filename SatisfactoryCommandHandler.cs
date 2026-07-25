@@ -441,7 +441,7 @@ public class SatisfactoryCommandHandler
             };
 
             png = await _charts.TryRenderPlaytimeChartAsync(
-                days, DigestZone(), $"Playtime — last {days} days");
+                days, DigestZone(), $"Last {days} days  ·  hours per player");
             fileName = "playtime.png";
         }
         else
@@ -453,8 +453,8 @@ public class SatisfactoryCommandHandler
                 _     => TimeSpan.FromHours(24),
             };
 
-            var label = window.TotalHours <= 24 ? "last 24 hours" : $"last {(int)window.TotalDays} days";
-            png = await _charts.TryRenderPowerChartAsync(window, $"Power — {label}");
+            var label = window.TotalHours <= 24 ? "Last 24 hours" : $"Last {(int)window.TotalDays} days";
+            png = await _charts.TryRenderPowerChartAsync(window, $"{label}  ·  189th Clanguard");
             fileName = "power.png";
         }
 

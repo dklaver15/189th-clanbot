@@ -686,7 +686,7 @@ public sealed class SatisfactoryFactoryService : BackgroundService
         // Chart is best-effort and comes back null on any failure, including
         // "not enough samples yet". A null just means the embed posts alone.
         var chart = _config.SatisfactoryMetricsEnabled
-            ? await _charts.TryRenderPowerChartAsync(TimeSpan.FromHours(24), $"Power — {day.Label}", ct)
+            ? await _charts.TryRenderPowerChartAsync(TimeSpan.FromHours(24), day.Label, ct)
             : null;
 
         var embed = result.Embed;

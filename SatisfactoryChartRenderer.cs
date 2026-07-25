@@ -12,8 +12,9 @@ namespace ClanGuardBot.Services;
 ///
 /// Two charts:
 /// <list type="bullet">
-/// <item><b>Power</b> — consumption against capacity over time, with fuse trips
-/// marked. Answers "was that blown fuse coming?", which a live reading can't.</item>
+/// <item><b>Power</b> — draw against capacity over time, with fuse trips and
+/// near-misses marked. Answers "was that blown fuse coming?", which a live
+/// reading can't.</item>
 /// <item><b>Playtime</b> — hours per player per day, stacked.</item>
 /// </list>
 ///
@@ -22,8 +23,15 @@ namespace ClanGuardBot.Services;
 /// reasoning: ScottPlot's 5.0 → 5.1 refactor moved the styling APIs its own
 /// cookbook documents, and a guess that threw at runtime produced a silently
 /// missing chart rather than a build error. SkiaSharp is what ScottPlot draws
-/// with anyway. The palette and layout constants here deliberately match that
-/// renderer so the bot's charts look like one family.
+/// with anyway.
+///
+/// ── The design was prototyped, not guessed ──
+/// Every visual decision below was rendered and looked at before being written
+/// here, and several first attempts were thrown away for reasons worth keeping:
+/// a shaded "danger zone" under the capacity line read as a second data series
+/// and, because capacity changes, rendered as a solid red slab; the battery
+/// series on the megawatt axis drew 100% charge at 320 MW, towering over a 60 MW
+/// factory. Both are replaced below, and the comments say what they're avoiding.
 ///
 /// ── Failure handling ──
 /// Every public method returns null on failure, already logged. Callers MUST
@@ -35,35 +43,60 @@ public sealed class SatisfactoryChartRenderer
     private readonly IServiceProvider _services;
     private readonly ILogger<SatisfactoryChartRenderer> _logger;
 
-    // ── Palette, matching MemberActivityChartRenderer ────────────────────────
-    private const string BackgroundHex = "0d1017";   // deep console black
-    private const string AxisColorHex  = "ffffff";   // labels & title
-    private const string GridColorHex  = "ffd86b";   // gridlines, very low alpha
-    private const string ConsumedHex   = "5865f2";   // Discord blurple — draw
-    private const string CapacityHex   = "ffd86b";   // command-deck gold — capacity
-    private const string TrippedHex    = "ed4245";   // Discord red — fuse trips
-    private const string BatteryHex    = "3ba55d";   // Discord green — battery charge
+    // ── Palette ──────────────────────────────────────────────────────────────
+    private const string BgTopHex     = "141b28";   // background gradient, top
+    private const string BgBottomHex  = "080a10";   // background gradient, bottom
+    private const string LiftHex      = "2a3550";   // radial lift behind the plot
+    private const string PanelHex     = "ffffff";   // plot panel wash, very low alpha
+    private const string AxisHex      = "ffffff";
+    private const string GridHex      = "8fa3c8";
+    private const string DrawLoHex    = "5865f2";   // blurple, at the baseline
+    private const string DrawHiHex    = "00d4ff";   // cyan, at the crown
+    private const string CapacityHex  = "ffd86b";   // command-deck gold
+    private const string CapacityLoHex = "d9ae3a";  // legend swatch, low end
+    private const string DangerHex    = "ed4245";
+    private const string DangerLoHex  = "a02529";
+    private const string BatteryHex   = "3ba55d";
+    private const string BatteryHiHex = "7be39b";
 
     /// <summary>
-    /// Per-player bar colours. Deliberately a fixed cycle rather than a hash of
-    /// the name: with four players, a hash would occasionally hand two of them
-    /// near-identical colours and there's no way to override it.
+    /// Per-player bar gradients, low (base) and high (crown). A fixed cycle
+    /// rather than a hash of the name: with four players a hash would
+    /// occasionally hand two of them near-identical colours and there'd be no
+    /// way to override it.
     /// </summary>
-    private static readonly string[] PlayerHexes =
-    {
-        "5865f2", "ffd86b", "3ba55d", "eb459e", "00b0f4", "f47b67",
-    };
+    private static readonly string[] PlayerLoHex =
+        { "3c46c8", "d9ae3a", "2a8248", "c22f7e", "0086bc", "c55a46" };
+
+    private static readonly string[] PlayerHiHex =
+        { "8b94ff", "ffe9a3", "63d98c", "ff8ac7", "5fd8ff", "ffa98f" };
+
+    /// <summary>
+    /// Usable palette length. Taken from BOTH arrays so adding a colour to one
+    /// and forgetting the other degrades to a shorter palette instead of an
+    /// index-out-of-range at render time — the bars index these without a
+    /// modulo, relying on Collapse() to bound the count.
+    /// </summary>
+    private static readonly int PaletteSize = Math.Min(PlayerLoHex.Length, PlayerHiHex.Length);
 
     // ── Layout ───────────────────────────────────────────────────────────────
     private const int CanvasWidth  = 1800;
-    private const int CanvasHeight = 600;
-    private const int MarginLeft   = 90;
-    private const int MarginRight  = 30;
-    private const int MarginTop    = 70;
-    private const int MarginBottom = 70;
+    private const int CanvasHeight = 660;
+    private const int MarginLeft   = 96;
+    private const int MarginRight  = 56;
+    private const int MarginTop    = 96;
+    private const int MarginBottom = 116;
 
-    private const int YAxisGridSteps = 5;
     private const int XAxisTickCount = 7;
+
+    /// <summary>Load above this share of capacity counts as a near miss.</summary>
+    private const double DangerFraction = 0.9;
+
+    /// <summary>
+    /// A sampling gap longer than this multiple of the typical interval breaks
+    /// the line instead of being interpolated across.
+    /// </summary>
+    private const int GapMultiple = 3;
 
     public SatisfactoryChartRenderer(
         IServiceProvider services,
@@ -76,12 +109,12 @@ public sealed class SatisfactoryChartRenderer
     // ─── Power ───────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Grid load over the given window: consumption as a filled line against a
-    /// capacity line, with fuse trips as red markers along the top.
+    /// Grid load over the given window.
     /// </summary>
+    /// <param name="subtitle">Second header line, e.g. "Friday, July 24".</param>
     /// <returns>PNG bytes, or null if there's nothing worth drawing.</returns>
     public async Task<byte[]?> TryRenderPowerChartAsync(
-        TimeSpan window, string title, CancellationToken ct = default)
+        TimeSpan window, string subtitle, CancellationToken ct = default)
     {
         try
         {
@@ -119,7 +152,7 @@ public sealed class SatisfactoryChartRenderer
 
             ct.ThrowIfCancellationRequested();
 
-            return RenderPowerChart(samples, title);
+            return RenderPowerChart(samples, subtitle);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -132,24 +165,28 @@ public sealed class SatisfactoryChartRenderer
         }
     }
 
-    private byte[] RenderPowerChart(IReadOnlyList<SatisfactoryMetricSample> samples, string title)
+    private byte[] RenderPowerChart(IReadOnlyList<SatisfactoryMetricSample> samples, string subtitle)
     {
         var consumed = samples.Select(s => s.PowerConsumedMw).ToArray();
         var capacity = samples.Select(s => s.PowerCapacityMw).ToArray();
 
-        var yMax = NiceCeiling(Math.Max(consumed.Max(), capacity.Max()));
+        // 6% headroom so the capacity ceiling never sits flush against the top
+        // gridline, where it reads as a chart edge rather than a value.
+        var (yMax, yStep) = NiceAxis(Math.Max(consumed.Max(), capacity.Max()) * 1.06);
 
-        const float plotLeft   = MarginLeft;
-        const float plotRight  = CanvasWidth - MarginRight;
-        const float plotTop    = MarginTop;
-        const float plotBottom = CanvasHeight - MarginBottom;
-        const float plotWidth  = plotRight - plotLeft;
-        const float plotHeight = plotBottom - plotTop;
+        var hasBatteries = samples.Any(s => s.BatteryPercent is not null);
 
-        // Samples are plotted against TIME, not against their index. The poll
-        // can miss ticks (FRM down, bot restarting), and index-spacing would
-        // quietly compress a six-hour outage into the same width as six
-        // minutes — making the chart lie about when things happened.
+        const float plotLeft = MarginLeft;
+        const float plotRight = CanvasWidth - MarginRight;
+        const float plotTop = MarginTop;
+        // Give back the strip's height only when a strip is actually drawn.
+        float plotBottom = CanvasHeight - MarginBottom - (hasBatteries ? 26f : 0f);
+        var plotWidth = plotRight - plotLeft;
+        var plotHeight = plotBottom - plotTop;
+
+        // Plotted against TIME, not against sample index. The poll can miss
+        // ticks (FRM down, bot restarting), and index-spacing would compress a
+        // six-hour outage to the width of a normal interval.
         var t0 = samples[0].SampledUtc;
         var span = samples[^1].SampledUtc - t0;
         if (span <= TimeSpan.Zero) span = TimeSpan.FromMinutes(1);
@@ -161,104 +198,295 @@ public sealed class SatisfactoryChartRenderer
         var info = new SKImageInfo(CanvasWidth, CanvasHeight);
         using var surface = SKSurface.Create(info);
         var canvas = surface.Canvas;
-        canvas.Clear(SKColor.Parse(BackgroundHex));
 
-        var titleTypeface = SKTypeface.FromFamilyName(null, SKFontStyle.Bold) ?? SKTypeface.Default;
-        var bodyTypeface  = SKTypeface.FromFamilyName(null) ?? SKTypeface.Default;
-        using var titleFont = new SKFont(titleTypeface, 22f);
-        using var labelFont = new SKFont(bodyTypeface, 14f);
+        DrawBackground(canvas);
+        DrawPanel(canvas, plotLeft, plotTop, plotRight, plotBottom);
 
-        var labelMetrics = labelFont.Metrics;
-        var labelVerticalCenter = -(labelMetrics.Ascent + labelMetrics.Descent) / 2f;
+        using var titleFont = Font(26, bold: true);
+        using var subtitleFont = Font(14);
+        using var labelFont = Font(14);
+        using var smallFont = Font(12);
+        using var smallBoldFont = Font(12, bold: true);
+        using var pillFont = Font(15, bold: true);
 
-        DrawYAxis(canvas, labelFont, labelVerticalCenter, yMax, plotLeft, plotRight, YToPixel, v => $"{v:0.#} MW");
+        DrawYAxis(canvas, labelFont, yMax, yStep, plotLeft, plotRight, YToPixel,
+            v => $"{v:0.###} MW");
 
-        // ── Consumption: area fill, then line ──
-        using (var fillPath = BuildAreaPath(samples, consumed, XToPixel, YToPixel, plotBottom))
-        using (var fillShader = SKShader.CreateLinearGradient(
-                   new SKPoint(0, plotBottom),
-                   new SKPoint(0, plotTop),
-                   new[] { SKColor.Parse(ConsumedHex).WithAlpha(110), SKColor.Parse(ConsumedHex).WithAlpha(0) },
-                   SKShaderTileMode.Clamp))
-        using (var fillPaint = new SKPaint { Shader = fillShader, Style = SKPaintStyle.Fill, IsAntialias = true })
+        var gap = MedianInterval(samples) * GapMultiple;
+        var runs = Runs(samples, gap);
+
+        // ── Near misses ──
+        // Not a permanent shaded "danger zone" under the capacity line: that
+        // looked like a second data series, sat there all day whether or not
+        // anything was wrong, and — because capacity changes — needed a gradient
+        // spanning both levels, which rendered the higher one as a solid red
+        // slab. Marking the moments load actually got close says the same thing
+        // only when it's true.
+        for (var i = 0; i < samples.Count; i++)
         {
-            canvas.DrawPath(fillPath, fillPaint);
-        }
+            if (samples[i].TrippedCount > 0) continue;
+            if (capacity[i] <= 0 || consumed[i] < capacity[i] * DangerFraction) continue;
 
-        using (var linePath = BuildLinePath(samples, consumed, XToPixel, YToPixel))
-        using (var linePaint = new SKPaint
-        {
-            Color = SKColor.Parse(ConsumedHex),
-            StrokeWidth = 3f,
-            Style = SKPaintStyle.Stroke,
-            StrokeCap = SKStrokeCap.Round,
-            StrokeJoin = SKStrokeJoin.Round,
-            IsAntialias = true,
-        })
-        {
-            canvas.DrawPath(linePath, linePaint);
-        }
+            var x = XToPixel(samples[i].SampledUtc);
+            var top = YToPixel(capacity[i]);
+            var bottom = YToPixel(consumed[i]);
 
-        // ── Capacity: dashed, because it's a ceiling rather than a measurement ──
-        using (var capPath = BuildLinePath(samples, capacity, XToPixel, YToPixel))
-        using (var dash = SKPathEffect.CreateDash(new[] { 10f, 6f }, 0f))
-        using (var capPaint = new SKPaint
-        {
-            Color = SKColor.Parse(CapacityHex).WithAlpha(200),
-            StrokeWidth = 2.5f,
-            Style = SKPaintStyle.Stroke,
-            PathEffect = dash,
-            IsAntialias = true,
-        })
-        {
-            canvas.DrawPath(capPath, capPaint);
+            using var shader = SKShader.CreateLinearGradient(
+                new SKPoint(0, bottom), new SKPoint(0, top),
+                new[] { Hex(DangerHex, 130), Hex(DangerHex, 20) },
+                SKShaderTileMode.Clamp);
+            using var paint = new SKPaint { Shader = shader, IsAntialias = true };
+            canvas.DrawRect(new SKRect(x - 1.5f, top, x + 1.5f, bottom), paint);
         }
 
         // ── Fuse trips ──
-        // Drawn as a full-height band rather than a dot on the line: a trip
-        // takes consumption to zero, so a marker at the data point would sit at
-        // the bottom of the chart, exactly where it's least visible.
-        using (var tripPaint = new SKPaint
+        // Full-height bands, behind the series. A marker on the data point would
+        // sit at the bottom of the chart — a trip takes draw to zero — which is
+        // exactly where it's least visible.
+        foreach (var s in samples.Where(s => s.TrippedCount > 0))
         {
-            Color = SKColor.Parse(TrippedHex).WithAlpha(70),
-            Style = SKPaintStyle.Fill,
+            var x = XToPixel(s.SampledUtc);
+            using var shader = SKShader.CreateLinearGradient(
+                new SKPoint(0, plotBottom), new SKPoint(0, plotTop),
+                new[] { Hex(DangerHex, 150), Hex(DangerHex, 10) },
+                SKShaderTileMode.Clamp);
+            using var paint = new SKPaint { Shader = shader, IsAntialias = true };
+            canvas.DrawRect(new SKRect(x - 2.5f, plotTop, x + 2.5f, plotBottom), paint);
+        }
+
+        // ── Consumption ──
+        // The gradient is anchored to the tallest READING, not to the top of the
+        // canvas. Anchored to the canvas, a factory drawing 60 MW on a 320 MW
+        // axis never reaches the hot end of the ramp and the fill is a flat navy
+        // wash — a gradient only pays off if the data spans it.
+        var drawPeakY = YToPixel(consumed.Max());
+
+        using (var areaPath = SmoothPath(samples, consumed, runs, XToPixel, YToPixel, plotBottom))
+        using (var areaShader = SKShader.CreateLinearGradient(
+                   new SKPoint(0, plotBottom), new SKPoint(0, drawPeakY),
+                   new[] { Hex(DrawLoHex, 20), Hex(DrawLoHex, 130), Hex(DrawHiHex, 105) },
+                   new[] { 0f, 0.55f, 1f },
+                   SKShaderTileMode.Clamp))
+        using (var areaPaint = new SKPaint { Shader = areaShader, IsAntialias = true })
+        {
+            canvas.DrawPath(areaPath, areaPaint);
+        }
+
+        using (var line = SmoothPath(samples, consumed, runs, XToPixel, YToPixel, null))
+        {
+            using (var outer = Glow(DrawHiHex, 60, 14f, 7f)) canvas.DrawPath(line, outer);
+            using (var inner = Glow(DrawLoHex, 90, 7f, 3f)) canvas.DrawPath(line, inner);
+
+            using var stroke = SKShader.CreateLinearGradient(
+                new SKPoint(0, plotBottom), new SKPoint(0, drawPeakY),
+                new[] { Hex(DrawLoHex), Hex(DrawHiHex) },
+                SKShaderTileMode.Clamp);
+            using var linePaint = new SKPaint
+            {
+                Shader = stroke,
+                StrokeWidth = 3.2f,
+                Style = SKPaintStyle.Stroke,
+                StrokeCap = SKStrokeCap.Round,
+                StrokeJoin = SKStrokeJoin.Round,
+                IsAntialias = true,
+            };
+            canvas.DrawPath(line, linePaint);
+        }
+
+        // ── Capacity ceiling ──
+        // Dashed with a soft glow, so it reads as a limit rather than another
+        // measurement.
+        using (var cap = SmoothPath(samples, capacity, runs, XToPixel, YToPixel, null))
+        {
+            using (var capGlow = Glow(CapacityHex, 45, 9f, 4f)) canvas.DrawPath(cap, capGlow);
+
+            using var dash = SKPathEffect.CreateDash(new[] { 11f, 7f }, 0f);
+            using var capPaint = new SKPaint
+            {
+                Color = Hex(CapacityHex, 215),
+                StrokeWidth = 2.2f,
+                Style = SKPaintStyle.Stroke,
+                PathEffect = dash,
+                IsAntialias = true,
+            };
+            canvas.DrawPath(cap, capPaint);
+        }
+
+        // ── Peak marker ──
+        var peakIndex = 0;
+        for (var i = 1; i < consumed.Length; i++)
+            if (consumed[i] > consumed[peakIndex]) peakIndex = i;
+
+        var peakX = XToPixel(samples[peakIndex].SampledUtc);
+        var peakY = YToPixel(consumed[peakIndex]);
+
+        using (var halo = new SKPaint
+        {
+            Color = Hex(DrawHiHex, 55),
+            IsAntialias = true,
+            MaskFilter = SKMaskFilter.CreateBlur(SKBlurStyle.Normal, 4f),
+        })
+        {
+            canvas.DrawCircle(peakX, peakY, 9f, halo);
+        }
+
+        using (var dot = new SKPaint { Color = Hex(DrawHiHex), IsAntialias = true })
+        {
+            canvas.DrawCircle(peakX, peakY, 4.2f, dot);
+        }
+
+        var peakLabel = $"peak {consumed[peakIndex]:0} MW";
+
+        // Sit the label BELOW the point when it would collide with the capacity
+        // ceiling — which is exactly where a peak worth marking tends to be.
+        var capAtPeakY = YToPixel(capacity[peakIndex]);
+        var peakLabelY = Math.Abs(peakY - 16f - capAtPeakY) > 16f ? peakY - 16f : peakY + 26f;
+
+        using (var peakPaint = new SKPaint { Color = Hex(DrawHiHex, 220), IsAntialias = true })
+        {
+            canvas.DrawText(peakLabel,
+                peakX - smallBoldFont.MeasureText(peakLabel) / 2f, peakLabelY,
+                smallBoldFont, peakPaint);
+        }
+
+        // ── Latest value ──
+        // A history chart makes "what is it right now" harder to read, not
+        // easier. The pill puts that back.
+        var latest = consumed[^1];
+        var capNow = capacity[^1];
+        var lastX = XToPixel(samples[^1].SampledUtc);
+        var lastY = YToPixel(latest);
+
+        using (var dot = new SKPaint { Color = Hex(DrawHiHex), IsAntialias = true })
+        {
+            canvas.DrawCircle(lastX, lastY, 5f, dot);
+        }
+
+        var pillText = capNow > 0
+            ? $"{latest:0} MW  ·  {100 * latest / capNow:0}%"
+            : $"{latest:0} MW";
+
+        var pillWidth = pillFont.MeasureText(pillText);
+        var pillLeft = lastX - pillWidth - 34f;
+        var pillTop = lastY - 30f;
+        var pill = new SKRect(pillLeft, pillTop, pillLeft + pillWidth + 22f, pillTop + 28f);
+
+        using (var fill = new SKPaint { Color = Hex(BgBottomHex, 220), IsAntialias = true })
+        {
+            canvas.DrawRoundRect(pill, 14f, 14f, fill);
+        }
+
+        using (var border = new SKPaint
+        {
+            Color = Hex(DrawHiHex, 120),
+            Style = SKPaintStyle.Stroke,
+            StrokeWidth = 1f,
             IsAntialias = true,
         })
         {
-            foreach (var s in samples.Where(s => s.TrippedCount > 0))
+            canvas.DrawRoundRect(pill, 14f, 14f, border);
+        }
+
+        using (var text = new SKPaint { Color = Hex(AxisHex, 235), IsAntialias = true })
+        {
+            canvas.DrawText(pillText, pillLeft + 11f, pillTop + 19f, pillFont, text);
+        }
+
+        // ── Time axis ──
+        var format = span <= TimeSpan.FromHours(36) ? "HH:mm" : "MMM d";
+        var ticks = Math.Min(XAxisTickCount, samples.Count);
+
+        using (var axisPaint = new SKPaint { Color = Hex(AxisHex, 150), IsAntialias = true })
+        {
+            if (ticks >= 2)
             {
-                var x = XToPixel(s.SampledUtc);
-                canvas.DrawRect(new SKRect(x - 1.5f, plotTop, x + 1.5f, plotBottom), tripPaint);
+                for (var t = 0; t < ticks; t++)
+                {
+                    var index = (int)Math.Round((double)t / (ticks - 1) * (samples.Count - 1));
+                    var time = samples[index].SampledUtc;
+                    var text = time.ToString(format);
+                    canvas.DrawText(text,
+                        XToPixel(time) - labelFont.MeasureText(text) / 2f, plotBottom + 30f,
+                        labelFont, axisPaint);
+                }
             }
         }
 
-        // ── Battery charge, only when the grid actually has batteries ──
-        // Plotted on the same axis as a percentage OF yMax, so it reads as a
-        // shape rather than a value — labelling it would need a second axis and
-        // the chart is already carrying three series.
-        if (samples.Any(s => s.BatteryPercent is > 0))
+        if (format == "HH:mm")
         {
-            var battery = samples.Select(s => (s.BatteryPercent ?? 0) / 100.0 * yMax).ToArray();
-
-            using var batteryPath = BuildLinePath(samples, battery, XToPixel, YToPixel);
-            using var batteryPaint = new SKPaint
-            {
-                Color = SKColor.Parse(BatteryHex).WithAlpha(180),
-                StrokeWidth = 2f,
-                Style = SKPaintStyle.Stroke,
-                IsAntialias = true,
-            };
-            canvas.DrawPath(batteryPath, batteryPaint);
+            using var notePaint = new SKPaint { Color = Hex(AxisHex, 90), IsAntialias = true };
+            canvas.DrawText("times UTC", plotLeft, plotBottom + 52f, smallFont, notePaint);
         }
 
-        DrawTimeAxis(canvas, labelFont, samples.Select(s => s.SampledUtc).ToList(), XToPixel, plotBottom, span);
-        DrawTitle(canvas, titleFont, title);
-
-        DrawLegend(canvas, labelFont, plotRight, plotTop, new[]
+        // ── Battery ──
+        // Its OWN track, not the main axis. Overlaying it (charge% scaled to
+        // yMax) drew 100% charge at 320 MW — a green mountain range towering
+        // over a 60 MW factory, which reads as a power series and not a
+        // percentage. A dedicated 0–100% strip is unambiguous and costs 26px.
+        if (hasBatteries)
         {
-            (ConsumedHex, "Draw"),
-            (CapacityHex, "Capacity"),
-            (TrippedHex,  "Fuse tripped"),
+            var stripTop = plotBottom + 58f;
+            const float stripHeight = 26f;
+            var stripBottom = stripTop + stripHeight;
+            var strip = new SKRect(plotLeft, stripTop, plotRight, stripBottom);
+
+            using (var bed = new SKPaint { Color = Hex(PanelHex, 10), IsAntialias = true })
+            {
+                canvas.DrawRoundRect(strip, 6f, 6f, bed);
+            }
+
+            canvas.Save();
+            using (var clip = new SKRoundRect(strip, 6f, 6f))
+            {
+                canvas.ClipRoundRect(clip, SKClipOperation.Intersect, antialias: true);
+            }
+
+            using (var battery = new SKPath())
+            {
+                float BatteryY(double pct) => stripBottom - (float)(pct / 100.0) * stripHeight;
+
+                foreach (var (start, end) in runs)
+                {
+                    if (end <= start) continue;
+
+                    battery.MoveTo(XToPixel(samples[start].SampledUtc),
+                        BatteryY(samples[start].BatteryPercent ?? 0));
+
+                    for (var i = start + 1; i <= end; i++)
+                        battery.LineTo(XToPixel(samples[i].SampledUtc),
+                            BatteryY(samples[i].BatteryPercent ?? 0));
+
+                    battery.LineTo(XToPixel(samples[end].SampledUtc), stripBottom);
+                    battery.LineTo(XToPixel(samples[start].SampledUtc), stripBottom);
+                    battery.Close();
+                }
+
+                using var shader = SKShader.CreateLinearGradient(
+                    new SKPoint(0, stripBottom), new SKPoint(0, stripTop),
+                    new[] { Hex(BatteryHex, 200), Hex(BatteryHiHex, 150) },
+                    SKShaderTileMode.Clamp);
+                using var paint = new SKPaint { Shader = shader, IsAntialias = true };
+                canvas.DrawPath(battery, paint);
+            }
+
+            canvas.Restore();
+
+            using var batteryLabel = new SKPaint { Color = Hex(BatteryHex, 190), IsAntialias = true };
+            const string caption = "BATTERY";
+            canvas.DrawText(caption,
+                plotLeft - 14f - smallBoldFont.MeasureText(caption), stripTop + 17f,
+                smallBoldFont, batteryLabel);
+
+            var pct = $"{samples[^1].BatteryPercent ?? 0:0}%";
+            canvas.DrawText(pct, plotRight + 8f, stripTop + 17f, smallBoldFont, batteryLabel);
+        }
+
+        DrawHeader(canvas, titleFont, subtitleFont, "Power", subtitle);
+        DrawLegend(canvas, labelFont, new (string, string, string)[]
+        {
+            (DrawLoHex, DrawHiHex, "Draw"),
+            (CapacityLoHex, CapacityHex, "Capacity"),
+            (DangerLoHex, DangerHex, "Fuse tripped"),
         });
 
         using var image = surface.Snapshot();
@@ -278,7 +506,7 @@ public sealed class SatisfactoryChartRenderer
     /// would split most of the clan's play sessions across two bars.
     /// </param>
     public async Task<byte[]?> TryRenderPlaytimeChartAsync(
-        int days, TimeZoneInfo zone, string title, CancellationToken ct = default)
+        int days, TimeZoneInfo zone, string subtitle, CancellationToken ct = default)
     {
         try
         {
@@ -305,9 +533,6 @@ public sealed class SatisfactoryChartRenderer
                 return null;
             }
 
-            // Bucket by clipping each session into every local day it touches,
-            // the same way the daily digest does. A session spanning midnight
-            // contributes to both days in proportion, not wholly to one.
             var dayBounds = new List<(DateOnly Day, DateTime StartUtc, DateTime EndUtc)>();
             for (var i = 0; i < days; i++)
             {
@@ -315,6 +540,9 @@ public sealed class SatisfactoryChartRenderer
                 dayBounds.Add((d, LocalMidnightToUtc(d, zone), LocalMidnightToUtc(d.AddDays(1), zone)));
             }
 
+            // Clip each session into every local day it touches, the same way
+            // the daily digest does. A session spanning midnight contributes to
+            // both days in proportion, not wholly to one.
             var byPlayer = new Dictionary<string, double[]>(StringComparer.Ordinal);
 
             foreach (var s in sessions)
@@ -339,9 +567,8 @@ public sealed class SatisfactoryChartRenderer
                 }
             }
 
-            // Order players by total time so the biggest contributor is the
-            // bottom of every stack — bars that reshuffle their own ordering
-            // between days are unreadable.
+            // Biggest contributor at the bottom of every stack — bars that
+            // reshuffle their own ordering between days are unreadable.
             var ranked = byPlayer
                 .Select(kv => new PlayerSeries(kv.Key, kv.Value, kv.Value.Sum()))
                 .Where(p => p.Total > 0)
@@ -350,15 +577,11 @@ public sealed class SatisfactoryChartRenderer
 
             if (ranked.Count == 0) return null;
 
-            // Never stack more distinct players than the palette can label. Past
-            // that the colours wrap, so player 7 gets player 1's swatch and the
-            // legend positively misattributes a segment. Folding the tail into
-            // one "Others" band is honest and keeps the totals right.
-            var players = Collapse(ranked, PlayerHexes.Length - 1, days);
+            var players = Collapse(ranked, PaletteSize - 1, days);
 
             ct.ThrowIfCancellationRequested();
 
-            return RenderPlaytimeChart(players, dayBounds.Select(b => b.Day).ToList(), title);
+            return RenderPlaytimeChart(players, dayBounds.Select(b => b.Day).ToList(), subtitle);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -375,8 +598,9 @@ public sealed class SatisfactoryChartRenderer
 
     /// <summary>
     /// Keeps the top <paramref name="keep"/> players and sums everyone else into
-    /// a single "Others" series, so the number of stacked bands never exceeds
-    /// the palette.
+    /// a single "others" series, so the number of stacked bands never exceeds
+    /// the palette. Past that the colours would wrap — player 7 drawn in player
+    /// 1's colour, with the legend positively misattributing a segment.
     /// </summary>
     private static List<PlayerSeries> Collapse(List<PlayerSeries> ranked, int keep, int days)
     {
@@ -395,249 +619,327 @@ public sealed class SatisfactoryChartRenderer
     }
 
     private byte[] RenderPlaytimeChart(
-        IReadOnlyList<PlayerSeries> players, IReadOnlyList<DateOnly> days, string title)
+        IReadOnlyList<PlayerSeries> players, IReadOnlyList<DateOnly> days, string subtitle)
     {
         var dayCount = days.Count;
 
-        // Stack height per day is the sum across players.
         var totals = new double[dayCount];
         for (var i = 0; i < dayCount; i++)
             totals[i] = players.Sum(p => p.Hours[i]);
 
-        var yMax = NiceCeiling(totals.Max());
+        var (yMax, yStep) = NiceAxis(totals.Max());
 
-        const float plotLeft   = MarginLeft;
-        const float plotRight  = CanvasWidth - MarginRight;
-        const float plotTop    = MarginTop;
+        const float plotLeft = MarginLeft;
+        const float plotRight = CanvasWidth - MarginRight;
+        const float plotTop = MarginTop;
         const float plotBottom = CanvasHeight - MarginBottom;
-        const float plotWidth  = plotRight - plotLeft;
+        const float plotWidth = plotRight - plotLeft;
         const float plotHeight = plotBottom - plotTop;
 
         var slotWidth = plotWidth / dayCount;
-        var barGap = Math.Min(6f, slotWidth * 0.25f);
+        var barGap = Math.Min(14f, slotWidth * 0.3f);
         var barWidth = slotWidth - barGap;
+        var radius = Math.Min(7f, barWidth / 2f);
 
         float YToPixel(double y) => plotBottom - (float)(y / yMax) * plotHeight;
 
         var info = new SKImageInfo(CanvasWidth, CanvasHeight);
         using var surface = SKSurface.Create(info);
         var canvas = surface.Canvas;
-        canvas.Clear(SKColor.Parse(BackgroundHex));
 
-        var titleTypeface = SKTypeface.FromFamilyName(null, SKFontStyle.Bold) ?? SKTypeface.Default;
-        var bodyTypeface  = SKTypeface.FromFamilyName(null) ?? SKTypeface.Default;
-        using var titleFont = new SKFont(titleTypeface, 22f);
-        using var labelFont = new SKFont(bodyTypeface, 14f);
+        DrawBackground(canvas);
+        DrawPanel(canvas, plotLeft, plotTop, plotRight, plotBottom);
 
-        var labelMetrics = labelFont.Metrics;
-        var labelVerticalCenter = -(labelMetrics.Ascent + labelMetrics.Descent) / 2f;
+        using var titleFont = Font(26, bold: true);
+        using var subtitleFont = Font(14);
+        using var labelFont = Font(14);
+        using var totalFont = Font(13, bold: true);
 
-        DrawYAxis(canvas, labelFont, labelVerticalCenter, yMax, plotLeft, plotRight, YToPixel, FormatHours);
+        // Weekend columns, tinted before anything else so they read as
+        // background rather than data.
+        using (var weekend = new SKPaint { Color = Hex(PanelHex, 10), IsAntialias = true })
+        {
+            for (var i = 0; i < dayCount; i++)
+            {
+                var dow = days[i].DayOfWeek;
+                if (dow is not (DayOfWeek.Saturday or DayOfWeek.Sunday)) continue;
 
-        // ── Stacked bars ──
+                var x0 = plotLeft + i * slotWidth;
+                canvas.DrawRect(new SKRect(x0, plotTop, x0 + slotWidth, plotBottom), weekend);
+            }
+        }
+
+        DrawYAxis(canvas, labelFont, yMax, yStep, plotLeft, plotRight, YToPixel, FormatHours);
+
+        // The blur never changes, so it's built once rather than per bar. A
+        // 90-day chart was allocating 90 identical native filters, none of them
+        // disposed. The paint takes its own native reference, so disposing this
+        // after the loop is correct.
+        using var barBlur = SKMaskFilter.CreateBlur(SKBlurStyle.Normal, 9f);
+
         for (var i = 0; i < dayCount; i++)
         {
+            if (totals[i] <= 0) continue;
+
             var x0 = plotLeft + i * slotWidth + barGap / 2f;
-            var runningBottom = plotBottom;
+            var stackTop = YToPixel(totals[i]);
+            var silhouette = new SKRect(x0, stackTop, x0 + barWidth, plotBottom);
+
+            using (var glow = new SKPaint
+            {
+                Color = Hex(PlayerHiHex[0], 26),
+                IsAntialias = true,
+                MaskFilter = barBlur,
+            })
+            {
+                canvas.DrawRoundRect(silhouette, radius, radius, glow);
+            }
+
+            // Rounded top on the stack AS A WHOLE, not per segment: clip once to
+            // the silhouette, then draw square segments inside it. Rounding each
+            // segment would put a notch between every player's band.
+            canvas.Save();
+            using (var clip = new SKRoundRect(silhouette, radius, radius))
+            {
+                canvas.ClipRoundRect(clip, SKClipOperation.Intersect, antialias: true);
+            }
+
+            var bottom = plotBottom;
 
             for (var p = 0; p < players.Count; p++)
             {
                 var hours = players[p].Hours[i];
                 if (hours <= 0) continue;
 
-                var segmentHeight = (float)(hours / yMax) * plotHeight;
-                var top = runningBottom - segmentHeight;
+                var top = bottom - (float)(hours / yMax) * plotHeight;
 
-                using var paint = new SKPaint
+                using (var shader = SKShader.CreateLinearGradient(
+                           new SKPoint(x0, bottom), new SKPoint(x0, top),
+                           new[] { Hex(PlayerLoHex[p]), Hex(PlayerHiHex[p]) },
+                           SKShaderTileMode.Clamp))
+                using (var paint = new SKPaint { Shader = shader, IsAntialias = true })
                 {
-                    Color = SKColor.Parse(PlayerHexes[p % PlayerHexes.Length]).WithAlpha(225),
-                    Style = SKPaintStyle.Fill,
-                    IsAntialias = true,
-                };
-                canvas.DrawRect(new SKRect(x0, top, x0 + barWidth, runningBottom), paint);
+                    canvas.DrawRect(new SKRect(x0, top, x0 + barWidth, bottom), paint);
+                }
 
-                runningBottom = top;
+                // Hairline between segments so adjacent bands stay distinct even
+                // when two players' colours are close in value.
+                using (var divider = new SKPaint
+                {
+                    Color = Hex(BgBottomHex, 120),
+                    StrokeWidth = 1.5f,
+                    IsAntialias = true,
+                })
+                {
+                    canvas.DrawLine(x0, top, x0 + barWidth, top, divider);
+                }
+
+                bottom = top;
+            }
+
+            // Highlight along the crown. Two pixels of near-white at low alpha
+            // is the difference between a flat block and a lit one.
+            using (var highlight = new SKPaint
+            {
+                Color = Hex(AxisHex, 110),
+                StrokeWidth = 2.4f,
+                IsAntialias = true,
+            })
+            {
+                canvas.DrawLine(x0 + 1f, stackTop + 1.2f, x0 + barWidth - 1f, stackTop + 1.2f, highlight);
+            }
+
+            canvas.Restore();
+
+            using (var totalPaint = new SKPaint { Color = Hex(AxisHex, 170), IsAntialias = true })
+            {
+                var label = FormatHours(totals[i]);
+                canvas.DrawText(label,
+                    x0 + barWidth / 2f - totalFont.MeasureText(label) / 2f, stackTop - 10f,
+                    totalFont, totalPaint);
             }
         }
 
         // ── X-axis day labels ──
-        // Thinned to at most XAxisTickCount so a 30-day chart doesn't render
-        // overlapping dates.
-        using (var labelPaint = new SKPaint { Color = SKColor.Parse(AxisColorHex), IsAntialias = true })
+        using (var labelPaint = new SKPaint { Color = Hex(AxisHex, 150), IsAntialias = true })
         {
             var step = Math.Max(1, (int)Math.Ceiling(dayCount / (double)XAxisTickCount));
-            var baselineY = plotBottom + 22f;
 
             for (var i = 0; i < dayCount; i += step)
             {
                 var label = days[i].ToDateTime(TimeOnly.MinValue).ToString("MMM d");
                 var x = plotLeft + i * slotWidth + slotWidth / 2f;
-                var w = labelFont.MeasureText(label);
-                canvas.DrawText(label, x - w / 2f, baselineY, labelFont, labelPaint);
+                canvas.DrawText(label,
+                    x - labelFont.MeasureText(label) / 2f, plotBottom + 30f,
+                    labelFont, labelPaint);
             }
         }
 
-        DrawTitle(canvas, titleFont, title);
+        DrawHeader(canvas, titleFont, subtitleFont, "Playtime", subtitle);
 
-        // Collapse() guarantees players.Count <= PlayerHexes.Length, so every
-        // stacked band gets a swatch and no colour is reused.
-        DrawLegend(canvas, labelFont, plotRight, plotTop,
-            players.Select((p, i) => (PlayerHexes[i], p.Name)).ToArray());
+        // Collapse() guarantees players.Count <= palette length, so every
+        // stacked band gets its own swatch and no colour is reused.
+        DrawLegend(canvas, labelFont, players
+            .Select((p, i) => (PlayerLoHex[i], PlayerHiHex[i], $"{p.Name}  {p.Total:0}h"))
+            .ToArray());
 
         using var image = surface.Snapshot();
         using var png = image.Encode(SKEncodedImageFormat.Png, 100);
         return png.ToArray();
     }
 
-    // ─── Shared drawing ──────────────────────────────────────────────────────
+    // ─── Chrome ──────────────────────────────────────────────────────────────
 
-    private static void DrawYAxis(
-        SKCanvas canvas, SKFont labelFont, float verticalCenter, double yMax,
-        float plotLeft, float plotRight, Func<double, float> yToPixel, Func<double, string> format)
+    /// <summary>
+    /// Vertical gradient plus a soft radial lift behind the plot, so the canvas
+    /// reads as a lit panel rather than a flat black rectangle.
+    /// </summary>
+    private static void DrawBackground(SKCanvas canvas)
     {
-        using var gridPaint = new SKPaint
+        var full = new SKRect(0, 0, CanvasWidth, CanvasHeight);
+
+        using (var shader = SKShader.CreateLinearGradient(
+                   new SKPoint(0, 0), new SKPoint(0, CanvasHeight),
+                   new[] { Hex(BgTopHex), Hex(BgBottomHex) },
+                   SKShaderTileMode.Clamp))
+        using (var paint = new SKPaint { Shader = shader })
         {
-            Color = SKColor.Parse(GridColorHex).WithAlpha(20),
-            StrokeWidth = 1,
+            canvas.DrawRect(full, paint);
+        }
+
+        using (var shader = SKShader.CreateRadialGradient(
+                   new SKPoint(CanvasWidth * 0.5f, CanvasHeight * 0.42f), CanvasWidth * 0.62f,
+                   new[] { Hex(LiftHex, 90), Hex(LiftHex, 0) },
+                   SKShaderTileMode.Clamp))
+        using (var paint = new SKPaint { Shader = shader })
+        {
+            canvas.DrawRect(full, paint);
+        }
+    }
+
+    private static void DrawPanel(SKCanvas canvas, float left, float top, float right, float bottom)
+    {
+        var rect = new SKRect(left - 14f, top - 14f, right + 14f, bottom + 14f);
+
+        using (var fill = new SKPaint { Color = Hex(PanelHex, 8), IsAntialias = true })
+        {
+            canvas.DrawRoundRect(rect, 14f, 14f, fill);
+        }
+
+        using (var border = new SKPaint
+        {
+            Color = Hex(PanelHex, 18),
             Style = SKPaintStyle.Stroke,
+            StrokeWidth = 1f,
+            IsAntialias = true,
+        })
+        {
+            canvas.DrawRoundRect(rect, 14f, 14f, border);
+        }
+    }
+
+    /// <summary>
+    /// Gridlines every <paramref name="step"/>, rather than slicing the maximum
+    /// into a fixed count. Slicing produced gridlines at 64/128/192 on a 320 MW
+    /// axis — correct, but nobody reads "64 MW" as a round number.
+    /// </summary>
+    private static void DrawYAxis(
+        SKCanvas canvas, SKFont font, double yMax, double step,
+        float left, float right, Func<double, float> yToPixel, Func<double, string> format)
+    {
+        using var dash = SKPathEffect.CreateDash(new[] { 2f, 6f }, 0f);
+        using var grid = new SKPaint
+        {
+            Color = Hex(GridHex, 26),
+            StrokeWidth = 1f,
+            Style = SKPaintStyle.Stroke,
+            PathEffect = dash,
             IsAntialias = true,
         };
-        using var labelPaint = new SKPaint { Color = SKColor.Parse(AxisColorHex), IsAntialias = true };
+        using var label = new SKPaint { Color = Hex(AxisHex, 150), IsAntialias = true };
 
-        for (var g = 0; g <= YAxisGridSteps; g++)
+        var metrics = font.Metrics;
+        var verticalCenter = -(metrics.Ascent + metrics.Descent) / 2f;
+
+        // Hard ceiling on the iteration count. NiceAxis never needs more than
+        // about six, so anything approaching this is a degenerate axis, and an
+        // unbounded loop here would wedge the render task rather than produce a
+        // bad chart. The epsilon is RELATIVE: an absolute 1e-9 made a tiny axis
+        // (a one-tick session overlap is ~3e-11 hours) iterate for ages.
+        for (var g = 0; g <= 64; g++)
         {
-            var value = yMax * g / YAxisGridSteps;
+            var value = step * g;
+            if (value > yMax + Math.Abs(yMax) * 1e-9) break;
+
             var y = yToPixel(value);
+            canvas.DrawLine(left, y, right, y, grid);
 
-            canvas.DrawLine(plotLeft, y, plotRight, y, gridPaint);
-
-            var label = format(value);
-            var w = labelFont.MeasureText(label);
-            canvas.DrawText(label, plotLeft - 10f - w, y + verticalCenter, labelFont, labelPaint);
+            var text = format(value);
+            canvas.DrawText(text, left - 14f - font.MeasureText(text), y + verticalCenter, font, label);
         }
     }
 
-    /// <summary>
-    /// Time labels along the bottom. The format adapts to the window: a 24-hour
-    /// chart labelled "Jul 25" seven times says nothing, and a 30-day chart
-    /// labelled by the hour says less.
-    /// </summary>
-    private static void DrawTimeAxis(
-        SKCanvas canvas, SKFont labelFont, IReadOnlyList<DateTime> times,
-        Func<DateTime, float> xToPixel, float plotBottom, TimeSpan span)
+    private static void DrawHeader(
+        SKCanvas canvas, SKFont titleFont, SKFont subtitleFont, string title, string subtitle)
     {
-        var format = span <= TimeSpan.FromHours(36) ? "HH:mm" : "MMM d";
-
-        using var labelPaint = new SKPaint { Color = SKColor.Parse(AxisColorHex), IsAntialias = true };
-        var baselineY = plotBottom + 22f;
-
-        // Never ask for more ticks than there are samples, or several ticks
-        // resolve to the same index and the same label is drawn on top of
-        // itself — which renders as one oddly bold, slightly fuzzy date.
-        var ticks = Math.Min(XAxisTickCount, times.Count);
-        if (ticks < 2) return;
-
-        for (var t = 0; t < ticks; t++)
+        using (var paint = new SKPaint { Color = Hex(AxisHex, 240), IsAntialias = true })
         {
-            var index = (int)Math.Round((double)t / (ticks - 1) * (times.Count - 1));
-            var time = times[index];
-            var label = time.ToString(format);
-            var x = xToPixel(time);
-            var w = labelFont.MeasureText(label);
-            canvas.DrawText(label, x - w / 2f, baselineY, labelFont, labelPaint);
+            canvas.DrawText(title, MarginLeft - 14f, 46f, titleFont, paint);
         }
 
-        // The axis is UTC — say so, rather than leaving people to guess whether
-        // a 03:00 spike means someone was up at 3am.
-        using var noteFont = new SKFont(SKTypeface.FromFamilyName(null) ?? SKTypeface.Default, 12f);
-        using var notePaint = new SKPaint { Color = SKColor.Parse(AxisColorHex).WithAlpha(120), IsAntialias = true };
-        if (format == "HH:mm")
-            canvas.DrawText("times UTC", MarginLeft, plotBottom + 44f, noteFont, notePaint);
-    }
+        if (string.IsNullOrWhiteSpace(subtitle)) return;
 
-    private static void DrawTitle(SKCanvas canvas, SKFont titleFont, string title)
-    {
-        using var paint = new SKPaint { Color = SKColor.Parse(AxisColorHex), IsAntialias = true };
-        var w = titleFont.MeasureText(title);
-        canvas.DrawText(title, (CanvasWidth - w) / 2f, 42f, titleFont, paint);
+        using (var paint = new SKPaint { Color = Hex(AxisHex, 110), IsAntialias = true })
+        {
+            canvas.DrawText(subtitle, MarginLeft - 14f, 70f, subtitleFont, paint);
+        }
     }
 
     /// <summary>
-    /// Swatch-and-label legend, laid out right-to-left from the plot's top-right
-    /// corner so it never collides with the title.
+    /// Rounded gradient swatches, laid out right-to-left from the header line.
+    ///
+    /// <para>It grows leftward, so a long enough legend WOULD eventually reach
+    /// the left-aligned title. Six entries of player names fits comfortably,
+    /// and Collapse() caps it at six — but that's the bound, not the layout.</para>
     /// </summary>
     private static void DrawLegend(
-        SKCanvas canvas, SKFont font, float plotRight, float plotTop,
-        IReadOnlyList<(string Hex, string Label)> entries)
+        SKCanvas canvas, SKFont font, IReadOnlyList<(string Lo, string Hi, string Label)> entries)
     {
-        const float swatch = 12f;
-        const float gap = 8f;
-        const float itemGap = 22f;
+        const float swatch = 14f;
+        const float gap = 9f;
+        const float itemGap = 24f;
+        const float y = 40f;
 
-        var x = plotRight;
-        var y = plotTop - 18f;
+        var x = (float)(CanvasWidth - MarginRight);
 
-        using var labelPaint = new SKPaint { Color = SKColor.Parse(AxisColorHex).WithAlpha(210), IsAntialias = true };
+        using var labelPaint = new SKPaint { Color = Hex(AxisHex, 200), IsAntialias = true };
 
-        foreach (var (hex, label) in entries.Reverse())
+        for (var i = entries.Count - 1; i >= 0; i--)
         {
-            var textWidth = font.MeasureText(label);
-            x -= textWidth;
-            canvas.DrawText(label, x, y + swatch - 2f, font, labelPaint);
+            var (lo, hi, text) = entries[i];
+
+            x -= font.MeasureText(text);
+            canvas.DrawText(text, x, y + 10f, font, labelPaint);
 
             x -= gap + swatch;
-            using var swatchPaint = new SKPaint
+            var rect = new SKRect(x, y, x + swatch, y + swatch);
+
+            using (var shader = SKShader.CreateLinearGradient(
+                       new SKPoint(x, y + swatch), new SKPoint(x, y),
+                       new[] { Hex(lo), Hex(hi) },
+                       SKShaderTileMode.Clamp))
+            using (var paint = new SKPaint { Shader = shader, IsAntialias = true })
             {
-                Color = SKColor.Parse(hex),
-                Style = SKPaintStyle.Fill,
-                IsAntialias = true,
-            };
-            canvas.DrawRect(new SKRect(x, y, x + swatch, y + swatch), swatchPaint);
+                canvas.DrawRoundRect(rect, 4f, 4f, paint);
+            }
 
             x -= itemGap;
         }
     }
 
-    /// <summary>
-    /// Traces the series, <b>breaking the line across sampling gaps</b>.
-    ///
-    /// <para>Spacing the points by time stops an outage being compressed to the
-    /// width of a normal interval, but on its own it still draws a straight
-    /// LineTo from the last reading before the gap to the first one after —
-    /// inventing a smooth six-hour trend across the widest part of the chart out
-    /// of two data points. Starting a new subpath instead leaves the gap
-    /// visible, which is the honest rendering of "we don't know".</para>
-    /// </summary>
-    private static SKPath BuildLinePath(
-        IReadOnlyList<SatisfactoryMetricSample> samples, IReadOnlyList<double> values,
-        Func<DateTime, float> xToPixel, Func<double, float> yToPixel)
-    {
-        var path = new SKPath();
-        if (values.Count == 0) return path;
+    // ─── Geometry ────────────────────────────────────────────────────────────
 
-        var gapThreshold = MedianInterval(samples) * 3;
-
-        path.MoveTo(xToPixel(samples[0].SampledUtc), yToPixel(values[0]));
-
-        for (var i = 1; i < values.Count; i++)
-        {
-            var x = xToPixel(samples[i].SampledUtc);
-            var y = yToPixel(values[i]);
-
-            if (samples[i].SampledUtc - samples[i - 1].SampledUtc > gapThreshold)
-                path.MoveTo(x, y);
-            else
-                path.LineTo(x, y);
-        }
-
-        return path;
-    }
-
-    /// <summary>
-    /// Typical spacing between samples, used to decide what counts as a gap.
-    /// Derived from the data rather than read from config, so it stays correct
-    /// if the poll interval is changed or the window spans a change.
-    /// </summary>
+    /// <summary>Typical spacing between samples, used to decide what a gap is.</summary>
     private static TimeSpan MedianInterval(IReadOnlyList<SatisfactoryMetricSample> samples)
     {
         if (samples.Count < 2) return TimeSpan.FromMinutes(2);
@@ -652,51 +954,97 @@ public sealed class SatisfactoryChartRenderer
         return median > 0 ? TimeSpan.FromSeconds(median) : TimeSpan.FromMinutes(2);
     }
 
+    /// <summary>Contiguous index ranges, split wherever sampling stopped.</summary>
+    private static List<(int Start, int End)> Runs(
+        IReadOnlyList<SatisfactoryMetricSample> samples, TimeSpan gap)
+    {
+        var runs = new List<(int, int)>();
+        var start = 0;
+
+        for (var i = 1; i < samples.Count; i++)
+        {
+            if (samples[i].SampledUtc - samples[i - 1].SampledUtc <= gap) continue;
+            runs.Add((start, i - 1));
+            start = i;
+        }
+
+        runs.Add((start, samples.Count - 1));
+        return runs;
+    }
+
     /// <summary>
-    /// The filled area under the series, as one closed shape PER contiguous
-    /// run of samples.
+    /// Quadratic mid-point smoothing, one subpath per contiguous run — the same
+    /// curve shape as <see cref="MemberActivityChartRenderer"/>'s trend line.
     ///
-    /// <para>Built independently rather than by extending the stroke path: with
-    /// gaps the stroke path has several subpaths, and closing that would drop a
-    /// baseline only under the last one while leaving the earlier runs open —
-    /// filling a shape that spans the gaps it was just taught to avoid.</para>
+    /// <para>Breaking on gaps is the point. Spacing points by time stops an
+    /// outage being squeezed to the width of a normal interval, but on its own
+    /// the path still draws straight from the last reading before the gap to the
+    /// first one after — inventing a smooth multi-hour trend out of two data
+    /// points, across the widest part of the chart.</para>
     /// </summary>
-    private static SKPath BuildAreaPath(
-        IReadOnlyList<SatisfactoryMetricSample> samples, IReadOnlyList<double> values,
-        Func<DateTime, float> xToPixel, Func<double, float> yToPixel, float baselineY)
+    /// <param name="closeTo">
+    /// Baseline Y to close each run down to, for a filled area; null for a
+    /// stroke-only path.
+    /// </param>
+    private static SKPath SmoothPath(
+        IReadOnlyList<SatisfactoryMetricSample> samples,
+        IReadOnlyList<double> values,
+        IReadOnlyList<(int Start, int End)> runs,
+        Func<DateTime, float> xToPixel,
+        Func<double, float> yToPixel,
+        float? closeTo)
     {
         var path = new SKPath();
-        if (values.Count == 0) return path;
 
-        var gapThreshold = MedianInterval(samples) * 3;
-
-        var runStart = 0;
-
-        void CloseRun(int endIndex)
+        foreach (var (start, end) in runs)
         {
-            // A single isolated sample has no area to fill.
-            if (endIndex <= runStart) return;
+            if (end <= start) continue;
 
-            path.MoveTo(xToPixel(samples[runStart].SampledUtc), yToPixel(values[runStart]));
-            for (var i = runStart + 1; i <= endIndex; i++)
-                path.LineTo(xToPixel(samples[i].SampledUtc), yToPixel(values[i]));
+            var count = end - start + 1;
+            var xs = new float[count];
+            var ys = new float[count];
 
-            path.LineTo(xToPixel(samples[endIndex].SampledUtc), baselineY);
-            path.LineTo(xToPixel(samples[runStart].SampledUtc), baselineY);
-            path.Close();
+            for (var i = 0; i < count; i++)
+            {
+                xs[i] = xToPixel(samples[start + i].SampledUtc);
+                ys[i] = yToPixel(values[start + i]);
+            }
+
+            path.MoveTo(xs[0], ys[0]);
+
+            if (count == 2)
+            {
+                path.LineTo(xs[1], ys[1]);
+            }
+            else
+            {
+                for (var k = 1; k < count - 1; k++)
+                    path.QuadTo(xs[k], ys[k], (xs[k] + xs[k + 1]) / 2f, (ys[k] + ys[k + 1]) / 2f);
+
+                path.LineTo(xs[^1], ys[^1]);
+            }
+
+            if (closeTo is { } baseline)
+            {
+                path.LineTo(xs[^1], baseline);
+                path.LineTo(xs[0], baseline);
+                path.Close();
+            }
         }
 
-        for (var i = 1; i < values.Count; i++)
-        {
-            if (samples[i].SampledUtc - samples[i - 1].SampledUtc <= gapThreshold) continue;
-
-            CloseRun(i - 1);
-            runStart = i;
-        }
-
-        CloseRun(values.Count - 1);
         return path;
     }
+
+    private static SKPaint Glow(string hex, byte alpha, float width, float sigma) => new()
+    {
+        Color = Hex(hex, alpha),
+        StrokeWidth = width,
+        Style = SKPaintStyle.Stroke,
+        StrokeCap = SKStrokeCap.Round,
+        StrokeJoin = SKStrokeJoin.Round,
+        IsAntialias = true,
+        MaskFilter = SKMaskFilter.CreateBlur(SKBlurStyle.Normal, sigma),
+    };
 
     private static DateTime LocalMidnightToUtc(DateOnly date, TimeZoneInfo zone)
     {
@@ -706,27 +1054,50 @@ public sealed class SatisfactoryChartRenderer
     }
 
     /// <summary>
-    /// Rounds up to a readable axis ceiling so gridlines land on whole numbers.
-    /// Same logic as <see cref="MemberActivityChartRenderer"/>.
+    /// Picks a round gridline step, then the smallest ceiling that is a whole
+    /// number of them.
+    ///
+    /// <para>Rounding the MAXIMUM up a 1/2/2.5/5/10 ladder wastes plot height —
+    /// a 300 MW capacity became a 500 MW axis, throwing away 40% of the chart.
+    /// Rounding the STEP instead gives 320 with lines every 80.</para>
     /// </summary>
-    private static double NiceCeiling(double value)
+    private static (double Max, double Step) NiceAxis(double value, int targetSteps = 5)
     {
-        if (value <= 0) return 1;
-        if (value <= 5) return 5;
+        // A NaN or infinite reading would produce a NaN step, and the gridline
+        // loop's `value > yMax` test is false for NaN — so it would never end.
+        if (!double.IsFinite(value) || value <= 0) return (1, 1);
 
-        var magnitude = Math.Pow(10, Math.Floor(Math.Log10(value)));
-        var normalized = value / magnitude;
+        var raw = value / targetSteps;
+        var magnitude = Math.Pow(10, Math.Floor(Math.Log10(raw)));
+        var normalized = raw / magnitude;
 
-        double nice;
-        if      (normalized <= 1)   nice = 1;
-        else if (normalized <= 2)   nice = 2;
-        else if (normalized <= 2.5) nice = 2.5;
-        else if (normalized <= 5)   nice = 5;
-        else                        nice = 10;
+        double nice = 10;
+        foreach (var candidate in new[] { 1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10 })
+        {
+            if (normalized > candidate) continue;
+            nice = candidate;
+            break;
+        }
 
-        return nice * magnitude;
+        var step = nice * magnitude;
+        return (step * Math.Ceiling(value / step), step);
     }
 
     private static string FormatHours(double hours) =>
-        hours == Math.Floor(hours) ? $"{(int)hours}h" : $"{hours:0.#}h";
+        Math.Abs(hours - Math.Floor(hours)) < 0.05 ? $"{(int)Math.Round(hours)}h" : $"{hours:0.#}h";
+
+    private static SKFont Font(float size, bool bold = false)
+    {
+        // Null family name = system default, which on the bot's Linux image is
+        // DejaVu Sans (fonts-dejavu-core, installed by the Dockerfile). The
+        // fallback matters: SKTypeface.Default is a shared singleton, so it is
+        // deliberately never disposed. SKFont owns scaling state and IS disposed
+        // by callers.
+        var typeface = SKTypeface.FromFamilyName(null, bold ? SKFontStyle.Bold : SKFontStyle.Normal)
+                       ?? SKTypeface.Default;
+
+        return new SKFont(typeface, size) { Subpixel = true, Edging = SKFontEdging.Antialias };
+    }
+
+    private static SKColor Hex(string hex, byte alpha = 255) => SKColor.Parse(hex).WithAlpha(alpha);
 }
