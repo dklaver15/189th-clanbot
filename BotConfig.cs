@@ -1790,6 +1790,54 @@ public class BotConfig
     /// </summary>
     public string FrmAuthToken { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Master switch for the factory ALERT feed (tripped fuses, batteries running
+    /// down). Posts to <see cref="SatisfactoryFeedChannelId"/>. Requires FRM.
+    /// </summary>
+    public bool SatisfactoryAlertsEnabled { get; set; } = true;
+
+    /// <summary>
+    /// How often to poll getPower for alerts, in seconds. Clamped 30–3600.
+    /// Default 120: fast enough that a blown fuse is noticed within a couple of
+    /// minutes, slow enough not to hammer a game server.
+    /// </summary>
+    public int SatisfactoryAlertIntervalSeconds { get; set; } = 120;
+
+    /// <summary>
+    /// Minimum gap between repeat alerts for the SAME circuit, in minutes.
+    /// Stops a flapping fuse spamming the channel. Recovery messages ignore this
+    /// — "it's fixed" should never be suppressed.
+    /// </summary>
+    public int SatisfactoryAlertCooldownMinutes { get; set; } = 30;
+
+    /// <summary>
+    /// Battery charge (%) at or below which a circuit is reported as running
+    /// down. Recovery is announced once it climbs 10 points clear of this, so a
+    /// bank hovering at the threshold doesn't alternate alert/recovery forever.
+    /// Only applies to circuits that actually have batteries.
+    /// </summary>
+    public double SatisfactoryBatteryAlertPercent { get; set; } = 20;
+
+    /// <summary>
+    /// Master switch for the daily factory digest. Off by default — it's a
+    /// recurring public post, so it should be switched on deliberately once the
+    /// channel is chosen.
+    /// </summary>
+    public bool SatisfactoryDigestEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Hour (UTC, 0–23) at which the daily digest posts. Fires once per UTC day;
+    /// a restart after the slot has passed won't re-post it.
+    /// </summary>
+    public int SatisfactoryDigestHourUtc { get; set; } = 17;
+
+    /// <summary>
+    /// Channel for the daily digest. 0 = use
+    /// <see cref="SatisfactoryFeedChannelId"/>. A report and a join/leave feed
+    /// often want different homes, hence the separate key.
+    /// </summary>
+    public ulong SatisfactoryDigestChannelId { get; set; } = 0;
+
     // ─── SQLite Backup Settings ──────────────────────────────────────
     /// <summary>
     /// Master switch for SqliteBackupService. When false, the service exits

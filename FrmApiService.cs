@@ -92,6 +92,28 @@ public sealed record FrmSpaceElevator(
     bool UpgradeReady,
     IReadOnlyList<FrmPhaseItem> CurrentPhase);
 
+/// <summary>
+/// Per-item production and consumption.
+///
+/// <para>FRM also returns a <c>ProdPerMin</c> string
+/// ("P: 14.8/ min - C: 16.950001/ min") which is display formatting, not data —
+/// deliberately not modelled. Use <see cref="CurrentProd"/> /
+/// <see cref="CurrentConsumed"/> for anything numeric.</para>
+///
+/// <para><b>MaxProd can be 0</b> for items that are only ever consumed (Leaves,
+/// for one), so never divide by it without a guard.</para>
+/// </summary>
+public sealed record FrmProdStat(
+    string Name,
+    string ClassName,
+    double ProdPercent,
+    double ConsPercent,
+    double CurrentProd,
+    double MaxProd,
+    double CurrentConsumed,
+    double MaxConsumed,
+    string Type);
+
 /// <summary>AWESOME Sink totals. GraphPoints is a rolling 10-sample history.</summary>
 public sealed record FrmResourceSink(
     string Name,
@@ -225,6 +247,14 @@ public sealed class FrmApiService
     /// </summary>
     public Task<IReadOnlyList<FrmSpaceElevator>?> GetSpaceElevatorAsync(CancellationToken ct = default) =>
         GetListAsync<FrmSpaceElevator>("getSpaceElevator", ct);
+
+    /// <summary>
+    /// Per-item production/consumption for everything the factory touches. This
+    /// is one of the bigger endpoints — fine on a daily digest, not something to
+    /// poll on a loop. Null = unreachable.
+    /// </summary>
+    public Task<IReadOnlyList<FrmProdStat>?> GetProdStatsAsync(CancellationToken ct = default) =>
+        GetListAsync<FrmProdStat>("getProdStats", ct);
 
     /// <summary>AWESOME Sink coupon/points state. Null = unreachable.</summary>
     public Task<IReadOnlyList<FrmResourceSink>?> GetResourceSinkAsync(CancellationToken ct = default) =>

@@ -606,6 +606,13 @@ try
     // BotConfig.FrmEnabled + FrmBaseUrl; idle otherwise.
     builder.Services.AddSingleton<FrmApiService>();
 
+    // SatisfactoryFactoryService rides on FRM too: a fast poll of getPower for
+    // fuse/battery alerts, plus a once-a-day factory digest. Independent of the
+    // presence poller (different cadence, different data), and each half is
+    // separately switchable via BotConfig.SatisfactoryAlertsEnabled /
+    // SatisfactoryDigestEnabled.
+    builder.Services.AddHostedService<SatisfactoryFactoryService>();
+
     // (A NitradoApiService used to be registered here to augment the above with
     // host-panel status. The clan moved off Nitrado to indifferent broccoli in July
     // 2026 and it was removed. If the new host exposes a panel API, an equivalent
