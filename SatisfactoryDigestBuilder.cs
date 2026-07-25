@@ -86,6 +86,17 @@ public sealed class SatisfactoryDigestBuilder
         return embed.Build();
     }
 
+    /// <summary>
+    /// Grid load, as consumption against generating capacity.
+    ///
+    /// <para><b>PowerProduction is deliberately not reported.</b> FRM returns 0
+    /// for it on this server even while circuits are drawing tens of megawatts,
+    /// so printing it produced "83.9 / 180 MW used, 0 MW produced" — which reads
+    /// as a factory that should have tripped its fuse. Capacity already conveys
+    /// headroom, and it's the number that's actually populated. The field is
+    /// still shown IF it ever comes back non-zero, so a future FRM version that
+    /// populates it isn't silently ignored.</para>
+    /// </summary>
     private static void AddPowerField(EmbedBuilder embed, IReadOnlyList<FrmPowerCircuit>? power)
     {
         if (power is null || power.Count == 0) return;
@@ -95,7 +106,10 @@ public sealed class SatisfactoryDigestBuilder
         var capacity = power.Sum(c => c.PowerCapacity);
         var tripped = power.Count(c => c.FuseTriggered);
 
-        var text = $"{consumed:0.#} / {capacity:0.#} MW used\n{production:0.#} MW produced across {power.Count} circuit(s)";
+        var load = capacity > 0 ? $" ({100.0 * consumed / capacity:0}% load)" : "";
+        var text = $"{consumed:0.#} / {capacity:0.#} MW{load} across {power.Count} circuit(s)";
+
+        if (production > 0) text += $"\n{production:0.#} MW being generated";
         if (tripped > 0) text += $"\n⚡ **{tripped} tripped fuse(s)**";
 
         embed.AddField("Power", text, false);

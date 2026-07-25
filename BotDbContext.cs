@@ -59,6 +59,7 @@ public class BotDbContext : DbContext
     // ── Satisfactory server (via the Ficsit Remote Monitoring mod) ──
     public DbSet<SatisfactorySession>  SatisfactorySessions  => Set<SatisfactorySession>();
     public DbSet<SatisfactoryLink>     SatisfactoryLinks     => Set<SatisfactoryLink>();
+    public DbSet<SatisfactoryUnlock>   SatisfactoryUnlocks   => Set<SatisfactoryUnlock>();
     // ── XP ladder ──
     public DbSet<XpSeason>             XpSeasons             => Set<XpSeason>();
     public DbSet<XpAward>              XpAwards              => Set<XpAward>();
@@ -634,6 +635,18 @@ public class BotDbContext : DbContext
         {
             e.HasIndex(l => new { l.GuildId, l.DiscordUserId }).IsUnique();
             e.HasIndex(l => new { l.GuildId, l.SatisfactoryPlayerName }).IsUnique();
+        });
+
+        // ── Satisfactory milestones / research ────────────────────────
+        // The poller's only query is "which unlocks of this kind do we already
+        // know about, for this save?", so (Seed, Kind) is the covering index.
+        // The unique constraint on (Seed, Kind, UnlockId) is the structural
+        // guarantee against double-announcing: even if two polls raced, the
+        // second insert fails rather than producing a duplicate row.
+        modelBuilder.Entity<SatisfactoryUnlock>(e =>
+        {
+            e.HasIndex(u => new { u.Seed, u.Kind });
+            e.HasIndex(u => new { u.Seed, u.Kind, u.UnlockId }).IsUnique();
         });
 
         // ── Palworld health samples ───────────────────────────────────

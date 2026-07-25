@@ -620,6 +620,12 @@ try
     builder.Services.AddSingleton<SatisfactoryDigestBuilder>();
     builder.Services.AddHostedService<SatisfactoryFactoryService>();
 
+    // SatisfactoryUnlockService announces milestones and M.A.M. research. Its
+    // state is PERSISTED (SatisfactoryUnlock) rather than in-memory, because
+    // completions are one-time events that can't be re-derived after a restart —
+    // unlike the power alerts above, which can.
+    builder.Services.AddHostedService<SatisfactoryUnlockService>();
+
     // (A NitradoApiService used to be registered here to augment the above with
     // host-panel status. The clan moved off Nitrado to indifferent broccoli in July
     // 2026 and it was removed. If the new host exposes a panel API, an equivalent

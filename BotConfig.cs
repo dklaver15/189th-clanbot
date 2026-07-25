@@ -1838,6 +1838,41 @@ public class BotConfig
     /// </summary>
     public ulong SatisfactoryDigestChannelId { get; set; } = 0;
 
+    /// <summary>
+    /// Master switch for the milestone / M.A.M. research feed. Announces things
+    /// the clan completes, once each, the first time they're seen done.
+    ///
+    /// The first run on a save records everything already complete WITHOUT
+    /// announcing, so switching this on won't dump the back catalogue into a
+    /// channel.
+    /// </summary>
+    public bool SatisfactoryUnlockFeedEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Channel for milestone/research announcements. 0 = use
+    /// <see cref="SatisfactoryFeedChannelId"/>.
+    /// </summary>
+    public ulong SatisfactoryUnlockChannelId { get; set; } = 0;
+
+    /// <summary>
+    /// Seconds between M.A.M. research polls. Clamped 60–3600, default 300.
+    /// getResearchTrees is ~72 KB on the clan's server — cheap enough for a
+    /// five-minute cadence, though it does run on the game thread.
+    /// </summary>
+    public int SatisfactoryResearchPollSeconds { get; set; } = 300;
+
+    /// <summary>
+    /// Seconds between milestone (schematic) polls. Clamped 300–21600, default
+    /// 1800.
+    ///
+    /// Deliberately much slower than the research poll: getSchematics is
+    /// <b>1.1 MB</b> across 575 entries on the clan's server because every
+    /// schematic embeds its full recipe list, and FRM serves it from the GAME
+    /// THREAD. A milestone announced half an hour late is still good news; a
+    /// stuttering server is not.
+    /// </summary>
+    public int SatisfactoryMilestonePollSeconds { get; set; } = 1800;
+
     // ─── SQLite Backup Settings ──────────────────────────────────────
     /// <summary>
     /// Master switch for SqliteBackupService. When false, the service exits

@@ -114,6 +114,42 @@ public sealed record FrmProdStat(
     double MaxConsumed,
     string Type);
 
+/// <summary>
+/// A schematic — a milestone, alternate recipe, tutorial step or event unlock.
+///
+/// <para><b>Recipes and Cost are deliberately not modelled.</b> Each schematic
+/// embeds its full recipe list with every ingredient and product, which is what
+/// makes getSchematics 1.1 MB for 575 entries on the clan's server. Leaving them
+/// out means the deserializer skips those tokens instead of materializing tens
+/// of thousands of objects we'd immediately discard.</para>
+///
+/// <para><b><see cref="Name"/> can be empty.</b> Confirmed on the live server:
+/// <c>Schematic_XMassTree_C</c> reports <c>"Name": ""</c>. Anything displaying
+/// this must fall back to the id.</para>
+/// </summary>
+public sealed record FrmSchematic(
+    string Id,
+    string Name,
+    string ClassName,
+    int TechTier,
+    string Type,
+    bool Purchased);
+
+/// <summary>One M.A.M. research category ("Alien Megafauna", "Quartz", …).</summary>
+public sealed record FrmResearchTree(string Name, IReadOnlyList<FrmResearchNode> Nodes);
+
+/// <summary>
+/// One M.A.M. research node. <see cref="State"/> is the completion signal —
+/// observed values on the live server are "Purchased", "Available" and "Locked".
+/// </summary>
+public sealed record FrmResearchNode(
+    string Id,
+    string Name,
+    string ClassName,
+    string Category,
+    string State,
+    int TechTier);
+
 /// <summary>AWESOME Sink totals. GraphPoints is a rolling 10-sample history.</summary>
 public sealed record FrmResourceSink(
     string Name,
@@ -255,6 +291,27 @@ public sealed class FrmApiService
     /// </summary>
     public Task<IReadOnlyList<FrmProdStat>?> GetProdStatsAsync(CancellationToken ct = default) =>
         GetListAsync<FrmProdStat>("getProdStats", ct);
+
+    /// <summary>
+    /// Every schematic in the game with its purchased state.
+    ///
+    /// <para><b>Expensive.</b> 1.1 MB / 575 entries on the clan's server, and
+    /// FRM runs it on the GAME THREAD. Poll this in tens of minutes, never in
+    /// seconds. <see cref="FrmSchematic"/> omits the recipe payload so parsing
+    /// is cheap, but the transfer and the server-side serialization are not.</para>
+    ///
+    /// Null = unreachable.
+    /// </summary>
+    public Task<IReadOnlyList<FrmSchematic>?> GetSchematicsAsync(CancellationToken ct = default) =>
+        GetListAsync<FrmSchematic>("getSchematics", ct);
+
+    /// <summary>
+    /// M.A.M. research trees and their nodes. ~72 KB / 97 nodes on the clan's
+    /// server — far cheaper than getSchematics, though still game-thread.
+    /// Null = unreachable.
+    /// </summary>
+    public Task<IReadOnlyList<FrmResearchTree>?> GetResearchTreesAsync(CancellationToken ct = default) =>
+        GetListAsync<FrmResearchTree>("getResearchTrees", ct);
 
     /// <summary>AWESOME Sink coupon/points state. Null = unreachable.</summary>
     public Task<IReadOnlyList<FrmResourceSink>?> GetResourceSinkAsync(CancellationToken ct = default) =>
