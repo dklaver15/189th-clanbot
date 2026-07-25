@@ -55,6 +55,14 @@ public sealed class SatisfactoryPresenceService : BackgroundService
     /// <summary>Consecutive unreachable polls before a real outage is declared.</summary>
     private const int OfflinePollsBeforeClose = 5;
 
+    /// <summary>
+    /// How stale LastSeenUtc may be before a leave is credited at
+    /// LastSeenUtc instead of now. Three polls: long enough that an ordinary
+    /// tick is never misread as an outage, short enough that a real gap can't
+    /// quietly become playtime.
+    /// </summary>
+    private TimeSpan StaleSessionGrace => PollInterval * 3;
+
     private enum ServerAvailability { Unknown, Up, Down }
 
     private readonly DiscordSocketClient _client;
@@ -319,9 +327,21 @@ public sealed class SatisfactoryPresenceService : BackgroundService
         // member rather than just the character. Mentions render without pinging
         // because every send uses AllowedMentions.None.
         var affected = joined.Select(kv => kv.Key).Concat(left.Select(kv => kv.Key)).Distinct().ToList();
-        var links = await db.SatisfactoryLinks
-            .Where(l => affected.Contains(l.SatisfactoryPlayerName))
-            .ToDictionaryAsync(l => l.SatisfactoryPlayerName, l => l.DiscordUserId, StringComparer.Ordinal, ct);
+        // Grouped rather than ToDictionaryAsync: SatisfactoryLink is unique on
+        // (GuildId, PlayerName), not on PlayerName alone, so if the bot is ever
+        // in two guilds and one in-game name is linked in both, ToDictionary
+        // throws "an item with the same key has already been added" — out of the
+        // tick, on every poll, for as long as both links exist.
+        var links = (await db.SatisfactoryLinks
+                .Where(l => affected.Contains(l.SatisfactoryPlayerName))
+                .Select(l => new { l.SatisfactoryPlayerName, l.DiscordUserId })
+                .ToListAsync(ct))
+            .GroupBy(l => l.SatisfactoryPlayerName, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.First().DiscordUserId, StringComparer.Ordinal);
+
+        // Feed lines are collected, NOT posted, while the transaction is open —
+        // see the ordering note below.
+        var feed = new List<string>();
 
         // ── Leaves ──
         foreach (var (name, _) in left)
@@ -334,13 +354,36 @@ public sealed class SatisfactoryPresenceService : BackgroundService
             TimeSpan? played = null;
             if (session is not null)
             {
-                session.EndedUtc = now;
-                session.LastSeenUtc = now;
+                // Close at the last time we actually OBSERVED them, not now.
+                //
+                // LastSeenUtc is normally one poll old, and the two are then
+                // interchangeable. But it can be hours stale in two reachable
+                // ways, and in both of them "now" invents playtime nobody had:
+                //
+                //   • The bot restarted while they were online and they logged
+                //     off during the outage. AdoptOpenSessionsAsync re-adopts
+                //     the row with its old LastSeenUtc, and the first poll sees
+                //     them missing.
+                //   • FRM went down while the game API stayed up — its web
+                //     server failing to bind its port is a recurring condition
+                //     on this host. PollPlayersAsync returns early so
+                //     LastSeenUtc stops advancing, while availability never goes
+                //     Down, so CloseAllOpenSessionsAsync never runs.
+                //
+                // Left unclamped, a 3-day outage becomes a 3-day session — and
+                // because the daily digest clips sessions to each day's window,
+                // that one row would report 24h of play on every intervening
+                // day, including days nobody logged on.
+                var observedEnd = now - session.LastSeenUtc > StaleSessionGrace
+                    ? session.LastSeenUtc
+                    : now;
+
+                session.EndedUtc = observedEnd;
+                session.LastSeenUtc = observedEnd;
                 played = session.Duration;
             }
 
-            _online.Remove(name);
-            await PostFeedAsync(LeaveMessage(name, links, played, seen.Count), ct);
+            feed.Add(LeaveMessage(name, links, played, seen.Count));
         }
 
         // ── Joins ──
@@ -355,11 +398,32 @@ public sealed class SatisfactoryPresenceService : BackgroundService
                 EndedUtc = null,
             });
 
-            _online[name] = player;
-            await PostFeedAsync(JoinMessage(name, links, seen.Count), ct);
+            feed.Add(JoinMessage(name, links, seen.Count));
         }
 
+        // ── Commit, THEN advance in-memory state, THEN talk to Discord ──
+        //
+        // The previous order mutated _online and awaited a Discord REST call in
+        // the middle of an open transaction, so any failure after the first
+        // mutation left the two permanently disagreeing:
+        //
+        //   • a leave that updated _online but not the row left the session open
+        //     forever — the player is gone from _online so they never appear in
+        //     `left` again, and gone from `seen` so TouchOpenSessionsAsync never
+        //     bumps them. They read as online in /satisfactory-leaderboard
+        //     indefinitely, and the next restart re-adopts the zombie row.
+        //   • a join that updated _online but not the row dropped the whole
+        //     stint, and couldn't self-heal for the same reason.
+        //
+        // Saving first means a throw leaves _online untouched, so the very next
+        // poll recomputes the identical diff and retries it.
         await db.SaveChangesAsync(ct);
+
+        foreach (var (name, _) in left) _online.Remove(name);
+        foreach (var (name, player) in joined) _online[name] = player;
+
+        foreach (var message in feed)
+            await PostFeedAsync(message, ct);
 
         // Refresh the survivors' rows in the same pass.
         if (seen.Count > 0) await TouchOpenSessionsAsync(seen, ct);
@@ -542,16 +606,38 @@ public sealed class SatisfactoryPresenceService : BackgroundService
         public Embed? Embed { get; set; }
     }
 
+    /// <summary>
+    /// Resolves the feed channel, returning null on any failure.
+    ///
+    /// <para>The REST fallback is a network call and CAN throw — a 403 after a
+    /// permission change, a 5xx, an exhausted rate-limit retry. It used to throw
+    /// straight through PollPlayersAsync, which is the one caller that holds
+    /// mutable state mid-update. Swallowing here keeps a Discord hiccup from
+    /// costing a session row; SendAsync already swallows on the same principle.</para>
+    /// </summary>
     private async Task<IMessageChannel?> ResolveFeedChannelAsync(CancellationToken ct)
     {
-        var channel = _client.GetChannel(_config.SatisfactoryFeedChannelId) as IMessageChannel
-                      ?? await _client.Rest.GetChannelAsync(_config.SatisfactoryFeedChannelId, new RequestOptions { CancelToken = ct }) as IMessageChannel;
+        try
+        {
+            var channel = _client.GetChannel(_config.SatisfactoryFeedChannelId) as IMessageChannel
+                          ?? await _client.Rest.GetChannelAsync(_config.SatisfactoryFeedChannelId, new RequestOptions { CancelToken = ct }) as IMessageChannel;
 
-        if (channel is null)
-            _logger.LogWarning("SatisfactoryPresenceService: could not resolve feed channel {ChannelId}",
+            if (channel is null)
+                _logger.LogWarning("SatisfactoryPresenceService: could not resolve feed channel {ChannelId}",
+                    _config.SatisfactoryFeedChannelId);
+
+            return channel;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "SatisfactoryPresenceService: failed to resolve feed channel {ChannelId}",
                 _config.SatisfactoryFeedChannelId);
-
-        return channel;
+            return null;
+        }
     }
 
     /// <summary>"2h 14m" / "47m". Shared with SatisfactoryCommandHandler.</summary>

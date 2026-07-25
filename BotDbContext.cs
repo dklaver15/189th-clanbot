@@ -60,6 +60,7 @@ public class BotDbContext : DbContext
     public DbSet<SatisfactorySession>  SatisfactorySessions  => Set<SatisfactorySession>();
     public DbSet<SatisfactoryLink>     SatisfactoryLinks     => Set<SatisfactoryLink>();
     public DbSet<SatisfactoryUnlock>   SatisfactoryUnlocks   => Set<SatisfactoryUnlock>();
+    public DbSet<SatisfactoryDailySnapshot> SatisfactoryDailySnapshots => Set<SatisfactoryDailySnapshot>();
     // ── XP ladder ──
     public DbSet<XpSeason>             XpSeasons             => Set<XpSeason>();
     public DbSet<XpAward>              XpAwards              => Set<XpAward>();
@@ -647,6 +648,19 @@ public class BotDbContext : DbContext
         {
             e.HasIndex(u => new { u.Seed, u.Kind });
             e.HasIndex(u => new { u.Seed, u.Kind, u.UnlockId }).IsUnique();
+        });
+
+        // ── Satisfactory: daily factory snapshots ─────────────────────
+        // Unique on (Seed, LocalDate) so a digest built twice for the same
+        // reporting day updates its row instead of adding a second one — which
+        // would leave the next day's delta picking arbitrarily between them.
+        //
+        // The TakenUtc index serves the only other read: "most recent snapshot
+        // for this save before time T", which is the delta lookup.
+        modelBuilder.Entity<SatisfactoryDailySnapshot>(e =>
+        {
+            e.HasIndex(s => new { s.Seed, s.LocalDate }).IsUnique();
+            e.HasIndex(s => new { s.Seed, s.TakenUtc });
         });
 
         // ── Palworld health samples ───────────────────────────────────

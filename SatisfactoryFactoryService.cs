@@ -1,6 +1,9 @@
+using ClanGuardBot.Data;
 using ClanGuardBot.Models;
 using Discord;
 using Discord.WebSocket;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -46,6 +49,7 @@ public sealed class SatisfactoryFactoryService : BackgroundService
     private readonly DiscordSocketClient _client;
     private readonly FrmApiService _frm;
     private readonly SatisfactoryDigestBuilder _digest;
+    private readonly IServiceProvider _services;
     private readonly BotConfig _config;
     private readonly ILogger<SatisfactoryFactoryService> _logger;
 
@@ -58,22 +62,59 @@ public sealed class SatisfactoryFactoryService : BackgroundService
     /// <summary>Last time we posted about a circuit, for flap throttling.</summary>
     private readonly Dictionary<int, DateTime> _lastCircuitAlertUtc = new();
 
+    /// <summary>
+    /// How late after the scheduled hour the digest will still go out. A bot
+    /// that was down at 9am should post when it comes back at 10; a bot that was
+    /// down all day should NOT post yesterday's report at 11pm, by which point
+    /// it's stale and the "yesterday" framing is confusing.
+    /// </summary>
+    private static readonly TimeSpan DigestCatchUp = TimeSpan.FromHours(3);
+
     /// <summary>False until the first successful alert read — see "quiet on boot".</summary>
     private bool _alertStateSeeded;
 
-    /// <summary>UTC date of the last digest posted, so it fires once per day.</summary>
-    private DateTime? _lastDigestDateUtc;
+    /// <summary>
+    /// Local date of the last digest SLOT we've handled, so it fires once per
+    /// slot. Local rather than UTC: with a 9am Central schedule the UTC date
+    /// rolls over mid-afternoon local time, so a UTC-keyed guard would let a
+    /// second digest through on the same local day.
+    ///
+    /// <para>In-memory, and therefore not sufficient on its own — a redeploy
+    /// resets it. <see cref="AlreadyPostedAsync"/> is the durable guard; this
+    /// field just saves a database round-trip on the polls in between.</para>
+    /// </summary>
+    private DateOnly? _lastDigestSlot;
+
+    /// <summary>Resolved once and cached — see <see cref="DigestZone"/>.</summary>
+    private TimeZoneInfo? _digestZone;
+
+    /// <summary>Slot the attempt counter belongs to; resets when the slot changes.</summary>
+    private DateOnly? _digestAttemptSlot;
+
+    /// <summary>
+    /// Sends attempted for the current slot. Bounded because retrying is only
+    /// worth it for a transient failure, and we can't tell one from a permanent
+    /// one — a bot that has lost Send Messages in the digest channel would
+    /// otherwise rebuild the whole report every poll for three hours, every day,
+    /// forever. Each rebuild costs five FRM reads including getProdStats, which
+    /// FrmApiService explicitly warns against polling.
+    /// </summary>
+    private int _digestPostAttempts;
+
+    private const int MaxDigestPostAttempts = 3;
 
     public SatisfactoryFactoryService(
         DiscordSocketClient client,
         FrmApiService frm,
         SatisfactoryDigestBuilder digest,
+        IServiceProvider services,
         IOptions<BotConfig> config,
         ILogger<SatisfactoryFactoryService> logger)
     {
         _client = client;
         _frm = frm;
         _digest = digest;
+        _services = services;
         _config = config.Value;
         _logger = logger;
     }
@@ -105,16 +146,16 @@ public sealed class SatisfactoryFactoryService : BackgroundService
             return;
         }
 
-        // If we've booted AFTER today's digest slot, mark today as done so a
-        // redeploy in the evening doesn't post a second one. Booting before the
-        // slot leaves it null, so today's digest still fires on schedule.
-        if (DateTime.UtcNow.Hour >= DigestHourUtc())
-            _lastDigestDateUtc = DateTime.UtcNow.Date;
+        // No boot-time suppression needed: the window check rejects a late boot
+        // on its own, and AlreadyPostedAsync rejects a boot inside the window
+        // when the digest has already gone out.
+        var zone = DigestZone();
+        var nowLocal = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, zone);
 
         _logger.LogInformation(
-            "SatisfactoryFactoryService started; polling every {Seconds}s, alerts={Alerts}, digest={Digest} (hour {Hour} UTC)",
+            "SatisfactoryFactoryService started; polling every {Seconds}s, alerts={Alerts}, digest={Digest} at {Hour}:00 {Zone} (currently {Local:yyyy-MM-dd HH:mm})",
             (int)PollInterval.TotalSeconds, _config.SatisfactoryAlertsEnabled,
-            _config.SatisfactoryDigestEnabled, DigestHourUtc());
+            _config.SatisfactoryDigestEnabled, DigestHourLocal(), zone.Id, nowLocal);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -137,7 +178,41 @@ public sealed class SatisfactoryFactoryService : BackgroundService
         }
     }
 
-    private int DigestHourUtc() => Math.Clamp(_config.SatisfactoryDigestHourUtc, 0, 23);
+    private int DigestHourLocal() => Math.Clamp(_config.SatisfactoryDigestHour, 0, 23);
+
+    /// <summary>
+    /// The timezone the digest hour is expressed in.
+    ///
+    /// <para>Stored as an IANA id rather than a fixed UTC hour so the post
+    /// doesn't slide an hour at each DST changeover — 9am Central is 14:00 UTC
+    /// in July and 15:00 UTC in January, and a hardcoded UTC hour is wrong for
+    /// roughly half the year whichever value you pick.</para>
+    ///
+    /// <para>Falls back to UTC on an unrecognised id rather than throwing: a
+    /// typo in config should cost a correctly-scheduled digest, not the alert
+    /// loop that shares this service. Resolved once — TimeZoneInfo lookups hit
+    /// the OS database, and this runs every poll.</para>
+    /// </summary>
+    private TimeZoneInfo DigestZone()
+    {
+        if (_digestZone is not null) return _digestZone;
+
+        var id = _config.SatisfactoryDigestTimeZone;
+
+        if (!string.IsNullOrWhiteSpace(id) && TimeZoneInfo.TryFindSystemTimeZoneById(id, out var tz) && tz is not null)
+        {
+            _digestZone = tz;
+        }
+        else
+        {
+            _logger.LogWarning(
+                "SatisfactoryDigestTimeZone \"{Id}\" not recognised — falling back to UTC. Use an IANA id like America/Chicago.",
+                id);
+            _digestZone = TimeZoneInfo.Utc;
+        }
+
+        return _digestZone;
+    }
 
     // ─── Alerts ──────────────────────────────────────────────────────────────
 
@@ -285,67 +360,114 @@ public sealed class SatisfactoryFactoryService : BackgroundService
 
     // ─── Daily digest ────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Fires the digest once per slot, at or shortly after the configured hour.
+    ///
+    /// <para><b>The window is anchored to the slot INSTANT, not to
+    /// <c>TimeOfDay</c>.</b> A naive <c>TimeOfDay &gt;= hour &amp;&amp;
+    /// TimeOfDay &lt; hour + 3</c> silently truncates when the window crosses
+    /// midnight — at hour 22 it's really 2 hours, at hour 23 it's 1, because
+    /// TimeOfDay can never reach 25:00. Subtracting two instants has no such
+    /// boundary. The clan's hour is 9 so this isn't live today, but a
+    /// scheduling bug that only appears for certain config values is exactly
+    /// the kind that gets found at 11pm.</para>
+    ///
+    /// <para>The window exists at all because an exact hour match loses the day
+    /// whenever the poll straddles the hour boundary or the bot is redeployed at
+    /// 8:58am — which, given how often this bot ships, is not a rare event.</para>
+    /// </summary>
     private async Task MaybePostDigestAsync(CancellationToken ct)
     {
-        var now = DateTime.UtcNow;
-        if (now.Hour != DigestHourUtc()) return;
-        if (_lastDigestDateUtc == now.Date) return;
+        var zone = DigestZone();
+        var nowLocal = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, zone);
 
-        _lastDigestDateUtc = now.Date;
-        await PostDigestAsync(ct);
-    }
+        // The most recent slot instant that has actually passed. If today's
+        // hasn't arrived yet, the live slot is yesterday's — which is what lets
+        // a late-evening hour catch up past midnight.
+        var slot = DateOnly.FromDateTime(nowLocal).ToDateTime(new TimeOnly(DigestHourLocal(), 0));
+        if (nowLocal < slot) slot = slot.AddDays(-1);
 
-    private async Task PostDigestAsync(CancellationToken ct)
-    {
-        var embed = await _digest.BuildAsync(ct);
-        if (embed is null)
+        if (nowLocal - slot >= DigestCatchUp) return;   // window has closed
+
+        var slotDate = DateOnly.FromDateTime(slot);
+        if (_lastDigestSlot == slotDate) return;        // already handled this process
+
+        if (_digestAttemptSlot != slotDate)
         {
-            _logger.LogInformation("Satisfactory digest skipped — server unreachable");
+            _digestAttemptSlot = slotDate;
+            _digestPostAttempts = 0;
+        }
+
+        if (_digestPostAttempts >= MaxDigestPostAttempts)
+        {
+            // Already burned the budget on this slot; wait for tomorrow.
             return;
         }
 
-        await PostDigestEmbedAsync(embed, ct);
+        var day = PreviousLocalDay(slotDate, zone);
+
+        // Durable guard. _lastDigestSlot is in-memory, so on its own it would
+        // let every redeploy inside the window post another copy — and this bot
+        // is redeployed often enough that "inside a 3-hour window" is a routine
+        // event, not a corner case. A snapshot row for the reporting day is
+        // proof the digest already went out.
+        if (await AlreadyPostedAsync(day, ct))
+        {
+            _lastDigestSlot = slotDate;
+            return;
+        }
+
+        _logger.LogInformation("Posting Satisfactory daily digest for {Date}", day.Key);
+
+        // The guard is set only when the post is believed delivered, so a server
+        // that's unreachable at 9:00 is retried on the next poll instead of
+        // costing the day. Uncertain counts as delivered — see PostOutcome.
+        var outcome = await PostDigestAsync(day, ct);
+
+        if (outcome != PostOutcome.Failed)
+            _lastDigestSlot = slotDate;
     }
-
-    // ─── Posting ─────────────────────────────────────────────────────────────
-
-    /// <summary>Alerts go to the presence feed channel — same audience, same urgency band.</summary>
-    private Task PostAlertAsync(Embed embed, CancellationToken ct, string what) =>
-        PostToAsync(_config.SatisfactoryFeedChannelId, embed, ct, what);
 
     /// <summary>
-    /// The digest goes to its own channel when one is set, else the feed channel.
-    /// A daily report and a join/leave feed often want different homes.
+    /// What we believe happened to a message we tried to send.
+    ///
+    /// <para><see cref="Uncertain"/> is the interesting one. A send that times
+    /// out may well have arrived — Discord accepted it and we lost the response,
+    /// or the rate limiter held us past the deadline. Retrying that would post
+    /// the digest twice, which people notice; treating it as delivered risks
+    /// losing one day's report, which they mostly don't. So an ambiguous result
+    /// stops the retry loop but is logged loudly enough to explain a missing
+    /// post.</para>
     /// </summary>
-    private Task PostDigestEmbedAsync(Embed embed, CancellationToken ct) =>
-        PostToAsync(
-            _config.SatisfactoryDigestChannelId != 0
-                ? _config.SatisfactoryDigestChannelId
-                : _config.SatisfactoryFeedChannelId,
-            embed, ct, "digest");
-
-    private async Task PostToAsync(ulong channelId, Embed embed, CancellationToken ct, string what)
+    private enum PostOutcome
     {
-        if (channelId == 0) return;
+        Sent,
+        Failed,
+        Uncertain,
+    }
 
-        var channel = _client.GetChannel(channelId) as IMessageChannel
-                      ?? await _client.Rest.GetChannelAsync(channelId, new RequestOptions { CancelToken = ct }) as IMessageChannel;
-
-        if (channel is null)
-        {
-            _logger.LogWarning("SatisfactoryFactoryService: could not resolve channel {ChannelId} for {What}", channelId, what);
-            return;
-        }
-
+    /// <summary>
+    /// Has a digest already been posted for this reporting day?
+    ///
+    /// <para>Keyed on the reporting date ALONE, deliberately not on the world
+    /// seed. If the save were wiped between two runs the seeds would differ, and
+    /// a seed-scoped check would happily post a second digest for the same
+    /// morning. "Did we already report on Friday" is a question about the
+    /// calendar, not about the world.</para>
+    ///
+    /// <para>Fails OPEN — an exception here returns false, so a database problem
+    /// costs a duplicate post at worst rather than silently killing the feature.
+    /// The in-memory guard still holds within the process.</para>
+    /// </summary>
+    private async Task<bool> AlreadyPostedAsync(DigestDay day, CancellationToken ct)
+    {
         try
         {
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(TimeSpan.FromSeconds(30));
+            using var scope = _services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
-            await channel.SendMessageAsync(
-                embed: embed,
-                allowedMentions: AllowedMentions.None,
-                options: new RequestOptions { CancelToken = cts.Token });
+            var key = day.Key;
+            return await db.SatisfactoryDailySnapshots.AnyAsync(s => s.LocalDate == key, ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -353,7 +475,163 @@ public sealed class SatisfactoryFactoryService : BackgroundService
         }
         catch (Exception ex)
         {
+            _logger.LogWarning(ex, "Could not check whether the {Date} digest was already posted; assuming not", day.Key);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The UTC interval covering the local day before <paramref name="slotDate"/>.
+    ///
+    /// <para>Both bounds go through <see cref="TimeZoneInfo"/> rather than being
+    /// derived by subtracting 24 hours, because a DST changeover day is 23 or 25
+    /// hours long. Getting this wrong would quietly drop or double-count an hour
+    /// of playtime twice a year.</para>
+    ///
+    /// <para>Local midnight is never inside a US DST gap, but
+    /// <see cref="TimeZoneInfo.ConvertTimeToUtc(DateTime, TimeZoneInfo)"/>
+    /// throws on an invalid local time, and this runs for whatever zone is in
+    /// config — so ambiguous and invalid instants are resolved rather than
+    /// allowed to take down the poll loop.</para>
+    /// </summary>
+    private static DigestDay PreviousLocalDay(DateOnly slotDate, TimeZoneInfo zone)
+    {
+        var yesterday = slotDate.AddDays(-1);
+
+        return new DigestDay(
+            yesterday,
+            LocalMidnightToUtc(yesterday, zone),
+            LocalMidnightToUtc(slotDate, zone));
+    }
+
+    private static DateTime LocalMidnightToUtc(DateOnly date, TimeZoneInfo zone)
+    {
+        var local = DateTime.SpecifyKind(date.ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified);
+
+        // Invalid = the clock skipped this instant (spring forward). Step
+        // forward until it exists; an hour is always enough for real zones.
+        while (zone.IsInvalidTime(local))
+            local = local.AddMinutes(15);
+
+        // Ambiguous = the clock repeated it (fall back). ConvertTimeToUtc picks
+        // standard time, which is the later of the two — deterministic, and the
+        // same choice on both ends of the window, so the day stays contiguous.
+        return TimeZoneInfo.ConvertTimeToUtc(local, zone);
+    }
+
+    /// <summary>
+    /// Builds and posts the digest. Returns true only if the message actually
+    /// reached Discord.
+    ///
+    /// <para>The snapshot row is committed AFTER the post, never before. It
+    /// doubles as the "already reported on this day" marker, so writing it
+    /// during the build would record intent rather than delivery: a 403 or a
+    /// timeout on the send would leave the marker down, every later attempt
+    /// would see it and skip, and the day would be silently lost.</para>
+    /// </summary>
+    private async Task<PostOutcome> PostDigestAsync(DigestDay day, CancellationToken ct)
+    {
+        var result = await _digest.BuildDailyAsync(day, ct);
+        if (result is null)
+        {
+            // Doesn't count against the send budget — the build never reached
+            // Discord, and an unreachable FRM costs one small request to retry.
+            _logger.LogInformation("Satisfactory digest skipped — server unreachable");
+            return PostOutcome.Failed;
+        }
+
+        _digestPostAttempts++;
+
+        var outcome = await PostDigestEmbedAsync(result.Embed, ct);
+
+        if (outcome == PostOutcome.Failed)
+        {
+            _logger.LogWarning(
+                "Satisfactory digest for {Date} was built but not posted (attempt {Attempt} of {Max})",
+                day.Key, _digestPostAttempts, MaxDigestPostAttempts);
+            return outcome;
+        }
+
+        if (outcome == PostOutcome.Uncertain)
+            _logger.LogWarning(
+                "Satisfactory digest for {Date} may or may not have posted; not retrying to avoid a duplicate",
+                day.Key);
+
+        if (result.Snapshot is not null)
+            await _digest.CommitSnapshotAsync(result.Snapshot, ct);
+
+        return outcome;
+    }
+
+    // ─── Posting ─────────────────────────────────────────────────────────────
+
+    /// <summary>Alerts go to the presence feed channel — same audience, same urgency band.</summary>
+    private Task<PostOutcome> PostAlertAsync(Embed embed, CancellationToken ct, string what) =>
+        PostToAsync(_config.SatisfactoryFeedChannelId, embed, ct, what);
+
+    /// <summary>
+    /// The digest goes to its own channel when one is set, else the feed channel.
+    /// A daily report and a join/leave feed often want different homes.
+    /// </summary>
+    private Task<PostOutcome> PostDigestEmbedAsync(Embed embed, CancellationToken ct) =>
+        PostToAsync(
+            _config.SatisfactoryDigestChannelId != 0
+                ? _config.SatisfactoryDigestChannelId
+                : _config.SatisfactoryFeedChannelId,
+            embed, ct, "digest");
+
+    /// <summary>
+    /// Posts an embed. The digest path uses the result to decide whether the day
+    /// has really been reported, so a swallowed exception must not read as
+    /// success — and an ambiguous timeout must not read as failure.
+    /// </summary>
+    private async Task<PostOutcome> PostToAsync(ulong channelId, Embed embed, CancellationToken ct, string what)
+    {
+        if (channelId == 0)
+        {
+            // Not an error for alerts (the feed is optional), but for the digest
+            // it means misconfiguration, and silence here made that invisible.
+            _logger.LogDebug("SatisfactoryFactoryService: no channel configured for {What}", what);
+            return PostOutcome.Failed;
+        }
+
+        try
+        {
+            var channel = _client.GetChannel(channelId) as IMessageChannel
+                          ?? await _client.Rest.GetChannelAsync(channelId, new RequestOptions { CancelToken = ct }) as IMessageChannel;
+
+            if (channel is null)
+            {
+                _logger.LogWarning("SatisfactoryFactoryService: could not resolve channel {ChannelId} for {What}", channelId, what);
+                return PostOutcome.Failed;
+            }
+
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(30));
+
+            await channel.SendMessageAsync(
+                embed: embed,
+                allowedMentions: AllowedMentions.None,
+                options: new RequestOptions { CancelToken = cts.Token });
+
+            return PostOutcome.Sent;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException ex)
+        {
+            // Our own 30s deadline, not a shutdown. The send may already have
+            // landed — Discord.NET's rate limiter can hold a request past the
+            // deadline after the message was queued.
+            _logger.LogWarning(ex, "SatisfactoryFactoryService: {What} timed out; delivery unknown", what);
+            return PostOutcome.Uncertain;
+        }
+        catch (Exception ex)
+        {
             _logger.LogWarning(ex, "SatisfactoryFactoryService: failed to post {What}", what);
+            return PostOutcome.Failed;
         }
     }
 

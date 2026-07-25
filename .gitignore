@@ -2,7 +2,8 @@
 .env
 bin/
 obj/
-logs/.DS_Store
+# macOS Finder metadata, anywhere in the tree
+.DS_Store
 .idea/
 .claude/
 obj copy/

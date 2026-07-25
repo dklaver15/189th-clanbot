@@ -1826,10 +1826,28 @@ public class BotConfig
     public bool SatisfactoryDigestEnabled { get; set; } = false;
 
     /// <summary>
-    /// Hour (UTC, 0–23) at which the daily digest posts. Fires once per UTC day;
-    /// a restart after the slot has passed won't re-post it.
+    /// Hour (0–23) at which the daily digest posts, in
+    /// <see cref="SatisfactoryDigestTimeZone"/>. Fires once per LOCAL day.
+    ///
+    /// <para>Replaces the old SatisfactoryDigestHourUtc. A fixed UTC hour drifts
+    /// an hour at every DST changeover, so a "9am" digest was only ever right
+    /// for half the year.</para>
+    ///
+    /// <para>The digest still posts if the bot misses the exact hour — it will
+    /// go out any time within three hours of the slot, so a redeploy at 8:58am
+    /// doesn't cost the day's report.</para>
     /// </summary>
-    public int SatisfactoryDigestHourUtc { get; set; } = 17;
+    public int SatisfactoryDigestHour { get; set; } = 9;
+
+    /// <summary>
+    /// IANA timezone the digest hour is expressed in, e.g. "America/Chicago".
+    /// Defaults to Central, matching <see cref="EventDefaultTimeZone"/> so the
+    /// clan's events and its factory report agree about what "9am" means.
+    ///
+    /// An unrecognised id falls back to UTC with a warning rather than throwing —
+    /// a config typo shouldn't take down the power alerts that share the service.
+    /// </summary>
+    public string SatisfactoryDigestTimeZone { get; set; } = "America/Chicago";
 
     /// <summary>
     /// Channel for the daily digest. 0 = use

@@ -326,10 +326,17 @@ public class SatisfactoryCommandHandler
     /// <summary>
     /// getModList reports the base game and the mod loader alongside real mods.
     /// They're useful to display but must not appear in the "install these" list.
+    ///
+    /// <para>Takes a nullable string on purpose. FrmMod is deserialized by
+    /// System.Text.Json, which does not enforce non-nullable reference
+    /// annotations, so a getModList entry missing its SMRName key yields null
+    /// here and the instance Equals would throw — taking out
+    /// /satisfactory-mods entirely. string.Equals is the static, null-safe
+    /// form.</para>
     /// </summary>
-    private static bool IsPlatformEntry(string smrName) =>
-        smrName.Equals("FactoryGame", StringComparison.OrdinalIgnoreCase) ||
-        smrName.Equals("SML", StringComparison.OrdinalIgnoreCase);
+    private static bool IsPlatformEntry(string? smrName) =>
+        string.Equals(smrName, "FactoryGame", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(smrName, "SML", StringComparison.OrdinalIgnoreCase);
 
     // ─── /satisfactory-report ────────────────────────────────────────────────
 
