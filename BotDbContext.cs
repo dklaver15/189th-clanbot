@@ -61,6 +61,7 @@ public class BotDbContext : DbContext
     public DbSet<SatisfactoryLink>     SatisfactoryLinks     => Set<SatisfactoryLink>();
     public DbSet<SatisfactoryUnlock>   SatisfactoryUnlocks   => Set<SatisfactoryUnlock>();
     public DbSet<SatisfactoryDailySnapshot> SatisfactoryDailySnapshots => Set<SatisfactoryDailySnapshot>();
+    public DbSet<SatisfactoryMetricSample>  SatisfactoryMetricSamples  => Set<SatisfactoryMetricSample>();
     // ── XP ladder ──
     public DbSet<XpSeason>             XpSeasons             => Set<XpSeason>();
     public DbSet<XpAward>              XpAwards              => Set<XpAward>();
@@ -661,6 +662,15 @@ public class BotDbContext : DbContext
         {
             e.HasIndex(s => new { s.Seed, s.LocalDate }).IsUnique();
             e.HasIndex(s => new { s.Seed, s.TakenUtc });
+        });
+
+        // ── Satisfactory: power samples ───────────────────────────────
+        // Every read is a time-window scan ("the last N hours") and the
+        // retention prune deletes by age, so a single index on SampledUtc
+        // covers both — same shape as PalworldMetricSample below.
+        modelBuilder.Entity<SatisfactoryMetricSample>(e =>
+        {
+            e.HasIndex(s => s.SampledUtc);
         });
 
         // ── Palworld health samples ───────────────────────────────────

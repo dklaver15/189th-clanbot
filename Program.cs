@@ -618,6 +618,14 @@ try
     // avoids resolving the hosted service to call into it, which would
     // construct a second instance of it.
     builder.Services.AddSingleton<SatisfactoryDigestBuilder>();
+
+    // SatisfactoryChartRenderer draws the power and playtime PNGs. Singleton
+    // and stateless, like the other renderers — it creates its own DI scopes
+    // for database reads. Injected into BOTH the factory service (which
+    // attaches a chart to the daily digest) and the command handler
+    // (/satisfactory-graph), so it must not be scoped.
+    builder.Services.AddSingleton<SatisfactoryChartRenderer>();
+
     builder.Services.AddHostedService<SatisfactoryFactoryService>();
 
     // SatisfactoryUnlockService announces milestones and M.A.M. research. Its

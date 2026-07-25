@@ -49,6 +49,7 @@ public sealed class SatisfactoryFactoryService : BackgroundService
     private readonly DiscordSocketClient _client;
     private readonly FrmApiService _frm;
     private readonly SatisfactoryDigestBuilder _digest;
+    private readonly SatisfactoryChartRenderer _charts;
     private readonly IServiceProvider _services;
     private readonly BotConfig _config;
     private readonly ILogger<SatisfactoryFactoryService> _logger;
@@ -103,10 +104,33 @@ public sealed class SatisfactoryFactoryService : BackgroundService
 
     private const int MaxDigestPostAttempts = 3;
 
+    /// <summary>
+    /// World seed, cached. Every metric sample wants it so a save wipe doesn't
+    /// splice two factories into one chart line, but getSessionInfo is a
+    /// separate request and the seed changes at most once per save — so it's
+    /// refreshed hourly rather than per poll.
+    /// </summary>
+    private long _cachedSeed;
+
+    private DateTime _seedFetchedUtc = DateTime.MinValue;
+
+    private static readonly TimeSpan SeedRefresh = TimeSpan.FromHours(1);
+
+    /// <summary>Last retention prune, so it runs hourly rather than every poll.</summary>
+    private DateTime _lastPruneUtc = DateTime.MinValue;
+
+    /// <summary>Consecutive sampling failures, for bounded logging.</summary>
+    private int _sampleFailures;
+
+    private const int MaxSampleFailureWarnings = 3;
+
+    private static readonly TimeSpan PruneInterval = TimeSpan.FromHours(1);
+
     public SatisfactoryFactoryService(
         DiscordSocketClient client,
         FrmApiService frm,
         SatisfactoryDigestBuilder digest,
+        SatisfactoryChartRenderer charts,
         IServiceProvider services,
         IOptions<BotConfig> config,
         ILogger<SatisfactoryFactoryService> logger)
@@ -114,6 +138,7 @@ public sealed class SatisfactoryFactoryService : BackgroundService
         _client = client;
         _frm = frm;
         _digest = digest;
+        _charts = charts;
         _services = services;
         _config = config.Value;
         _logger = logger;
@@ -237,6 +262,11 @@ public sealed class SatisfactoryFactoryService : BackgroundService
             await EvaluateBatteryAsync(c, now, ct);
         }
 
+        // Record what this read saw, for the power chart. Deliberately here and
+        // not in its own loop: getPower has already been called, so sampling is
+        // a row insert rather than another request to the game server.
+        await RecordSampleAsync(circuits, now, ct);
+
         // Circuits can disappear (rebuilt, merged, dismantled). Drop their state
         // so a returning circuit id doesn't inherit a stale "already alerted".
         var live = circuits.Select(c => c.CircuitGroupId).ToHashSet();
@@ -335,6 +365,117 @@ public sealed class SatisfactoryFactoryService : BackgroundService
                 .WithCurrentTimestamp()
                 .Build(), ct, "battery recovery");
         }
+    }
+
+    /// <summary>
+    /// Writes one aggregate row for this poll, and occasionally prunes old ones.
+    ///
+    /// <para>Never throws into the caller. Sampling exists to draw a chart; an
+    /// exception here must not cost a fuse alert, which is the thing in this
+    /// service that someone is actually waiting on.</para>
+    /// </summary>
+    private async Task RecordSampleAsync(IReadOnlyList<FrmPowerCircuit> circuits, DateTime now, CancellationToken ct)
+    {
+        if (!_config.SatisfactoryMetricsEnabled) return;
+
+        try
+        {
+            // Resolved BEFORE the scope is opened. It can make an HTTP call, and
+            // doing that inside the scope would pin a DbContext and its SQLite
+            // connection for the length of a network round-trip.
+            var seed = await ResolveSeedAsync(ct);
+
+            using var scope = _services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+            // Only circuits that actually have batteries contribute to the mean.
+            // Averaging in every battery-less circuit as 0% would report the grid
+            // as flat whenever one Power Storage exists among ten circuits.
+            var withBatteries = circuits.Where(c => c.BatteryCapacity > 0).ToList();
+
+            db.SatisfactoryMetricSamples.Add(new SatisfactoryMetricSample
+            {
+                SampledUtc = now,
+                Seed = seed,
+                PowerConsumedMw = circuits.Sum(c => c.PowerConsumed),
+                PowerCapacityMw = circuits.Sum(c => c.PowerCapacity),
+                PowerProductionMw = circuits.Sum(c => c.PowerProduction),
+                CircuitCount = circuits.Count,
+                TrippedCount = circuits.Count(c => c.FuseTriggered),
+                BatteryPercent = withBatteries.Count > 0 ? withBatteries.Average(c => c.BatteryPercent) : null,
+            });
+
+            await db.SaveChangesAsync(ct);
+
+            _sampleFailures = 0;
+
+            await MaybePruneSamplesAsync(db, now, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Bounded logging. A persistent failure — most likely the migration
+            // not applied on this host — happens on every poll, and 720 identical
+            // warnings a day buries everything else in the log.
+            _sampleFailures++;
+
+            if (_sampleFailures <= MaxSampleFailureWarnings)
+                _logger.LogWarning(ex,
+                    "Failed to record a Satisfactory power sample ({Count} of {Max} warnings; further failures log at debug)",
+                    _sampleFailures, MaxSampleFailureWarnings);
+            else
+                _logger.LogDebug(ex, "Failed to record a Satisfactory power sample");
+        }
+    }
+
+    /// <summary>
+    /// Deletes samples past the retention window, at most once an hour.
+    ///
+    /// <para>Without this the table grows forever at ~720 rows/day. It's small
+    /// per row, but "small forever" is still a leak, and the chart queries only
+    /// ever look back 30 days.</para>
+    /// </summary>
+    private async Task MaybePruneSamplesAsync(BotDbContext db, DateTime now, CancellationToken ct)
+    {
+        if (now - _lastPruneUtc < PruneInterval) return;
+        _lastPruneUtc = now;
+
+        var days = Math.Clamp(_config.SatisfactoryMetricsRetentionDays, 1, 365);
+        var cutoff = now - TimeSpan.FromDays(days);
+
+        var removed = await db.SatisfactoryMetricSamples
+            .Where(s => s.SampledUtc < cutoff)
+            .ExecuteDeleteAsync(ct);
+
+        if (removed > 0)
+            _logger.LogInformation("Pruned {Count} Satisfactory power sample(s) older than {Days}d", removed, days);
+    }
+
+    /// <summary>
+    /// The world seed, refreshed hourly. Returns 0 when it can't be determined —
+    /// the sample is still worth keeping for its power figures, and the model
+    /// documents 0 as "unknown".
+    /// </summary>
+    private async Task<long> ResolveSeedAsync(CancellationToken ct)
+    {
+        if (DateTime.UtcNow - _seedFetchedUtc < SeedRefresh) return _cachedSeed;
+
+        // Stamp BEFORE the call, not after a successful one. Stamping only on
+        // success means a persistently failing getSessionInfo is retried every
+        // poll rather than hourly — and this path is only reached when getPower
+        // already succeeded, so the failure it hits is "FRM is up but this one
+        // endpoint is broken", which is a lasting state, not a blip. Each retry
+        // would cost a full HTTP timeout on the alert loop.
+        _seedFetchedUtc = DateTime.UtcNow;
+
+        var session = await _frm.GetSessionInfoAsync(ct);
+        if (session is null) return _cachedSeed;   // keep the last known value
+
+        _cachedSeed = session.Seed;
+        return _cachedSeed;
     }
 
     /// <summary>
@@ -542,7 +683,24 @@ public sealed class SatisfactoryFactoryService : BackgroundService
 
         _digestPostAttempts++;
 
-        var outcome = await PostDigestEmbedAsync(result.Embed, ct);
+        // Chart is best-effort and comes back null on any failure, including
+        // "not enough samples yet". A null just means the embed posts alone.
+        var chart = _config.SatisfactoryMetricsEnabled
+            ? await _charts.TryRenderPowerChartAsync(TimeSpan.FromHours(24), $"Power — {day.Label}", ct)
+            : null;
+
+        var embed = result.Embed;
+
+        if (chart is not null)
+        {
+            // Discord ties an embed image to an attachment by filename, so this
+            // string MUST match the name passed to SendFileAsync below.
+            embed = embed.ToEmbedBuilder()
+                .WithImageUrl($"attachment://{DigestChartFileName}")
+                .Build();
+        }
+
+        var outcome = await PostDigestEmbedAsync(embed, chart, ct);
 
         if (outcome == PostOutcome.Failed)
         {
@@ -573,19 +731,23 @@ public sealed class SatisfactoryFactoryService : BackgroundService
     /// The digest goes to its own channel when one is set, else the feed channel.
     /// A daily report and a join/leave feed often want different homes.
     /// </summary>
-    private Task<PostOutcome> PostDigestEmbedAsync(Embed embed, CancellationToken ct) =>
+    private const string DigestChartFileName = "power.png";
+
+    private Task<PostOutcome> PostDigestEmbedAsync(Embed embed, byte[]? chart, CancellationToken ct) =>
         PostToAsync(
             _config.SatisfactoryDigestChannelId != 0
                 ? _config.SatisfactoryDigestChannelId
                 : _config.SatisfactoryFeedChannelId,
-            embed, ct, "digest");
+            embed, ct, "digest", chart, DigestChartFileName);
 
     /// <summary>
     /// Posts an embed. The digest path uses the result to decide whether the day
     /// has really been reported, so a swallowed exception must not read as
     /// success — and an ambiguous timeout must not read as failure.
     /// </summary>
-    private async Task<PostOutcome> PostToAsync(ulong channelId, Embed embed, CancellationToken ct, string what)
+    private async Task<PostOutcome> PostToAsync(
+        ulong channelId, Embed embed, CancellationToken ct, string what,
+        byte[]? attachment = null, string? attachmentName = null)
     {
         if (channelId == 0)
         {
@@ -609,10 +771,26 @@ public sealed class SatisfactoryFactoryService : BackgroundService
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(30));
 
-            await channel.SendMessageAsync(
-                embed: embed,
-                allowedMentions: AllowedMentions.None,
-                options: new RequestOptions { CancelToken = cts.Token });
+            var options = new RequestOptions { CancelToken = cts.Token };
+
+            if (attachment is not null && attachmentName is not null)
+            {
+                using var stream = new MemoryStream(attachment);
+                using var file = new FileAttachment(stream, attachmentName);
+
+                await channel.SendFileAsync(
+                    file,
+                    embed: embed,
+                    allowedMentions: AllowedMentions.None,
+                    options: options);
+            }
+            else
+            {
+                await channel.SendMessageAsync(
+                    embed: embed,
+                    allowedMentions: AllowedMentions.None,
+                    options: options);
+            }
 
             return PostOutcome.Sent;
         }

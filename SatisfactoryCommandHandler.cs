@@ -48,6 +48,7 @@ public class SatisfactoryCommandHandler
         "satisfactory-report",
         "satisfactory-playtime",
         "satisfactory-leaderboard",
+        "satisfactory-graph",
         "satisfactory-link",
         "satisfactory-admin",
     };
@@ -60,6 +61,7 @@ public class SatisfactoryCommandHandler
     private readonly SatisfactoryApiService _api;
     private readonly FrmApiService _frm;
     private readonly SatisfactoryDigestBuilder _digest;
+    private readonly SatisfactoryChartRenderer _charts;
     private readonly IServiceProvider _services;
 
     public SatisfactoryCommandHandler(
@@ -68,6 +70,7 @@ public class SatisfactoryCommandHandler
         SatisfactoryApiService api,
         FrmApiService frm,
         SatisfactoryDigestBuilder digest,
+        SatisfactoryChartRenderer charts,
         IServiceProvider services)
     {
         _logger = logger;
@@ -75,6 +78,7 @@ public class SatisfactoryCommandHandler
         _api = api;
         _frm = frm;
         _digest = digest;
+        _charts = charts;
         _services = services;
     }
 
@@ -128,6 +132,35 @@ public class SatisfactoryCommandHandler
         new SlashCommandBuilder()
             .WithName("satisfactory-leaderboard")
             .WithDescription("Who's put the most hours into the clan's Satisfactory server")
+            .Build();
+
+    /// <summary>
+    /// /satisfactory-graph — power or playtime as a chart image.
+    ///
+    /// <para>Power history comes from SatisfactoryMetricSample, which only
+    /// starts accumulating once the bot has been running with metrics enabled —
+    /// so this command says "not enough data yet" rather than erroring for the
+    /// first hour or so after deployment.</para>
+    /// </summary>
+    public static SlashCommandProperties BuildGraphCommand() =>
+        new SlashCommandBuilder()
+            .WithName("satisfactory-graph")
+            .WithDescription("Charts for the clan's Satisfactory server — power over time, or playtime per day")
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("type")
+                .WithDescription("What to chart")
+                .WithType(ApplicationCommandOptionType.String)
+                .WithRequired(true)
+                .AddChoice("Power", "power")
+                .AddChoice("Playtime", "playtime"))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("range")
+                .WithDescription("How far back to look (default 24 hours for power, 14 days for playtime)")
+                .WithType(ApplicationCommandOptionType.String)
+                .WithRequired(false)
+                .AddChoice("24 hours", "24h")
+                .AddChoice("7 days", "7d")
+                .AddChoice("30 days", "30d"))
             .Build();
 
     public static SlashCommandProperties BuildLinkCommand() =>
@@ -205,6 +238,7 @@ public class SatisfactoryCommandHandler
             case "satisfactory-report": await HandleReportAsync(command); break;
             case "satisfactory-playtime":    await HandlePlaytimeAsync(command); break;
             case "satisfactory-leaderboard": await HandleLeaderboardAsync(command); break;
+            case "satisfactory-graph":       await HandleGraphAsync(command); break;
             case "satisfactory-link":        await HandleLinkAsync(command); break;
             case "satisfactory-admin":  await HandleAdminAsync(command); break;
         }
@@ -371,6 +405,83 @@ public class SatisfactoryCommandHandler
 
         await command.FollowupAsync(embed: embed);
     }
+
+    // ─── /satisfactory-graph ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// Renders a chart and posts it publicly, matching /satisfactory-report.
+    ///
+    /// <para>Deferred immediately: a render allocates a 1800x600 surface and
+    /// runs a font system after a database read, which is comfortably past
+    /// Discord's 3-second initial-response window.</para>
+    ///
+    /// <para>A null from the renderer is NOT an error — it also means "not
+    /// enough data yet", which is the expected state for the first hour after
+    /// deployment. The message says so rather than reporting a failure.</para>
+    /// </summary>
+    private async Task HandleGraphAsync(SocketSlashCommand command)
+    {
+        await command.DeferAsync();
+
+        var type = command.Data.Options
+            .FirstOrDefault(o => o.Name == "type")?.Value as string ?? "power";
+        var range = command.Data.Options
+            .FirstOrDefault(o => o.Name == "range")?.Value as string;
+
+        byte[]? png;
+        string fileName;
+
+        if (string.Equals(type, "playtime", StringComparison.OrdinalIgnoreCase))
+        {
+            var days = range switch
+            {
+                "24h" => 2,      // a one-day bar chart is a single bar; show yesterday too
+                "30d" => 30,
+                _     => 14,
+            };
+
+            png = await _charts.TryRenderPlaytimeChartAsync(
+                days, DigestZone(), $"Playtime — last {days} days");
+            fileName = "playtime.png";
+        }
+        else
+        {
+            var window = range switch
+            {
+                "7d"  => TimeSpan.FromDays(7),
+                "30d" => TimeSpan.FromDays(30),
+                _     => TimeSpan.FromHours(24),
+            };
+
+            var label = window.TotalHours <= 24 ? "last 24 hours" : $"last {(int)window.TotalDays} days";
+            png = await _charts.TryRenderPowerChartAsync(window, $"Power — {label}");
+            fileName = "power.png";
+        }
+
+        if (png is null)
+        {
+            await command.FollowupAsync(
+                "Not enough data for that chart yet. Power history builds up from the alert poll " +
+                "(a couple of hours gives a useful picture), and playtime needs at least one recorded session.",
+                ephemeral: true);
+            return;
+        }
+
+        using var ms = new MemoryStream(png);
+        await command.FollowupWithFileAsync(ms, fileName);
+    }
+
+    /// <summary>
+    /// The clan's timezone, for bucketing playtime days. Shares the digest's
+    /// setting so a bar labelled "Jul 24" means the same thing in the chart and
+    /// in the morning report. Falls back to UTC on an unrecognised id.
+    /// </summary>
+    private TimeZoneInfo DigestZone() =>
+        !string.IsNullOrWhiteSpace(_config.SatisfactoryDigestTimeZone)
+        && TimeZoneInfo.TryFindSystemTimeZoneById(_config.SatisfactoryDigestTimeZone, out var tz)
+        && tz is not null
+            ? tz
+            : TimeZoneInfo.Utc;
 
     // ─── /satisfactory-playtime ──────────────────────────────────────────────
 

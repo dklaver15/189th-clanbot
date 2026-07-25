@@ -1891,6 +1891,22 @@ public class BotConfig
     /// </summary>
     public int SatisfactoryMilestonePollSeconds { get; set; } = 1800;
 
+    /// <summary>
+    /// Whether to record a power sample on each alert poll, for the charts.
+    ///
+    /// On by default because it's genuinely close to free: the alert loop
+    /// already calls getPower, so this adds a row insert and NOT a request to
+    /// the game server. Switch it off to stop the table growing at all.
+    /// </summary>
+    public bool SatisfactoryMetricsEnabled { get; set; } = true;
+
+    /// <summary>
+    /// How many days of power samples to keep. Clamped 1–365, default 30.
+    /// At the default 120s alert cadence that's ~720 rows/day, so 30 days is
+    /// ~21,600 rows.
+    /// </summary>
+    public int SatisfactoryMetricsRetentionDays { get; set; } = 30;
+
     // ─── SQLite Backup Settings ──────────────────────────────────────
     /// <summary>
     /// Master switch for SqliteBackupService. When false, the service exits
