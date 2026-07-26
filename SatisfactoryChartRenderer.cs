@@ -111,10 +111,15 @@ public sealed class SatisfactoryChartRenderer
     /// <summary>
     /// Grid load over the given window.
     /// </summary>
+    /// <param name="zone">
+    /// Timezone the x-axis is labelled in. Samples are stored in UTC — as they
+    /// must be — but a UTC axis makes people do arithmetic to answer "was that
+    /// me?", which is the whole question a power chart exists to settle.
+    /// </param>
     /// <param name="subtitle">Second header line, e.g. "Friday, July 24".</param>
     /// <returns>PNG bytes, or null if there's nothing worth drawing.</returns>
     public async Task<byte[]?> TryRenderPowerChartAsync(
-        TimeSpan window, string subtitle, CancellationToken ct = default)
+        TimeSpan window, TimeZoneInfo zone, string subtitle, CancellationToken ct = default)
     {
         try
         {
@@ -152,7 +157,7 @@ public sealed class SatisfactoryChartRenderer
 
             ct.ThrowIfCancellationRequested();
 
-            return RenderPowerChart(samples, subtitle);
+            return RenderPowerChart(samples, zone, subtitle);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -165,7 +170,8 @@ public sealed class SatisfactoryChartRenderer
         }
     }
 
-    private byte[] RenderPowerChart(IReadOnlyList<SatisfactoryMetricSample> samples, string subtitle)
+    private byte[] RenderPowerChart(
+        IReadOnlyList<SatisfactoryMetricSample> samples, TimeZoneInfo zone, string subtitle)
     {
         var consumed = samples.Select(s => s.PowerConsumedMw).ToArray();
         var capacity = samples.Select(s => s.PowerCapacityMw).ToArray();
@@ -403,10 +409,15 @@ public sealed class SatisfactoryChartRenderer
                 for (var t = 0; t < ticks; t++)
                 {
                     var index = (int)Math.Round((double)t / (ticks - 1) * (samples.Count - 1));
-                    var time = samples[index].SampledUtc;
-                    var text = time.ToString(format);
+                    var sampledUtc = samples[index].SampledUtc;
+
+                    // Label in local time, but POSITION from the UTC instant.
+                    // Converting before XToPixel would shift every point by the
+                    // offset and silently mislabel the whole axis.
+                    var text = TimeZoneInfo.ConvertTimeFromUtc(sampledUtc, zone).ToString(format);
+
                     canvas.DrawText(text,
-                        XToPixel(time) - labelFont.MeasureText(text) / 2f, plotBottom + 30f,
+                        XToPixel(sampledUtc) - labelFont.MeasureText(text) / 2f, plotBottom + 30f,
                         labelFont, axisPaint);
                 }
             }
@@ -414,8 +425,12 @@ public sealed class SatisfactoryChartRenderer
 
         if (format == "HH:mm")
         {
+            // Name the zone, and say whether it's currently on daylight time —
+            // an unlabelled clock is the thing that made the UTC axis annoying,
+            // and "Eastern" alone is ambiguous by an hour for half the year.
             using var notePaint = new SKPaint { Color = Hex(AxisHex, 90), IsAntialias = true };
-            canvas.DrawText("times UTC", plotLeft, plotBottom + 52f, smallFont, notePaint);
+            canvas.DrawText($"times {ZoneLabel(zone, samples[^1].SampledUtc)}",
+                plotLeft, plotBottom + 52f, smallFont, notePaint);
         }
 
         // ── Battery ──
@@ -1045,6 +1060,26 @@ public sealed class SatisfactoryChartRenderer
         IsAntialias = true,
         MaskFilter = SKMaskFilter.CreateBlur(SKBlurStyle.Normal, sigma),
     };
+
+    /// <summary>
+    /// A short, unambiguous name for the axis footnote: the zone's own
+    /// daylight/standard name at that instant ("Eastern Daylight Time"),
+    /// shortened to its initials where the name follows the usual three-word
+    /// shape. Falls back to the IANA id, which is never wrong, only ugly.
+    /// </summary>
+    private static string ZoneLabel(TimeZoneInfo zone, DateTime instantUtc)
+    {
+        if (zone == TimeZoneInfo.Utc) return "UTC";
+
+        var name = zone.IsDaylightSavingTime(instantUtc) ? zone.DaylightName : zone.StandardName;
+        if (string.IsNullOrWhiteSpace(name)) return zone.Id;
+
+        var words = name.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (words.Length is 3 or 4 && words.All(w => char.IsUpper(w[0])))
+            return string.Concat(words.Select(w => w[0]));
+
+        return name;
+    }
 
     private static DateTime LocalMidnightToUtc(DateOnly date, TimeZoneInfo zone)
     {

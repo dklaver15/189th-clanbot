@@ -454,7 +454,7 @@ public class SatisfactoryCommandHandler
             };
 
             var label = window.TotalHours <= 24 ? "Last 24 hours" : $"Last {(int)window.TotalDays} days";
-            png = await _charts.TryRenderPowerChartAsync(window, $"{label}  ·  189th Clanguard");
+            png = await _charts.TryRenderPowerChartAsync(window, DigestZone(), $"{label}  ·  189th Clanguard");
             fileName = "power.png";
         }
 

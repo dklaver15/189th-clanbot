@@ -119,6 +119,12 @@ public sealed class SatisfactoryFactoryService : BackgroundService
     /// <summary>Last retention prune, so it runs hourly rather than every poll.</summary>
     private DateTime _lastPruneUtc = DateTime.MinValue;
 
+    /// <summary>
+    /// Whether we've already said the digest is waiting on the server, so an
+    /// outage spanning the whole window says so once rather than every poll.
+    /// </summary>
+    private bool _loggedDigestOutage;
+
     /// <summary>Consecutive sampling failures, for bounded logging.</summary>
     private int _sampleFailures;
 
@@ -537,6 +543,7 @@ public sealed class SatisfactoryFactoryService : BackgroundService
         {
             _digestAttemptSlot = slotDate;
             _digestPostAttempts = 0;
+            _loggedDigestOutage = false;
         }
 
         if (_digestPostAttempts >= MaxDigestPostAttempts)
@@ -558,8 +565,11 @@ public sealed class SatisfactoryFactoryService : BackgroundService
             return;
         }
 
-        _logger.LogInformation("Posting Satisfactory daily digest for {Date}", day.Key);
-
+        // No "posting…" line here: this runs on every poll inside the catch-up
+        // window, and an FRM outage turned it into 26 identical claims that a
+        // digest was being posted when none ever was. PostDigestAsync logs once
+        // it actually has something to send.
+        //
         // The guard is set only when the post is believed delivered, so a server
         // that's unreachable at 9:00 is retried on the next poll instead of
         // costing the day. Uncertain counts as delivered — see PostOutcome.
@@ -677,16 +687,36 @@ public sealed class SatisfactoryFactoryService : BackgroundService
         {
             // Doesn't count against the send budget — the build never reached
             // Discord, and an unreachable FRM costs one small request to retry.
-            _logger.LogInformation("Satisfactory digest skipped — server unreachable");
+            //
+            // Debug, not Information: this repeats every poll for as long as the
+            // window is open, so a three-hour outage writes ~90 identical lines.
+            // The one-per-day summary below is what's worth reading.
+            _logger.LogDebug("Satisfactory digest not built — server unreachable, will retry");
+
+            if (!_loggedDigestOutage)
+            {
+                _loggedDigestOutage = true;
+                _logger.LogInformation(
+                    "Satisfactory digest for {Date} is waiting on the server — retrying until the window closes",
+                    day.Key);
+            }
+
             return PostOutcome.Failed;
         }
 
+        _loggedDigestOutage = false;
         _digestPostAttempts++;
+
+        _logger.LogInformation("Posting Satisfactory daily digest for {Date}", day.Key);
+
+        // Same zone the reporting day was computed in, so the axis and the
+        // "Covering Friday, July 24" heading agree about where the day ends.
+        var zone = DigestZone();
 
         // Chart is best-effort and comes back null on any failure, including
         // "not enough samples yet". A null just means the embed posts alone.
         var chart = _config.SatisfactoryMetricsEnabled
-            ? await _charts.TryRenderPowerChartAsync(TimeSpan.FromHours(24), day.Label, ct)
+            ? await _charts.TryRenderPowerChartAsync(TimeSpan.FromHours(24), zone, day.Label, ct)
             : null;
 
         var embed = result.Embed;

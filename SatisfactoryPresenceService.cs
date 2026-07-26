@@ -500,7 +500,7 @@ public sealed class SatisfactoryPresenceService : BackgroundService
         $"🟢 {FeedName(name, links)} joined the factory — {onlineCount} online";
 
     private static string LeaveMessage(string name, IReadOnlyDictionary<string, ulong> links, TimeSpan? played, int onlineCount) =>
-        $"🔵 {FeedName(name, links)} left" +
+        $"🔴 {FeedName(name, links)} left" +
         (played is TimeSpan d && d > TimeSpan.Zero ? $" after {Humanize(d)}" : "") +
         $" — {onlineCount} online";
 
@@ -524,7 +524,7 @@ public sealed class SatisfactoryPresenceService : BackgroundService
 
     private static string CountChangeMessage(int prev, int now, SatisfactoryServerState state)
     {
-        var arrow = now > prev ? "🟢 ↑" : "🔵 ↓";
+        var arrow = now > prev ? "🟢 ↑" : "🔴 ↓";
         var session = string.IsNullOrWhiteSpace(state.ActiveSessionName) ? "the Satisfactory server" : Escape(state.ActiveSessionName);
         var noun = now == 1 ? "player" : "players";
         return $"{arrow} **{session}** — **{prev} → {now}** {noun} online ({now}/{state.PlayerLimit})";

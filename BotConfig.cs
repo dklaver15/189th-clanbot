@@ -1853,14 +1853,20 @@ public class BotConfig
     public int SatisfactoryDigestHour { get; set; } = 9;
 
     /// <summary>
-    /// IANA timezone the digest hour is expressed in, e.g. "America/Chicago".
-    /// Defaults to Central, matching <see cref="EventDefaultTimeZone"/> so the
-    /// clan's events and its factory report agree about what "9am" means.
+    /// IANA timezone for everything Satisfactory: the hour the digest fires,
+    /// the day boundaries its "yesterday" window and the playtime chart use, and
+    /// the labels on chart time axes.
     ///
-    /// An unrecognised id falls back to UTC with a warning rather than throwing —
-    /// a config typo shouldn't take down the power alerts that share the service.
+    /// <para><b>Deliberately one setting, not several.</b> Splitting "when
+    /// things happen" from "how times are displayed" reads tidier but lets them
+    /// drift — and a chart whose day boundaries disagree with the report printed
+    /// beside it is worse than either being wrong on its own.</para>
+    ///
+    /// <para>An unrecognised id falls back to UTC with a warning rather than
+    /// throwing — a config typo shouldn't take down the power alerts that share
+    /// the service.</para>
     /// </summary>
-    public string SatisfactoryDigestTimeZone { get; set; } = "America/Chicago";
+    public string SatisfactoryDigestTimeZone { get; set; } = "America/New_York";
 
     /// <summary>
     /// Channel for the daily digest. 0 = use

@@ -77,15 +77,18 @@ public sealed class SatisfactoryDigestBuilder
     private static readonly TimeSpan MaxDeltaAge = TimeSpan.FromDays(3);
 
     private readonly FrmApiService _frm;
+    private readonly SatisfactoryApiService _api;
     private readonly IServiceProvider _services;
     private readonly ILogger<SatisfactoryDigestBuilder> _logger;
 
     public SatisfactoryDigestBuilder(
         FrmApiService frm,
+        SatisfactoryApiService api,
         IServiceProvider services,
         ILogger<SatisfactoryDigestBuilder> logger)
     {
         _frm = frm;
+        _api = api;
         _services = services;
         _logger = logger;
     }
@@ -118,19 +121,45 @@ public sealed class SatisfactoryDigestBuilder
     /// </param>
     private async Task<DigestResult?> BuildCoreAsync(DigestDay? day, CancellationToken ct = default)
     {
-        // getSessionInfo is the anchor: if that fails there's nothing worth
-        // posting, so bail before spending the other four requests.
+        // ── The anchor read, and why it needs a fallback ──
+        //
+        // FRM answers 503 "World not ready" whenever the dedicated server has
+        // idled with nobody connected — its world context goes invalid and every
+        // endpoint refuses. That is the NORMAL state at 9am: the digest reports
+        // on a day that is over, at an hour when nobody is playing. Bailing here
+        // meant the morning report failed on exactly the mornings it was for.
+        //
+        // The vanilla game API on the game port keeps answering while the world
+        // is idle — it's what the host's own dashboard reads — so it can still
+        // supply the session name and tier. The retrospective sections below
+        // come from our database and never needed a live server at all.
         var session = await _frm.GetSessionInfoAsync(ct);
+        SatisfactoryServerState? state = null;
+
         if (session is null)
         {
-            _logger.LogInformation("Satisfactory digest not built — server unreachable");
-            return null;
+            state = await _api.GetServerStateAsync(ct);
+
+            if (state is null)
+            {
+                // Both APIs silent: the machine really is unreachable.
+                _logger.LogInformation("Satisfactory digest not built — server unreachable");
+                return null;
+            }
+
+            _logger.LogInformation(
+                "Satisfactory digest: FRM is idle (world not loaded), building from stored data and the game API");
         }
 
-        var power = await _frm.GetPowerAsync(ct);
-        var prod = await _frm.GetProdStatsAsync(ct);
-        var sink = await _frm.GetResourceSinkAsync(ct);
-        var elevators = await _frm.GetSpaceElevatorAsync(ct);
+        // Live factory figures only exist when FRM is answering. Left null
+        // otherwise, and every section below already omits itself on null.
+        var power = session is null ? null : await _frm.GetPowerAsync(ct);
+        var prod = session is null ? null : await _frm.GetProdStatsAsync(ct);
+        var sink = session is null ? null : await _frm.GetResourceSinkAsync(ct);
+        var elevators = session is null ? null : await _frm.GetSpaceElevatorAsync(ct);
+
+        var sessionName = session?.SessionName ?? state?.ActiveSessionName ?? "";
+        var seed = session?.Seed ?? 0;
 
         var embed = new EmbedBuilder()
             .WithColor(new Color(0xE59344))
@@ -140,12 +169,12 @@ public sealed class SatisfactoryDigestBuilder
         // session name is player-chosen text that Escape can more than double.
         if (day is { } titleDay)
         {
-            embed.WithTitle(Title($"🏭 Daily report — {Escape(session.SessionName)}"));
+            embed.WithTitle(Title($"🏭 Daily report — {Escape(sessionName)}"));
             embed.WithDescription($"Covering **{titleDay.Label}**.");
         }
         else
         {
-            embed.WithTitle(Title($"🏭 Factory report — {Escape(session.SessionName)}"));
+            embed.WithTitle(Title($"🏭 Factory report — {Escape(sessionName)}"));
         }
 
         // ── What happened during the reporting day ──
@@ -159,10 +188,10 @@ public sealed class SatisfactoryDigestBuilder
         if (day is { } reportDay)
         {
             await SafelyAsync("playtime", ct, () => AddDayPlaytimeFieldAsync(embed, reportDay, ct));
-            await SafelyAsync("unlocks", ct, () => AddDayUnlocksFieldAsync(embed, session.Seed, reportDay, ct));
+            await SafelyAsync("unlocks", ct, () => AddDayUnlocksFieldAsync(embed, seed, reportDay, ct));
 
-            var previous = await LoadPreviousSnapshotAsync(session.Seed, reportDay, ct);
-            AddDeltaField(embed, previous, power, prod, sink, session);
+            var previous = await LoadPreviousSnapshotAsync(seed, reportDay, ct);
+            if (session is not null) AddDeltaField(embed, previous, power, prod, sink, session);
         }
 
         // ── Current state ──
@@ -172,11 +201,21 @@ public sealed class SatisfactoryDigestBuilder
         // missing the key yields null, and EmbedFieldBuilder throws on a null or
         // whitespace value. That would take out the whole digest AND
         // /satisfactory-report, so it goes through the same guard as the rest.
-        embed.AddField("Day", session.PassedDays.ToString(), true);
-        AddInlineField(embed, "Total playtime", session.TotalPlayDurationText);
-        embed.AddField("Deaths", session.NumberOfDaysSinceLastDeath == 0
-            ? "someone died today"
-            : $"{session.NumberOfDaysSinceLastDeath} day(s) clean", true);
+        if (session is not null)
+        {
+            embed.AddField("Day", session.PassedDays.ToString(), true);
+            AddInlineField(embed, "Total playtime", session.TotalPlayDurationText);
+            embed.AddField("Deaths", session.NumberOfDaysSinceLastDeath == 0
+                ? "someone died today"
+                : $"{session.NumberOfDaysSinceLastDeath} day(s) clean", true);
+        }
+        else if (state is not null)
+        {
+            // What the game API can still tell us with the world idle.
+            embed.AddField("Tier", state.TechTier.ToString(), true);
+            AddInlineField(embed, "Phase", state.GamePhase);
+            embed.AddField("Server", state.IsGamePaused ? "idle — nobody on" : "running", true);
+        }
 
         AddPowerField(embed, power);
         AddProductionField(embed, prod);
@@ -186,12 +225,17 @@ public sealed class SatisfactoryDigestBuilder
         if (day is null)
             await SafelyAsync("recent players", ct, () => AddRecentPlayersFieldAsync(embed, ct));
 
-        embed.WithFooter(day is null
-            ? "Live figures from the server at the time of posting."
-            : "Playtime and unlocks cover the day above. Power, production and sink are live figures from this morning.");
+        embed.WithFooter(session is null
+            ? "The factory was idle at posting time, so live power and production aren't available — everything above is from the day itself."
+            : day is null
+                ? "Live figures from the server at the time of posting."
+                : "Playtime and unlocks cover the day above. Power, production and sink are live figures from this morning.");
 
+        // Still written when FRM was idle: the row doubles as the "already
+        // reported this day" marker, and every measurement on it is nullable
+        // precisely so a partial one is recordable. It contributes no deltas.
         var snapshot = day is { } snapshotDay
-            ? BuildSnapshot(session, snapshotDay, power, prod, sink)
+            ? BuildSnapshot(seed, session?.PassedDays ?? 0, snapshotDay, power, prod, sink)
             : null;
 
         // Build() enforces the 6000-character total across title, description
@@ -208,7 +252,7 @@ public sealed class SatisfactoryDigestBuilder
             _logger.LogWarning(ex, "Satisfactory digest exceeded Discord's embed limits; posting a reduced version");
 
             var fallback = new EmbedBuilder()
-                .WithTitle(Title($"🏭 Factory report — {Escape(session.SessionName)}"))
+                .WithTitle(Title($"🏭 Factory report — {Escape(sessionName)}"))
                 .WithColor(new Color(0xE59344))
                 .WithCurrentTimestamp()
                 .WithDescription(day is { } d
@@ -450,7 +494,8 @@ public sealed class SatisfactoryDigestBuilder
     /// never happened. See <see cref="BuildDailyAsync"/> for why that matters.
     /// </summary>
     private static SatisfactoryDailySnapshot BuildSnapshot(
-        FrmSessionInfo session,
+        long seed,
+        int passedDays,
         DigestDay day,
         IReadOnlyList<FrmPowerCircuit>? power,
         IReadOnlyList<FrmProdStat>? prod,
@@ -460,10 +505,10 @@ public sealed class SatisfactoryDigestBuilder
 
         return new SatisfactoryDailySnapshot
         {
-            Seed = session.Seed,
+            Seed = seed,
             LocalDate = day.Key,
             TakenUtc = DateTime.UtcNow,
-            PassedDays = session.PassedDays,
+            PassedDays = passedDays,
 
             PowerCapacityMw = power?.Sum(c => c.PowerCapacity),
             PowerConsumedMw = power?.Sum(c => c.PowerConsumed),
