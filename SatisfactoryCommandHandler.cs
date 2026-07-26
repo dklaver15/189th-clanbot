@@ -49,6 +49,7 @@ public class SatisfactoryCommandHandler
         "satisfactory-playtime",
         "satisfactory-leaderboard",
         "satisfactory-graph",
+        "satisfactory-production",
         "satisfactory-link",
         "satisfactory-admin",
     };
@@ -163,6 +164,21 @@ public class SatisfactoryCommandHandler
                 .AddChoice("30 days", "30d"))
             .Build();
 
+    /// <summary>
+    /// /satisfactory-production — the full production table.
+    ///
+    /// <para>Separate from the five-line summary in /satisfactory-report on
+    /// purpose. The summary answers "what's the factory doing"; this answers
+    /// "where is the bottleneck", and those want different amounts of detail.
+    /// The clan's save has 29 tracked items, so everything fits in one embed —
+    /// no paging, no "top N".</para>
+    /// </summary>
+    public static SlashCommandProperties BuildProductionCommand() =>
+        new SlashCommandBuilder()
+            .WithName("satisfactory-production")
+            .WithDescription("Every item the factory is producing or consuming, with efficiency")
+            .Build();
+
     public static SlashCommandProperties BuildLinkCommand() =>
         new SlashCommandBuilder()
             .WithName("satisfactory-link")
@@ -197,6 +213,32 @@ public class SatisfactoryCommandHandler
     public void Register(DiscordSocketClient client)
     {
         client.SlashCommandExecuted += OnSlashCommandAsync;
+        client.ButtonExecuted += OnButtonAsync;
+    }
+
+    /// <summary>
+    /// Only the production sort buttons belong to this handler. Everything else
+    /// is left alone — several handlers subscribe to ButtonExecuted and each
+    /// must ignore ids it doesn't own.
+    /// </summary>
+    private Task OnButtonAsync(SocketMessageComponent component)
+    {
+        var id = component.Data.CustomId;
+        if (id != ProductionSortOutputId && id != ProductionSortAlphaId) return Task.CompletedTask;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await HandleProductionSortAsync(component);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error re-sorting the production table for {User}", component.User.Username);
+            }
+        });
+
+        return Task.CompletedTask;
     }
 
     private Task OnSlashCommandAsync(SocketSlashCommand command)
@@ -239,6 +281,7 @@ public class SatisfactoryCommandHandler
             case "satisfactory-playtime":    await HandlePlaytimeAsync(command); break;
             case "satisfactory-leaderboard": await HandleLeaderboardAsync(command); break;
             case "satisfactory-graph":       await HandleGraphAsync(command); break;
+            case "satisfactory-production":  await HandleProductionAsync(command); break;
             case "satisfactory-link":        await HandleLinkAsync(command); break;
             case "satisfactory-admin":  await HandleAdminAsync(command); break;
         }
@@ -405,6 +448,194 @@ public class SatisfactoryCommandHandler
 
         await command.FollowupAsync(embed: embed);
     }
+
+    // ─── /satisfactory-production ────────────────────────────────────────────
+
+    /// <summary>Item-name column width. Long names are elided, not wrapped.</summary>
+    private const int ProductionNameWidth = 24;
+
+    private const string ProductionSortOutputId = "satprod:sort:output";
+    private const string ProductionSortAlphaId = "satprod:sort:alpha";
+
+    /// <summary>
+    /// Everything moving, as one monospace table.
+    ///
+    /// <para>A code block rather than embed fields: this is a column of numbers,
+    /// and numbers that don't line up are harder to compare than fewer numbers
+    /// would be. Discord renders code blocks monospace, which is the only way to
+    /// get alignment in an embed.</para>
+    ///
+    /// <para>Public, like /satisfactory-report — the clan runs these together.</para>
+    /// </summary>
+    private async Task HandleProductionAsync(SocketSlashCommand command)
+    {
+        await command.DeferAsync();
+
+        if (!_frm.IsConfigured)
+        {
+            await command.FollowupAsync(
+                "This needs the Ficsit Remote Monitoring integration, which isn't set up yet " +
+                "(`FrmEnabled` / `FrmBaseUrl`). Ask an admin.",
+                ephemeral: true);
+            return;
+        }
+
+        var stats = await _frm.GetProdStatsAsync();
+
+        if (stats is null)
+        {
+            await command.FollowupAsync(
+                "⚠️ Couldn't read the factory. The server may be offline, or the monitoring mod may have lost " +
+                "track of the world — if people are playing right now, it needs restarting.",
+                ephemeral: true);
+            return;
+        }
+
+        // Anything actually moving, in either direction. An item sitting at zero
+        // for both tells you nothing that its absence doesn't.
+        var embed = BuildProductionEmbed(stats, alphabetical: false);
+
+        if (embed is null)
+        {
+            await command.FollowupAsync(
+                "Nothing is moving right now — the factory may be paused, or everything is backed up.",
+                ephemeral: true);
+            return;
+        }
+
+        await command.FollowupAsync(
+            embed: embed,
+            components: ProductionSortButtons(alphabetical: false));
+    }
+
+    /// <summary>
+    /// Re-sorts the table in place when someone clicks one of the sort buttons.
+    ///
+    /// <para><b>Re-reads getProdStats rather than caching the previous result.</b>
+    /// The alternative is stashing rows against a message id and expiring them,
+    /// which is real state for no benefit — a click is a deliberate act, not a
+    /// poll, and re-reading means the numbers are current rather than however
+    /// old the original post was. The endpoint is only expensive on a loop.</para>
+    ///
+    /// <para>The message is public, so anyone can re-sort it for everyone. With
+    /// four people that's a feature; a per-viewer sort would need an ephemeral
+    /// copy each and the buttons would stop reflecting what's on screen.</para>
+    /// </summary>
+    private async Task HandleProductionSortAsync(SocketMessageComponent component)
+    {
+        var alphabetical = component.Data.CustomId == ProductionSortAlphaId;
+
+        await component.DeferAsync();
+
+        var stats = await _frm.GetProdStatsAsync();
+        var embed = stats is null ? null : BuildProductionEmbed(stats, alphabetical);
+
+        if (embed is null)
+        {
+            // Leave the existing table alone — a stale sort beats replacing a
+            // working table with an error.
+            await component.FollowupAsync(
+                "⚠️ Couldn't re-read the factory just now. The table above is unchanged.",
+                ephemeral: true);
+            return;
+        }
+
+        await component.ModifyOriginalResponseAsync(m =>
+        {
+            m.Embed = embed;
+            m.Components = ProductionSortButtons(alphabetical);
+        });
+    }
+
+    /// <summary>
+    /// The production table. Null when nothing is moving, which the callers
+    /// report differently.
+    /// </summary>
+    private static Embed? BuildProductionEmbed(IReadOnlyList<FrmProdStat> stats, bool alphabetical)
+    {
+        var moving = stats.Where(p => p.CurrentProd > 0.01 || p.CurrentConsumed > 0.01);
+
+        var rows = (alphabetical
+                ? moving.OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
+                : moving.OrderByDescending(p => p.CurrentProd).ThenByDescending(p => p.CurrentConsumed))
+            .ToList();
+
+        if (rows.Count == 0) return null;
+
+        var header = "Item".PadRight(ProductionNameWidth)
+                     + "prod/min".PadLeft(9)
+                     + "max".PadLeft(6)
+                     + "used/min".PadLeft(10);
+
+        // 4096 is the description cap; leave room for the code fences and the
+        // footer. At ~50 characters a row that holds around 75 items — well past
+        // the 29 this save tracks — but the overflow is stated, not silent.
+        const int budget = 3800;
+
+        var table = new System.Text.StringBuilder()
+            .Append(header).Append('\n')
+            .Append(new string('─', header.Length)).Append('\n');
+
+        var shown = 0;
+
+        foreach (var p in rows)
+        {
+            var name = Truncate(p.Name ?? "?", ProductionNameWidth - 1).PadRight(ProductionNameWidth);
+
+            var prod = p.CurrentProd > 0.01
+                ? p.CurrentProd.ToString("0.#").PadLeft(9)
+                : "-".PadLeft(9);
+
+            // MaxProd is 0 for consume-only items, and dividing by it unguarded
+            // is the oldest bug in this file.
+            var pct = p.MaxProd > 0 && p.CurrentProd > 0.01
+                ? $"{100.0 * p.CurrentProd / p.MaxProd:0}%".PadLeft(6)
+                : "-".PadLeft(6);
+
+            var used = p.CurrentConsumed > 0.01
+                ? p.CurrentConsumed.ToString("0.#").PadLeft(10)
+                : "-".PadLeft(10);
+
+            var line = name + prod + pct + used;
+
+            if (table.Length + line.Length + 1 > budget) break;
+
+            table.Append(line).Append('\n');
+            shown++;
+        }
+
+        var dropped = rows.Count - shown;
+        var producing = rows.Count(p => p.CurrentProd > 0.01);
+        var consuming = rows.Count(p => p.CurrentConsumed > 0.01);
+
+        var sortNote = alphabetical ? "A–Z" : "by output";
+
+        var footer = dropped > 0
+            ? $"{producing} producing · {consuming} consuming · sorted {sortNote} · {dropped} row(s) didn't fit"
+            : $"{producing} producing · {consuming} consuming · sorted {sortNote}";
+
+        return new EmbedBuilder()
+            .WithTitle("⚙️ Production")
+            .WithColor(new Color(0xE59344))
+            .WithDescription($"```\n{table}```")
+            .WithFooter(footer)
+            .WithCurrentTimestamp()
+            .Build();
+    }
+
+    /// <summary>
+    /// The active sort is disabled rather than merely restyled — a button that
+    /// does nothing when pressed is worse than one that can't be pressed.
+    /// </summary>
+    private static MessageComponent ProductionSortButtons(bool alphabetical) =>
+        new ComponentBuilder()
+            .WithButton("Sort by output", ProductionSortOutputId,
+                alphabetical ? ButtonStyle.Secondary : ButtonStyle.Primary,
+                disabled: !alphabetical)
+            .WithButton("Sort A–Z", ProductionSortAlphaId,
+                alphabetical ? ButtonStyle.Primary : ButtonStyle.Secondary,
+                disabled: alphabetical)
+            .Build();
 
     // ─── /satisfactory-graph ─────────────────────────────────────────────────
 

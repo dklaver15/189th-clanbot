@@ -213,7 +213,7 @@ public sealed class SatisfactoryDigestBuilder
         {
             // What the game API can still tell us with the world idle.
             embed.AddField("Tier", state.TechTier.ToString(), true);
-            AddInlineField(embed, "Phase", state.GamePhase);
+            AddInlineField(embed, "Phase", PhaseName(state.GamePhase));
             embed.AddField("Server", state.IsGamePaused ? "idle — nobody on" : "running", true);
         }
 
@@ -623,8 +623,18 @@ public sealed class SatisfactoryDigestBuilder
         var capacity = power.Sum(c => c.PowerCapacity);
         var tripped = power.Count(c => c.FuseTriggered);
 
-        var load = capacity > 0 ? $" ({100.0 * consumed / capacity:0}% load)" : "";
-        var text = $"{consumed:0.#} / {capacity:0.#} MW{load} across {power.Count} circuit(s)";
+        var text = "";
+
+        if (capacity > 0)
+        {
+            var load = consumed / capacity;
+
+            // Bar first, numbers second. At a glance you want "are we close to
+            // the ceiling", and only then the megawatts.
+            text += $"{Bar(load)}  **{100.0 * load:0}%**\n";
+        }
+
+        text += $"{consumed:0.#} / {capacity:0.#} MW across {power.Count} circuit(s)";
 
         if (production > 0) text += $"\n{production:0.#} MW being generated";
         if (tripped > 0) text += $"\n⚡ **{tripped} tripped fuse(s)**";
@@ -660,6 +670,24 @@ public sealed class SatisfactoryDigestBuilder
         });
 
         AddField(embed, "Top production", string.Join("\n", lines));
+    }
+
+    /// <summary>
+    /// A text meter. Uses U+2588 / U+2591, which are full-cell block glyphs —
+    /// every font Discord falls back to renders them at the same width, so the
+    /// bar stays rectangular. Characters that only LOOK equal width (▰▱) drift
+    /// on mobile and the bar comes out ragged.
+    /// </summary>
+    /// <param name="fraction">
+    /// Can exceed 1: a circuit drawing more than it can make is exactly the
+    /// state worth showing. The bar saturates, the percentage beside it doesn't.
+    /// </param>
+    private static string Bar(double fraction, int width = 16)
+    {
+        if (double.IsNaN(fraction) || fraction < 0) fraction = 0;
+
+        var filled = (int)Math.Round(Math.Min(fraction, 1.0) * width);
+        return new string('█', filled) + new string('░', width - filled);
     }
 
     private static void AddSinkField(EmbedBuilder embed, IReadOnlyList<FrmResourceSink>? sink)
@@ -770,6 +798,32 @@ public sealed class SatisfactoryDigestBuilder
     /// </summary>
     private static void AddInlineField(EmbedBuilder embed, string name, string? value) =>
         embed.AddField(name, string.IsNullOrWhiteSpace(value) ? "unknown" : value, true);
+
+    /// <summary>
+    /// The game API returns GamePhase as a full Unreal object path:
+    ///
+    /// <code>/Script/FactoryGame.FGGamePhase'/Game/FactoryGame/GamePhases/GP_Project_Assembly_Phase_1.GP_Project_Assembly_Phase_1'</code>
+    ///
+    /// The readable part is the asset name after the last dot. Strips the
+    /// <c>GP_</c> prefix and splits the underscores, so the above becomes
+    /// "Project Assembly Phase 1". Falls back to the raw value rather than
+    /// blanking, since a wrong-looking label beats a missing one.
+    /// </summary>
+    private static string PhaseName(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return "";
+
+        var s = raw.Trim().TrimEnd('\'');
+
+        var dot = s.LastIndexOf('.');
+        if (dot >= 0 && dot < s.Length - 1) s = s[(dot + 1)..];
+
+        if (s.StartsWith("GP_", StringComparison.OrdinalIgnoreCase)) s = s[3..];
+
+        s = s.Replace('_', ' ').Trim();
+
+        return s.Length == 0 ? raw : s;
+    }
 
     /// <summary>Embed titles throw above 256 characters.</summary>
     private static string Title(string s) =>

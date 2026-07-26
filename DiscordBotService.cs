@@ -550,6 +550,7 @@ public class DiscordBotService : IHostedService
                 SatisfactoryCommandHandler.BuildPlaytimeCommand(),
                 SatisfactoryCommandHandler.BuildLeaderboardCommand(),
                 SatisfactoryCommandHandler.BuildGraphCommand(),
+                SatisfactoryCommandHandler.BuildProductionCommand(),
                 SatisfactoryCommandHandler.BuildLinkCommand(),
                 SatisfactoryCommandHandler.BuildAdminCommand(),
 

@@ -78,6 +78,23 @@ public sealed class SatisfactoryPresenceService : BackgroundService
     /// <summary>Consecutive failed reads of the game API.</summary>
     private int _gameApiFailures;
 
+    /// <summary>
+    /// Consecutive polls where FRM gave us nothing WHILE the game API reported
+    /// players online. Only that combination is suspicious: FRM going quiet with
+    /// an empty server is normal and nightly.
+    /// </summary>
+    private int _frmBlindPolls;
+
+    /// <summary>So the warning is posted once per outage, not once per poll.</summary>
+    private bool _frmBlindAnnounced;
+
+    /// <summary>
+    /// Five polls — five minutes at the default cadence. Long enough that a
+    /// single dropped request or a world still loading after a join doesn't
+    /// trigger it, short enough to catch the problem the same session.
+    /// </summary>
+    private const int FrmBlindPollsBeforeWarning = 5;
+
     /// <summary>Last player count seen while up; null when unknown/down. Only used in the FRM-less fallback.</summary>
     private int? _lastPlayerCount;
 
@@ -221,17 +238,30 @@ public sealed class SatisfactoryPresenceService : BackgroundService
             return;
         }
 
-        if (FrmActive)
-        {
-            // Names supersede the count line entirely — posting both would say
-            // the same thing twice.
-            await PollPlayersAsync(ct);
-        }
-        else
+        // Names supersede the count line — posting both would say the same thing
+        // twice. But FrmActive only means FRM is CONFIGURED, not that it's
+        // answering, and FRM stops answering entirely whenever the dedicated
+        // server idles with nobody on ("World not ready", 503).
+        //
+        // That is exactly the moment someone logs in. The old code took the FRM
+        // branch, got nothing, and returned — so the first person back was never
+        // announced, and the count fallback that exists for precisely this case
+        // was unreachable. Now the fallback covers any tick FRM couldn't serve.
+        var named = FrmActive && await PollPlayersAsync(ct);
+
+        if (!named)
         {
             var message = TrackPlayerCount(state);
             if (message is not null) await PostFeedAsync(message, ct);
         }
+        else
+        {
+            // Keep the baseline fresh while names are working, so switching to
+            // the fallback mid-session doesn't post a jump spanning the gap.
+            _lastPlayerCount = state.NumConnectedPlayers;
+        }
+
+        await CheckFrmBlindAsync(named, state, ct);
     }
 
     /// <summary>
@@ -291,14 +321,19 @@ public sealed class SatisfactoryPresenceService : BackgroundService
     /// Diffs the live player list against what we last saw, writes session rows,
     /// and posts a join/leave line per change.
     /// </summary>
-    private async Task PollPlayersAsync(CancellationToken ct)
+    /// <returns>
+    /// True if FRM served a player list and the named feed handled this tick;
+    /// false if it couldn't, so the caller can fall back to the count line.
+    /// </returns>
+    private async Task<bool> PollPlayersAsync(CancellationToken ct)
     {
         var players = await _frm.GetOnlinePlayersAsync(ct);
 
         // null is "unknown", never "empty". FRM can be down while the game API is
-        // fine — most likely its web server failed to bind its port — and that
-        // must not read as everyone leaving.
-        if (players is null) return;
+        // fine — its web server failing to bind its port, or the world being
+        // unloaded while the server idles — and that must not read as everyone
+        // leaving.
+        if (players is null) return false;
 
         var seen = new Dictionary<string, FrmPlayer>(StringComparer.Ordinal);
         foreach (var p in players)
@@ -315,7 +350,7 @@ public sealed class SatisfactoryPresenceService : BackgroundService
             // Steady state: still refresh the open rows so LastSeenUtc tracks
             // reality. This is what makes an open session's duration trustworthy.
             if (seen.Count > 0) await TouchOpenSessionsAsync(seen, ct);
-            return;
+            return true;
         }
 
         var now = DateTime.UtcNow;
@@ -427,6 +462,64 @@ public sealed class SatisfactoryPresenceService : BackgroundService
 
         // Refresh the survivors' rows in the same pass.
         if (seen.Count > 0) await TouchOpenSessionsAsync(seen, ct);
+
+        return true;
+    }
+
+    /// <summary>
+    /// Warns when FRM has stopped answering while people are actually in game.
+    ///
+    /// <para>This exists because the failure is INVISIBLE. FRM binds its web
+    /// server to the world when it starts and never rebinds, so once the world
+    /// has been torn down — a server restart, or everyone logging off — it keeps
+    /// listening and keeps returning 503 "World not ready" forever. Nothing
+    /// crashes. Named join/leave silently becomes player counts, power alerts
+    /// stop, sampling stops, milestones stop. You find out days later by
+    /// noticing the absence of something.</para>
+    ///
+    /// <para>Deliberately only fires when the game API says somebody is
+    /// connected. FRM is legitimately unreachable every night with an empty
+    /// server; warning about that would train everyone to ignore it.</para>
+    /// </summary>
+    private async Task CheckFrmBlindAsync(bool named, SatisfactoryServerState state, CancellationToken ct)
+    {
+        if (!FrmActive) return;
+
+        if (named)
+        {
+            if (_frmBlindAnnounced)
+            {
+                _frmBlindAnnounced = false;
+                await PostFeedAsync(
+                    "✅ Ficsit Remote Monitoring is answering again — names, alerts and milestones are back.", ct);
+            }
+
+            _frmBlindPolls = 0;
+            return;
+        }
+
+        if (state.NumConnectedPlayers <= 0)
+        {
+            _frmBlindPolls = 0;
+            return;
+        }
+
+        _frmBlindPolls++;
+
+        if (_frmBlindPolls < FrmBlindPollsBeforeWarning || _frmBlindAnnounced) return;
+
+        _frmBlindAnnounced = true;
+
+        _logger.LogWarning(
+            "FRM has been unreachable for {Polls} polls with {Players} player(s) online — it has probably lost its world binding",
+            _frmBlindPolls, state.NumConnectedPlayers);
+
+        await PostFeedAsync(
+            "⚠️ **The factory monitoring mod has stopped responding.** People are on the server, but Ficsit " +
+            "Remote Monitoring can't see the world — so join/leave names, power alerts and milestone " +
+            "announcements are paused. Player counts still work.\n" +
+            "Someone in game can try `/frm http stop` then `/frm http start`; if that doesn't take, the server " +
+            "needs a restart.", ct);
     }
 
     /// <summary>

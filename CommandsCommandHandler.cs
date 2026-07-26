@@ -645,6 +645,8 @@ public class CommandsCommandHandler
                 "Everyone", everyone),
             new("satisfactory-graph", "Charts for the Satisfactory server — power over time, or playtime per day",
                 "Everyone", everyone),
+            new("satisfactory-production", "Every item the Satisfactory factory is producing or consuming",
+                "Everyone", everyone),
             new("satisfactory-link", "Link your Discord account to your Satisfactory in-game name",
                 "Everyone", everyone),
             new("patrol", "Toggle your visibility on Patrol Watch embeds (off/on/info)",
