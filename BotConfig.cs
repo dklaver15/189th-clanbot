@@ -396,6 +396,39 @@ public class BotConfig
     /// </summary>
     public ulong JotdChannelId { get; set; } = 1421928902963494922;
 
+    // ──────────────────────────────────────────────────────────────────────
+    //  Polls (/poll)
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Channel that gets the "new poll" announcement embed and the midpoint
+    /// "still open" reminder for every poll, wherever the poll itself was posted.
+    /// Polls usually live in a low-traffic #polls channel, so the clan only finds
+    /// out about them if something surfaces them in the channel people actually
+    /// read — this is that channel (defaults to the clan's general channel).
+    ///
+    /// Set to 0 to disable cross-posting entirely: the announcement is skipped and
+    /// the reminder falls back to the poll's own channel (the pre-cross-post
+    /// behaviour). Cross-posting is also skipped automatically when a poll is
+    /// posted directly into this channel, so it never announces itself.
+    /// </summary>
+    public ulong PollAnnounceChannelId { get; set; } = 1421928902963494922;
+
+    /// <summary>
+    /// Master switch for poll cross-posting. When false, nothing is posted to
+    /// <see cref="PollAnnounceChannelId"/> and the midpoint reminder stays in the
+    /// poll's own channel — equivalent to setting the channel id to 0, but kept
+    /// separate so the channel can be configured and toggled independently.
+    /// </summary>
+    public bool PollAnnounceEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Whether the cross-posted announcement lists the poll's options. Off keeps
+    /// the announcement a one-line nudge (question + jump link); on lets members
+    /// see what they'd be choosing between before clicking through.
+    /// </summary>
+    public bool PollAnnounceShowOptions { get; set; } = true;
+
     /// <summary>
     /// Master switch for the pinned "Upcoming Events" board maintained by
     /// <see cref="Services.UpcomingEventsBoardService"/>. When false the service

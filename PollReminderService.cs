@@ -6,6 +6,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 // Disambiguate from Discord.Net's own Poll type under `using Discord;`.
 using Poll = ClanGuardBot.Models.Poll;
@@ -19,6 +20,13 @@ namespace ClanGuardBot.Services;
 /// message with no @mentions — it just re-surfaces the poll with a jump link and
 /// a relative countdown to close.
 ///
+/// The reminder lands in <see cref="BotConfig.PollAnnounceChannelId"/> (the clan's
+/// general channel) rather than the poll's own channel — a nudge in the quiet
+/// #polls channel reaches nobody who wasn't already looking. It falls back to the
+/// poll's channel when cross-posting is off, unconfigured, opted out of for that
+/// poll (<c>/poll cross_post:false</c>), or when the configured channel can't be
+/// resolved.
+///
 /// Mirrors <see cref="PollCloseService"/>: a short interval, idempotent via the
 /// <see cref="Poll.ReminderSent"/> flag so a sweep overlapping a restart can't
 /// double-post. A poll closed (manually or on schedule) before its midpoint is
@@ -30,15 +38,18 @@ public sealed class PollReminderService : BackgroundService
 
     private readonly DiscordSocketClient _client;
     private readonly IServiceProvider _services;
+    private readonly BotConfig _config;
     private readonly ILogger<PollReminderService> _logger;
 
     public PollReminderService(
         DiscordSocketClient client,
         IServiceProvider services,
+        IOptions<BotConfig> config,
         ILogger<PollReminderService> logger)
     {
         _client   = client;
         _services = services;
+        _config   = config.Value;
         _logger   = logger;
     }
 
@@ -99,16 +110,23 @@ public sealed class PollReminderService : BackgroundService
 
         try
         {
-            if (_client.GetChannel(poll.ChannelId) is not IMessageChannel channel) return;
+            var channel = ResolveReminderChannel(poll);
+            if (channel is null) return;
 
             var close = new DateTimeOffset(poll.ClosesAtUtc, TimeSpan.Zero).ToUnixTimeSeconds();
             var eb = new EmbedBuilder()
                 .WithTitle("⏳ Poll still open")
                 .WithColor(new Color(0xFEE75C))
-                .WithDescription($"**{Trim(poll.Question, 250)}**")
-                .AddField("Closes", $"<t:{close}:R>", inline: true)
-                .AddField("​",
-                    $"[Jump to the poll](https://discord.com/channels/{poll.GuildId}/{poll.ChannelId}/{poll.MessageId}) and get your vote in!");
+                .WithDescription($"**{Trim(poll.Question, 250)}**");
+
+            // Only worth naming the poll's channel when the reminder is somewhere
+            // else — in the poll's own channel it's noise.
+            if (channel.Id != poll.ChannelId)
+                eb.AddField("Where", MentionUtils.MentionChannel(poll.ChannelId), inline: true);
+
+            eb.AddField("Closes", $"<t:{close}:R>", inline: true)
+              .AddField("​",
+                  $"[Jump to the poll](https://discord.com/channels/{poll.GuildId}/{poll.ChannelId}/{poll.MessageId}) and get your vote in!");
 
             // No pings — explicitly suppress any mention parsing in the question text.
             await channel.SendMessageAsync(embed: eb.Build(), allowedMentions: AllowedMentions.None);
@@ -119,6 +137,27 @@ public sealed class PollReminderService : BackgroundService
         {
             _logger.LogWarning(ex, "Failed to post midpoint reminder for poll {PollId}", poll.Id);
         }
+    }
+
+    /// <summary>
+    /// Where this poll's reminder goes: the configured cross-post channel when
+    /// cross-posting applies to the poll, otherwise the poll's own channel. Null
+    /// when neither resolves (the poll's channel was deleted, say) — the caller
+    /// then simply skips the reminder.
+    /// </summary>
+    private IMessageChannel? ResolveReminderChannel(Poll poll)
+    {
+        var targetId = _config.PollAnnounceChannelId;
+        var useAnnounceChannel = poll.CrossPost && _config.PollAnnounceEnabled && targetId != 0;
+
+        if (useAnnounceChannel && _client.GetChannel(targetId) is IMessageChannel announce)
+            return announce;
+
+        if (useAnnounceChannel)
+            _logger.LogWarning("Poll announce channel {ChannelId} not found — reminding in the poll's own channel instead",
+                targetId);
+
+        return _client.GetChannel(poll.ChannelId) as IMessageChannel;
     }
 
     private static async Task<bool> WaitAsync(PeriodicTimer timer, CancellationToken ct)

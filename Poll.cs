@@ -59,6 +59,18 @@ public class Poll
     /// <summary>Post a winner announcement to the channel when the poll closes.</summary>
     public bool AnnounceOnClose { get; set; } = true;
 
+    /// <summary>
+    /// Whether this poll is surfaced in <c>BotConfig.PollAnnounceChannelId</c> —
+    /// the "new poll" announcement embed at creation and the midpoint "still open"
+    /// reminder. True by default; the creator opts out per poll with
+    /// <c>/poll cross_post:false</c>, which keeps the poll confined to the channel
+    /// it was posted in (the reminder then falls back to that channel).
+    ///
+    /// Rows written before this shipped default to false, so historical polls are
+    /// never retro-announced — they're all long closed anyway.
+    /// </summary>
+    public bool CrossPost { get; set; } = true;
+
     public DateTime CreatedAt { get; set; }
 
     /// <summary>

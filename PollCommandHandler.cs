@@ -4,6 +4,7 @@ using ClanGuardBot.Services;
 using Discord;
 using Discord.WebSocket;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace ClanGuardBot.Handlers;
 
@@ -25,11 +26,16 @@ public sealed class PollCommandHandler
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(20) };
 
     private readonly PollPublisher _publisher;
+    private readonly BotConfig _config;
     private readonly ILogger<PollCommandHandler> _logger;
 
-    public PollCommandHandler(PollPublisher publisher, ILogger<PollCommandHandler> logger)
+    public PollCommandHandler(
+        PollPublisher publisher,
+        IOptions<BotConfig> config,
+        ILogger<PollCommandHandler> logger)
     {
         _publisher = publisher;
+        _config    = config.Value;
         _logger    = logger;
     }
 
@@ -87,7 +93,9 @@ public sealed class PollCommandHandler
             .AddOption("image_url", ApplicationCommandOptionType.String,
                 "Banner link instead of an upload (Tenor, Giphy, or direct)", isRequired: false)
             .AddOption("announce", ApplicationCommandOptionType.Boolean,
-                "Post a winner announcement when the poll closes. Default: true", isRequired: false);
+                "Post a winner announcement when the poll closes. Default: true", isRequired: false)
+            .AddOption("cross_post", ApplicationCommandOptionType.Boolean,
+                "Announce the poll (and its reminder) in the main channel. Default: true", isRequired: false);
 
         return builder.Build();
     }
@@ -155,6 +163,7 @@ public sealed class PollCommandHandler
         var anonymous   = Flag("anonymous");
         var multiselect = Flag("multiselect");
         var announce    = command.Data.Options.FirstOrDefault(o => o.Name == "announce")?.Value as bool? ?? true;
+        var crossPost   = command.Data.Options.FirstOrDefault(o => o.Name == "cross_post")?.Value as bool? ?? true;
         var hours       = (int)(command.Data.Options.FirstOrDefault(o => o.Name == "hours")?.Value as long? ?? 24);
         hours = Math.Clamp(hours, PollPublisher.MinDurationHours, PollPublisher.MaxDurationHours);
 
@@ -168,6 +177,7 @@ public sealed class PollCommandHandler
             Kind             = anonymous ? PollKind.Anonymous : PollKind.Native,
             AllowMultiselect = multiselect,
             AnnounceOnClose  = announce,
+            CrossPost        = crossPost,
             DurationHours    = hours,
             Options          = options,
         };
@@ -182,7 +192,7 @@ public sealed class PollCommandHandler
             return;
         }
 
-        var poll = await _publisher.PublishAsync(channel, draft);
+        var (poll, crossPosted) = await _publisher.PublishAsync(channel, draft);
 
         var kindNote = poll.Kind == PollKind.Anonymous
             ? "🔒 **Anonymous** — individual votes are hidden; only totals show."
@@ -190,8 +200,16 @@ public sealed class PollCommandHandler
         var imgNote = poll.Kind == PollKind.Native && draft.ImageBytes is { Length: > 0 }
             ? "\n*(Native polls can't show a banner in the poll itself, so I posted your image just above it.)*"
             : "";
+
+        // Driven by what the publisher actually did, not by re-deriving the config —
+        // so the confirmation never promises an announcement that was skipped or
+        // failed to post.
+        var crossNote = crossPosted
+            ? $"\n📣 Announced in {MentionUtils.MentionChannel(_config.PollAnnounceChannelId)} — the halfway reminder will go there too."
+            : "";
+
         await command.FollowupAsync(
-            $"✅ Poll posted in {MentionUtils.MentionChannel(channel.Id)}.\n{kindNote}{imgNote}",
+            $"✅ Poll posted in {MentionUtils.MentionChannel(channel.Id)}.\n{kindNote}{imgNote}{crossNote}",
             ephemeral: true);
     }
 

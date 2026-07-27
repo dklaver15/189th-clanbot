@@ -527,6 +527,12 @@ public class BotDbContext : DbContext
             entity.HasIndex(e => e.MessageId).IsUnique();        // vote/button + gateway-event → poll lookup
             entity.HasIndex(e => new { e.Status, e.ClosesAtUtc }); // close sweep: Open polls due to close
             entity.HasIndex(e => new { e.GuildId, e.CreatedAt }); // analytics / listing
+
+            // Existing rows get false on migration: polls created before
+            // cross-posting shipped are never retro-announced or re-reminded into
+            // the general channel. New rows carry the model default (true) unless
+            // the creator passed /poll cross_post:false.
+            entity.Property(e => e.CrossPost).HasDefaultValue(false);
         });
 
         modelBuilder.Entity<PollOption>(entity =>
