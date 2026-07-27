@@ -452,22 +452,17 @@ public class SatisfactoryCommandHandler
     // ─── /satisfactory-production ────────────────────────────────────────────
 
     /// <summary>
-    /// Column widths, chosen for MOBILE. Discord's mobile code blocks wrap at
-    /// roughly 30 characters, and a wrapped table is worse than no table — every
-    /// row splits and the columns stop lining up, which is the only reason to
-    /// use a monospace block in the first place.
+    /// Numeric column widths. Each is one wider than its header text so a value
+    /// that fills the column can't butt against its neighbour — "80" and "100%"
+    /// running together as "80100%" is what a too-tight column looks like.
     ///
-    /// <para>Total is 31. Desktop shows the same narrow table with space to the
-    /// right, which costs nothing; widening for desktop would cost mobile
-    /// everything. Names elide at 12 characters — "Compacted Coal" and
-    /// "Reinforced Iron Plate" both lose their tails, and that was the accepted
-    /// trade for keeping all three numbers.</para>
+    /// <para>The item column is NOT here. It's measured per render against the
+    /// names actually present — see <see cref="ProductionNameWidthFor"/>.</para>
     /// </summary>
-    private const int ProductionNameWidth = 13;
+    private const int ProductionProdWidth = 9;
 
-    private const int ProductionProdWidth = 6;
-    private const int ProductionPctWidth = 5;
-    private const int ProductionUsedWidth = 7;
+    private const int ProductionPctWidth = 6;
+    private const int ProductionUsedWidth = 10;
 
     private const string ProductionSortOutputId = "satprod:sort:output";
     private const string ProductionSortAlphaId = "satprod:sort:alpha";
@@ -568,6 +563,8 @@ public class SatisfactoryCommandHandler
     /// </summary>
     private static Embed? BuildProductionEmbed(IReadOnlyList<FrmProdStat> stats, bool alphabetical)
     {
+        // Anything actually moving, in either direction. An item sitting at
+        // zero for both tells you nothing that its absence doesn't.
         var moving = stats.Where(p => p.CurrentProd > 0.01 || p.CurrentConsumed > 0.01);
 
         var rows = (alphabetical
@@ -577,10 +574,12 @@ public class SatisfactoryCommandHandler
 
         if (rows.Count == 0) return null;
 
-        var header = "Item".PadRight(ProductionNameWidth)
-                     + "prod".PadLeft(ProductionProdWidth)
+        var nameWidth = ProductionNameWidthFor(rows);
+
+        var header = "Item".PadRight(nameWidth)
+                     + "prod/min".PadLeft(ProductionProdWidth)
                      + "max".PadLeft(ProductionPctWidth)
-                     + "used".PadLeft(ProductionUsedWidth);
+                     + "used/min".PadLeft(ProductionUsedWidth);
 
         // 4096 is the description cap; leave room for the code fences and the
         // footer. At ~50 characters a row that holds around 75 items — well past
@@ -595,7 +594,8 @@ public class SatisfactoryCommandHandler
 
         foreach (var p in rows)
         {
-            var name = Truncate(p.Name ?? "?", ProductionNameWidth - 1).PadRight(ProductionNameWidth);
+            // No truncation — nameWidth was measured to fit the longest of these.
+            var name = (p.Name ?? "?").PadRight(nameWidth);
 
             var prod = Flow(p.CurrentProd, ProductionProdWidth);
 
@@ -633,6 +633,26 @@ public class SatisfactoryCommandHandler
             .WithCurrentTimestamp()
             .Build();
     }
+
+    /// <summary>
+    /// How wide the item column has to be to show every name in full.
+    ///
+    /// <para>Measured, not guessed. A fixed width means either wasted space or
+    /// elided names, and an elided name is the one thing in this table you can't
+    /// reconstruct — "Reinforced Iron …" could be the plate or the frame. The
+    /// numbers are readable at any width; the name either is or isn't.</para>
+    ///
+    /// <para>The +1 is the guaranteed gap before the right-aligned production
+    /// figure, for the case where that figure fills its own column exactly.
+    /// The floor of 4 keeps the "Item" header from overhanging when every name
+    /// is shorter than the word.</para>
+    ///
+    /// <para>This does mean rows run 45-52 characters and wrap on a phone. That
+    /// is deliberate: a wrapped table you can read beats an aligned one you
+    /// can't.</para>
+    /// </summary>
+    private static int ProductionNameWidthFor(IReadOnlyList<FrmProdStat> rows) =>
+        Math.Max(4, rows.Max(p => (p.Name ?? "?").Length)) + 1;
 
     /// <summary>
     /// A rate, right-aligned into a fixed column.
