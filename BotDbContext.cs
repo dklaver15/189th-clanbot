@@ -62,6 +62,7 @@ public class BotDbContext : DbContext
     public DbSet<SatisfactoryUnlock>   SatisfactoryUnlocks   => Set<SatisfactoryUnlock>();
     public DbSet<SatisfactoryDailySnapshot> SatisfactoryDailySnapshots => Set<SatisfactoryDailySnapshot>();
     public DbSet<SatisfactoryMetricSample>  SatisfactoryMetricSamples  => Set<SatisfactoryMetricSample>();
+    public DbSet<SatisfactoryCircuitSample> SatisfactoryCircuitSamples => Set<SatisfactoryCircuitSample>();
     // ── XP ladder ──
     public DbSet<XpSeason>             XpSeasons             => Set<XpSeason>();
     public DbSet<XpAward>              XpAwards              => Set<XpAward>();
@@ -670,6 +671,18 @@ public class BotDbContext : DbContext
         // covers both — same shape as PalworldMetricSample below.
         modelBuilder.Entity<SatisfactoryMetricSample>(e =>
         {
+            e.HasIndex(s => s.SampledUtc);
+        });
+
+        // ── Satisfactory: per-circuit power samples ───────────────────
+        // TWO indexes, because the two readers want opposite leading columns.
+        // The trip diagnosis asks "circuit 3, last 30 minutes" and needs
+        // CircuitGroupId first. The retention prune deletes purely by age and
+        // can't use a CircuitGroupId-leading index at all, so SampledUtc gets
+        // its own. Cheap insurance on a table this small.
+        modelBuilder.Entity<SatisfactoryCircuitSample>(e =>
+        {
+            e.HasIndex(s => new { s.CircuitGroupId, s.SampledUtc });
             e.HasIndex(s => s.SampledUtc);
         });
 

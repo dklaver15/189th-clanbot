@@ -132,6 +132,15 @@ public sealed class SatisfactoryFactoryService : BackgroundService
 
     private static readonly TimeSpan PruneInterval = TimeSpan.FromHours(1);
 
+    /// <summary>
+    /// How far back the trip diagnosis looks for the circuit's last healthy
+    /// reading. 30 minutes is ~15 samples at the default cadence — long enough
+    /// to survive a couple of missed polls and to show a load that was climbing,
+    /// short enough that "peak before the trip" still means this event and not
+    /// something from half an hour of unrelated activity.
+    /// </summary>
+    private static readonly TimeSpan TripLookback = TimeSpan.FromMinutes(30);
+
     public SatisfactoryFactoryService(
         DiscordSocketClient client,
         FrmApiService frm,
@@ -307,15 +316,18 @@ public sealed class SatisfactoryFactoryService : BackgroundService
             if (!PassesCooldown(c.CircuitGroupId, now)) return;
             _fuseAlerted.Add(c.CircuitGroupId);
 
-            await PostAlertAsync(new EmbedBuilder()
+            var embed = new EmbedBuilder()
                 .WithColor(Color.Red)
                 .WithTitle("⚡ Fuse tripped")
                 .WithDescription(
                     $"Circuit **{c.CircuitGroupId}** has blown its fuse — everything on it is offline until someone resets it.")
-                .AddField("Draw before it blew", $"{c.PowerMaxConsumed:0.#} MW", true)
                 .AddField("Capacity", $"{c.PowerCapacity:0.#} MW", true)
-                .WithCurrentTimestamp()
-                .Build(), ct, "fuse alert");
+                .AddField("Max possible draw", $"{c.PowerMaxConsumed:0.#} MW", true)
+                .WithCurrentTimestamp();
+
+            await AddTripContextAsync(embed, c, now, ct);
+
+            await PostAlertAsync(embed.Build(), ct, "fuse alert");
         }
         else if (!c.FuseTriggered && wasAlerted)
         {
@@ -380,6 +392,230 @@ public sealed class SatisfactoryFactoryService : BackgroundService
     /// exception here must not cost a fuse alert, which is the thing in this
     /// service that someone is actually waiting on.</para>
     /// </summary>
+    /// <summary>
+    /// Assembles the diagnosis: why this circuit keeps tripping, what it was
+    /// drawing beforehand, whether its generators were healthy, and what the
+    /// biggest loads on it are.
+    ///
+    /// <para><b>The four sections are independent on purpose.</b> They draw on
+    /// different sources — one live field, the sample table, getGenerators and
+    /// getPowerUsage — and any of them can be unavailable while the others are
+    /// fine. They used to share a method body, which meant an early return in
+    /// the history section silently swallowed the two below it.</para>
+    ///
+    /// <para>Best-effort throughout: an alert with no context still beats no
+    /// alert, so every failure path degrades to a missing field.</para>
+    /// </summary>
+    private async Task AddTripContextAsync(
+        EmbedBuilder embed, FrmPowerCircuit c, DateTime now, CancellationToken ct)
+    {
+        // Over-subscription is readable straight off the live circuit and needs
+        // no history at all — it answers "why does this keep happening" rather
+        // than "what happened just now".
+        if (c.PowerCapacity > 0 && c.PowerMaxConsumed > c.PowerCapacity)
+            embed.AddField("Why this keeps happening",
+                $"Everything on this circuit could draw up to **{c.PowerMaxConsumed:0.#} MW**, but it only " +
+                $"generates **{c.PowerCapacity:0.#} MW** — over-subscribed by **{c.PowerMaxConsumed - c.PowerCapacity:0.#} MW**. " +
+                "It will trip again whenever enough machines happen to run at once. More generation, or split the circuit.");
+
+        await AddPreTripLoadAsync(embed, c, now, ct);
+        await AddGeneratorContextAsync(embed, c, ct);
+        await AddLoadBreakdownAsync(embed, c, ct);
+    }
+
+    /// <summary>
+    /// What the circuit was drawing BEFORE it blew — the one thing the live API
+    /// cannot tell you.
+    ///
+    /// <para>A tripped fuse takes the whole circuit offline, so the getPower
+    /// reading that DETECTS the trip already shows PowerConsumed near zero. The
+    /// causal number — what it was pulling a minute earlier — exists only in
+    /// <see cref="SatisfactoryCircuitSample"/>. Hence the read-back, and hence
+    /// this section going quiet when sampling is switched off.</para>
+    /// </summary>
+    private async Task AddPreTripLoadAsync(
+        EmbedBuilder embed, FrmPowerCircuit c, DateTime now, CancellationToken ct)
+    {
+        if (!_config.SatisfactoryMetricsEnabled) return;
+
+        try
+        {
+            using var scope = _services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+            var since = now - TripLookback;
+
+            // Healthy rows only. A row with FuseTriggered set is the aftermath of
+            // this trip or a previous one, and its near-zero draw would drag the
+            // "last reading" and the peak toward nonsense.
+            //
+            // This runs BEFORE RecordSampleAsync writes the current poll (see
+            // CheckAlertsAsync), so the newest row here is genuinely pre-trip.
+            var recent = await db.SatisfactoryCircuitSamples
+                .Where(s => s.CircuitGroupId == c.CircuitGroupId
+                            && s.SampledUtc >= since
+                            && !s.FuseTriggered)
+                .OrderByDescending(s => s.SampledUtc)
+                .Take(64)
+                .ToListAsync(ct);
+
+            if (recent.Count == 0)
+            {
+                embed.AddField("Load before it blew",
+                    "_No readings — the monitoring mod wasn't answering in the half hour before this._");
+                return;
+            }
+
+            var last = recent[0];
+            var peak = recent.Max(s => s.ConsumedMw);
+
+            var text = $"**{last.ConsumedMw:0.#} MW** as of {Relative(last.SampledUtc)}";
+
+            if (last.CapacityMw > 0)
+                text += $" — {100.0 * last.ConsumedMw / last.CapacityMw:0}% of {last.CapacityMw:0.#} MW";
+
+            text += $"\nPeak over the previous {TripLookback.TotalMinutes:0} min: **{peak:0.#} MW**";
+
+            embed.AddField("Load before it blew", text);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Never let a diagnostic lookup cost us the alert itself.
+            _logger.LogWarning(ex, "Couldn't read pre-trip history for circuit {Circuit}", c.CircuitGroupId);
+        }
+    }
+
+    /// <summary>
+    /// Why the supply side may have failed: generators that can't start, and
+    /// water buffers running dry.
+    ///
+    /// <para>A coal plant starved of water produces nothing while still counting
+    /// toward PowerCapacity, so a circuit can show comfortable headroom on paper
+    /// and trip anyway. That gap is invisible in getPower and only shows up
+    /// here.</para>
+    ///
+    /// <para>Fetched on a trip, never on the poll — getGenerators is far heavier
+    /// than getPower.</para>
+    /// </summary>
+    private async Task AddGeneratorContextAsync(EmbedBuilder embed, FrmPowerCircuit c, CancellationToken ct)
+    {
+        try
+        {
+            var generators = await _frm.GetGeneratorsAsync(ct);
+            if (generators is null) return;
+
+            var mine = generators
+                .Where(g => g.PowerInfo is not null && g.PowerInfo.CircuitGroupId == c.CircuitGroupId)
+                .ToList();
+
+            if (mine.Count == 0) return;
+
+            var lines = new List<string>();
+
+            foreach (var group in mine
+                         .GroupBy(g => g.Name ?? "Generator")
+                         .OrderByDescending(g => g.Count()))
+            {
+                var stalled = group.Count(g => !g.CanStart);
+                var throttled = group.Count(g => g.CanStart && !g.IsFullSpeed);
+
+                var line = $"**{group.Count()}× {group.Key}**";
+                if (stalled > 0) line += $" · ⚠️ {stalled} can't start";
+                if (throttled > 0) line += $" · {throttled} below full speed";
+
+                // Lowest secondary-input buffer in the group. Water is the usual
+                // overnight failure: the coal keeps arriving, the water doesn't.
+                var supplements = group
+                    .Select(g => g.Supplement)
+                    .Where(s => s is not null && s.MaxConsumed > 0)
+                    .ToList();
+
+                if (supplements.Count > 0)
+                {
+                    var worst = supplements.MinBy(s => s!.PercentFull)!;
+                    var flag = worst.PercentFull < 50 ? "⚠️ " : "";
+                    line += $" · {flag}{worst.Name ?? "supply"} at **{worst.PercentFull:0}%**";
+                }
+
+                lines.Add(line);
+            }
+
+            embed.AddField($"Generators on circuit {c.CircuitGroupId}", string.Join("\n", lines).Trim());
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Couldn't read generator state for circuit {Circuit}", c.CircuitGroupId);
+        }
+    }
+
+    /// <summary>
+    /// The biggest potential draws on the circuit, grouped by building type.
+    ///
+    /// <para><b>Ranked by MaxPowerConsumed, not PowerConsumed</b>, and that is
+    /// not a preference — by the time we run, the fuse is already blown and
+    /// every building on the circuit reports a live draw of roughly zero. Max
+    /// draw is the only field that still describes what was pulling.</para>
+    ///
+    /// <para>Which also makes it the right number for the question people ask:
+    /// "what do we have to turn off". </para>
+    /// </summary>
+    private async Task AddLoadBreakdownAsync(EmbedBuilder embed, FrmPowerCircuit c, CancellationToken ct)
+    {
+        try
+        {
+            var buildings = await _frm.GetPowerUsageAsync(ct);
+            if (buildings is null) return;
+
+            var top = buildings
+                .Where(b => b.PowerInfo is not null
+                            && b.PowerInfo.CircuitGroupId == c.CircuitGroupId
+                            && b.PowerInfo.MaxPowerConsumed > 0)
+                .GroupBy(b => b.Name ?? "?")
+                .Select(g => new
+                {
+                    Name = g.Key,
+                    Count = g.Count(),
+                    MaxDraw = g.Sum(b => b.PowerInfo!.MaxPowerConsumed),
+                })
+                .OrderByDescending(x => x.MaxDraw)
+                .Take(6)
+                .ToList();
+
+            if (top.Count == 0) return;
+
+            var lines = top.Select(x => $"`{x.MaxDraw,7:0.#} MW`  {x.Count}× {x.Name}");
+
+            embed.AddField("Biggest draws on this circuit", string.Join("\n", lines));
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Couldn't read power usage for circuit {Circuit}", c.CircuitGroupId);
+        }
+    }
+
+    /// <summary>
+    /// A Discord relative-timestamp tag, so everyone reads it in their own zone.
+    ///
+    /// <para>SQLite hands DateTimes back with Kind=Unspecified, and
+    /// DateTimeOffset would then interpret them as LOCAL — silently shifting
+    /// every timestamp by the host's offset. The SpecifyKind is the fix, not
+    /// decoration.</para>
+    /// </summary>
+    private static string Relative(DateTime utc) =>
+        $"<t:{new DateTimeOffset(DateTime.SpecifyKind(utc, DateTimeKind.Utc)).ToUnixTimeSeconds()}:R>";
+
     private async Task RecordSampleAsync(IReadOnlyList<FrmPowerCircuit> circuits, DateTime now, CancellationToken ct)
     {
         if (!_config.SatisfactoryMetricsEnabled) return;
@@ -410,6 +646,24 @@ public sealed class SatisfactoryFactoryService : BackgroundService
                 TrippedCount = circuits.Count(c => c.FuseTriggered),
                 BatteryPercent = withBatteries.Count > 0 ? withBatteries.Average(c => c.BatteryPercent) : null,
             });
+
+            // Same reading, kept per circuit. The aggregate row above is what the
+            // chart plots; these are what a trip diagnosis reads back.
+            foreach (var c in circuits)
+            {
+                db.SatisfactoryCircuitSamples.Add(new SatisfactoryCircuitSample
+                {
+                    SampledUtc = now,
+                    Seed = seed,
+                    CircuitGroupId = c.CircuitGroupId,
+                    ConsumedMw = c.PowerConsumed,
+                    CapacityMw = c.PowerCapacity,
+                    MaxConsumedMw = c.PowerMaxConsumed,
+                    ProductionMw = c.PowerProduction,
+                    FuseTriggered = c.FuseTriggered,
+                    BatteryPercent = c.BatteryCapacity > 0 ? c.BatteryPercent : null,
+                });
+            }
 
             await db.SaveChangesAsync(ct);
 
@@ -456,8 +710,14 @@ public sealed class SatisfactoryFactoryService : BackgroundService
             .Where(s => s.SampledUtc < cutoff)
             .ExecuteDeleteAsync(ct);
 
-        if (removed > 0)
-            _logger.LogInformation("Pruned {Count} Satisfactory power sample(s) older than {Days}d", removed, days);
+        var removedCircuits = await db.SatisfactoryCircuitSamples
+            .Where(s => s.SampledUtc < cutoff)
+            .ExecuteDeleteAsync(ct);
+
+        if (removed > 0 || removedCircuits > 0)
+            _logger.LogInformation(
+                "Pruned {Count} Satisfactory power sample(s) and {Circuits} per-circuit sample(s) older than {Days}d",
+                removed, removedCircuits, days);
     }
 
     /// <summary>

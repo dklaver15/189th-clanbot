@@ -54,10 +54,14 @@ public class SatisfactoryMetricSample
     public double PowerCapacityMw { get; set; }
 
     /// <summary>
-    /// Reported generation, MW. <b>Reads 0 on this server</b> even while
-    /// circuits draw tens of megawatts, which is why the digest doesn't print
-    /// it. Recorded anyway so that if a future FRM version starts populating
-    /// it, the history is already there rather than starting from zero.
+    /// Reported generation, MW — what generators are ACTUALLY making, as
+    /// opposed to <see cref="PowerCapacityMw"/>, which is what they could make
+    /// if fully supplied.
+    ///
+    /// <para>This read 0 for a while and was recorded on the chance it started
+    /// working; it did (975 MW on 2026-07-25). The gap between this and capacity
+    /// is the interesting quantity: it's generators starved of fuel or water,
+    /// and a circuit can trip with capacity to spare because of it.</para>
     /// </summary>
     public double PowerProductionMw { get; set; }
 

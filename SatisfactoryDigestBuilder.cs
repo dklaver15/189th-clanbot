@@ -606,13 +606,16 @@ public sealed class SatisfactoryDigestBuilder
     /// <summary>
     /// Grid load, as consumption against generating capacity.
     ///
-    /// <para><b>PowerProduction is deliberately not reported.</b> FRM returns 0
-    /// for it on this server even while circuits are drawing tens of megawatts,
-    /// so printing it produced "83.9 / 180 MW used, 0 MW produced" — which reads
-    /// as a factory that should have tripped its fuse. Capacity already conveys
-    /// headroom, and it's the number that's actually populated. The field is
-    /// still shown IF it ever comes back non-zero, so a future FRM version that
-    /// populates it isn't silently ignored.</para>
+    /// <para><b>PowerProduction is shown only when non-zero.</b> It used to read
+    /// 0 on this server while circuits drew tens of megawatts, which printed as
+    /// "83.9 / 180 MW used, 0 MW produced" — a factory that should have tripped.
+    /// It populates now (975 MW on 2026-07-25), so the guard is no longer
+    /// hiding it; keep the guard anyway, since circuits with no generation at
+    /// all still report 0 and "0 MW being generated" is noise on those.</para>
+    ///
+    /// <para>Worth knowing when reading it: production BELOW consumption is the
+    /// supply side failing to keep up — generators starved of fuel or water —
+    /// not a measurement quirk.</para>
     /// </summary>
     private static void AddPowerField(EmbedBuilder embed, IReadOnlyList<FrmPowerCircuit>? power)
     {

@@ -73,7 +73,89 @@ public sealed record FrmPowerCircuit(
     double BatteryCapacity,
     string BatteryTimeEmpty,
     string BatteryTimeFull,
-    bool FuseTriggered);
+    bool FuseTriggered,
+    IReadOnlyList<int>? AssociatedCircuits = null);
+
+/// <summary>
+/// The power block that hangs off every powered thing FRM reports — generators
+/// and consumers alike. JSON key is "PowerInfo".
+///
+/// <para><b>CircuitGroupId is -1</b> for anything not wired to a circuit at all
+/// (an unconnected pipeline junction, for one), so it is not safe to treat as
+/// an index. Filter on equality with a known group, never on "not zero".</para>
+///
+/// <para>Note which field survives a trip: once the fuse blows, everything on
+/// the circuit reads <see cref="PowerConsumed"/> ≈ 0, so post-trip only
+/// <see cref="MaxPowerConsumed"/> still says anything about what was drawing.</para>
+/// </summary>
+public sealed record FrmPowerInfo(
+    int CircuitGroupId,
+    int CircuitId,
+    bool FuseTriggered,
+    double PowerConsumed,
+    double MaxPowerConsumed);
+
+/// <summary>
+/// A generator's secondary input — water, for coal and fuel generators. Null on
+/// generator types that don't take one.
+///
+/// <para><see cref="PercentFull"/> is the one worth alerting on: a coal plant
+/// with no water produces nothing regardless of how much coal it's holding.</para>
+/// </summary>
+public sealed record FrmGeneratorSupplement(
+    string? Name,
+    string? ClassName,
+    double CurrentConsumed,
+    double MaxConsumed,
+    double PercentFull);
+
+/// <summary>One stack in a generator's fuel inventory.</summary>
+public sealed record FrmFuelStack(
+    string? Name,
+    string? ClassName,
+    double Amount,
+    double MaxAmount);
+
+/// <summary>
+/// One power generator.
+///
+/// <para><b>Field names come from the live server, not the docs</b> — the docs
+/// list IsFullBlast and a top-level CircuitID, neither of which exists in the
+/// response. Both would have deserialized to a silent default.</para>
+///
+/// <para><see cref="FuelAmount"/> is a FRACTION (0.54 in the capture), i.e. how
+/// far through the current fuel item the generator is — not a quantity, and not
+/// a shortage signal. For "is it about to run dry", read
+/// <see cref="FuelInventory"/> amounts instead.</para>
+/// </summary>
+public sealed record FrmGenerator(
+    string? Id,
+    string? Name,
+    string? ClassName,
+    double BaseProd,
+    double ProductionCapacity,
+    double PowerProductionPotential,
+    double LoadPercentage,
+    bool IsFullSpeed,
+    bool CanStart,
+    double FuelAmount,
+    string? FuelResource,
+    string? NuclearWarning,
+    FrmGeneratorSupplement? Supplement,
+    IReadOnlyList<FrmFuelStack>? FuelInventory,
+    FrmPowerInfo? PowerInfo);
+
+/// <summary>
+/// One powered building, from getPowerUsage.
+///
+/// <para><b>This endpoint returns EVERY powered building in the save</b>, so it
+/// belongs on a one-off diagnostic and never in a poll loop.</para>
+/// </summary>
+public sealed record FrmPoweredBuilding(
+    string? Id,
+    string? Name,
+    string? ClassName,
+    FrmPowerInfo? PowerInfo);
 
 /// <summary>One item still owed for the current space-elevator phase.</summary>
 public sealed record FrmPhaseItem(string Name, int RemainingCost, int TotalCost);
@@ -280,6 +362,21 @@ public sealed class FrmApiService
     /// <summary>Power circuit groups, including fuse and battery state. Null = unreachable.</summary>
     public Task<IReadOnlyList<FrmPowerCircuit>?> GetPowerAsync(CancellationToken ct = default) =>
         GetListAsync<FrmPowerCircuit>("getPower", ct);
+
+    /// <summary>
+    /// Every generator, with fuel, water and run state. Moderately large — for
+    /// diagnosing a specific event, not for polling. Null = unreachable.
+    /// </summary>
+    public Task<IReadOnlyList<FrmGenerator>?> GetGeneratorsAsync(CancellationToken ct = default) =>
+        GetListAsync<FrmGenerator>("getGenerators", ct);
+
+    /// <summary>
+    /// Every powered building and what it draws. <b>The whole save</b> — this is
+    /// in the same weight class as getFactory and must never go in a poll loop.
+    /// Null = unreachable.
+    /// </summary>
+    public Task<IReadOnlyList<FrmPoweredBuilding>?> GetPowerUsageAsync(CancellationToken ct = default) =>
+        GetListAsync<FrmPoweredBuilding>("getPowerUsage", ct);
 
     /// <summary>
     /// Space elevators and their phase requirements. An EMPTY list is normal and
