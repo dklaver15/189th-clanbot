@@ -597,8 +597,7 @@ public class CommandsCommandHandler
         var compEventLbl     = $"{config.CompEventMinRank}+";
         var awolKickLbl      = $"{config.AwolKickMinRank}+";
         var briefingLbl      = $"{config.BriefingNowMinRank}+";
-        var palworldLbl      = $"{config.PalworldMinRank}+";
-        var xpAdminLbl       = $"{config.XpAdminMinRank}+";
+            var xpAdminLbl       = $"{config.XpAdminMinRank}+";
         const string eventCreditLbl   = "CPT+";   // SyncWithHandlers: EventCreditCommandHandler.MinRankFloor
         const string attendanceLbl    = "MAJ+";   // SyncWithHandlers: AttendanceCommandHandler.MinRankFloor
         const string securityAuditLbl = "BG+";    // SyncWithHandlers: SecurityAuditCommandHandler.MinRankFloor
@@ -727,16 +726,19 @@ public class CommandsCommandHandler
             new("ticket-panel", "Post (or re-post) the ticket panel to the tickets channel",
                 "HQ", ticketHq),   // SyncWithHandlers: TicketPanelCommandHandler.InvokerHasPermission
 
+            // Open to everyone, same as their Satisfactory counterparts — these
+            // read public server state and change nothing.
+            // SyncWithHandlers: PalworldCommandHandler.PassesMemberGateAsync
             new("palworld-status", "Live status of the clan's Palworld server — who's on, uptime, in-game day",
-                palworldLbl, MinRank(config.PalworldMinRank)),   // SyncWithHandlers: PalworldCommandHandler.HasMinRank
+                "Everyone", everyone),
             new("palworld-playtime", "How long someone has played on the clan's Palworld server",
-                palworldLbl, MinRank(config.PalworldMinRank)),
+                "Everyone", everyone),
             new("palworld-leaderboard", "Top Palworld players by playtime or level",
-                palworldLbl, MinRank(config.PalworldMinRank)),
+                "Everyone", everyone),
             new("palworld-link", "Link your Discord account to your Palworld character (be online in-game)",
-                palworldLbl, MinRank(config.PalworldMinRank)),
+                "Everyone", everyone),
             new("palworld-performance", "Palworld server FPS history — is lag from player count or uptime?",
-                palworldLbl, MinRank(config.PalworldMinRank)),
+                "Everyone", everyone),
 
             new("palworld-name", "Pin a canonical name for a Palworld player across the feed, playtime & leaderboard",
                 "Palworld Mod", palworldMod),   // SyncWithHandlers: PalworldCommandHandler.HasAdminRole (HandleNameAsync)

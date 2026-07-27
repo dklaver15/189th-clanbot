@@ -968,17 +968,22 @@ public class PalworldCommandHandler
     // ─── Shared ──────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// The member-facing gate for /palworld-status, -playtime, -leaderboard and
-    /// -link: feature enabled + configured, in a guild, and at or above
-    /// <see cref="BotConfig.PalworldMinRank"/> (default PFC). Administrator bypasses.
+    /// The member-facing gate for /palworld-status, -playtime, -leaderboard,
+    /// -performance and -link: feature enabled + configured, and in a guild.
+    ///
+    /// <para>No rank floor. There used to be one (PFC+), which meant a recruit
+    /// could ask the bot what the Satisfactory server was doing but not the
+    /// Palworld one — an inconsistency, not a policy. These commands only read
+    /// public server state; the commands that CHANGE anything are gated on the
+    /// Palworld Mod role and always were.</para>
     ///
     /// Runs BEFORE the handler defers and replies with RespondAsync (not Followup),
     /// so a denial is a clean ephemeral message with no dangling deferred response —
     /// which matters for /palworld-leaderboard, whose defer is public.
     ///
     /// /palworld-admin does NOT use this — it has its own role gate
-    /// (<see cref="HasAdminRole"/>) that is independent of the rank ladder, because
-    /// the server's owner holds the mod role without holding a clan rank.
+    /// (<see cref="HasAdminRole"/>), because the server's owner holds the mod
+    /// role without holding a clan rank.
     /// </summary>
     private async Task<bool> PassesMemberGateAsync(SocketSlashCommand command)
     {
@@ -991,17 +996,9 @@ public class PalworldCommandHandler
             return false;
         }
 
-        if (command.User is not SocketGuildUser caller)
+        if (command.User is not SocketGuildUser)
         {
             await command.RespondAsync("This command can only be used in a server.", ephemeral: true);
-            return false;
-        }
-
-        if (!HasMinRank(caller))
-        {
-            await command.RespondAsync(
-                $"❌ You need to be **{_config.PalworldMinRank}+** to use the Palworld commands.",
-                ephemeral: true);
             return false;
         }
 
@@ -1022,29 +1019,6 @@ public class PalworldCommandHandler
             "`PalworldAdminPassword`). Ask an admin.",
             ephemeral: ephemeral);
         return false;
-    }
-
-    /// <summary>
-    /// Rank floor for the member-facing commands: Administrator bypasses, otherwise
-    /// any role at or above <see cref="BotConfig.PalworldMinRank"/> in the RankRoles
-    /// ladder. An unrecognized configured rank fails CLOSED (nobody but Admins),
-    /// same conservative default as the other rank gates.
-    /// SyncWithHandlers: CommandsCommandHandler.BuildCatalog (MinRank(PalworldMinRank)).
-    /// </summary>
-    private bool HasMinRank(SocketGuildUser user)
-    {
-        if (user.GuildPermissions.Administrator) return true;
-
-        var rankRoles = _config.GetRankRolesList();
-        var minIndex = rankRoles.FindIndex(r =>
-            r.Equals(_config.PalworldMinRank, StringComparison.OrdinalIgnoreCase));
-        if (minIndex < 0) return false;
-
-        return user.Roles.Any(role =>
-        {
-            var roleIndex = rankRoles.FindIndex(r => r.Equals(role.Name, StringComparison.OrdinalIgnoreCase));
-            return roleIndex >= minIndex;
-        });
     }
 
     private static async Task ReportAsync(SocketSlashCommand command, bool ok, string success, string failure) =>

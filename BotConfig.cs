@@ -1619,16 +1619,6 @@ public class BotConfig
     public int PalworldLagAlertCooldownMinutes { get; set; } = 60;
 
     /// <summary>
-    /// Minimum rank to use the member-facing Palworld commands (/palworld-status,
-    /// -playtime, -leaderboard, -link). Default PFC — keeps brand-new recruits
-    /// (RCT) out while opening it to essentially the whole membership. Administrator
-    /// bypasses. Does NOT apply to /palworld-admin, which is gated on
-    /// PalworldAdminRoleId instead.
-    /// SyncWithHandlers: PalworldCommandHandler.HasMinRank.
-    /// </summary>
-    public string PalworldMinRank { get; set; } = "PFC";
-
-    /// <summary>
     /// Whether the whole-server up/down notice is posted (as a green/red embed) to
     /// the feed channel when the server comes online or goes offline. Default true.
     /// Independent of the per-player join/leave feed — this can be silenced on its
