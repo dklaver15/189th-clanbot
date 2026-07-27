@@ -451,8 +451,23 @@ public class SatisfactoryCommandHandler
 
     // ─── /satisfactory-production ────────────────────────────────────────────
 
-    /// <summary>Item-name column width. Long names are elided, not wrapped.</summary>
-    private const int ProductionNameWidth = 24;
+    /// <summary>
+    /// Column widths, chosen for MOBILE. Discord's mobile code blocks wrap at
+    /// roughly 30 characters, and a wrapped table is worse than no table — every
+    /// row splits and the columns stop lining up, which is the only reason to
+    /// use a monospace block in the first place.
+    ///
+    /// <para>Total is 31. Desktop shows the same narrow table with space to the
+    /// right, which costs nothing; widening for desktop would cost mobile
+    /// everything. Names elide at 12 characters — "Compacted Coal" and
+    /// "Reinforced Iron Plate" both lose their tails, and that was the accepted
+    /// trade for keeping all three numbers.</para>
+    /// </summary>
+    private const int ProductionNameWidth = 13;
+
+    private const int ProductionProdWidth = 6;
+    private const int ProductionPctWidth = 5;
+    private const int ProductionUsedWidth = 7;
 
     private const string ProductionSortOutputId = "satprod:sort:output";
     private const string ProductionSortAlphaId = "satprod:sort:alpha";
@@ -563,9 +578,9 @@ public class SatisfactoryCommandHandler
         if (rows.Count == 0) return null;
 
         var header = "Item".PadRight(ProductionNameWidth)
-                     + "prod/min".PadLeft(9)
-                     + "max".PadLeft(6)
-                     + "used/min".PadLeft(10);
+                     + "prod".PadLeft(ProductionProdWidth)
+                     + "max".PadLeft(ProductionPctWidth)
+                     + "used".PadLeft(ProductionUsedWidth);
 
         // 4096 is the description cap; leave room for the code fences and the
         // footer. At ~50 characters a row that holds around 75 items — well past
@@ -582,19 +597,15 @@ public class SatisfactoryCommandHandler
         {
             var name = Truncate(p.Name ?? "?", ProductionNameWidth - 1).PadRight(ProductionNameWidth);
 
-            var prod = p.CurrentProd > 0.01
-                ? p.CurrentProd.ToString("0.#").PadLeft(9)
-                : "-".PadLeft(9);
+            var prod = Flow(p.CurrentProd, ProductionProdWidth);
 
             // MaxProd is 0 for consume-only items, and dividing by it unguarded
             // is the oldest bug in this file.
             var pct = p.MaxProd > 0 && p.CurrentProd > 0.01
-                ? $"{100.0 * p.CurrentProd / p.MaxProd:0}%".PadLeft(6)
-                : "-".PadLeft(6);
+                ? $"{100.0 * p.CurrentProd / p.MaxProd:0}%".PadLeft(ProductionPctWidth)
+                : "-".PadLeft(ProductionPctWidth);
 
-            var used = p.CurrentConsumed > 0.01
-                ? p.CurrentConsumed.ToString("0.#").PadLeft(10)
-                : "-".PadLeft(10);
+            var used = Flow(p.CurrentConsumed, ProductionUsedWidth);
 
             var line = name + prod + pct + used;
 
@@ -621,6 +632,22 @@ public class SatisfactoryCommandHandler
             .WithFooter(footer)
             .WithCurrentTimestamp()
             .Build();
+    }
+
+    /// <summary>
+    /// A rate, right-aligned into a fixed column.
+    ///
+    /// <para>Drops the decimal above 1000 so a big number can't outgrow its
+    /// column and shove the row out of alignment — at four figures the tenths
+    /// are noise anyway. Zero renders as "-" rather than "0.0", so a
+    /// consume-only item reads as not producing instead of producing nothing.</para>
+    /// </summary>
+    private static string Flow(double value, int width)
+    {
+        if (value <= 0.01) return "-".PadLeft(width);
+
+        var text = value >= 1000 ? value.ToString("0") : value.ToString("0.#");
+        return text.PadLeft(width);
     }
 
     /// <summary>
