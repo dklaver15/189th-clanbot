@@ -549,15 +549,6 @@ public class CommandsCommandHandler
             return user.Roles.Any(r => r.Id == cfg.PalworldAdminRoleId);
         };
 
-        // SyncWithHandlers: SatisfactoryCommandHandler.HasAdminRole
-        // The "Satisfactory Mod" role. Fails closed (Administrators only) when unset.
-        Func<SocketGuildUser, BotConfig, bool> satisfactoryMod = (user, cfg) =>
-        {
-            if (user.GuildPermissions.Administrator) return true;
-            if (cfg.SatisfactoryAdminRoleId == 0) return false;
-            return user.Roles.Any(r => r.Id == cfg.SatisfactoryAdminRoleId);
-        };
-
         // SyncWithHandlers: SetNickCommandHandler.HasPermission
         Func<SocketGuildUser, BotConfig, bool> officerOrManageNicknames = (user, cfg) =>
         {
@@ -745,9 +736,6 @@ public class CommandsCommandHandler
 
             new("palworld-admin", "Administer the Palworld server — announce, kick, ban, unban, save, restart",
                 "Palworld Mod", palworldMod),   // SyncWithHandlers: PalworldCommandHandler.HasAdminRole
-
-            new("satisfactory-admin", "Administer the Satisfactory server — save, restart, run a console command",
-                "Satisfactory Mod", satisfactoryMod),   // SyncWithHandlers: SatisfactoryCommandHandler.HasAdminRole
 
             new("purge-user", "Delete a member's recent messages server-wide (dry-run unless confirm:true)",
                 "Admin", (user, _) => user.GuildPermissions.Administrator),   // SyncWithHandlers: PurgeUserCommandHandler

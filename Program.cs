@@ -583,8 +583,12 @@ try
     // hence the dedicated named HttpClient below that accepts any server certificate
     // (trust scoped to this one client only). Auth is a Bearer token, from either a
     // pre-generated Application token or an Admin-password login the client caches.
-    // SatisfactoryCommandHandler owns /satisfactory-status and the role-gated
-    // /satisfactory-admin (Register() called from DiscordBotService).
+    // SatisfactoryCommandHandler owns the read-only /satisfactory-* commands
+    // (Register() called from DiscordBotService). It no longer writes: save/restart/
+    // run-command were removed 2026-07-28, since the host's own Discord bot restarts
+    // from the panel side and can revive a crashed server, which the game API can't.
+    // SatisfactoryApiService still exposes SaveGame/Shutdown/RunCommand for whenever
+    // a host-panel client makes them worth wiring up again.
     // SatisfactoryPresenceService polls QueryServerState for the up/down + player-count
     // feed — the API has no webhooks and no player-list, so only a COUNT is available.
     // All gated by BotConfig.Satisfactory* — idle until SatisfactoryEnabled + a base

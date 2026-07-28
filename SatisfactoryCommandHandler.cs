@@ -20,12 +20,13 @@ namespace ClanGuardBot.Handlers;
 ///   • /satisfactory-playtime    — one player's total hours and last-seen                 (everyone)
 ///   • /satisfactory-leaderboard — most playtime, public                                  (everyone)
 ///   • /satisfactory-link        — bind a Discord account to an in-game name              (everyone; others = Satisfactory Mod)
-///   • /satisfactory-admin       — save / restart / run-command                           (Satisfactory Mod)
 ///
 /// ── Two data sources ──
 /// <see cref="SatisfactoryApiService"/> is the game's own HTTPS API: authoritative
-/// for server state and the only thing that can save/restart, but it exposes no
-/// player list — a COUNT is all it will ever give.
+/// for server state, but it exposes no player list — a COUNT is all it will ever
+/// give. Read-only from here: the save/restart/run-command surface was removed
+/// 2026-07-28 (the host's own bot restarts from the panel side and can revive a
+/// crashed server, which this API structurally cannot).
 /// <see cref="FrmApiService"/> is the Ficsit Remote Monitoring mod, which supplies
 /// what that can't: player NAMES and the mod list. It's optional, so every FRM
 /// read here is best-effort — a null result drops the extra field rather than
@@ -51,7 +52,6 @@ public class SatisfactoryCommandHandler
         "satisfactory-graph",
         "satisfactory-production",
         "satisfactory-link",
-        "satisfactory-admin",
     };
 
     /// <summary>Cap on leaderboard rows, so the embed can't blow the description limit.</summary>
@@ -189,27 +189,6 @@ public class SatisfactoryCommandHandler
                 "Link on someone else's behalf (Satisfactory Mod only)", isRequired: false)
             .Build();
 
-    public static SlashCommandProperties BuildAdminCommand() =>
-        new SlashCommandBuilder()
-            .WithName("satisfactory-admin")
-            .WithDescription("Administer the Satisfactory server — save, restart, run a console command (Satisfactory Mod)")
-            .AddOption(new SlashCommandOptionBuilder()
-                .WithName("save")
-                .WithDescription("Force a world save")
-                .WithType(ApplicationCommandOptionType.SubCommand)
-                .AddOption("name", ApplicationCommandOptionType.String,
-                    "Save file name (defaults to the current session)", isRequired: false))
-            .AddOption(new SlashCommandOptionBuilder()
-                .WithName("restart")
-                .WithDescription("Save, then shut the server down (the host restart script brings it back up)")
-                .WithType(ApplicationCommandOptionType.SubCommand))
-            .AddOption(new SlashCommandOptionBuilder()
-                .WithName("command")
-                .WithDescription("Run a console command on the server and show its output")
-                .WithType(ApplicationCommandOptionType.SubCommand)
-                .AddOption("command", ApplicationCommandOptionType.String, "The console command line to run", isRequired: true))
-            .Build();
-
     public void Register(DiscordSocketClient client)
     {
         client.SlashCommandExecuted += OnSlashCommandAsync;
@@ -283,7 +262,6 @@ public class SatisfactoryCommandHandler
             case "satisfactory-graph":       await HandleGraphAsync(command); break;
             case "satisfactory-production":  await HandleProductionAsync(command); break;
             case "satisfactory-link":        await HandleLinkAsync(command); break;
-            case "satisfactory-admin":  await HandleAdminAsync(command); break;
         }
     }
 
@@ -303,7 +281,8 @@ public class SatisfactoryCommandHandler
         if (state is null && health is null)
         {
             await command.FollowupAsync(
-                "🔴 The Satisfactory server isn't responding — it's most likely offline or restarting.",
+                $"🔴 The Satisfactory server isn't responding. It's most likely offline or restarting.\n\n" +
+                $"{OfflineHint()}",
                 ephemeral: true);
             return;
         }
@@ -993,109 +972,6 @@ public class SatisfactoryCommandHandler
             ephemeral: true);
     }
 
-    // ─── /satisfactory-admin ─────────────────────────────────────────────────
-
-    private async Task HandleAdminAsync(SocketSlashCommand command)
-    {
-        await command.DeferAsync(ephemeral: true);
-        if (!await EnsureEnabledAsync(command)) return;
-
-        if (command.User is not SocketGuildUser caller)
-        {
-            await command.FollowupAsync("This command can only be used in a server.", ephemeral: true);
-            return;
-        }
-
-        if (!HasAdminRole(caller))
-        {
-            await command.FollowupAsync(
-                "❌ You don't have permission to use this command (requires the Satisfactory Mod role).",
-                ephemeral: true);
-            return;
-        }
-
-        var sub = command.Data.Options.FirstOrDefault();
-        if (sub is null)
-        {
-            await command.FollowupAsync("No subcommand given.", ephemeral: true);
-            return;
-        }
-
-        var opts = sub.Options?.ToList() ?? new List<SocketSlashCommandDataOption>();
-        string? Opt(string n) => opts.FirstOrDefault(o => o.Name == n)?.Value as string;
-
-        switch (sub.Name)
-        {
-            case "save":
-            {
-                var name = (Opt("name") ?? "").Trim();
-                if (name.Length == 0)
-                    name = (await _api.GetServerStateAsync())?.ActiveSessionName ?? "ClanSave";
-
-                var ok = await _api.SaveGameAsync(name);
-                if (ok) _logger.LogInformation("Satisfactory save '{Name}' by {Caller}", name, caller.Id);
-
-                await ReportAsync(command, ok,
-                    $"💾 Saved to **{Escape(name)}**.",
-                    "Save failed — the server may be offline.");
-                break;
-            }
-
-            case "restart":
-            {
-                // Save first, on purpose: a shutdown without a save can cost whatever
-                // was built since the last autosave, and this is most often run
-                // precisely because something is misbehaving.
-                var name = (await _api.GetServerStateAsync())?.ActiveSessionName ?? "ClanSave";
-                var saved = await _api.SaveGameAsync(name);
-                if (!saved)
-                {
-                    await command.FollowupAsync(
-                        "⚠️ Couldn't save the world, so I did NOT restart. The server may be offline — " +
-                        "check the host panel before forcing anything.",
-                        ephemeral: true);
-                    return;
-                }
-
-                var ok = await _api.ShutdownAsync();
-                if (ok) _logger.LogWarning("Satisfactory restart (save + shutdown) by {Caller}", caller.Id);
-
-                await ReportAsync(command, ok,
-                    $"💾 Saved to **{Escape(name)}**, and sent the shutdown. If a restart script is configured " +
-                    "on the host, it should come straight back up (otherwise someone has to start it).",
-                    "Shutdown failed — the world WAS saved, though. Check the host panel.");
-                break;
-            }
-
-            case "command":
-            {
-                var cmd = (Opt("command") ?? "").Trim();
-                if (cmd.Length == 0)
-                {
-                    await command.FollowupAsync("Give me a command to run.", ephemeral: true);
-                    return;
-                }
-
-                var (ok, output) = await _api.RunCommandAsync(cmd);
-                if (ok) _logger.LogInformation("Satisfactory RunCommand '{Command}' by {Caller}", cmd, caller.Id);
-
-                if (!ok)
-                {
-                    await command.FollowupAsync("⚠️ Command failed — the server may be offline.", ephemeral: true);
-                    return;
-                }
-
-                var body = string.IsNullOrWhiteSpace(output) ? "_(no output)_" : $"```\n{Truncate(output, 1800)}\n```";
-                await command.FollowupAsync($"🖥️ Ran `{Escape(cmd)}`:\n{body}", ephemeral: true);
-                break;
-            }
-
-            default:
-                await command.FollowupAsync($"Unknown subcommand `{sub.Name}`.", ephemeral: true);
-                break;
-        }
-    }
-
     // ─── Shared ──────────────────────────────────────────────────────────────
 
     private async Task<bool> EnsureEnabledAsync(SocketSlashCommand command)
@@ -1109,15 +985,62 @@ public class SatisfactoryCommandHandler
         return false;
     }
 
-    private static async Task ReportAsync(SocketSlashCommand command, bool ok, string success, string failure) =>
-        await command.FollowupAsync(ok ? success : "⚠️ " + failure, ephemeral: true);
+    /// <summary>
+    /// How to name the host's control panel in a failure message. A markdown link
+    /// when <see cref="BotConfig.SatisfactoryHostPanelUrl"/> is set, the bare name
+    /// otherwise, and a neutral fallback when neither is configured.
+    ///
+    /// Every message that uses this is telling someone "the bot cannot fix this",
+    /// so it has to name a place a human can actually go. See the config docs for
+    /// why the bot can't do it itself.
+    /// SyncWithHandlers: BotConfig.SatisfactoryHostPanelName / SatisfactoryHostPanelUrl.
+    /// </summary>
+    private string PanelHint()
+    {
+        var name = string.IsNullOrWhiteSpace(_config.SatisfactoryHostPanelName)
+            ? "the host control panel"
+            : _config.SatisfactoryHostPanelName.Trim();
+
+        var url = (_config.SatisfactoryHostPanelUrl ?? string.Empty).Trim();
+        return url.Length == 0 ? name : $"[{name}]({url})";
+    }
 
     /// <summary>
-    /// Gate for /satisfactory-admin: holders of the "Satisfactory Mod" role
-    /// (<see cref="BotConfig.SatisfactoryAdminRoleId"/>), plus Administrators. A role
-    /// check, not a rank floor — these commands can shut the server down. An unset
+    /// The standard "I couldn't reach the game server" explanation, shown under the
+    /// red /satisfactory-status embed. No "that didn't work" preamble in front of it:
+    /// the failure is already obvious to whoever ran the command, and what they
+    /// actually need is why the bot can't help and where to go instead. The bot talks
+    /// to an API that runs inside the game process, so a server that's down or hung
+    /// can't be reached from Discord, let alone restarted.
+    ///
+    /// When <see cref="BotConfig.SatisfactoryHostBotCommand"/> is set, the host's own
+    /// bot leads: it's a panel-side restart the member can run right here, without
+    /// the dashboard login the fallback needs.
+    /// </summary>
+    private string OfflineHint()
+    {
+        var head =
+            "I can only talk to the game server while it's actually running. The API lives inside the game " +
+            "itself, so when it's down or hung there's nothing here that can bring it back.";
+
+        var hostCommand = (_config.SatisfactoryHostBotCommand ?? string.Empty).Trim();
+        if (hostCommand.Length == 0)
+            return $"{head} Start or restart it from {PanelHint()}.";
+
+        return $"{head} Run `{hostCommand}` instead: that's the host's own bot, and it restarts the server " +
+               $"from their side, which works even when it's crashed. Failing that, {PanelHint()} does the same thing.";
+    }
+
+    /// <summary>
+    /// Holders of the "Satisfactory Mod" role
+    /// (<see cref="BotConfig.SatisfactoryAdminRoleId"/>), plus Administrators. An unset
     /// role id fails CLOSED (Administrators only).
-    /// SyncWithHandlers: CommandsCommandHandler.BuildCatalog (satisfactoryMod).
+    ///
+    /// Only gates linking someone ELSE's in-game name now. The save/restart/command
+    /// subcommands it used to protect were removed 2026-07-28: the host's own Discord
+    /// bot does a panel-side restart that works on a crashed server, which ours never
+    /// could, so keeping a second weaker restart around was just a way to confuse
+    /// people about which one to reach for.
     /// </summary>
     private bool HasAdminRole(SocketGuildUser user)
     {

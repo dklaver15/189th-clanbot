@@ -1782,14 +1782,55 @@ public class BotConfig
     public bool SatisfactoryServerStatusAnnounceEnabled { get; set; } = true;
 
     /// <summary>
-    /// Role permitted to use /satisfactory-admin (save, restart, run-command).
-    /// Administrator always bypasses; 0 locks the command to Administrators only
-    /// (fail closed, never fail open). Deliberately a role id, not a rank floor:
-    /// these commands can shut the game server down, so the people who can run them
-    /// should be an explicit group.
+    /// The "Satisfactory Mod" role. Administrator always bypasses; 0 fails CLOSED
+    /// (Administrators only), never open.
+    ///
+    /// <para>Now gates only /satisfactory-link on someone else's behalf. It used to
+    /// gate /satisfactory-admin save|restart|command, which were removed 2026-07-28
+    /// in favour of the host's own Discord bot. Kept because the role still exists and
+    /// the link case still needs it.</para>
     /// SyncWithHandlers: SatisfactoryCommandHandler.HasAdminRole.
     /// </summary>
     public ulong SatisfactoryAdminRoleId { get; set; } = 0;
+
+    /// <summary>
+    /// Display name of the game host's control panel, used in the "I can't reach the
+    /// server" messages so members are pointed somewhere that can actually help.
+    ///
+    /// <para>Why this exists: the game's HTTPS API lives INSIDE the Satisfactory
+    /// process, so the bot can only ever talk to a server that is already running. A
+    /// crashed or hung one can't be reached, let alone restarted. That needs the host
+    /// panel, and nothing in the bot can reach one: broccoli confirmed 2026-07-28 that
+    /// they have no customer API yet. Rather than hardcode a host name that goes stale
+    /// the next time the clan moves, the messages read it from config.</para>
+    ///
+    /// Empty falls back to the neutral phrase "the host control panel".
+    /// SyncWithHandlers: SatisfactoryCommandHandler.PanelHint.
+    /// </summary>
+    public string SatisfactoryHostPanelName { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Link to the host control panel's dashboard, rendered as a markdown link on
+    /// <see cref="SatisfactoryHostPanelName"/>. Empty = name only, no link.
+    /// SyncWithHandlers: SatisfactoryCommandHandler.PanelHint.
+    /// </summary>
+    public string SatisfactoryHostPanelUrl { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Slash command exposed by the HOST's own Discord bot that restarts the server
+    /// from their side, e.g. <c>/restart</c> from the Indifferent Broccoli Server
+    /// Manager Bot. Named in the offline hint so a member who can't reach the game
+    /// server has a fix they can run without leaving Discord.
+    ///
+    /// <para>broccoli confirmed 2026-07-28 that they have no customer-facing API
+    /// "yet" and pointed at that bot instead, so this is the only panel-side restart
+    /// available to us. Set it only once the host's bot is actually in the guild:
+    /// empty means the hint just points at the dashboard, which is the honest answer
+    /// when there's no bot to run the command on.</para>
+    ///
+    /// SyncWithHandlers: SatisfactoryCommandHandler.OfflineHint.
+    /// </summary>
+    public string SatisfactoryHostBotCommand { get; set; } = string.Empty;
 
     // ─── Ficsit Remote Monitoring (Satisfactory mod) ─────────────────
     /// <summary>

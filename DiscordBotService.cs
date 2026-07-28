@@ -535,11 +535,12 @@ public class DiscordBotService : IHostedService
                 PalworldCommandHandler.BuildAdminCommand(),
 
                 // /satisfactory-* — the clan's Satisfactory Dedicated Server via its
-                // built-in HTTPS API (same port as the game, self-signed cert). status
-                // is open to all members; /satisfactory-admin (save, restart, run a
-                // console command) is gated to the "Satisfactory Mod" role
-                // (BotConfig.SatisfactoryAdminRoleId). Runtime-gated by
-                // BotConfig.SatisfactoryEnabled. Handled by SatisfactoryCommandHandler.
+                // built-in HTTPS API (same port as the game, self-signed cert). All of
+                // these are read-only and open to all members; the write commands
+                // (/satisfactory-admin save|restart|command) were removed 2026-07-28 in
+                // favour of the host's own Discord bot, whose restart works on a crashed
+                // server. Runtime-gated by BotConfig.SatisfactoryEnabled. Handled by
+                // SatisfactoryCommandHandler.
                 // /satisfactory-mods additionally needs the Ficsit Remote Monitoring
                 // mod (BotConfig.FrmEnabled + FrmBaseUrl) — the game API can't list
                 // mods — and says so rather than failing when FRM is off.
@@ -552,7 +553,6 @@ public class DiscordBotService : IHostedService
                 SatisfactoryCommandHandler.BuildGraphCommand(),
                 SatisfactoryCommandHandler.BuildProductionCommand(),
                 SatisfactoryCommandHandler.BuildLinkCommand(),
-                SatisfactoryCommandHandler.BuildAdminCommand(),
 
                 new SlashCommandBuilder()
                     .WithName("promote")
