@@ -613,15 +613,16 @@ public sealed class PalworldPresenceService : BackgroundService
     /// session logic), which is exactly the kind of thing an embed suits, unlike the
     /// high-volume join/leave lines that stay plain text on purpose.
     ///
-    /// Shares the feed channel, and is gated by BOTH the feed switch (a channel is
-    /// needed either way) and its own PalworldServerStatusAnnounceEnabled, so the
-    /// up/down pings can be silenced without losing the join/leave feed. Best-effort
-    /// — a failed post is logged and dropped, never propagated into the poll loop.
+    /// Shares the feed channel but is gated only by its own
+    /// PalworldServerStatusAnnounceEnabled (plus a channel) — independent of the
+    /// join/leave feed switch, so silencing the per-player chatter leaves the
+    /// up/down notice intact. Best-effort — a failed post is logged and dropped,
+    /// never propagated into the poll loop.
     /// </summary>
     private async Task PostServerStatusAsync(bool online, CancellationToken ct)
     {
         if (!_config.PalworldServerStatusAnnounceEnabled) return;
-        if (!_config.PalworldFeedEnabled || _config.PalworldFeedChannelId == 0) return;
+        if (_config.PalworldFeedChannelId == 0) return;
 
         // Enrich the "online" post with the server name when we can get it; purely
         // cosmetic, so a failure here just omits the footer.
@@ -653,10 +654,15 @@ public sealed class PalworldPresenceService : BackgroundService
     /// Sends an embed to the feed channel. Best-effort: resolution and send failures
     /// are logged and swallowed, never propagated into the poll loop.
     /// <paramref name="what"/> is used only for the failure log line.
+    ///
+    /// Gated ONLY on the channel being configured — NOT on PalworldFeedEnabled.
+    /// PalworldFeedEnabled controls the per-player join/leave chatter alone; the
+    /// server up/down notice and lag alerts (both of which come through here) have
+    /// their own switches and must survive the join/leave feed being silenced.
     /// </summary>
     private async Task PostEmbedAsync(Embed embed, string what, CancellationToken ct)
     {
-        if (!_config.PalworldFeedEnabled || _config.PalworldFeedChannelId == 0) return;
+        if (_config.PalworldFeedChannelId == 0) return;
 
         var channel = await ResolveFeedChannelAsync(ct);
         if (channel is null) return;

@@ -1596,11 +1596,15 @@ public class BotConfig
     public int PalworldPollIntervalSeconds { get; set; } = 60;
 
     /// <summary>
-    /// Whether join/leave messages are posted to <see cref="PalworldFeedChannelId"/>.
-    /// Turning this off still records sessions/playtime — it only silences the chat
-    /// feed. Default true.
+    /// Whether the per-player join/leave messages are posted to
+    /// <see cref="PalworldFeedChannelId"/>. Scoped to ONLY that chatter: turning it
+    /// off still records sessions/playtime, and does NOT affect the server up/down
+    /// notice (<see cref="PalworldServerStatusAnnounceEnabled"/>) or the lag alerts
+    /// (<see cref="PalworldLagAlertEnabled"/>) — those share the channel but have
+    /// their own switches. Default false: the join/leave stream tended to clutter
+    /// the channel, so it's opt-in.
     /// </summary>
-    public bool PalworldFeedEnabled { get; set; } = true;
+    public bool PalworldFeedEnabled { get; set; } = false;
 
     /// <summary>
     /// Channel for the Palworld join/leave feed (the #palworld channel). 0 disables
