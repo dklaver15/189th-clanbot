@@ -60,6 +60,7 @@ public sealed class XpSeasonSchedulerService : BackgroundService
     private readonly DiscordSocketClient _client;
     private readonly XpService _xp;
     private readonly XpLeaderboardService _board;
+    private readonly XpAccrualService _accrual;
     private readonly BotConfig _config;
     private readonly ILogger<XpSeasonSchedulerService> _logger;
 
@@ -68,6 +69,7 @@ public sealed class XpSeasonSchedulerService : BackgroundService
         DiscordSocketClient client,
         XpService xp,
         XpLeaderboardService board,
+        XpAccrualService accrual,
         IOptions<BotConfig> config,
         ILogger<XpSeasonSchedulerService> logger)
     {
@@ -75,6 +77,7 @@ public sealed class XpSeasonSchedulerService : BackgroundService
         _client = client;
         _xp = xp;
         _board = board;
+        _accrual = accrual;
         _config = config.Value;
         _logger = logger;
     }
@@ -176,6 +179,24 @@ public sealed class XpSeasonSchedulerService : BackgroundService
             var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
             if (await _xp.GetSeasonDueToCloseAsync(db, guild.Id, ct) is null) return;
+        }
+
+        // Credit everything earned since the last accrual tick BEFORE freezing the
+        // standings. Final placements are read from the rollup table, which only
+        // XpAccrualService writes, and it runs on a ten minute timer. Skipping this
+        // silently drops up to ten minutes of the season's last activity from the
+        // results card, which is the only permanent record the season leaves.
+        try { await _accrual.RunFinalSweepAsync(guild, ct); }
+        catch (Exception ex)
+        {
+            // Close anyway. Standings a few minutes stale beat a season that runs on
+            // past the date everyone was told it ended.
+            _logger.LogError(ex, "XP: final accrual pass failed for guild {Guild}; closing on stale rollups", guild.Id);
+        }
+
+        using (var scope = _services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
             var result = await _xp.EndSeasonAsync(db, guild.Id, ct);
             if (result is null) return;

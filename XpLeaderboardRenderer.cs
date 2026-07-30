@@ -619,6 +619,14 @@ public sealed class XpLeaderboardRenderer
             _avatarCache[url] = bytes;
             return bytes;
         }
+        catch (OperationCanceledException)
+        {
+            // Ran out of the batch budget, or the caller's refresh was abandoned.
+            // That says nothing about this avatar, so it must NOT be negative-cached:
+            // doing so drew that member as a grey disc on every board for an hour
+            // because one render happened to be slow.
+            return null;
+        }
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "XP board: avatar fetch failed for {Url}", url);

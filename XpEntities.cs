@@ -149,8 +149,11 @@ public class XpSeason
 ///   Meeting      "meet:{calendarEventId}"
 ///   RsvpHonored  "rsvp:{calendarEventId}"
 ///   EventStreak  "streak3:{calendarEventId}" / "streak5:{calendarEventId}"
-///   Voice        "voice:{yyyy-MM-dd}"        — one ROLLUP row per member per UTC day
-///   Message      "msg:{yyyy-MM-dd}"          — one ROLLUP row per member per UTC day
+///   Voice        "voice:{seasonId}:{yyyy-MM-dd}"  — one ROLLUP row per member per UTC day
+///   Message      "msg:{seasonId}:{yyyy-MM-dd}"    — one ROLLUP row per member per UTC day
+///                (season-scoped: without the id, a day straddling a season boundary
+///                 is claimed by whichever season got there first and the new one
+///                 never pays it)
 ///   Manual       "manual:{guid}"             — always unique; officers can stack grants
 ///
 /// A unique index on (GuildId, UserId, Source, SourceKey) is the structural

@@ -104,8 +104,8 @@ public static class XpGuide
         $"• **RSVPs don't decide attendance** — voice presence does. The bonus is only for saying Going and " +
         $"then turning up; you're never docked for missing one.\n" +
         $"• **Voice needs {config.XpVoiceMinSessionMinutes} unbroken minutes** to earn anything. AFK never " +
-        $"counts, and neither does the events channel during an event — that already paid you " +
-        $"{config.XpPerEvent:N0}.\n" +
+        $"counts, and nor do the event and meeting channels at any time, since attending is what pays " +
+        $"there.\n" +
         $"• **Chat is capped at {config.XpMessageDailyCap} messages a day**, on purpose.\n" +
         $"• **Streaks reset** if you miss an event other people made.";
 
@@ -117,8 +117,9 @@ public static class XpGuide
     {
         var perEvent = config.XpPerEvent + config.XpRsvpHonoredBonus;
         return
-            $"1–{config.XpMaxLevel}, each costing a bit more than the last.\n\n" +
-            $"Two events in a week is about **{perEvent * 2:N0} XP** — roughly a level a week.";
+            $"1 to {config.XpMaxLevel}, each costing a bit more than the last.\n\n" +
+            $"Two events in a week is about **{perEvent * 2:N0} XP**. The first few levels go by quickly, " +
+            $"then they stretch out.";
     }
 
     private static string BuildSeasons() =>

@@ -64,6 +64,14 @@ public sealed class XpAccrualService : BackgroundService
     /// </summary>
     private DateTime? _noSeasonWarnedAt;
 
+    /// <summary>
+    /// Serialises accrual for a guild. Two passes over the same window are safe on
+    /// their own (every award is idempotent), but the season scheduler now triggers
+    /// an out-of-band pass right before a close, and that one racing the timer pass
+    /// would have both computing standings from a half-written rollup.
+    /// </summary>
+    private readonly SemaphoreSlim _accrualLock = new(1, 1);
+
     private readonly IServiceProvider _services;
     private readonly DiscordSocketClient _client;
     private readonly XpService _xp;
@@ -108,7 +116,7 @@ public sealed class XpAccrualService : BackgroundService
         {
             foreach (var guild in _client.Guilds.ToList())
             {
-                try { await RunGuildAsync(guild, stoppingToken); }
+                try { await RunGuildLockedAsync(guild, stoppingToken); }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
                 catch (Exception ex) { _logger.LogError(ex, "XP accrual failed for guild {Guild}", guild.Id); }
             }
@@ -118,12 +126,40 @@ public sealed class XpAccrualService : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Runs one accrual pass NOW and waits for it, so the caller can rely on the
+    /// rollups being current when it returns.
+    ///
+    /// This exists for exactly one caller: XpSeasonSchedulerService, immediately
+    /// before it closes a season. Final standings are read from XpMemberSeasons,
+    /// which only this service writes, and the timer only fires every
+    /// XpAccrualIntervalMinutes. Without this, everything earned between the last
+    /// tick and the close instant is never credited: the season ends, accrual sees
+    /// no active season and returns early, and that activity is lost permanently
+    /// from a results card that is the season's only permanent record.
+    /// </summary>
+    public async Task RunFinalSweepAsync(SocketGuild guild, CancellationToken ct)
+    {
+        if (!_config.XpEnabled) return;
+
+        _logger.LogInformation("XP: running a final accrual pass for guild {Guild} before the season closes", guild.Id);
+        await RunGuildLockedAsync(guild, ct);
+    }
+
+    private async Task RunGuildLockedAsync(SocketGuild guild, CancellationToken ct)
+    {
+        await _accrualLock.WaitAsync(ct);
+        try { await RunGuildAsync(guild, ct); }
+        finally { _accrualLock.Release(); }
+    }
+
     private async Task RunGuildAsync(SocketGuild guild, CancellationToken ct)
     {
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
-        // Seasons are entirely manual. No season running means no XP accrues —
+        // A season is only ever opened by an officer, whether they typed the command
+        // now or scheduled it earlier. No season running means no XP accrues —
         // the accrual does NOT bank activity against an implicit season, because
         // that would quietly decide something the officers asked to decide
         // themselves. Both the board and /xp state this plainly so it can't sit

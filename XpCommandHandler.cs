@@ -58,10 +58,14 @@ public sealed class XpCommandHandler
 
     private const int ProgressBarWidth = 12;
 
+    /// <summary>Ceiling on the courtesy board refresh an officer command waits for.</summary>
+    private static readonly TimeSpan BoardRefreshTimeout = TimeSpan.FromSeconds(20);
+
     private readonly IServiceProvider _services;
     private readonly DiscordSocketClient _client;
     private readonly XpService _xp;
     private readonly XpLeaderboardService _board;
+    private readonly XpAccrualService _accrual;
     private readonly EventTimeParser _time;
     private readonly BotConfig _config;
     private readonly ILogger<XpCommandHandler> _logger;
@@ -71,6 +75,7 @@ public sealed class XpCommandHandler
         DiscordSocketClient client,
         XpService xp,
         XpLeaderboardService board,
+        XpAccrualService accrual,
         EventTimeParser time,
         IOptions<BotConfig> config,
         ILogger<XpCommandHandler> logger)
@@ -79,6 +84,7 @@ public sealed class XpCommandHandler
         _client = client;
         _xp = xp;
         _board = board;
+        _accrual = accrual;
         _time = time;
         _config = config.Value;
         _logger = logger;
@@ -127,7 +133,7 @@ public sealed class XpCommandHandler
                 .AddOption("end_when", ApplicationCommandOptionType.String,
                     "When to close it automatically, e.g. \"August 31\" (runs through that whole day)", isRequired: false)
                 .AddOption("days", ApplicationCommandOptionType.Integer,
-                    "Planned length in days. Display only unless you also set end_when.", isRequired: false))
+                    "Planned length in days. Display only, and ignored entirely if you set end_when.", isRequired: false))
             .AddOption(new SlashCommandOptionBuilder()
                 .WithName("end")
                 .WithDescription($"Close the season now, or set it to close on its own ({minRank}+ only)")
@@ -161,8 +167,17 @@ public sealed class XpCommandHandler
                 // the award was already written.
                 .WithMinValue(-1_000_000)
                 .WithMaxValue(1_000_000))
-            .AddOption("reason", ApplicationCommandOptionType.String,
-                "Why — shown in the ledger and on their /xp card", isRequired: true)
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("reason")
+                .WithDescription("Why. Shown in the ledger and on their /xp card.")
+                .WithType(ApplicationCommandOptionType.String)
+                .WithRequired(true)
+                // Discord allows 6000 characters in a string option. This value is
+                // echoed into a plain message (2000 cap) AND stored as the ledger note
+                // that /xp renders into an embed field (1024 cap), so it is bounded
+                // here rather than truncated in three places later.
+                .WithMinLength(1)
+                .WithMaxLength(200))
             .Build();
 
     public static SlashCommandProperties BuildDmsCommand() =>
@@ -679,7 +694,8 @@ public sealed class XpCommandHandler
         if (opened.Status == XpSeasonStatus.Scheduled)
         {
             reply.Append($"🗓️ **{XpService.SeasonLabel(opened)}** is lined up to open ");
-            reply.Append($"<t:{Unix(opened.StartUtc)}:F> ({XpLeaderboardService.FormatRelative(opened.StartUtc)}).\n\n");
+            reply.Append($"<t:{Unix(opened.StartUtc)}:F> ({XpLeaderboardService.FormatRelative(opened.StartUtc)}).\n");
+            reply.Append($"_Read in {_lastZoneRead}._\n\n");
             reply.Append("Nothing accrues until then. The board will show the countdown, and the bot posts an ");
             reply.Append("announcement the moment it opens, so you do not need to be around for it.");
         }
@@ -758,7 +774,8 @@ public sealed class XpCommandHandler
 
             await command.FollowupAsync(
                 $"🗓️ **{XpService.SeasonLabel(scheduled)}** will close <t:{Unix(endUtc)}:F> " +
-                $"({XpLeaderboardService.FormatRelative(endUtc)}). Standings get locked in and the results card " +
+                $"({XpLeaderboardService.FormatRelative(endUtc)}), read in {_lastZoneRead}. " +
+                "Standings get locked in and the results card " +
                 "posts on its own, so you do not need to be around. " +
                 "Call it off with `/xp-season cancel confirm:true`.",
                 ephemeral: true);
@@ -777,6 +794,21 @@ public sealed class XpCommandHandler
                 "`when:` to have it close on its own instead.",
                 ephemeral: true);
             return;
+        }
+
+        // Credit everything earned since the last accrual tick BEFORE freezing the
+        // standings, exactly as the scheduled close does. Without this, activity in
+        // the last few minutes is not merely stale on the card, it is lost for good:
+        // no XpAward row was ever written for it, and once the season is Ended
+        // accrual returns at the no-season guard and the NEXT season clamps its
+        // lookback to its own StartUtc. It never reaches AllTimeXp either.
+        if (_client.GetGuild(guildId) is { } sweepGuild)
+        {
+            try { await _accrual.RunFinalSweepAsync(sweepGuild, CancellationToken.None); }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "XP: final accrual pass failed before a manual close of guild {Guild}", guildId);
+            }
         }
 
         var result = await _xp.EndSeasonAsync(db, guildId, CancellationToken.None);
@@ -896,6 +928,7 @@ public sealed class XpCommandHandler
     {
         var iana = (await db.UserTimeZones.FirstOrDefaultAsync(t => t.UserId == userId))?.IanaId;
         var tz   = _time.ResolveZone(iana);
+        _lastZoneRead = iana is null ? $"{tz.Id} (server default, you have no `/timezone` set)" : tz.Id;
 
         var parsed = _time.ParseStart(input, tz);
         if (!parsed.Success)
@@ -939,6 +972,15 @@ public sealed class XpCommandHandler
         utc = default;
         return false;
     }
+
+    /// <summary>
+    /// Which zone ParseWhenAsync last read a time in, echoed back to the officer.
+    /// An hour-wrong season boundary is otherwise near-invisible: the confirmation
+    /// renders &lt;t:...&gt; in the reader's OWN zone, so it looks plausible whether or
+    /// not the input was interpreted the way they meant. Naming the zone makes a
+    /// mismatch obvious. Set on every parse, read immediately after.
+    /// </summary>
+    private string _lastZoneRead = string.Empty;
 
     private static long Unix(DateTime utc) => new DateTimeOffset(utc, TimeSpan.Zero).ToUnixTimeSeconds();
 
@@ -1088,12 +1130,27 @@ public sealed class XpCommandHandler
     /// next ten minutes. Invalidates the render signature first, since a season
     /// change alters content the signature alone might not catch.
     /// </summary>
+    /// <summary>
+    /// Pushes an immediate board redraw after a state change, so an officer is not
+    /// left looking at a stale board for ten minutes.
+    ///
+    /// Bounded, because this sits between the officer and their reply. A refresh can
+    /// post, edit, pin and delete several messages, any of which can be rate limited,
+    /// and the interaction token it is holding up expires after 15 minutes. If it
+    /// overruns, abandon it: the service's own timer will redraw shortly anyway.
+    /// </summary>
     private async Task RefreshBoardAsync(ulong guildId)
     {
         try
         {
             _board.InvalidateBoard(guildId);
-            await _board.RefreshAsync(CancellationToken.None);
+            using var cts = new CancellationTokenSource(BoardRefreshTimeout);
+            await _board.RefreshAsync(cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning("XP: board refresh took longer than {Sec}s after a state change; " +
+                "leaving it to the next scheduled refresh", BoardRefreshTimeout.TotalSeconds);
         }
         catch (Exception ex)
         {

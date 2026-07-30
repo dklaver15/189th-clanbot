@@ -559,7 +559,8 @@ try
     builder.Services.AddSingleton<XpLeaderboardRenderer>();
     builder.Services.AddSingleton<XpLeaderboardService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<XpLeaderboardService>());
-    builder.Services.AddHostedService<XpAccrualService>();
+    builder.Services.AddSingleton<XpAccrualService>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<XpAccrualService>());
     builder.Services.AddHostedService<XpSeasonSchedulerService>();
     builder.Services.AddSingleton<XpCommandHandler>();
 

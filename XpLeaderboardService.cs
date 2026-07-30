@@ -247,11 +247,25 @@ public sealed class XpLeaderboardService : BackgroundService
 
         if (wantGuide && guide is null)
         {
-            // Reposting the guide alone would put it BELOW the board. Take the
-            // board down with it and rebuild both in order.
-            await DeleteAllAsync(board is null ? Array.Empty<IUserMessage>() : new[] { board }, ct);
-            board = null;
-            guide = await PostGuideAsync(guild, channel, ct);
+            // Reposting the guide alone would put it BELOW the board, so the board has
+            // to go too. POST FIRST, THEN DELETE. Deleting first and then failing to
+            // post (rate limit, transient 5xx, Attach Files denied so SendFileAsync
+            // fails where the board's SendMessageAsync would not) leaves guide null
+            // forever, and every subsequent cycle deletes and reposts the board again:
+            // new id, new upload, new pin, new pin notice, indefinitely.
+            var replacement = await PostGuideAsync(guild, channel, ct);
+            if (replacement is not null)
+            {
+                await DeleteAllAsync(board is null ? Array.Empty<IUserMessage>() : new[] { board }, ct);
+                board = null;
+                guide = replacement;
+            }
+            else
+            {
+                // Leave the board exactly where it is and try again next cycle. A
+                // board with no guide above it beats no board at all.
+                _logger.LogWarning("XP: could not repost the guide; leaving the existing board in place");
+            }
         }
         else if (wantGuide && guide is not null)
         {
@@ -284,6 +298,13 @@ public sealed class XpLeaderboardService : BackgroundService
         var (season, scheduled) = await GetSeasonStateAsync(guild.Id, ct);
         var png = _renderer.TryRenderRatesCard();
         var embed = XpGuide.Build(_config, season, scheduled, png is not null);
+
+        // Bank the signature ONLY when a card went up. Leaving it unbanked after a
+        // failed render means UpdateGuideAsync sees ratesChanged forever, and because
+        // a message with no attachment has hasImage false it can never re-render
+        // either: an identical PATCH every cycle, and a card unrecoverable without
+        // deleting the guide by hand.
+        if (png is not null) _lastRatesSignature[guild.Id] = BuildRatesSignature();
 
         try
         {
@@ -346,7 +367,11 @@ public sealed class XpLeaderboardService : BackgroundService
                 await guide.ModifyAsync(m => m.Embed = embed);
             }
 
-            _lastRatesSignature[guild.Id] = ratesSignature;
+            // Only bank the signature if a card actually went up. Recording it after a
+            // failed render (png null) would mean the retuned rates are never drawn
+            // again: the text half would be right and the graphic permanently wrong.
+            if (png is not null || !ratesChanged)
+                _lastRatesSignature[guild.Id] = ratesSignature;
         }
         catch (Exception ex) { _logger.LogWarning(ex, "XP: failed to update the guide message"); }
     }
@@ -488,7 +513,7 @@ public sealed class XpLeaderboardService : BackgroundService
             : null;
 
         var embed = BuildEmbed(season, subtitle, entries, png is not null, page, totalPages);
-        var components = BuildComponents(page, totalPages, forBoard);
+        var components = BuildComponents(page, totalPages, forBoard, pageSize);
 
         return new XpPageRender(embed, png, BoardImageFileName, components, page, totalPages,
             BuildSignature(season, subtitle, entries, page, totalPages, png is not null),
@@ -591,10 +616,19 @@ public sealed class XpLeaderboardService : BackgroundService
         {
             if (guild.GetChannel(channelId) is SocketTextChannel channel)
             {
+                // The one send left without a retry guard, and it runs while holding
+                // _refreshLock. Discord.NET's default RetryMode silently AWAITS a
+                // rate limit, which would park the board loop, make every officer
+                // command's bounded refresh time out, and delay a season transition
+                // blocked on RefreshAsync for as long as the bucket lasts.
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cts.CancelAfter(AnnounceTimeout);
+
                 await channel.SendMessageAsync(
                     text: $"<@{leader.UserId}>",
                     embed: embed,
-                    allowedMentions: new AllowedMentions { UserIds = new List<ulong> { leader.UserId } });
+                    allowedMentions: new AllowedMentions { UserIds = new List<ulong> { leader.UserId } },
+                    options: new RequestOptions { RetryMode = RetryMode.AlwaysFail, CancelToken = cts.Token });
 
                 _logger.LogInformation("XP: announced new leader {User} (was {Previous})", leader.UserId, previous.UserId);
             }
@@ -708,7 +742,7 @@ public sealed class XpLeaderboardService : BackgroundService
 
         var body = new StringBuilder();
         body.Append($"**{XpService.SeasonLabel(scheduled)} opens <t:{Unix(scheduled.StartUtc)}:F>**\n");
-        body.Append($"That is {FormatRelative(scheduled.StartUtc)}.\n\n");
+        body.Append($"That is <t:{Unix(scheduled.StartUtc)}:R>.\n\n");
         body.Append("Nothing counts until then, and everyone starts at zero. Attend events between now and ");
         body.Append("the start if you like, they just won't be worth XP yet.");
 
@@ -761,7 +795,7 @@ public sealed class XpLeaderboardService : BackgroundService
     /// nothing else, so they keep working across restarts with no state to
     /// rehydrate.
     /// </summary>
-    private static MessageComponent? BuildComponents(int page, int totalPages, bool forBoard)
+    private static MessageComponent? BuildComponents(int page, int totalPages, bool forBoard, int pageSize)
     {
         if (totalPages <= 1 && forBoard) return null;
 
@@ -769,7 +803,7 @@ public sealed class XpLeaderboardService : BackgroundService
 
         if (forBoard)
         {
-            builder.WithButton("Next 25 ▶", $"xp:page:2", ButtonStyle.Secondary);
+            builder.WithButton($"Next {pageSize} \u25B6", "xp:page:2", ButtonStyle.Secondary);
             builder.WithButton("🔎 Find me", "xp:find", ButtonStyle.Primary);
             return builder.Build();
         }
@@ -800,11 +834,14 @@ public sealed class XpLeaderboardService : BackgroundService
 
     private SocketTextChannel? ResolveAnnounceChannel(SocketGuild guild)
     {
-        var channelId = _config.XpLevelUpAnnounceChannelId != 0
-            ? _config.XpLevelUpAnnounceChannelId
-            : _config.XpBoardChannelId;
+        var channelId = _config.XpLevelUpAnnounceChannelId;
 
+        // 0 means "no announcements", the same as it does for level-ups and leader
+        // changes. Falling back to the board channel would drop a post into the
+        // read-only channel and leave the board no longer the last message there.
         if (channelId == 0) return null;
+        if (channelId == _config.XpBoardChannelId) return null;
+
         return guild.GetChannel(channelId) as SocketTextChannel;
     }
 
@@ -830,7 +867,7 @@ public sealed class XpLeaderboardService : BackgroundService
         body.Append("Everyone starts at zero. Lifetime totals from past seasons are untouched.");
 
         if (season.AutoEndUtc is { } close)
-            body.Append($"\n\nThe season closes <t:{Unix(close)}:F> ({FormatRelative(close)}).");
+            body.Append($"\n\nThe season closes <t:{Unix(close)}:F>, <t:{Unix(close)}:R>.");
         else if (season.EndUtc is { } target)
             body.Append($"\n\nIt is planned to run until <t:{Unix(target)}:D>.");
 
