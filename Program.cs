@@ -560,6 +560,7 @@ try
     builder.Services.AddSingleton<XpLeaderboardService>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<XpLeaderboardService>());
     builder.Services.AddHostedService<XpAccrualService>();
+    builder.Services.AddHostedService<XpSeasonSchedulerService>();
     builder.Services.AddSingleton<XpCommandHandler>();
 
     // ── Palworld (DatHost) ───────────────────────────────────────────

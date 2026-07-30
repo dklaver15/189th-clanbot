@@ -79,7 +79,7 @@ public sealed class XpLeaderboardService : BackgroundService
     /// exactly one refresh instead of leaving the old board up until someone's XP
     /// happens to move.
     /// </summary>
-    private const string BoardSchemaVersion = "v2";
+    private const string BoardSchemaVersion = "v3";
 
     private const int BoardScanLimit = 50;
 
@@ -103,6 +103,9 @@ public sealed class XpLeaderboardService : BackgroundService
     // for a week. Same silent-baseline trick FinalsLeaderboardService uses for
     // rank-ups — a first sighting never announces.
     private readonly ConcurrentDictionary<ulong, LeaderState> _lastLeader = new();
+
+    // guildId → signature of the economy values baked into the rendered rates card.
+    private readonly ConcurrentDictionary<ulong, string> _lastRatesSignature = new();
 
     private readonly record struct LeaderState(int SeasonId, ulong UserId, DateTime AnnouncedAtUtc);
 
@@ -193,6 +196,20 @@ public sealed class XpLeaderboardService : BackgroundService
     {
         if (_client.CurrentUser is null) return;
 
+        // After a full reconnect Discord.NET re-chunks the member cache asynchronously,
+        // so guild.GetUser() briefly returns null for most of the roster. With
+        // XpBoardCurrentMembersOnly on, a refresh in that gap filters the board down to
+        // whoever happens to be cached, re-numbers them, and — far worse — hands
+        // CheckLeaderChangeAsync a bogus leader, pinging a mid-table member as the new
+        // #1. The startup grace only covers process start, not later reconnects.
+        if (_config.XpBoardCurrentMembersOnly && guild.MemberCount > 0
+            && guild.DownloadedMemberCount < guild.MemberCount)
+        {
+            _logger.LogDebug("XP: member cache still syncing ({Have}/{Want}) — skipping this refresh",
+                guild.DownloadedMemberCount, guild.MemberCount);
+            return;
+        }
+
         var recent = (await channel.GetMessagesAsync(BoardScanLimit).FlattenAsync()).ToList();
         var mine = recent.OfType<IUserMessage>().Where(m => m.Author.Id == _client.CurrentUser.Id).ToList();
 
@@ -219,6 +236,14 @@ public sealed class XpLeaderboardService : BackgroundService
         // Snowflake ids are monotonic, so a guide with a HIGHER id than the board
         // means the two are inverted in the channel and the board has to move.
         var outOfOrder = wantGuide && guide is not null && board is not null && guide.Id > board.Id;
+
+        // Guide turned off after one was posted: take it down rather than leaving an
+        // orphan that is still pinned, never updated, and can't be re-ordered.
+        if (!wantGuide && guide is not null)
+        {
+            await DeleteAllAsync(new[] { guide }, ct);
+            guide = null;
+        }
 
         if (wantGuide && guide is null)
         {
@@ -256,9 +281,9 @@ public sealed class XpLeaderboardService : BackgroundService
 
     private async Task<IUserMessage?> PostGuideAsync(SocketGuild guild, SocketTextChannel channel, CancellationToken ct)
     {
-        var season = await GetSeasonAsync(guild.Id, ct);
+        var (season, scheduled) = await GetSeasonStateAsync(guild.Id, ct);
         var png = _renderer.TryRenderRatesCard();
-        var embed = XpGuide.Build(_config, season, png is not null);
+        var embed = XpGuide.Build(_config, season, scheduled, png is not null);
 
         try
         {
@@ -282,19 +307,47 @@ public sealed class XpLeaderboardService : BackgroundService
     /// </summary>
     private async Task UpdateGuideAsync(SocketGuild guild, IUserMessage guide, CancellationToken ct)
     {
-        var season = await GetSeasonAsync(guild.Id, ct);
+        var (season, scheduled) = await GetSeasonStateAsync(guild.Id, ct);
         var hasImage = guide.Attachments.Any(a => a.Filename == XpGuide.RatesImageFileName);
-        var embed = XpGuide.Build(_config, season, hasImage);
+        var embed = XpGuide.Build(_config, season, scheduled, hasImage);
+
+        // Most of the economy appears ONLY inside the rendered card, so a text-only
+        // comparison would let a retuned rate (meeting XP, streak bonuses, the voice
+        // cap) stay wrong on the pinned guide forever. Track a signature of the values
+        // the card draws and re-upload it when they move.
+        var ratesSignature = BuildRatesSignature();
+        var ratesChanged = !_lastRatesSignature.TryGetValue(guild.Id, out var lastRates)
+                           || lastRates != ratesSignature;
 
         var current = guide.Embeds.FirstOrDefault();
-        if (current is not null
+        var textUnchanged = current is not null
             && current.Description == embed.Description
             && current.Footer?.Text == embed.Footer?.Text
             && current.Fields.Length == embed.Fields.Length
-            && !current.Fields.Where((f, i) => f.Value != embed.Fields[i].Value).Any())
-            return;
+            && !current.Fields.Where((f, i) => f.Value != embed.Fields[i].Value).Any();
 
-        try { await guide.ModifyAsync(m => m.Embed = embed); }
+        if (textUnchanged && !ratesChanged) return;
+
+        try
+        {
+            var png = ratesChanged && hasImage ? _renderer.TryRenderRatesCard() : null;
+
+            if (png is not null)
+            {
+                using var fa = new FileAttachment(new MemoryStream(png), XpGuide.RatesImageFileName);
+                await guide.ModifyAsync(m =>
+                {
+                    m.Embed = embed;
+                    m.Attachments = new List<FileAttachment> { fa };
+                });
+            }
+            else
+            {
+                await guide.ModifyAsync(m => m.Embed = embed);
+            }
+
+            _lastRatesSignature[guild.Id] = ratesSignature;
+        }
         catch (Exception ex) { _logger.LogWarning(ex, "XP: failed to update the guide message"); }
     }
 
@@ -334,6 +387,12 @@ public sealed class XpLeaderboardService : BackgroundService
                 {
                     m.Embed = page.Embed;
                     m.Components = page.Components;
+                    // MUST clear explicitly. Discord's PATCH keeps existing attachments
+                    // when the field is omitted, so ending a season (or a failed render)
+                    // would leave the previous leaderboard PNG hanging under a "no season
+                    // is running" embed — and the matching signature meant it never
+                    // corrected itself.
+                    m.Attachments = new List<FileAttachment>();
                 });
             }
             else
@@ -378,8 +437,21 @@ public sealed class XpLeaderboardService : BackgroundService
         var pageSize = Math.Max(1, _config.XpBoardPageSize);
 
         if (season is null)
-            return new XpPageRender(BuildNoSeasonEmbed(), null, BoardImageFileName, null, 1, 1,
-                $"{BoardSchemaVersion}|no-season", 0, null);
+        {
+            // A season lined up to open is worth showing. Without this the channel
+            // reads "no season is running" right up to the moment one starts, which
+            // is the opposite of the reassurance anyone checking the board wants.
+            var scheduled = await _xp.GetScheduledSeasonAsync(db, guild.Id, ct);
+
+            // The pending start is part of the signature, so moving or cancelling it
+            // redraws the board instead of leaving the old date up.
+            var idleSignature = scheduled is null
+                ? $"{BoardSchemaVersion}|no-season"
+                : $"{BoardSchemaVersion}|pending|{scheduled.Id}|{scheduled.StartUtc:O}|{scheduled.AutoEndUtc:O}";
+
+            return new XpPageRender(BuildNoSeasonEmbed(scheduled), null, BoardImageFileName, null, 1, 1,
+                idleSignature, 0, null);
+        }
 
         var all = await _xp.GetSeasonStandingsAsync(db, guild.Id, season.Id, int.MaxValue, ct);
 
@@ -616,17 +688,41 @@ public sealed class XpLeaderboardService : BackgroundService
         return sb.ToString().TrimEnd();
     }
 
-    private Embed BuildNoSeasonEmbed() =>
-        new EmbedBuilder()
-            .WithTitle(BoardTitle)
+    private Embed BuildNoSeasonEmbed(XpSeason? scheduled)
+    {
+        var embed = new EmbedBuilder()
             .WithColor(new Color(0x8B96A8))
-            .WithDescription(
-                "**No season is running right now.**\n\n" +
-                "XP isn't being counted until an officer opens a season with `/xp-season start`. " +
-                "All-time totals and past season results are untouched — check yours with `/xp`.")
-            .WithFooter("XP is recognition only — it does not affect promotions")
-            .WithCurrentTimestamp()
+            .WithFooter("XP is recognition only. It does not affect promotions.")
+            .WithCurrentTimestamp();
+
+        if (scheduled is null)
+        {
+            return embed
+                .WithTitle(BoardTitle)
+                .WithDescription(
+                    "**No season is running right now.**\n\n" +
+                    "XP isn't being counted until an officer opens a season with `/xp-season start`. " +
+                    "All-time totals and past season results are untouched, check yours with `/xp`.")
+                .Build();
+        }
+
+        var body = new StringBuilder();
+        body.Append($"**{XpService.SeasonLabel(scheduled)} opens <t:{Unix(scheduled.StartUtc)}:F>**\n");
+        body.Append($"That is {FormatRelative(scheduled.StartUtc)}.\n\n");
+        body.Append("Nothing counts until then, and everyone starts at zero. Attend events between now and ");
+        body.Append("the start if you like, they just won't be worth XP yet.");
+
+        if (scheduled.AutoEndUtc is { } close)
+            body.Append($"\n\nIt runs until <t:{Unix(close)}:F>.");
+        else if (scheduled.EndUtc is { } target)
+            body.Append($"\n\nPlanned to run until <t:{Unix(target)}:D>.");
+
+        return embed
+            .WithTitle(BoardTitle)
+            .WithColor(new Color(0xF1C40F))
+            .WithDescription(body.ToString())
             .Build();
+    }
 
     private static string BuildSubtitle(XpSeason season, int ranked)
     {
@@ -635,11 +731,24 @@ public sealed class XpLeaderboardService : BackgroundService
         if (season.EndUtc is { } end)
         {
             var days = (int)Math.Ceiling((end - DateTime.UtcNow).TotalDays);
-            // Seasons are closed by hand, so a past planned end is a note for the
-            // officers, not something the board should claim already happened.
-            parts.Add(days > 1 ? $"{days} days to go"
-                : days == 1 ? "last day"
-                : "past its planned end");
+
+            if (season.AutoEndUtc is not null)
+            {
+                // A season that closes itself can state a deadline honestly. The
+                // "past" case should be seconds long: the scheduler closes it on the
+                // next tick.
+                parts.Add(days > 1 ? $"closes in {days} days"
+                    : days == 1 ? "closes today"
+                    : "closing now");
+            }
+            else
+            {
+                // No automatic close, so a past date is a note for the officers, not
+                // something the board should claim already happened.
+                parts.Add(days > 1 ? $"{days} days to go"
+                    : days == 1 ? "last day"
+                    : "past its planned end");
+            }
         }
 
         parts.Add(ranked == 1 ? "1 member ranked" : $"{ranked:N0} members ranked");
@@ -673,14 +782,203 @@ public sealed class XpLeaderboardService : BackgroundService
         return builder.Build();
     }
 
+    // ─── Season announcements ───────────────────────────────────────────
+
+    /// <summary>
+    /// Resolves the channel XP announcements go to. Falls back to the board channel
+    /// so a season opening or closing is never completely silent just because the
+    /// announce channel is unset. Returns null when neither is configured or
+    /// reachable, and callers report that rather than pretending it posted.
+    /// </summary>
+    /// <summary>
+    /// Ceiling on a single season announcement. Discord.NET's default retry mode
+    /// silently AWAITS a rate limit's retry-after, which on the scheduler's loop
+    /// would mean one throttled post stops every later season transition from being
+    /// checked at all. Same guard /kick-awols needed for the same reason.
+    /// </summary>
+    private static readonly TimeSpan AnnounceTimeout = TimeSpan.FromSeconds(20);
+
+    private SocketTextChannel? ResolveAnnounceChannel(SocketGuild guild)
+    {
+        var channelId = _config.XpLevelUpAnnounceChannelId != 0
+            ? _config.XpLevelUpAnnounceChannelId
+            : _config.XpBoardChannelId;
+
+        if (channelId == 0) return null;
+        return guild.GetChannel(channelId) as SocketTextChannel;
+    }
+
+    /// <summary>
+    /// Announces that a season has opened.
+    ///
+    /// This only exists because seasons can now open on a schedule. A season an
+    /// officer starts by hand announces itself: they are stood at the keyboard and
+    /// can say so. One that opens at midnight has nobody to say it, and the first
+    /// anyone would know is the board quietly changing, which is a poor way to
+    /// discover that the thing you were told about on Tuesday is now live.
+    ///
+    /// Deliberately not pinged to @everyone. It is a scoreboard, not an alert.
+    /// </summary>
+    public async Task<bool> PostSeasonStartAsync(SocketGuild guild, XpSeason season, CancellationToken ct)
+    {
+        var channel = ResolveAnnounceChannel(guild);
+        if (channel is null) return false;
+
+        var body = new StringBuilder();
+        body.Append("XP is now being counted. Every event, meeting, voice session and message from ");
+        body.Append($"<t:{Unix(season.StartUtc)}:t> onwards adds to your total.\n\n");
+        body.Append("Everyone starts at zero. Lifetime totals from past seasons are untouched.");
+
+        if (season.AutoEndUtc is { } close)
+            body.Append($"\n\nThe season closes <t:{Unix(close)}:F> ({FormatRelative(close)}).");
+        else if (season.EndUtc is { } target)
+            body.Append($"\n\nIt is planned to run until <t:{Unix(target)}:D>.");
+
+        var embed = new EmbedBuilder()
+            .WithTitle($"🚩 {XpService.SeasonLabel(season)} is live")
+            .WithColor(new Color(0xF1C40F))
+            .WithDescription(body.ToString())
+            .AddField("Where to look",
+                _config.XpBoardChannelId != 0
+                    ? $"The leaderboard is in <#{_config.XpBoardChannelId}>, updated automatically."
+                    : "Run `/xp-leaderboard` for the standings.")
+            .AddField("Your card", "`/xp` shows your level and exactly where every point came from.")
+            .WithFooter("XP is recognition only. It does not affect promotions.")
+            .WithCurrentTimestamp()
+            .Build();
+
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(AnnounceTimeout);
+
+            await channel.SendMessageAsync(embed: embed, allowedMentions: AllowedMentions.None,
+                options: new RequestOptions { RetryMode = RetryMode.AlwaysFail, CancelToken = cts.Token });
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "XP: failed to announce the start of Season {Number}", season.Number);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Posts the end-of-season results card.
+    ///
+    /// This is the permanent artefact of a season. The numbers behind it reset the
+    /// moment the next one opens, so if this never gets posted the season may as
+    /// well not have happened. Returns true only if it actually reached a channel,
+    /// so a manual /xp-season end can tell the officer the truth rather than sending
+    /// them hunting for a card that was never sent.
+    ///
+    /// Lives here rather than in XpCommandHandler because a season can now close on
+    /// a schedule with no command and no officer attached to it.
+    /// </summary>
+    public async Task<bool> PostSeasonResultsAsync(
+        SocketGuild guild, XpSeason finished, IReadOnlyList<XpStanding> standings, CancellationToken ct)
+    {
+        var channel = ResolveAnnounceChannel(guild);
+        if (channel is null) return false;
+
+        var podium = standings.Take(3)
+            .Select(s => new XpBoardEntry(
+                s.Place, s.UserId, s.Username, s.Level, s.Xp,
+                guild.GetUser(s.UserId)?.GetDisplayAvatarUrl(ImageFormat.Png, 128)))
+            .ToList();
+
+        var medals = new[] { "🥇", "🥈", "🥉" };
+        var lines = podium.Count == 0
+            ? "_Nobody placed. The season closed with no XP earned._"
+            : string.Join('\n', podium.Select((s, i) =>
+                $"{medals[Math.Min(i, medals.Length - 1)]} <@{s.UserId}> is on **{s.Xp:N0} XP** (Level {s.Level})"));
+
+        var png = podium.Count > 0
+            ? await _renderer.TryRenderSeasonResultsAsync(
+                XpService.SeasonLabel(finished), podium, standings.Count, ct)
+            : null;
+
+        var embed = new EmbedBuilder()
+            .WithTitle($"🏁 {XpService.SeasonLabel(finished)}: final standings")
+            .WithColor(new Color(0xF1C40F))
+            .WithDescription(
+                $"{lines}\n\n{standings.Count:N0} member(s) placed. Season XP resets to zero for the next " +
+                "season. Lifetime totals and every past result are kept, check yours with `/xp`.")
+            .WithCurrentTimestamp();
+
+        if (png is not null) embed.WithImageUrl("attachment://xp-season-results.png");
+
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(AnnounceTimeout);
+            var options = new RequestOptions { RetryMode = RetryMode.AlwaysFail, CancelToken = cts.Token };
+
+            if (png is null)
+            {
+                await channel.SendMessageAsync(embed: embed.Build(),
+                    allowedMentions: AllowedMentions.None, options: options);
+            }
+            else
+            {
+                using var fa = new FileAttachment(new MemoryStream(png), "xp-season-results.png");
+                await channel.SendFileAsync(fa, embed: embed.Build(),
+                    allowedMentions: AllowedMentions.None, options: options);
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "XP: failed to post the results for Season {Number}", finished.Number);
+            return false;
+        }
+    }
+
+    internal static long Unix(DateTime utc) => new DateTimeOffset(utc, TimeSpan.Zero).ToUnixTimeSeconds();
+
+    /// <summary>
+    /// A plain-English gap, for the places Discord's own relative stamp cannot go
+    /// (embed footers, and sentences where "in 3 days" reads better mid-line).
+    /// </summary>
+    internal static string FormatRelative(DateTime utc)
+    {
+        var delta = utc - DateTime.UtcNow;
+        if (delta <= TimeSpan.Zero) return "any moment now";
+        if (delta.TotalHours < 1) return $"in {Math.Max(1, (int)delta.TotalMinutes)} min";
+        if (delta.TotalHours < 36) return $"in {(int)Math.Round(delta.TotalHours)} hours";
+        return $"in {(int)Math.Round(delta.TotalDays)} days";
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────
 
-    private async Task<XpSeason?> GetSeasonAsync(ulong guildId, CancellationToken ct)
+    /// <summary>
+    /// Both season states in one scope: the one accruing right now, and the one
+    /// lined up to open later. They are mutually exclusive in practice (a season
+    /// cannot be scheduled while another is running) but the guide and the board
+    /// both need to know which of the two, if either, they are describing.
+    /// </summary>
+    private async Task<(XpSeason? Active, XpSeason? Scheduled)> GetSeasonStateAsync(ulong guildId, CancellationToken ct)
     {
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-        return await _xp.GetActiveSeasonAsync(db, guildId, ct);
+
+        var active = await _xp.GetActiveSeasonAsync(db, guildId, ct);
+        if (active is not null) return (active, null);
+
+        return (null, await _xp.GetScheduledSeasonAsync(db, guildId, ct));
     }
+
+    /// <summary>
+    /// Every config value that appears inside the rendered rates card. If any moves,
+    /// the card is stale and must be re-uploaded — the guide's text alone wouldn't
+    /// show it.
+    /// </summary>
+    private string BuildRatesSignature() => string.Join('|',
+        _config.XpPerEvent, _config.XpPerMeeting, _config.XpRsvpHonoredBonus,
+        _config.XpStreak3Bonus, _config.XpStreak5Bonus,
+        _config.XpVoicePer15Minutes, _config.XpVoiceDailyCap,
+        _config.XpPerMessage, _config.XpMessageDailyCap);
 
     private static bool HasEmbedTitled(IUserMessage m, string title) =>
         m.Embeds.Any(e => string.Equals(e.Title, title, StringComparison.Ordinal));

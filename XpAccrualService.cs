@@ -54,6 +54,9 @@ public sealed class XpAccrualService : BackgroundService
     /// <summary>Hard cap on a single level-up DM attempt (open channel + send). See TrySendLevelUpDmAsync.</summary>
     private static readonly TimeSpan DmTimeout = TimeSpan.FromSeconds(5);
 
+    /// <summary>Hard cap on a single public announcement send. Same rate-limit rationale as DmTimeout.</summary>
+    private static readonly TimeSpan SendTimeout = TimeSpan.FromSeconds(5);
+
     /// <summary>
     /// When the "no season running" warning was last logged. Throttles what would
     /// otherwise be one warning per cycle, forever, for a state that is perfectly
@@ -132,9 +135,24 @@ public sealed class XpAccrualService : BackgroundService
             if (_noSeasonWarnedAt is null || DateTime.UtcNow - _noSeasonWarnedAt > NoSeasonWarnInterval)
             {
                 _noSeasonWarnedAt = DateTime.UtcNow;
-                _logger.LogWarning(
-                    "XP: no active season for guild {Guild} — nothing is accruing. An officer starts one with /xp-season start.",
-                    guild.Id);
+
+                // A season lined up to open is not a problem, it is the plan. Warning
+                // about it would teach whoever reads the log to ignore the warning
+                // that matters, which is the ladder sitting idle with nothing planned.
+                var pending = await _xp.GetScheduledSeasonAsync(db, guild.Id, ct);
+                if (pending is not null)
+                {
+                    _logger.LogInformation(
+                        "XP: nothing accruing in guild {Guild} yet. Season {Number} opens at {Start}.",
+                        guild.Id, pending.Number, pending.StartUtc.ToString("u"));
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "XP: no active season for guild {Guild}, nothing is accruing and nothing is scheduled. " +
+                        "An officer starts one with /xp-season start.",
+                        guild.Id);
+                }
             }
             return;
         }
@@ -155,6 +173,14 @@ public sealed class XpAccrualService : BackgroundService
         await AccrueMeetingsAsync(db, guild, season, windowStart, changed, ct);
         await AccrueVoiceAsync(db, guild, season, windowStart, now, changed, ct);
         await AccrueMessagesAsync(db, guild, season, windowStart, now, changed, ct);
+
+        // MUST flush before recomputing. RecomputeMemberAsync sums XpAwards with a
+        // server-side aggregate, and EF Core does NOT include pending Added entities
+        // in one — verified: a tracked-but-unsaved 500 XP award returns SUM = 0.
+        // Recomputing first wrote a rollup that ignored everything this cycle earned,
+        // and because awards are idempotent the next cycle saw no change, skipped the
+        // recompute entirely, and the wrong total stuck permanently.
+        if (db.ChangeTracker.HasChanges()) await db.SaveChangesAsync(ct);
 
         if (changed.Count == 0)
         {
@@ -297,16 +323,38 @@ public sealed class XpAccrualService : BackgroundService
             .GroupBy(r => r.UserId)
             .ToDictionary(g => g.Key, g => g.Select(x => x.CalendarEventId).ToHashSet());
 
-        // Only members who attended something inside the lookback window can have a
-        // newly-completed run, so there's no need to re-walk everyone every cycle.
-        var candidates = recent.Select(a => a.UserId).Distinct();
+        // Every participant is re-walked, not just those with attendance in the
+        // lookback window. An event whose snapshot lands late is INSERTED into the
+        // middle of the timeline, which can break a run for somebody who has no
+        // recent attendance at all — and they'd otherwise keep a bonus they no
+        // longer qualify for. Tens of events × tens of members is trivial work.
+        var existing = await db.XpAwards
+            .Where(a => a.GuildId == guild.Id && a.SeasonId == season.Id && a.Source == XpSource.EventStreak)
+            .ToListAsync(ct);
 
-        foreach (var userId in candidates)
+        var existingByUser = existing
+            .GroupBy(a => a.UserId)
+            .ToDictionary(g => g.Key, g => g.ToList());
+
+        foreach (var userId in attendedBy.Keys)
         {
             if (IsBot(guild, userId)) continue;
-            if (!attendedBy.TryGetValue(userId, out var attended)) continue;
 
+            var attended = attendedBy[userId];
+
+            // Recompute the member's ENTIRE set of earned streak keys from the current
+            // timeline, then make the ledger match it exactly.
+            //
+            // Reconciling rather than only adding is what makes late snapshots safe.
+            // The timeline is built from attendance rows, so an event that snapshots
+            // hours late slots into the middle and shifts every later position by one.
+            // Add-only, that re-points each bonus at a different event id while the old
+            // rows stay — a 15-event run re-indexed once could pay out ~1,400 XP of
+            // phantom bonus. Reconciling also correctly REVOKES a bonus when a
+            // late-arriving event turns out to have broken the run.
+            var desired = new Dictionary<string, (int Amount, string Note, DateTime EarnedAt)>();
             var run = 0;
+
             foreach (var evt in timeline)
             {
                 if (!attended.Contains(evt.CalendarEventId)) { run = 0; continue; }
@@ -314,20 +362,30 @@ public sealed class XpAccrualService : BackgroundService
                 run++;
 
                 if (_config.XpStreak3Bonus > 0 && run % 3 == 0)
-                {
-                    if (await _xp.AwardAsync(db, guild.Id, season.Id, userId, XpSource.EventStreak,
-                            $"streak3:{evt.CalendarEventId}", _config.XpStreak3Bonus,
-                            $"{run} events in a row", evt.EndUtc, ct))
-                        changed.Add(userId);
-                }
+                    desired[$"streak3:{evt.CalendarEventId}"] =
+                        (_config.XpStreak3Bonus, $"{run} events in a row", evt.EndUtc);
 
                 if (_config.XpStreak5Bonus > 0 && run % 5 == 0)
-                {
-                    if (await _xp.AwardAsync(db, guild.Id, season.Id, userId, XpSource.EventStreak,
-                            $"streak5:{evt.CalendarEventId}", _config.XpStreak5Bonus,
-                            $"{run} events in a row", evt.EndUtc, ct))
-                        changed.Add(userId);
-                }
+                    desired[$"streak5:{evt.CalendarEventId}"] =
+                        (_config.XpStreak5Bonus, $"{run} events in a row", evt.EndUtc);
+            }
+
+            foreach (var (key, v) in desired)
+            {
+                if (await _xp.AwardAsync(db, guild.Id, season.Id, userId, XpSource.EventStreak,
+                        key, v.Amount, v.Note, v.EarnedAt, ct))
+                    changed.Add(userId);
+            }
+
+            if (!existingByUser.TryGetValue(userId, out var mine)) continue;
+
+            foreach (var stale in mine.Where(a => !desired.ContainsKey(a.SourceKey)))
+            {
+                db.XpAwards.Remove(stale);
+                changed.Add(userId);
+                _logger.LogInformation(
+                    "XP: revoked stale streak award {Key} from {User} — the event timeline changed",
+                    stale.SourceKey, userId);
             }
         }
     }
@@ -414,10 +472,15 @@ public sealed class XpAccrualService : BackgroundService
 
             for (var day = start.Date; day <= end.Date; day = day.AddDays(1))
             {
-                if (day < windowStart.Date) continue;
-
-                var dayStart = day;
                 var dayEnd = day.AddDays(1);
+                if (dayEnd <= windowStart) continue;
+
+                // Clamp to windowStart itself, not windowStart.Date. On the day a
+                // season opens, windowStart carries a time of day; truncating it to
+                // midnight credited voice time from BEFORE the season existed, while
+                // AccrueMessagesAsync (which filters on the full timestamp) did not —
+                // so voice and chat disagreed about when the season started.
+                var dayStart = day > windowStart ? day : windowStart;
                 var from = start > dayStart ? start : dayStart;
                 var to = end < dayEnd ? end : dayEnd;
                 var seconds = (to - from).TotalSeconds;
@@ -443,7 +506,7 @@ public sealed class XpAccrualService : BackgroundService
             var earnedAt = day.AddDays(1) > now ? now : day.AddDays(1).AddSeconds(-1);
 
             if (await _xp.AwardAsync(db, guild.Id, season.Id, userId, XpSource.Voice,
-                    $"voice:{day:yyyy-MM-dd}", amount,
+                    $"voice:{season.Id}:{day:yyyy-MM-dd}", amount,
                     $"{(int)(seconds / 60)} min in voice", earnedAt, ct))
                 changed.Add(userId);
         }
@@ -509,7 +572,7 @@ public sealed class XpAccrualService : BackgroundService
             var earnedAt = d.Day.AddDays(1) > now ? now : d.Day.AddDays(1).AddSeconds(-1);
 
             if (await _xp.AwardAsync(db, guild.Id, season.Id, d.UserId, XpSource.Message,
-                    $"msg:{d.Day:yyyy-MM-dd}", amount,
+                    $"msg:{season.Id}:{d.Day:yyyy-MM-dd}", amount,
                     $"{counted} message(s) counted", earnedAt, ct))
                 changed.Add(d.UserId);
         }
@@ -578,6 +641,12 @@ public sealed class XpAccrualService : BackgroundService
 
         var every = Math.Max(1, _config.XpLevelUpAnnounceEveryLevels);
 
+        // try/finally so the raised LastAnnouncedLevel marks are persisted even if the
+        // batch is cut short by host shutdown. Without it, a restart part-way through
+        // twenty level-ups discards every mark raised so far and re-DMs (and re-posts)
+        // all of them later — the exact retry storm the marks exist to prevent.
+        try
+        {
         foreach (var row in rows)
         {
             var newLevel = row.Level;
@@ -607,20 +676,45 @@ public sealed class XpAccrualService : BackgroundService
                 .WithFooter(XpService.SeasonLabel(season))
                 .Build();
 
-            try
+            // Same guard as the DM path, for the same reason: several members
+            // crossing a milestone in one cycle hits the per-channel rate limit, and
+            // under Discord.NET's default RetryMode a 429 is silently AWAITED rather
+            // than thrown — parking the accrual loop on one line with the try/catch
+            // none the wiser. This is what froze /kick-awols on 2026-06-19.
+            using (var postCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
             {
-                await channel.SendMessageAsync(
-                    text: $"<@{row.UserId}>",
-                    embed: embed,
-                    allowedMentions: new AllowedMentions { UserIds = new List<ulong> { row.UserId } });
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "XP: failed to announce level-up for {User}", row.UserId);
+                postCts.CancelAfter(SendTimeout);
+                var postOptions = new RequestOptions
+                {
+                    RetryMode   = RetryMode.AlwaysFail,
+                    CancelToken = postCts.Token,
+                };
+
+                try
+                {
+                    await channel.SendMessageAsync(
+                        text: $"<@{row.UserId}>",
+                        embed: embed,
+                        allowedMentions: new AllowedMentions { UserIds = new List<ulong> { row.UserId } },
+                        options: postOptions);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "XP: failed to announce level-up for {User}", row.UserId);
+                }
             }
         }
-
-        await db.SaveChangesAsync(ct);
+        }
+        finally
+        {
+            // CancellationToken.None: this save must survive the very cancellation
+            // that interrupted the loop, otherwise the marks are lost.
+            await db.SaveChangesAsync(CancellationToken.None);
+        }
     }
 
     /// <summary>

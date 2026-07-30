@@ -42,7 +42,14 @@ public static class XpGuide
 
     public const string RatesImageFileName = "xp-rates.png";
 
-    public static Embed Build(BotConfig config, XpSeason? season, bool hasRatesImage)
+    /// <summary>
+    /// <paramref name="scheduled"/> is the season lined up to open later, if any.
+    /// It is only ever non-null when <paramref name="season"/> is null: a season
+    /// cannot be scheduled while another is running. The guide needs it so the
+    /// pinned rules do not sit there saying nobody has started a season when one
+    /// starts on Saturday.
+    /// </summary>
+    public static Embed Build(BotConfig config, XpSeason? season, XpSeason? scheduled, bool hasRatesImage)
     {
         var embed = new EmbedBuilder()
             .WithTitle(GuideTitle)
@@ -54,6 +61,16 @@ public static class XpGuide
                 "Events are worth far more than everything else put together. That's deliberate. " +
                 "Full rates below.");
 
+        // The countdown goes in a FIELD, not the footer. Discord renders <t:...>
+        // timestamp markdown in descriptions and field values but not in footers,
+        // where it would show up as raw text.
+        if (season is null && scheduled is not null)
+        {
+            var stamp = new DateTimeOffset(scheduled.StartUtc, TimeSpan.Zero).ToUnixTimeSeconds();
+            embed.AddField($"⏳ {XpService.SeasonLabel(scheduled)} starts",
+                $"<t:{stamp}:F> (<t:{stamp}:R>)\nNothing counts until then. Everyone starts at zero.");
+        }
+
         if (hasRatesImage)
             embed.WithImageUrl($"attachment://{RatesImageFileName}");
         else
@@ -64,9 +81,11 @@ public static class XpGuide
         embed.AddField("Seasons", BuildSeasons(), inline: true);
         embed.AddField("Commands", BuildCommands());
 
-        embed.WithFooter(season is null
-            ? "No season is running right now — an officer will start one."
-            : $"{XpService.SeasonLabel(season)} • these rates update automatically if they're changed");
+        embed.WithFooter(season is not null
+            ? $"{XpService.SeasonLabel(season)} • these rates update automatically if they're changed"
+            : scheduled is not null
+                ? "These rates update automatically if they're changed."
+                : "No season is running right now. An officer will start one.");
 
         return embed.Build();
     }

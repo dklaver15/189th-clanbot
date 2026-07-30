@@ -11,6 +11,19 @@ public enum XpSeasonStatus
 
     /// <summary>Closed. Its <see cref="XpMemberSeason"/> rows are frozen as the historical record.</summary>
     Ended = 2,
+
+    /// <summary>
+    /// Created ahead of time and not accruing anything yet. XpSeasonSchedulerService
+    /// flips it to <see cref="Active"/> once <see cref="XpSeason.StartUtc"/> arrives.
+    ///
+    /// This exists so a season can be lined up for a sensible clock time (midnight on
+    /// the 1st) without an officer having to be awake to type the command. It is NOT
+    /// a second kind of active season: GetActiveSeasonAsync ignores it, so no XP
+    /// accrues, no board standings are drawn and no announcements fire until the flip.
+    /// At most one Scheduled season exists per guild, and one cannot be created while
+    /// another season is still Active.
+    /// </summary>
+    Scheduled = 3,
 }
 
 /// <summary>
@@ -85,11 +98,29 @@ public class XpSeason
     public DateTime StartUtc { get; set; }
 
     /// <summary>
-    /// Scheduled end. Set from BotConfig.XpSeasonLengthDays at open time. When
-    /// XpSeasonAutoRollover is on, XpAccrualService closes the season and opens
-    /// the next one once this passes. Null = runs until an officer ends it.
+    /// The end date the board shows. Set from BotConfig.XpSeasonLengthDays (or the
+    /// command's days: option) at open time, or to the exact instant an officer
+    /// scheduled a close for.
+    ///
+    /// Whether this is a deadline or just a target depends entirely on
+    /// <see cref="AutoEndUtc"/>. With AutoEndUtc null this is DISPLAY ONLY, nothing
+    /// acts on it, and past the date the board reads "past its planned end" rather
+    /// than pretending the season closed itself. Null = no date shown at all.
     /// </summary>
     public DateTime? EndUtc { get; set; }
+
+    /// <summary>
+    /// When set, XpSeasonSchedulerService closes the season at this instant: final
+    /// standings locked in, results card posted, XP stops accruing. Null means the
+    /// season only ends when an officer runs /xp-season end, which is how every
+    /// season behaved before scheduling existed.
+    ///
+    /// INVARIANT: whenever this is non-null it equals <see cref="EndUtc"/>. Two
+    /// dates that can disagree is exactly how a board ends up counting down to one
+    /// instant and closing at another, so both are only ever written together, by
+    /// XpService. Read AutoEndUtc to decide whether to act; read EndUtc to display.
+    /// </summary>
+    public DateTime? AutoEndUtc { get; set; }
 
     /// <summary>When the season was actually closed (may differ from <see cref="EndUtc"/>). Null while Active.</summary>
     public DateTime? ClosedUtc { get; set; }

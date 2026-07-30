@@ -69,13 +69,27 @@ public sealed class XpLeaderboardRenderer
 
     private const int MaxCachedAvatars = 400;
 
+    /// <summary>Per-request avatar timeout.</summary>
+    private static readonly TimeSpan AvatarTimeout = TimeSpan.FromSeconds(4);
+
+    /// <summary>Total budget for fetching every avatar on one render. See LoadAvatarsAsync.</summary>
+    private static readonly TimeSpan AvatarBatchBudget = TimeSpan.FromSeconds(20);
+
+    /// <summary>How long a FAILED avatar fetch stays negative-cached before we retry it.</summary>
+    private static readonly TimeSpan AvatarFailureTtl = TimeSpan.FromHours(1);
+
     private readonly IHttpClientFactory _httpFactory;
     private readonly BotConfig _config;
     private readonly ILogger<XpLeaderboardRenderer> _logger;
 
     // url → decoded PNG/WebP bytes. Null value = "we tried and it failed",
     // cached so a broken avatar URL isn't re-fetched on every single refresh.
-    private readonly ConcurrentDictionary<string, byte[]?> _avatarCache = new();
+    private readonly ConcurrentDictionary<string, byte[]> _avatarCache = new();
+
+    // url → when the fetch last failed. Separate from the success cache so a failure
+    // expires (AvatarFailureTtl) instead of blanking that member permanently — a
+    // single CDN blip used to grey them out until they changed their avatar.
+    private readonly ConcurrentDictionary<string, DateTime> _avatarFailures = new();
 
     public XpLeaderboardRenderer(
         IHttpClientFactory httpFactory,
@@ -186,12 +200,13 @@ public sealed class XpLeaderboardRenderer
         // some weight without a hard band that would fight the embed's own edge.
         using (var wash = new SKPaint { IsAntialias = true })
         {
-            wash.Shader = SKShader.CreateLinearGradient(
+            using var washShader = SKShader.CreateLinearGradient(
                 new SKPoint(0, 0),
                 new SKPoint(0, HeaderH),
                 new[] { SKColor.Parse(GoldHex).WithAlpha(26), SKColor.Parse(BackgroundHex).WithAlpha(0) },
                 null,
                 SKShaderTileMode.Clamp);
+            wash.Shader = washShader;
             canvas.DrawRect(new SKRect(0, 0, Width, HeaderH), wash);
         }
 
@@ -206,12 +221,13 @@ public sealed class XpLeaderboardRenderer
 
         using (var rule = new SKPaint { IsAntialias = true, StrokeWidth = 3, Style = SKPaintStyle.Stroke })
         {
-            rule.Shader = SKShader.CreateLinearGradient(
+            using var ruleShader = SKShader.CreateLinearGradient(
                 new SKPoint(Pad, 0),
                 new SKPoint(Width - Pad, 0),
                 new[] { SKColor.Parse(GoldHex), SKColor.Parse(GoldHex).WithAlpha(0) },
                 null,
                 SKShaderTileMode.Clamp);
+            rule.Shader = ruleShader;
             canvas.DrawLine(Pad, HeaderH - 10f, Width - Pad, HeaderH - 10f, rule);
         }
 
@@ -256,12 +272,13 @@ public sealed class XpLeaderboardRenderer
 
             using (var fill = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill })
             {
-                fill.Shader = SKShader.CreateLinearGradient(
+                using var fillShader = SKShader.CreateLinearGradient(
                     new SKPoint(0, rect.Top),
                     new SKPoint(0, rect.Bottom),
                     new[] { accent.WithAlpha(46), SKColor.Parse(PanelHex) },
                     null,
                     SKShaderTileMode.Clamp);
+                fill.Shader = fillShader;
                 canvas.DrawRoundRect(rect, 18f, 18f, fill);
             }
 
@@ -319,14 +336,16 @@ public sealed class XpLeaderboardRenderer
         var barRect = new SKRect(rect.Left, rect.Top, rect.Left + rect.Width * frac, rect.Bottom);
         using (var bar = new SKPaint { IsAntialias = true })
         {
-            bar.Shader = SKShader.CreateLinearGradient(
+            using var barShader = SKShader.CreateLinearGradient(
                 new SKPoint(barRect.Left, 0),
                 new SKPoint(barRect.Right, 0),
                 new[] { SKColor.Parse(BlurpleHex).WithAlpha(70), SKColor.Parse(BlurpleHex).WithAlpha(10) },
                 null,
                 SKShaderTileMode.Clamp);
+            bar.Shader = barShader;
             canvas.Save();
-            canvas.ClipRoundRect(new SKRoundRect(rect, 10f, 10f), SKClipOperation.Intersect, true);
+            using var clipRr = new SKRoundRect(rect, 10f, 10f);
+            canvas.ClipRoundRect(clipRr, SKClipOperation.Intersect, true);
             canvas.DrawRect(barRect, bar);
             canvas.Restore();
         }
@@ -421,10 +440,11 @@ public sealed class XpLeaderboardRenderer
 
             using (var wash = new SKPaint { IsAntialias = true })
             {
-                wash.Shader = SKShader.CreateLinearGradient(
+                using var washShader = SKShader.CreateLinearGradient(
                     new SKPoint(0, 0), new SKPoint(0, 150),
                     new[] { SKColor.Parse(GoldHex).WithAlpha(26), SKColor.Parse(BackgroundHex).WithAlpha(0) },
                     null, SKShaderTileMode.Clamp);
+                wash.Shader = washShader;
                 canvas.DrawRect(new SKRect(0, 0, Width, 150), wash);
             }
 
@@ -449,12 +469,14 @@ public sealed class XpLeaderboardRenderer
                 var barRect = new SKRect(rect.Left, rect.Top, rect.Left + rect.Width * frac, rect.Bottom);
                 using (var bar = new SKPaint { IsAntialias = true })
                 {
-                    bar.Shader = SKShader.CreateLinearGradient(
+                    using var barShader = SKShader.CreateLinearGradient(
                         new SKPoint(barRect.Left, 0), new SKPoint(barRect.Right, 0),
                         new[] { accent.WithAlpha(150), accent.WithAlpha(40) },
                         null, SKShaderTileMode.Clamp);
+                    bar.Shader = barShader;
                     canvas.Save();
-                    canvas.ClipRoundRect(new SKRoundRect(rect, 10f, 10f), SKClipOperation.Intersect, true);
+                    using var clipRr2 = new SKRoundRect(rect, 10f, 10f);
+                    canvas.ClipRoundRect(clipRr2, SKClipOperation.Intersect, true);
                     canvas.DrawRect(barRect, bar);
                     canvas.Restore();
                 }
@@ -542,12 +564,26 @@ public sealed class XpLeaderboardRenderer
         var result = new Dictionary<ulong, SKImage>();
         if (!_config.XpBoardShowAvatars) return result;
 
+        // A whole-batch deadline, not just a per-request one. Sequentially, 25 cold
+        // fetches at the per-request timeout is minutes of wall clock — and the board
+        // refresh holds its lock the entire time, so an officer running /xp-season
+        // would sit on "thinking" behind it. Past the budget we stop fetching and draw
+        // plain discs for the rest; the next refresh picks them up from cache.
+        using var batchCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        batchCts.CancelAfter(AvatarBatchBudget);
+
         foreach (var entry in entries)
         {
+            if (batchCts.IsCancellationRequested)
+            {
+                _logger.LogDebug("XP board: avatar budget exhausted; remaining members draw without avatars");
+                break;
+            }
+
             if (string.IsNullOrWhiteSpace(entry.AvatarUrl)) continue;
             if (result.ContainsKey(entry.UserId)) continue;
 
-            var bytes = await GetAvatarBytesAsync(entry.AvatarUrl!, ct);
+            var bytes = await GetAvatarBytesAsync(entry.AvatarUrl!, batchCts.Token);
             if (bytes is null) continue;
 
             // A corrupt or unsupported payload decodes to null rather than
@@ -563,16 +599,22 @@ public sealed class XpLeaderboardRenderer
     {
         if (_avatarCache.TryGetValue(url, out var cached)) return cached;
 
+        if (_avatarFailures.TryGetValue(url, out var failedAt))
+        {
+            if (DateTime.UtcNow - failedAt < AvatarFailureTtl) return null;
+            _avatarFailures.TryRemove(url, out _);
+        }
+
         // Crude but correct: Discord bakes a content hash into avatar URLs, so
         // entries are naturally invalidated by the member changing their avatar.
         // The only unbounded growth is roster churn, and a full clear costs one
         // cold cycle.
-        if (_avatarCache.Count > MaxCachedAvatars) _avatarCache.Clear();
+        if (_avatarCache.Count > MaxCachedAvatars) { _avatarCache.Clear(); _avatarFailures.Clear(); }
 
         try
         {
             using var http = _httpFactory.CreateClient();
-            http.Timeout = TimeSpan.FromSeconds(6);
+            http.Timeout = AvatarTimeout;
             var bytes = await http.GetByteArrayAsync(url, ct);
             _avatarCache[url] = bytes;
             return bytes;
@@ -580,7 +622,7 @@ public sealed class XpLeaderboardRenderer
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "XP board: avatar fetch failed for {Url}", url);
-            _avatarCache[url] = null;   // negative-cache so we don't retry every cycle
+            _avatarFailures[url] = DateTime.UtcNow;
             return null;
         }
     }

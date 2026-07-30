@@ -68,6 +68,15 @@ public sealed record XpProfile(
 /// </summary>
 public sealed class XpService
 {
+    /// <summary>
+    /// How far in the future a requested start has to be before the season is
+    /// created as Scheduled rather than opened immediately. Without it, "start now"
+    /// and a start time a few seconds out (clock skew, or an officer typing an
+    /// explicit time that has just passed) would produce a pending season that sits
+    /// idle until the next scheduler tick.
+    /// </summary>
+    private static readonly TimeSpan ScheduleGrace = TimeSpan.FromMinutes(1);
+
     private readonly BotConfig _config;
     private readonly ILogger<XpService> _logger;
 
@@ -148,20 +157,30 @@ public sealed class XpService
             .FirstOrDefaultAsync(ct);
 
     /// <summary>
-    /// Opens a new season. Returns null if one is already active — the caller is
-    /// expected to surface that rather than silently stacking two, because
-    /// "exactly one active season per guild" is an invariant the rollup tables and
-    /// the leaderboard both assume.
+    /// Creates a season, either open right now or lined up to open later.
     ///
-    /// <paramref name="plannedDays"/> sets a DISPLAY-ONLY target end date shown on
-    /// the board ("12 days to go"). Nothing acts on it; the season still only ends
-    /// when an officer ends it, and the board says "past its planned end" rather
-    /// than pretending it closed itself.
+    /// Returns null if a season is already Active OR already Scheduled. The caller
+    /// is expected to surface that rather than silently stacking two, because
+    /// "exactly one season per guild that is not Ended" is an invariant the rollup
+    /// tables and the leaderboard both assume.
+    ///
+    /// <paramref name="startUtc"/> null means open immediately, which is how every
+    /// season worked before scheduling existed. A time far enough in the future
+    /// creates the season as <see cref="XpSeasonStatus.Scheduled"/>: nothing accrues
+    /// and nothing is announced until XpSeasonSchedulerService opens it.
+    ///
+    /// <paramref name="plannedDays"/> still only sets a DISPLAY target end date on
+    /// the board ("12 days to go"); nothing acts on it. <paramref name="autoEndUtc"/>
+    /// is the one that binds. When it is given it overrides the days-derived date,
+    /// so the countdown on the board and the instant the season actually closes are
+    /// always the same date.
     /// </summary>
     public async Task<XpSeason?> StartSeasonAsync(
-        BotDbContext db, ulong guildId, string? name, int? plannedDays, CancellationToken ct)
+        BotDbContext db, ulong guildId, string? name, int? plannedDays,
+        DateTime? startUtc, DateTime? autoEndUtc, CancellationToken ct)
     {
         if (await GetActiveSeasonAsync(db, guildId, ct) is not null) return null;
+        if (await GetScheduledSeasonAsync(db, guildId, ct) is not null) return null;
 
         var lastNumber = await db.XpSeasons
             .Where(s => s.GuildId == guildId)
@@ -170,25 +189,183 @@ public sealed class XpService
 
         var days = plannedDays ?? _config.XpSeasonLengthDays;
         var now = DateTime.UtcNow;
+        var start = startUtc ?? now;
+
+        // The grace window stops a start time of "now" (or a few seconds of clock
+        // skew) creating a Scheduled season that then has to wait for a scheduler
+        // tick before anything happens. Anything further out than this was clearly
+        // meant to be scheduled.
+        var scheduled = start > now + ScheduleGrace;
+        if (!scheduled) start = now;
+
+        // A planned length counts from when the season OPENS, not from when the
+        // command was typed. Scheduling a 30 day season on the 20th for the 1st and
+        // getting an end date of the 20th would be nonsense.
+        var end = autoEndUtc ?? (days > 0 ? start.AddDays(days) : (DateTime?)null);
 
         var season = new XpSeason
         {
-            GuildId   = guildId,
-            Number    = lastNumber + 1,
-            Name      = (name ?? string.Empty).Trim(),
-            StartUtc  = now,
-            EndUtc    = days > 0 ? now.AddDays(days) : null,
-            Status    = XpSeasonStatus.Active,
-            CreatedAt = now,
+            GuildId    = guildId,
+            Number     = lastNumber + 1,
+            Name       = (name ?? string.Empty).Trim(),
+            StartUtc   = start,
+            EndUtc     = end,
+            AutoEndUtc = autoEndUtc,
+            Status     = scheduled ? XpSeasonStatus.Scheduled : XpSeasonStatus.Active,
+            CreatedAt  = now,
         };
 
         db.XpSeasons.Add(season);
         await db.SaveChangesAsync(ct);
 
-        _logger.LogInformation("XP: opened Season {Number} for guild {Guild} (planned end {End})",
-            season.Number, guildId, season.EndUtc?.ToString("u") ?? "none");
+        _logger.LogInformation(
+            "XP: created Season {Number} for guild {Guild} as {Status} (starts {Start}, planned end {End}, auto-close {Auto})",
+            season.Number, guildId, season.Status, season.StartUtc.ToString("u"),
+            season.EndUtc?.ToString("u") ?? "none", season.AutoEndUtc?.ToString("u") ?? "no");
 
         return season;
+    }
+
+    /// <summary>
+    /// The season lined up to open later, if there is one. Deliberately NOT returned
+    /// by <see cref="GetActiveSeasonAsync"/>: a scheduled season must be invisible to
+    /// accrual, standings and announcements, or "scheduled" would just mean "active
+    /// with a confusing label".
+    /// </summary>
+    public Task<XpSeason?> GetScheduledSeasonAsync(BotDbContext db, ulong guildId, CancellationToken ct) =>
+        db.XpSeasons
+            .Where(s => s.GuildId == guildId && s.Status == XpSeasonStatus.Scheduled)
+            .OrderBy(s => s.StartUtc)
+            .FirstOrDefaultAsync(ct);
+
+    /// <summary>
+    /// Opens a scheduled season whose start time has arrived. Returns null when
+    /// there is nothing due, which is the overwhelmingly common case.
+    ///
+    /// StartUtc is left at the SCHEDULED instant rather than being reset to now.
+    /// That matters: XpAccrualService clamps its lookback window to StartUtc, so a
+    /// season set for midnight still pays for everything from midnight even though
+    /// the tick that opened it landed a few seconds later. It also means a season
+    /// that opens late (bot restarting, host down) back-pays what the accrual
+    /// lookback can still see rather than silently losing it.
+    ///
+    /// Refuses to open while another season is Active. That state should be
+    /// unreachable, since a scheduled season cannot be created while one is running,
+    /// but opening a second Active season would corrupt every rollup in the ladder,
+    /// so it is checked rather than assumed.
+    /// </summary>
+    public async Task<XpSeason?> ActivateDueSeasonAsync(BotDbContext db, ulong guildId, CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+
+        var due = await db.XpSeasons
+            .Where(s => s.GuildId == guildId
+                        && s.Status == XpSeasonStatus.Scheduled
+                        && s.StartUtc <= now)
+            .OrderBy(s => s.StartUtc)
+            .FirstOrDefaultAsync(ct);
+
+        if (due is null) return null;
+
+        if (await GetActiveSeasonAsync(db, guildId, ct) is { } running)
+        {
+            _logger.LogError(
+                "XP: Season {Scheduled} was due to open but Season {Running} is still Active. " +
+                "Leaving it scheduled. End the running season and it will open on the next tick.",
+                due.Number, running.Number);
+            return null;
+        }
+
+        due.Status = XpSeasonStatus.Active;
+        await db.SaveChangesAsync(ct);
+
+        _logger.LogInformation("XP: Season {Number} opened on schedule for guild {Guild} (start {Start})",
+            due.Number, guildId, due.StartUtc.ToString("u"));
+
+        return due;
+    }
+
+    /// <summary>
+    /// The season that has run past its scheduled close, if any. Only ever returns
+    /// an Active season with a non-null <see cref="XpSeason.AutoEndUtc"/>, so a
+    /// season with a display-only planned end is never touched.
+    /// </summary>
+    public Task<XpSeason?> GetSeasonDueToCloseAsync(BotDbContext db, ulong guildId, CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+
+        return db.XpSeasons
+            .Where(s => s.GuildId == guildId
+                        && s.Status == XpSeasonStatus.Active
+                        && s.AutoEndUtc != null
+                        && s.AutoEndUtc <= now)
+            .OrderBy(s => s.AutoEndUtc)
+            .FirstOrDefaultAsync(ct);
+    }
+
+    /// <summary>
+    /// Sets (or moves) the automatic close on whichever season is Active or
+    /// Scheduled. Writes EndUtc alongside AutoEndUtc so the board counts down to the
+    /// instant it will actually close. Returns null if there is no season to set it
+    /// on, or the requested instant is not after the season's start.
+    /// </summary>
+    public async Task<XpSeason?> ScheduleEndAsync(
+        BotDbContext db, ulong guildId, DateTime endUtc, CancellationToken ct)
+    {
+        var season = await GetActiveSeasonAsync(db, guildId, ct)
+                     ?? await GetScheduledSeasonAsync(db, guildId, ct);
+
+        if (season is null) return null;
+        if (endUtc <= season.StartUtc) return null;
+
+        season.EndUtc     = endUtc;
+        season.AutoEndUtc = endUtc;
+        await db.SaveChangesAsync(ct);
+
+        _logger.LogInformation("XP: Season {Number} will close automatically at {End}",
+            season.Number, endUtc.ToString("u"));
+
+        return season;
+    }
+
+    /// <summary>
+    /// Turns the automatic close back off, leaving the season running until an
+    /// officer ends it by hand. EndUtc is left alone on purpose: the date is still a
+    /// useful target on the board, it just stops being binding. Returns null when
+    /// there was no automatic close to clear.
+    /// </summary>
+    public async Task<XpSeason?> ClearScheduledEndAsync(BotDbContext db, ulong guildId, CancellationToken ct)
+    {
+        var season = await GetActiveSeasonAsync(db, guildId, ct)
+                     ?? await GetScheduledSeasonAsync(db, guildId, ct);
+
+        if (season?.AutoEndUtc is null) return null;
+
+        season.AutoEndUtc = null;
+        await db.SaveChangesAsync(ct);
+
+        _logger.LogInformation("XP: automatic close cleared on Season {Number}", season.Number);
+        return season;
+    }
+
+    /// <summary>
+    /// Deletes a season that was lined up but has not opened yet, freeing its season
+    /// number for the next one. Safe to delete outright rather than mark Ended: a
+    /// Scheduled season has never accrued anything, so there are no awards, rollups
+    /// or historical placements pointing at it. Returns null if nothing was pending.
+    /// </summary>
+    public async Task<XpSeason?> CancelScheduledStartAsync(BotDbContext db, ulong guildId, CancellationToken ct)
+    {
+        var pending = await GetScheduledSeasonAsync(db, guildId, ct);
+        if (pending is null) return null;
+
+        db.XpSeasons.Remove(pending);
+        await db.SaveChangesAsync(ct);
+
+        _logger.LogInformation("XP: scheduled Season {Number} cancelled for guild {Guild}",
+            pending.Number, guildId);
+
+        return pending;
     }
 
     /// <summary>
