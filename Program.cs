@@ -402,6 +402,17 @@ try
     // IHttpClientFactory with PhishingDomainFeedService (AddHttpClient
     // is already registered above). Mode-gated via
     // BotConfig.DiscordStatusMonitorEnabled.
+    // The default SocketsHttpHandler has NO connect timeout, so a wedged
+    // connect burns the service's entire 30s request budget before anything is
+    // logged. Giving it a real ConnectTimeout means a routing or DNS stall
+    // fails fast and shows up in the failure counter promptly. Same reasoning
+    // as EventImageFetcher's private handler.
+    builder.Services.AddHttpClient(DiscordStatusMonitorService.HttpClientName)
+        .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+        {
+            ConnectTimeout         = DiscordStatusMonitorService.ConnectTimeout,
+            AutomaticDecompression = System.Net.DecompressionMethods.All,
+        });
     builder.Services.AddHostedService<DiscordStatusMonitorService>();
 
     // ApolloEventHandler: parses #events channel posts and syncs to Google Calendar.

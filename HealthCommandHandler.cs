@@ -260,17 +260,38 @@ public class HealthCommandHandler
         embed.AddField("📤 Calendar outbox", outboxLine, inline: false);
 
         // Discord status monitor
-        // Three-line shape:
-        //   Last poll: 1m ago         ← liveness from BotState
-        //   Tracked: 162 · Posted: 0  ← dedupe-table counts
-        //   Last live post: …         ← only when statusPosted > 0
-        // If the last poll errored, the error tags onto the first line so
-        // it's visible without taking another row.
+        // Shape:
+        //   Last good poll: 3m ago            ← liveness from BotState
+        //   Tracked: 183 · Live-posted: 21    ← dedupe-table counts
+        //   Last live post: …                 ← only when statusPosted > 0
+        // While polls are failing the first line also carries the consecutive-
+        // failure count and how long ago the most recent attempt was, and the
+        // error text drops onto its own line.
+        //
+        // The count is the point. Without it a single stale error looks exactly
+        // like an ongoing outage, which is how this monitor sat "broken" on
+        // /health for three days in July 2026 while working perfectly.
+        //
+        // The error is gated on failures > 0 rather than on the string being
+        // non-empty. Success clears both together, so they can only disagree on
+        // a row written by the older code, and in that case the count is the
+        // one telling the truth.
+        var statusFailures = state?.DiscordStatusPollConsecutiveFailures ?? 0;
+
         var statusLine = state?.LastDiscordStatusPollCompletedUtc.HasValue == true
-            ? $"Last poll: **{FormatDuration(now - state.LastDiscordStatusPollCompletedUtc.Value)}** ago"
+            ? $"Last good poll: **{FormatDuration(now - state.LastDiscordStatusPollCompletedUtc.Value)}** ago"
             : "No polls completed yet";
-        if (!string.IsNullOrEmpty(state?.LastDiscordStatusPollError))
-            statusLine += $" · ⚠️ `{Truncate(state.LastDiscordStatusPollError, 120)}`";
+
+        if (statusFailures > 0)
+        {
+            statusLine += $" · ⚠️ **{statusFailures:N0}** consecutive failure(s)";
+            if (state?.LastDiscordStatusPollAttemptUtc.HasValue == true)
+                statusLine +=
+                    $", last tried **{FormatDuration(now - state.LastDiscordStatusPollAttemptUtc.Value)}** ago";
+            if (!string.IsNullOrEmpty(state?.LastDiscordStatusPollError))
+                statusLine += $"\n⚠️ `{Truncate(state.LastDiscordStatusPollError, 120)}`";
+        }
+
         statusLine += $"\nTracked: **{statusTotal}** · Live-posted: **{statusPosted}**";
         if (statusPosted > 0 && statusLastPostedAt.HasValue)
             statusLine += $"\nLast live post: **{FormatDuration(now - statusLastPostedAt.Value)}** ago";

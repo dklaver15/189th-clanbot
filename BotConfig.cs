@@ -867,6 +867,28 @@ public class BotConfig
     /// </summary>
     public string DiscordStatusMention { get; set; } = "@here";
 
+    /// <summary>
+    /// How many consecutive failed polls before DiscordStatusMonitorService
+    /// escalates to the alert channel. Failed polls retry every minute, so this
+    /// is roughly "minutes broken before anyone is told". Default 10.
+    ///
+    /// Set to 0 to disable escalation entirely; the consecutive-failure counter
+    /// on /health keeps working either way.
+    /// </summary>
+    public int DiscordStatusFailureAlertThreshold { get; set; } = 10;
+
+    /// <summary>
+    /// Where DiscordStatusMonitorService posts its "polling has been failing"
+    /// escalation and the matching recovery notice. Defaults to 0, which falls
+    /// back to <see cref="HqChannelId"/>. Kept separate so this one alert can be
+    /// routed elsewhere without moving everything else out of HQ.
+    ///
+    /// Deliberately NOT DiscordStatusChannelId: that channel is for incident
+    /// announcements the whole server reads, and "the bot's monitor is broken"
+    /// is an officer problem, not a member-facing one.
+    /// </summary>
+    public ulong DiscordStatusAlertChannelId { get; set; } = default;
+
     // ─── Officer Application Settings ────────────────────────────────
 
     /// <summary>

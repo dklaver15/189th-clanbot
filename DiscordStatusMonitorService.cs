@@ -70,6 +70,20 @@ public sealed class DiscordStatusMonitorService : BackgroundService
     private static readonly TimeSpan StartupDelay     = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan RetryAfterFailure = TimeSpan.FromMinutes(1);
 
+    /// <summary>
+    /// Named HttpClient for this service, registered in Program.cs. It exists
+    /// only to attach an explicit ConnectTimeout: the default handler has none,
+    /// so a connect that hangs eats the whole <see cref="RequestTimeout"/>
+    /// budget before the failure is even logged.
+    /// </summary>
+    public const string HttpClientName = "discordstatus";
+
+    /// <summary>Connect-phase budget. Consumed by Program.cs when it builds the handler.</summary>
+    public static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(10);
+
+    /// <summary>Whole-request budget: connect, TLS, headers and body.</summary>
+    private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(30);
+
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly DiscordSocketClient _client;
     private readonly IServiceScopeFactory _scopeFactory;
@@ -151,8 +165,8 @@ public sealed class DiscordStatusMonitorService : BackgroundService
         StatuspageIncidentsResponse? response;
         try
         {
-            var http = _httpClientFactory.CreateClient();
-            http.Timeout = TimeSpan.FromSeconds(30);
+            var http = _httpClientFactory.CreateClient(HttpClientName);
+            http.Timeout = RequestTimeout;
 
             using var req = new HttpRequestMessage(HttpMethod.Get, IncidentsUrl);
             req.Headers.UserAgent.ParseAdd(UserAgent);
@@ -200,7 +214,17 @@ public sealed class DiscordStatusMonitorService : BackgroundService
             .OrderBy(t => t.Update.CreatedAt ?? DateTimeOffset.MinValue)
             .ToList();
 
-        if (pending.Count == 0) return true;
+        // A quiet cycle is still a successful poll. Stamp liveness (which
+        // also clears any stale error) before returning, otherwise the
+        // /health timestamp only advances when Discord actually has an
+        // incident: a perfectly healthy monitor reads as dead for weeks,
+        // and a single transient fetch error sticks forever because the
+        // only code that clears it is never reached.
+        if (pending.Count == 0)
+        {
+            await StampPollSuccessAsync(db, ct);
+            return true;
+        }
 
         IMessageChannel? channel = null;
         if (!isFirstRun)
@@ -208,10 +232,19 @@ public sealed class DiscordStatusMonitorService : BackgroundService
             channel = _client.GetChannel(_config.DiscordStatusChannelId) as IMessageChannel;
             if (channel is null)
             {
+                // Recorded through the same path as a fetch failure, not just
+                // logged. This branch is only reachable when there ARE updates
+                // waiting to post, so silently returning false would leave
+                // /health showing a frozen "last good poll" with a zero failure
+                // count: identical to healthy-but-quiet, which is exactly the
+                // ambiguity the counter exists to remove.
                 _logger.LogWarning(
                     "DiscordStatusMonitorService: channel {ChannelId} did not resolve. " +
-                    "Skipping this cycle — will retry.",
+                    "Skipping this cycle, will retry.",
                     _config.DiscordStatusChannelId);
+                await RecordPollErrorAsync(
+                    $"Channel {_config.DiscordStatusChannelId} did not resolve "
+                    + "(check DiscordStatusChannelId and the bot's access to it)", ct);
                 return false;
             }
         }
@@ -272,11 +305,19 @@ public sealed class DiscordStatusMonitorService : BackgroundService
     }
 
     /// <summary>
-    /// Stamps a successful poll on the BotState row. Clears any previous
-    /// error so /health stops showing it once the next poll succeeds.
-    /// Idempotent — runs inside the same DbContext scope as the poll.
+    /// Stamps a successful poll on the BotState row: refreshes both the
+    /// completed and attempt timestamps, clears any previous error, and resets
+    /// the consecutive-failure counter. Idempotent, and runs inside the same
+    /// DbContext scope as the poll.
+    ///
+    /// Must be reached on EVERY successful poll including quiet ones that found
+    /// nothing to post. An early return that skips it freezes the /health
+    /// timestamp at the last poll that happened to have work to do, which reads
+    /// as a dead monitor.
+    ///
+    /// If an escalation was outstanding, posts the recovery notice afterwards.
     /// </summary>
-    private static async Task StampPollSuccessAsync(BotDbContext db, CancellationToken ct)
+    private async Task StampPollSuccessAsync(BotDbContext db, CancellationToken ct)
     {
         var state = await db.BotStates.FirstOrDefaultAsync(ct);
         if (state is null)
@@ -284,19 +325,44 @@ public sealed class DiscordStatusMonitorService : BackgroundService
             state = new BotState();
             db.BotStates.Add(state);
         }
-        state.LastDiscordStatusPollCompletedUtc = DateTime.UtcNow;
-        state.LastDiscordStatusPollError = null;
+
+        // Captured before the reset so the recovery notice can report how bad
+        // it got.
+        var failures  = state.DiscordStatusPollConsecutiveFailures;
+        var alertedAt = state.DiscordStatusPollAlertedAtUtc;
+
+        var now = DateTime.UtcNow;
+        state.LastDiscordStatusPollCompletedUtc     = now;
+        state.LastDiscordStatusPollAttemptUtc       = now;
+        state.LastDiscordStatusPollError            = null;
+        state.DiscordStatusPollConsecutiveFailures  = 0;
+        state.DiscordStatusPollAlertedAtUtc         = null;
         await db.SaveChangesAsync(ct);
+
+        // Posted after the save, deliberately. If Discord rejects the message
+        // the cleared state still stands, so the next failure can escalate
+        // again rather than being suppressed by a stale alert marker.
+        if (alertedAt.HasValue)
+            await PostMonitorAlertAsync(recovered: true, failures: failures, lastGoodPoll: null, error: null);
     }
 
     /// <summary>
-    /// Stamps a failed poll. Preserves any prior
-    /// LastDiscordStatusPollCompletedUtc so /health can show "last good
-    /// poll: 12m ago · ⚠️ error". Uses a fresh scope so an EF or DB
-    /// error inside the main poll doesn't poison this write.
+    /// Stamps a failed poll: refreshes the attempt timestamp, records the
+    /// message, and increments the consecutive-failure counter. Deliberately
+    /// preserves LastDiscordStatusPollCompletedUtc so /health can show "last
+    /// good poll 12m ago" alongside "8 consecutive failures". Uses a fresh
+    /// scope so an EF or DB error inside the main poll cannot poison this write.
+    ///
+    /// Escalates to the alert channel exactly once per outage, on the poll that
+    /// crosses BotConfig.DiscordStatusFailureAlertThreshold. The marker that
+    /// keeps it to once is DiscordStatusPollAlertedAtUtc.
     /// </summary>
     private async Task RecordPollErrorAsync(string message, CancellationToken ct)
     {
+        var       shouldAlert  = false;
+        var       failures     = 0;
+        DateTime? lastGoodPoll = null;
+
         try
         {
             using var scope = _scopeFactory.CreateScope();
@@ -307,16 +373,122 @@ public sealed class DiscordStatusMonitorService : BackgroundService
                 state = new BotState();
                 db.BotStates.Add(state);
             }
+
             state.LastDiscordStatusPollError =
                 message.Length > 800 ? message[..800] : message;
+            state.LastDiscordStatusPollAttemptUtc = DateTime.UtcNow;
+            state.DiscordStatusPollConsecutiveFailures++;
+
+            failures     = state.DiscordStatusPollConsecutiveFailures;
+            lastGoodPoll = state.LastDiscordStatusPollCompletedUtc;
+
+            var threshold = _config.DiscordStatusFailureAlertThreshold;
+            if (threshold > 0
+                && failures >= threshold
+                && state.DiscordStatusPollAlertedAtUtc is null)
+            {
+                state.DiscordStatusPollAlertedAtUtc = DateTime.UtcNow;
+                shouldAlert = true;
+            }
+
             await db.SaveChangesAsync(ct);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex,
                 "DiscordStatusMonitorService: failed to record poll error to BotState.");
+            // The marker may not have persisted, so do not post: an alert whose
+            // suppression marker was never saved would repeat every retry.
+            return;
+        }
+
+        if (shouldAlert)
+            await PostMonitorAlertAsync(recovered: false, failures: failures,
+                                        lastGoodPoll: lastGoodPoll, error: message);
+    }
+
+    /// <summary>
+    /// Posts the "monitor is failing" escalation or its matching recovery
+    /// notice to <see cref="BotConfig.DiscordStatusAlertChannelId"/>, falling
+    /// back to <see cref="BotConfig.HqChannelId"/>.
+    ///
+    /// Never throws: an alert that cannot be delivered must not take down the
+    /// poll loop that is already having a bad day. Sends with
+    /// AllowedMentions.None because this is officer plumbing, not something to
+    /// ping the server about.
+    /// </summary>
+    private async Task PostMonitorAlertAsync(
+        bool recovered, int failures, DateTime? lastGoodPoll, string? error)
+    {
+        try
+        {
+            var channelId = _config.DiscordStatusAlertChannelId != 0
+                ? _config.DiscordStatusAlertChannelId
+                : _config.HqChannelId;
+
+            if (channelId == 0)
+            {
+                _logger.LogWarning(
+                    "DiscordStatusMonitorService: wanted to post a monitor alert but neither "
+                    + "DiscordStatusAlertChannelId nor HqChannelId is set.");
+                return;
+            }
+
+            if (_client.GetChannel(channelId) is not IMessageChannel channel)
+            {
+                _logger.LogWarning(
+                    "DiscordStatusMonitorService: alert channel {ChannelId} did not resolve.",
+                    channelId);
+                return;
+            }
+
+            EmbedBuilder embed;
+            if (recovered)
+            {
+                embed = new EmbedBuilder()
+                    .WithTitle("Discord status monitor is working again")
+                    .WithDescription(
+                        $"Polling recovered after **{failures:N0}** failed attempt(s). "
+                        + "Discord incident announcements are going out normally again.")
+                    .WithColor(Color.Green);
+            }
+            else
+            {
+                embed = new EmbedBuilder()
+                    .WithTitle("Discord status monitor is failing")
+                    .WithDescription(
+                        $"The last **{failures:N0}** attempts to read discordstatus.com have failed, "
+                        + "so Discord incident announcements are not going out. Nothing else in the "
+                        + "bot is affected, and the monitor keeps retrying on its own.")
+                    .WithColor(new Color(0xE67E22))
+                    .AddField("Last good poll", RelativeStamp(lastGoodPoll), inline: true)
+                    .AddField("Retrying", "every minute", inline: true)
+                    .AddField("Error", $"```{Truncate(error ?? "unknown", 300)}```", inline: false);
+            }
+
+            await channel.SendMessageAsync(
+                embed: embed
+                    .WithFooter("ClanGuard • Discord Status Monitor")
+                    .WithCurrentTimestamp()
+                    .Build(),
+                allowedMentions: AllowedMentions.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "DiscordStatusMonitorService: failed to post the monitor {Kind} alert.",
+                recovered ? "recovery" : "failure");
         }
     }
+
+    /// <summary>Discord relative timestamp, or "never" for a null.</summary>
+    private static string RelativeStamp(DateTime? utc) =>
+        utc.HasValue
+            ? $"<t:{new DateTimeOffset(DateTime.SpecifyKind(utc.Value, DateTimeKind.Utc)).ToUnixTimeSeconds()}:R>"
+            : "never";
+
+    private static string Truncate(string s, int max) =>
+        s.Length <= max ? s : s[..max] + "...";
 
     private async Task PostUpdateAsync(
         IMessageChannel channel,

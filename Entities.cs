@@ -638,6 +638,37 @@ public class BotState
     public string? LastDiscordStatusPollError { get; set; }
 
     /// <summary>
+    /// Timestamp of the last DiscordStatusMonitorService poll ATTEMPT, whether
+    /// it succeeded or failed. Pairs with LastDiscordStatusPollCompletedUtc:
+    /// when the two agree the monitor is healthy, and when they diverge the gap
+    /// between them is exactly how long it has been broken.
+    /// Null until the first attempt.
+    /// </summary>
+    public DateTime? LastDiscordStatusPollAttemptUtc { get; set; }
+
+    /// <summary>
+    /// How many DiscordStatusMonitorService polls have failed back to back.
+    /// Reset to 0 by any successful poll.
+    ///
+    /// Exists because LastDiscordStatusPollError on its own cannot tell one
+    /// stale error from thousands of live ones. In July 2026 a single transient
+    /// timeout sat on /health for three days looking identical to an ongoing
+    /// outage, which sent a debugging session chasing the network for two hours.
+    /// </summary>
+    public int DiscordStatusPollConsecutiveFailures { get; set; }
+
+    /// <summary>
+    /// When the HQ escalation for a sustained polling failure was posted. Set
+    /// once, by the poll that crosses BotConfig.DiscordStatusFailureAlertThreshold;
+    /// cleared by the next successful poll, which also posts the recovery notice.
+    /// Null means no escalation is currently outstanding.
+    ///
+    /// This field is the whole reason the alert fires once rather than once per
+    /// retry: without it a wedged monitor would post every minute forever.
+    /// </summary>
+    public DateTime? DiscordStatusPollAlertedAtUtc { get; set; }
+
+    /// <summary>
     /// Discord message ID of the auto-posted honeypot warning embed in the
     /// configured trap channel (BotConfig.HoneypotChannelId). Set the first
     /// time the embed is posted on Ready; consulted on later boots so the bot
