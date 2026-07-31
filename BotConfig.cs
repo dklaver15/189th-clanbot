@@ -1202,6 +1202,17 @@ public class BotConfig
     /// </summary>
     public ulong SecurityAlertsChannelId { get; set; } = 1407959078105514046;
 
+    /// <summary>
+    /// Channel ID where RoleConfigValidator posts its startup report when the
+    /// role configuration does not match the guild's actual roles (a rank role
+    /// missing from RankRoles, a *MinRank that is not in RankRoles, and so on).
+    /// Defaults to the moderator notice log, the same channel the other
+    /// operational alerts use. When set to 0 the bot falls back to
+    /// SecurityAlertsChannelId; if neither resolves the problems are still in
+    /// the startup log and on /health, the channel post is just skipped.
+    /// </summary>
+    public ulong RoleConfigAlertChannelId { get; set; } = 1407959078105514046;
+
     // ─── Server protection: Invite-Link Filter ───────────────────────
     /// <summary>
     /// Operating mode for the invite-link filter on MessageReceived /
@@ -2495,32 +2506,29 @@ public class BotConfig
     /// <summary>
     /// Returns the appropriate window days for a guild member based on their roles.
     ///
-    /// Logic: members holding a role in ShortWindowRoles (typically "Guest,RCT")
-    /// get ShortWindowDays — UNLESS they also hold a higher-tier rank role
-    /// (any RankRoles entry NOT in ShortWindowRoles, e.g. PVT and above), in
-    /// which case the higher rank wins and they get the regular WindowDays.
+    /// Logic: a member gets the regular WindowDays only if they hold a rank
+    /// above the short-window tier, meaning any RankRoles entry that is NOT
+    /// also listed in ShortWindowRoles (PVT and above). Everyone else gets
+    /// ShortWindowDays. That covers three cases:
     ///
-    /// This handles Guest-promoted-to-PVT cases where the Guest role wasn't
-    /// stripped on promotion: PVT takes precedence over Guest, so the user
-    /// is correctly evaluated against the 28-day window rather than the
-    /// 14-day Guest window. Members with no short-window role at all get
-    /// WindowDays as before.
+    /// 1. Guest or RCT only: ShortWindowDays, as before.
+    /// 2. No rank role at all: ShortWindowDays. These are people who joined
+    ///    and never picked up a rank, so they are held to the same short
+    ///    window as a recruit rather than the full member window.
+    /// 3. Guest or RCT plus a higher rank (the Guest role was not stripped on
+    ///    promotion): the higher rank wins and they get WindowDays.
+    ///
+    /// Exempt roles (Admin, Moderator, Retired, Reserve and the rest of
+    /// GetExemptRolesList) are filtered out before this is reached, so an
+    /// unranked exempt member is never judged on the short window.
     /// </summary>
     public int GetWindowDaysForRoles(IEnumerable<string> memberRoleNames)
     {
         var roleList = memberRoleNames.ToList();
         var shortRoles = GetShortWindowRolesList();
-
-        var hasShortWindowRole = roleList.Any(r =>
-            shortRoles.Contains(r, StringComparer.OrdinalIgnoreCase));
-
-        if (!hasShortWindowRole)
-            return WindowDays;
-
-        // Holds a short-window role. Check whether they also hold a higher-tier
-        // rank role (any RankRoles entry NOT also in ShortWindowRoles). If so,
-        // the higher rank takes precedence — Guest+PVT means PVT, not Guest.
         var rankRoles = GetRankRolesList();
+
+        // Any rank role that is not itself a short-window role, e.g. PVT and up.
         var hasHigherRank = roleList.Any(r =>
             rankRoles.Contains(r, StringComparer.OrdinalIgnoreCase)
             && !shortRoles.Contains(r, StringComparer.OrdinalIgnoreCase));

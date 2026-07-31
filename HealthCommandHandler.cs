@@ -1,5 +1,6 @@
 using ClanGuardBot.Data;
 using ClanGuardBot.Models;
+using ClanGuardBot.Services;
 using Discord;
 using Discord.WebSocket;
 using Microsoft.EntityFrameworkCore;
@@ -30,6 +31,9 @@ namespace ClanGuardBot.Handlers;
 /// • Operational queues — AWOL records pending notification, pending officer
 ///   applications, upcoming calendar events
 /// • Security — SecurityAuditRecords written in the last 24h, grouped by feature
+/// • Role config — only rendered when RoleConfigValidator finds a mismatch
+///   between the role names in config and the roles that exist in the guild
+///   (or a *MinRank that is not in RankRoles). Silent when the config is clean
 /// • Footer — version, runtime, and codebase size (hand-written .cs file
 ///   count + line count, baked in at build time via BuildInfo.g.cs)
 ///
@@ -309,6 +313,24 @@ public class HealthCommandHandler
             ? "✅ Quiet (last 24h)"
             : string.Join("\n", securityRows.Select(r => $"• {r.Feature}: **{r.Count}**"));
         embed.AddField($"🛡️ Security audit (24h, {securityTotal} total)", secLine, inline: false);
+
+        // Role config — rendered only when something is actually wrong, so a
+        // healthy bot doesn't carry a permanent "all good" row. These problems
+        // are the quiet kind: a rank role missing from RankRoles silently puts
+        // everyone at that rank on the short AWOL window, and a *MinRank that
+        // isn't in RankRoles silently disables its gate. Full detail, including
+        // the impact of each one, goes to the log at startup.
+        IReadOnlyList<RoleConfigValidator.RoleConfigIssue> roleIssues = guild is not null
+            ? RoleConfigValidator.Validate(_config, guild)
+            : Array.Empty<RoleConfigValidator.RoleConfigIssue>();
+        var roleIssueText = RoleConfigValidator.Describe(roleIssues);
+        if (roleIssueText is not null)
+        {
+            embed.AddField(
+                $"⚙️ Role config ({roleIssues.Count} problem(s))",
+                Truncate(roleIssueText, 900),
+                inline: false);
+        }
 
         return embed.Build();
     }

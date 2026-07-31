@@ -98,6 +98,13 @@ public class DiscordBotService : IHostedService
     private readonly ILogger<DiscordBotService> _logger;
     private readonly BotConfig _config;
 
+    // Guilds whose role-config problems have already been posted to the
+    // notice log this process. Ready fires again on every reconnect, so
+    // without this a flappy gateway connection would repost the same embed
+    // all day. Cleared only by a restart, which is exactly the cadence
+    // asked for: one post per startup that has problems.
+    private readonly HashSet<ulong> _roleConfigAlertedGuilds = new();
+
     public DiscordBotService(
         DiscordSocketClient client,
         ActivityTrackingHandler activityHandler,
@@ -376,6 +383,46 @@ public class DiscordBotService : IHostedService
     {
         _logger.LogInformation("Bot is connected as {BotUser} to {GuildCount} guild(s)",
             _client.CurrentUser, _client.Guilds.Count);
+
+        // ── Role config sanity check ──
+        // Several features resolve roles by NAME out of config (RankRoles,
+        // ShortWindowRoles, ExemptRoles, AwolRoleName) and treat "no match" as
+        // a normal state, so a renamed or deleted Discord role misbehaves
+        // silently rather than failing. RoleConfigValidator turns that into a
+        // startup warning. Never fatal: a drifted config is not a reason to
+        // refuse to start. Also posted once per startup to the moderator notice
+        // log, and shown on /health for as long as the problem exists.
+        try
+        {
+            foreach (var guild in _client.Guilds)
+            {
+                var roleIssues = RoleConfigValidator.Validate(_config, guild);
+
+                if (roleIssues.Count == 0)
+                {
+                    _logger.LogInformation("Role config check passed for guild {GuildName}", guild.Name);
+                    continue;
+                }
+
+                _logger.LogWarning(
+                    "Role config check found {Count} problem(s) in guild {GuildName}",
+                    roleIssues.Count, guild.Name);
+
+                foreach (var issue in roleIssues)
+                {
+                    _logger.LogWarning(
+                        "Role config: {Setting} {Detail}. Impact: {Impact}",
+                        issue.Setting, issue.Detail, issue.Impact);
+                }
+
+                if (_roleConfigAlertedGuilds.Add(guild.Id))
+                    await PostRoleConfigAlertAsync(guild, roleIssues);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Role config check failed");
+        }
 
         try
         {
@@ -891,6 +938,79 @@ public class DiscordBotService : IHostedService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to register slash commands");
+        }
+    }
+
+    /// <summary>
+    /// Posts the role-config problems to the moderator notice log. Called once
+    /// per guild per process (see _roleConfigAlertedGuilds).
+    ///
+    /// A channel post rather than log-only because these problems are the
+    /// quiet kind: nothing throws, nothing looks broken, the affected feature
+    /// simply stops matching anyone. Nobody reads the droplet log on a normal
+    /// day, and /health has to be asked. This puts it where an officer will
+    /// trip over it.
+    ///
+    /// Best-effort throughout: a failure to post is logged and swallowed, and
+    /// never takes the Ready handler down with it.
+    /// </summary>
+    private async Task PostRoleConfigAlertAsync(
+        SocketGuild guild,
+        IReadOnlyList<RoleConfigValidator.RoleConfigIssue> issues)
+    {
+        // Explicit ID wins; 0 falls back to the shared security alerts channel
+        // so a fresh deploy still reports somewhere visible.
+        var channelId = _config.RoleConfigAlertChannelId != 0
+            ? _config.RoleConfigAlertChannelId
+            : _config.SecurityAlertsChannelId;
+
+        if (channelId == 0) return;
+
+        var channel = guild.GetTextChannel(channelId);
+        if (channel is null)
+        {
+            _logger.LogWarning(
+                "Role config alert channel {ChannelId} did not resolve in guild {GuildName}. "
+                + "The problems are still in this log and on /health.",
+                channelId, guild.Name);
+            return;
+        }
+
+        try
+        {
+            var embed = new EmbedBuilder()
+                .WithTitle("⚙️ Role config needs attention")
+                .WithColor(Color.Orange)
+                .WithDescription(
+                    $"Found **{issues.Count}** problem(s) in the bot's role settings at startup. "
+                    + "These do not throw or stop the bot, they just quietly stop matching anyone, "
+                    + "so they can sit unnoticed. Fix the setting in `appsettings.json` and restart.")
+                .WithTimestamp(DateTimeOffset.UtcNow)
+                .WithFooter("Shown on /health until it is fixed");
+
+            const int maxFields = 10;
+            foreach (var issue in issues.Take(maxFields))
+            {
+                embed.AddField(
+                    issue.Setting,
+                    $"{issue.Detail}\nWhat breaks: {issue.Impact}",
+                    inline: false);
+            }
+
+            if (issues.Count > maxFields)
+            {
+                embed.AddField(
+                    "More",
+                    $"...and {issues.Count - maxFields} more. The full list is in the startup log.",
+                    inline: false);
+            }
+
+            await channel.SendMessageAsync(embed: embed.Build());
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to post the role config report to channel {ChannelId}", channelId);
         }
     }
 

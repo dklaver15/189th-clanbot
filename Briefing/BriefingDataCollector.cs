@@ -149,8 +149,9 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
         var ctx7d  = await LoadBatchActivityAsync(db, guild.Id, now.AddDays(-SpotlightWindowDays), now, ct);
 
         // Risk Watch must measure each member over their *own* AWOL window
-        // (WindowDays normally, ShortWindowDays for Guest/RCT) so its numbers
-        // mean the same thing AwolCheckService's do. Using a single fixed
+        // (WindowDays for ranked members, ShortWindowDays for Guest, RCT and
+        // anyone with no rank role) so its numbers mean the same thing
+        // AwolCheckService's do. Using a single fixed
         // window here previously produced lines like "4/5 msgs over 28d" that
         // were actually 14d counts — a member with 300+ messages spread across
         // the month could surface as at-risk. GetWindowDaysForRoles only ever
