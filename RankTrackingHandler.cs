@@ -18,7 +18,7 @@ namespace ClanGuardBot.Handlers;
 ///      auto-log new recruits to the Google Sheet.
 ///
 ///   2. Exempt-role transitions — when a member GAINS an exempt role
-///      (Reserve, Admin, Moderator, Retired, etc. as defined by
+///      (Reserve, Moderator, etc. as defined by
 ///      BotConfig.GetExemptRolesList()), strip the AWOL role if they have
 ///      it and resolve any pending AwolRecords. This is the real-time
 ///      counterpart to the self-healing pass in AwolCheckService Step 2 —
@@ -303,7 +303,7 @@ public class RankTrackingHandler
     /// "Gained an exempt role" = was not exempt before, is exempt now. We do NOT
     /// fire on every role change for a member who happens to be exempt — only
     /// on the actual exempt transition. This avoids redundant DB lookups on
-    /// e.g. platoon changes for a Retired member.
+    /// e.g. platoon changes for a member who is already exempt.
     ///
     /// Also a no-op if the member doesn't currently have AWOL — most exempt-role
     /// gains happen on members who weren't AWOL, and we don't want to spam the

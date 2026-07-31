@@ -127,9 +127,19 @@ public class BotConfig
 
     /// <summary>
     /// Comma-separated list of role names that are exempt from AWOL tracking.
-    /// Officers, admins, bots, etc.
+    /// ReserveRoleName is appended automatically by GetExemptRolesList(), so it
+    /// does not need to be listed here.
+    ///
+    /// Kept deliberately short: this used to read "Admin,Moderator,Retired,Bot,
+    /// Bot Whisperer", but RoleConfigValidator found on 2026-07-31 that four of
+    /// those five roles do not exist in the guild. They matched nobody, so the
+    /// list read as far more protective than it was. Only add a name here that
+    /// is a real role, and check the startup report after changing it.
+    ///
+    /// Bots do not need an entry: the AWOL sweep skips member.IsBot before it
+    /// ever looks at roles.
     /// </summary>
-    public string ExemptRoles { get; set; } = "Admin,Moderator,Retired,Bot,Bot Whisperer";
+    public string ExemptRoles { get; set; } = "Moderator";
 
     /// <summary>
     /// Name of the role for clan members on Reserve status. Reserve members are
@@ -187,7 +197,7 @@ public class BotConfig
     /// Comma-separated list of rank role names in order from lowest to highest.
     /// Used to identify a user's current rank and track time-in-rank.
     /// </summary>
-    public string RankRoles { get; set; } = "RCT,PVT,PFC,SPC,CPL,SGT,SSG,SFC,MSG,1SG,SGM,CSM,SMA,2ndLT,1stLT,CPT,MAJ,LTC,COL,BG,MG,LTG,GEN,GA";
+    public string RankRoles { get; set; } = "RCT,PVT,PFC,SPC,CPL,SGT,SSG,SFC,MSG,1SG,SGM,CSM,SMA,2ndLT,1stLT,CPT,MAJ,LTCOL,COL,BG,MG,LTG,GEN,GA";
 
     /// <summary>Name of the Discord category where ticket channels are created.</summary>
     public string TicketCategoryName { get; set; } = "TICKET CENTER";
@@ -2518,7 +2528,7 @@ public class BotConfig
     /// 3. Guest or RCT plus a higher rank (the Guest role was not stripped on
     ///    promotion): the higher rank wins and they get WindowDays.
     ///
-    /// Exempt roles (Admin, Moderator, Retired, Reserve and the rest of
+    /// Exempt roles (Moderator, Reserve and anything else in
     /// GetExemptRolesList) are filtered out before this is reached, so an
     /// unranked exempt member is never judged on the short window.
     /// </summary>
