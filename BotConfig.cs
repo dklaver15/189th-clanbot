@@ -2399,10 +2399,37 @@ public class BotConfig
     public int XpSeasonLengthDays { get; set; } = 30;
 
     /// <summary>
-    /// Minimum rank to run /xp-season start and /xp-adjust. Default MAJ.
+    /// Minimum rank to run the /xp-season subcommands. Default MAJ.
     /// Administrator or Manage Roles always passes.
+    ///
+    /// NOTE: this no longer governs /xp-adjust. Handing out XP by hand is the one
+    /// XP command that can quietly rewrite the standings, so it is gated on an
+    /// explicit role instead of a rank threshold. See <see cref="XpAdjustRoleId"/>.
     /// </summary>
     public string XpAdminMinRank { get; set; } = "MAJ";
+
+    /// <summary>
+    /// The role allowed to run /xp-adjust, the manual XP grant/deduction. Set to
+    /// the HQ role.
+    ///
+    /// Deliberately a ROLE and not a rank threshold. Every other way of earning XP
+    /// is derived from activity the bot already records and is auditable against it;
+    /// /xp-adjust is the only one that writes a number nobody can check against
+    /// anything, which makes it the only real way the leaderboard can be made to
+    /// look rigged. That justifies a smaller, explicitly named group than "MAJ and
+    /// above", and a group whose membership is changed by handing out a role rather
+    /// than by a promotion.
+    ///
+    /// Its own key rather than a reuse of TicketHqRoleId or OfficerAppHqRoleId, in
+    /// line with how PalworldAdminRoleId is kept separate: the ids happen to match
+    /// today, and the two concerns should be able to diverge without one silently
+    /// changing the other.
+    ///
+    /// Fails CLOSED. Set to 0 to fall back to the XpAdminMinRank rank gate; if it
+    /// names a role that does not exist in the guild, nobody but an Administrator
+    /// can adjust XP and the handler logs why.
+    /// </summary>
+    public ulong XpAdjustRoleId { get; set; } = 1408089365816541264;
 
     // ─── Helpers ─────────────────────────────────────────────────────
 

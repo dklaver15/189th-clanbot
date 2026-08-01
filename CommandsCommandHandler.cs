@@ -538,6 +538,17 @@ public class CommandsCommandHandler
             return user.Roles.Any(r => r.Id == cfg.TicketHqRoleId);
         };
 
+        // SyncWithHandlers: XpCommandHandler.RequireAdjustRoleAsync
+        // The HQ role, via its own config key. Falls back to the rank gate only when
+        // the key is unset, exactly as the handler does.
+        Func<SocketGuildUser, BotConfig, bool> xpAdjust = (user, cfg) =>
+        {
+            if (user.GuildPermissions.Administrator) return true;
+            if (cfg.XpAdjustRoleId == 0)
+                return MinRank(cfg.XpAdminMinRank)(user, cfg);
+            return user.Roles.Any(r => r.Id == cfg.XpAdjustRoleId);
+        };
+
         // SyncWithHandlers: PalworldCommandHandler.HasAdminRole
         // The dedicated "Palworld Mod" role — NOT TicketHqRoleId. Its membership is
         // HQ plus the server's owner, so it has to be its own key. Fails closed when
@@ -588,7 +599,6 @@ public class CommandsCommandHandler
         var compEventLbl     = $"{config.CompEventMinRank}+";
         var awolKickLbl      = $"{config.AwolKickMinRank}+";
         var briefingLbl      = $"{config.BriefingNowMinRank}+";
-            var xpAdminLbl       = $"{config.XpAdminMinRank}+";
         const string eventCreditLbl   = "CPT+";   // SyncWithHandlers: EventCreditCommandHandler.MinRankFloor
         const string attendanceLbl    = "MAJ+";   // SyncWithHandlers: AttendanceCommandHandler.MinRankFloor
         const string securityAuditLbl = "BG+";    // SyncWithHandlers: SecurityAuditCommandHandler.MinRankFloor
@@ -689,7 +699,7 @@ public class CommandsCommandHandler
                 $"{config.JotdMinRank}+", MinRank(config.JotdMinRank)),   // SyncWithHandlers: JotdCommandHandler.HasPermission
 
             new("xp-adjust", "Grant or deduct clan XP manually, with a reason",
-                xpAdminLbl, MinRank(config.XpAdminMinRank)),   // SyncWithHandlers: XpCommandHandler.HasAdminPermission
+                "HQ", xpAdjust),   // SyncWithHandlers: XpCommandHandler.RequireAdjustRoleAsync
 
             new("add-event-credit", "Manually add 1 event credit at member's current rank",
                 eventCreditLbl, MinRank("CPT")),

@@ -21,6 +21,8 @@ namespace ClanGuardBot.Handlers;
 ///   /xp-season          — status / start / end. start and end are officer-gated
 ///                         (XpAdminMinRank); seasons NEVER roll over on their own.
 ///   /xp-adjust          — manual grant or deduction with a mandatory reason.
+///                         Gated on the HQ role (BotConfig.XpAdjustRoleId), NOT on
+///                         the rank threshold the season subcommands use.
 ///
 /// ── Why paging is private ──
 /// The pinned board is one shared message, so paging it in place would mean one
@@ -150,10 +152,10 @@ public sealed class XpCommandHandler
                     "Must be true", isRequired: true))
             .Build();
 
-    public static SlashCommandProperties BuildAdjustCommand(string minRank) =>
+    public static SlashCommandProperties BuildAdjustCommand() =>
         new SlashCommandBuilder()
             .WithName(AdjustCommandName)
-            .WithDescription($"Grant or deduct XP manually ({minRank}+ only)")
+            .WithDescription("Grant or deduct XP manually (HQ only)")
             .AddOption("member", ApplicationCommandOptionType.User,
                 "The member to adjust", isRequired: true)
             .AddOption(new SlashCommandOptionBuilder()
@@ -1061,7 +1063,7 @@ public sealed class XpCommandHandler
     private async Task HandleAdjustAsync(SocketSlashCommand command)
     {
         await command.DeferAsync(ephemeral: true);
-        if (!await RequireAdminAsync(command, "Adjusting XP")) return;
+        if (!await RequireAdjustRoleAsync(command)) return;
 
         var caller = (SocketGuildUser)command.User;
         var target = command.Data.Options.FirstOrDefault(o => o.Name == "member")?.Value as SocketUser;
@@ -1156,6 +1158,53 @@ public sealed class XpCommandHandler
         {
             _logger.LogWarning(ex, "XP: board refresh failed after a state change");
         }
+    }
+
+    /// <summary>
+    /// The gate for /xp-adjust, which is deliberately NOT the rank gate the season
+    /// commands use. See BotConfig.XpAdjustRoleId for why this one command is
+    /// singled out.
+    ///
+    /// Fails closed in both misconfigured directions: a role id naming a role that
+    /// no longer exists denies everyone (and says so in the log, rather than
+    /// silently letting the whole officer corps through), while an id of 0 means
+    /// "not configured" and hands back to the old rank gate so an upgrade that
+    /// forgets the key does not lock the command out entirely.
+    /// </summary>
+    private async Task<bool> RequireAdjustRoleAsync(SocketSlashCommand command)
+    {
+        if (command.User is not SocketGuildUser user)
+        {
+            await command.FollowupAsync("That command only works inside the server.", ephemeral: true);
+            return false;
+        }
+
+        if (_config.XpAdjustRoleId == 0)
+        {
+            _logger.LogWarning("XpAdjustRoleId is not set; falling back to the XpAdminMinRank gate for /xp-adjust");
+            return await RequireAdminAsync(command, "Adjusting XP");
+        }
+
+        // Matches how /ticket-panel and /palworld-admin gate: an Administrator
+        // passes, because anyone holding Administrator can give themselves the role
+        // in about four seconds and pretending otherwise only makes the check look
+        // stronger than it is.
+        if (user.GuildPermissions.Administrator) return true;
+        if (user.Roles.Any(r => r.Id == _config.XpAdjustRoleId)) return true;
+
+        if (user.Guild.GetRole(_config.XpAdjustRoleId) is null)
+        {
+            _logger.LogError(
+                "XpAdjustRoleId {Role} does not exist in guild {Guild} — /xp-adjust is denied to everyone " +
+                "except Administrators until it is corrected",
+                _config.XpAdjustRoleId, user.Guild.Id);
+        }
+
+        await command.FollowupAsync(
+            $"❌ Adjusting XP is restricted to <@&{_config.XpAdjustRoleId}>.",
+            ephemeral: true,
+            allowedMentions: AllowedMentions.None);
+        return false;
     }
 
     private async Task<bool> RequireAdminAsync(SocketSlashCommand command, string what)

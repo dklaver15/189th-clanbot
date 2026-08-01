@@ -556,7 +556,7 @@ public class DiscordBotService : IHostedService
                 // XpCommandHandler. NOTE: keep CommandsCommandHandler.BuildCatalog
                 // in sync.
                 XpCommandHandler.BuildSeasonCommand(_config.XpAdminMinRank),
-                XpCommandHandler.BuildAdjustCommand(_config.XpAdminMinRank),
+                XpCommandHandler.BuildAdjustCommand(),
 
                 // /xp-dms — per-member switch for the level-up DM. Open to all
                 // members; the same thing the "Stop these DMs" button on the DM
