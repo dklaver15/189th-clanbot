@@ -3,6 +3,8 @@ using System.Text;
 using ClanGuardBot.Data;
 using ClanGuardBot.Models;
 using Discord;
+using Discord.Net;
+using Discord.Rest;
 using Discord.WebSocket;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -210,7 +212,7 @@ public sealed class XpLeaderboardService : BackgroundService
             return;
         }
 
-        var recent = (await channel.GetMessagesAsync(BoardScanLimit).FlattenAsync()).ToList();
+        var recent = await FetchRecentAsync(channel, ct);
         var mine = recent.OfType<IUserMessage>().Where(m => m.Author.Id == _client.CurrentUser.Id).ToList();
 
         var guides = mine.Where(m => HasEmbedTitled(m, XpGuide.GuideTitle)).ToList();
@@ -283,9 +285,12 @@ public sealed class XpLeaderboardService : BackgroundService
             board = await PostBoardAsync(channel, page, ct);
             if (board is not null) _lastBoardSignature[guild.Id] = page.Signature;
         }
-        else
+        else if (!await UpdateBoardAsync(guild, board, page, ct))
         {
-            await UpdateBoardAsync(guild, board, page, ct);
+            // Stale reference. Drop it and put a fresh board up in the same pass.
+            _lastBoardSignature.TryRemove(guild.Id, out _);
+            board = await PostBoardAsync(channel, page, ct);
+            if (board is not null) _lastBoardSignature[guild.Id] = page.Signature;
         }
 
         await EnsurePinnedAsync(guide, ct);
@@ -398,11 +403,12 @@ public sealed class XpLeaderboardService : BackgroundService
         }
     }
 
-    private async Task UpdateBoardAsync(SocketGuild guild, IUserMessage board, XpPageRender page, CancellationToken ct)
+    /// <summary>Returns false when the message turned out to be gone and must be reposted.</summary>
+    private async Task<bool> UpdateBoardAsync(SocketGuild guild, IUserMessage board, XpPageRender page, CancellationToken ct)
     {
         var signature = page.Signature;
         if (_lastBoardSignature.TryGetValue(guild.Id, out var last) && last == signature)
-            return;
+            return true;
 
         try
         {
@@ -434,10 +440,20 @@ public sealed class XpLeaderboardService : BackgroundService
             }
 
             _lastBoardSignature[guild.Id] = signature;
+            return true;
+        }
+        catch (HttpException ex) when (ex.DiscordCode == DiscordErrorCode.UnknownMessage)
+        {
+            // The message is gone and the caller is holding a stale reference.
+            // Report it rather than swallowing it, so the caller reposts THIS pass
+            // instead of retrying a dead id every ten minutes forever.
+            _logger.LogWarning("XP: the leaderboard message {Msg} no longer exists; reposting", board.Id);
+            return false;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "XP: failed to update the leaderboard message");
+            return true;   // unknown failure: keep the message, try again next cycle
         }
     }
 
@@ -1011,6 +1027,43 @@ public sealed class XpLeaderboardService : BackgroundService
     // ─── Helpers ────────────────────────────────────────────────────────
 
     /// <summary>
+    /// The channel's recent messages, read over REST rather than from the gateway
+    /// cache.
+    ///
+    /// This service finds its own guide and board after a restart by scanning the
+    /// channel, so the scan MUST reflect what Discord actually holds. The socket
+    /// client is configured with MessageCacheSize 500, and
+    /// SocketTextChannel.GetMessagesAsync serves from that cache when it can. A
+    /// message deleted while the bot was disconnected leaves a GHOST in the cache:
+    /// the delete event was never received, so the entry is never evicted.
+    ///
+    /// That is not theoretical. It happened on 2026-08-01. The board was deleted
+    /// during a restart, the scan kept returning the dead id, the service concluded
+    /// the board still existed, every edit failed with 10008 Unknown Message, and
+    /// because `board` was non-null the repost branch was never reached. The board
+    /// stayed missing for forty minutes and only came back on the next restart,
+    /// which cleared the cache.
+    ///
+    /// One extra REST call per refresh (ten minutes apart) is nothing next to that.
+    /// </summary>
+    private async Task<List<IMessage>> FetchRecentAsync(SocketTextChannel channel, CancellationToken ct)
+    {
+        try
+        {
+            if (await _client.Rest.GetChannelAsync(channel.Id) is RestTextChannel rest)
+                return (await rest.GetMessagesAsync(BoardScanLimit).FlattenAsync()).Cast<IMessage>().ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "XP: REST channel scan failed; falling back to the cached view");
+        }
+
+        // Falling back is better than doing nothing, but the ghost risk above is
+        // exactly why this is the fallback and not the primary path.
+        return (await channel.GetMessagesAsync(BoardScanLimit).FlattenAsync()).ToList();
+    }
+
+    /// <summary>
     /// Both season states in one scope: the one accruing right now, and the one
     /// lined up to open later. They are mutually exclusive in practice (a season
     /// cannot be scheduled while another is running) but the guide and the board
@@ -1059,10 +1112,16 @@ public sealed class XpLeaderboardService : BackgroundService
             await message.PinAsync();
             _logger.LogInformation("XP: pinned message {Msg}", message.Id);
         }
+        catch (HttpException ex) when (ex.DiscordCode == DiscordErrorCode.UnknownMessage)
+        {
+            // Already handled by the caller, which reposts. Logging it at warning
+            // level just buried the real signal under one line every ten minutes.
+            _logger.LogDebug("XP: message {Msg} vanished before it could be pinned", message.Id);
+        }
         catch (Exception ex)
         {
             // Missing Manage Messages, or the channel's 50-pin limit is full.
-            // Not fatal — the messages still render, they're just not in the pins.
+            // Not fatal: the messages still render, they're just not in the pins.
             _logger.LogWarning(ex, "XP: could not pin message {Msg}", message.Id);
         }
     }
@@ -1076,7 +1135,7 @@ public sealed class XpLeaderboardService : BackgroundService
     {
         try
         {
-            var recent = (await channel.GetMessagesAsync(BoardScanLimit).FlattenAsync()).ToList();
+            var recent = await FetchRecentAsync(channel, ct);
             foreach (var m in recent)
             {
                 if (m.Type != MessageType.ChannelPinnedMessage) continue;

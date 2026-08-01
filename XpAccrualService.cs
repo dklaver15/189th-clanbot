@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using ClanGuardBot.Data;
 using ClanGuardBot.Models;
@@ -62,7 +63,14 @@ public sealed class XpAccrualService : BackgroundService
     /// otherwise be one warning per cycle, forever, for a state that is perfectly
     /// legitimate between seasons.
     /// </summary>
-    private DateTime? _noSeasonWarnedAt;
+    /// <summary>
+    /// Per guild, because a single shared field does not throttle anything once the
+    /// bot is in more than one. A guild WITH a season reset it to null on every
+    /// cycle, so the guild without one warned every ten minutes instead of every
+    /// six hours: 89 lines in a day, which is how you teach someone to ignore the
+    /// warning that matters.
+    /// </summary>
+    private readonly ConcurrentDictionary<ulong, DateTime> _noSeasonWarnedAt = new();
 
     /// <summary>
     /// Serialises accrual for a guild. Two passes over the same window are safe on
@@ -168,9 +176,10 @@ public sealed class XpAccrualService : BackgroundService
         var season = await _xp.GetActiveSeasonAsync(db, guild.Id, ct);
         if (season is null)
         {
-            if (_noSeasonWarnedAt is null || DateTime.UtcNow - _noSeasonWarnedAt > NoSeasonWarnInterval)
+            if (!_noSeasonWarnedAt.TryGetValue(guild.Id, out var lastWarn)
+                || DateTime.UtcNow - lastWarn > NoSeasonWarnInterval)
             {
-                _noSeasonWarnedAt = DateTime.UtcNow;
+                _noSeasonWarnedAt[guild.Id] = DateTime.UtcNow;
 
                 // A season lined up to open is not a problem, it is the plan. Warning
                 // about it would teach whoever reads the log to ignore the warning
@@ -193,7 +202,7 @@ public sealed class XpAccrualService : BackgroundService
             return;
         }
 
-        _noSeasonWarnedAt = null;
+        _noSeasonWarnedAt.TryRemove(guild.Id, out _);
 
         var now = DateTime.UtcNow;
         var lookbackDays = Math.Max(1, _config.XpAccrualLookbackDays);
