@@ -77,12 +77,18 @@ public sealed class XpLeaderboardRenderer
     /// Everything horizontal is derived from this constant. Nothing below should
     /// hardcode an x position or a card width.
     /// </summary>
-    private const int Width      = 900;
+    private const int Width      = 950;
     private const int Pad        = 44;
     private const int HeaderH    = 172;
     private const int PodiumH    = 320;
     private const int RowH       = 62;
     private const int FooterH    = 68;
+
+    /// <summary>Gutter between the two row columns.</summary>
+    private const int ColumnGap  = 26;
+
+    /// <summary>Row count at or above which the rows split into two columns.</summary>
+    private const int TwoColumnThreshold = 8;
 
     private const int MaxCachedAvatars = 400;
 
@@ -144,9 +150,14 @@ public sealed class XpLeaderboardRenderer
             var avatars = await LoadAvatarsAsync(entries, ct);
             using var avatarLease = new AvatarLease(avatars);
 
+            // Two columns once there are enough rows for it to pay. Below the
+            // threshold a split just looks lopsided.
+            var twoCol   = rows.Count >= TwoColumnThreshold;
+            var rowBands = twoCol ? (rows.Count + 1) / 2 : rows.Count;
+
             var height = HeaderH
                          + (podium.Count > 0 ? PodiumH : 0)
-                         + rows.Count * RowH
+                         + rowBands * RowH
                          + FooterH
                          + (rows.Count > 0 ? Pad / 2 : 0);
 
@@ -168,6 +179,11 @@ public sealed class XpLeaderboardRenderer
             using var valueFont    = new SKFont(boldFace, 24f);
             using var smallFont    = new SKFont(bodyFace, 19f);
             using var rankFont     = new SKFont(boldFace, 27f);
+            // Slightly smaller in a column, but only slightly: shrinking the type is
+            // working against the whole point of the change.
+            using var colNameFont  = new SKFont(boldFace, 22f);
+            using var colValueFont = new SKFont(boldFace, 21f);
+            using var colRankFont  = new SKFont(boldFace, 22f);
 
             // "TOP n" reflects how many are actually on this page — XpBoardPageSize
             // is configurable, so hardcoding "TOP 25" would eventually be a lie.
@@ -188,10 +204,36 @@ public sealed class XpLeaderboardRenderer
 
             if (rows.Count > 0) y += Pad / 2;
 
-            foreach (var entry in rows)
+            if (twoCol)
             {
-                DrawRow(canvas, entry, avatars, y, barMax, nameFont, valueFont, smallFont, rankFont);
-                y += RowH;
+                // Ranks read DOWN the left column and then down the right, which is
+                // how a leaderboard is scanned. Filling left-right-left-right would
+                // put 4th beside 5th and make the order ambiguous at a glance.
+                var colW   = (Width - Pad * 2 - ColumnGap) / 2f;
+                var leftX  = (float)Pad;
+                var rightX = Pad + colW + ColumnGap;
+
+                for (var i = 0; i < rows.Count; i++)
+                {
+                    var inLeft = i < rowBands;
+                    var band   = inLeft ? i : i - rowBands;
+                    var x0     = inLeft ? leftX : rightX;
+
+                    DrawRow(canvas, rows[i], avatars, y + band * RowH, barMax,
+                        colNameFont, colValueFont, smallFont, colRankFont,
+                        x0, x0 + colW, compact: true);
+                }
+
+                y += rowBands * RowH;
+            }
+            else
+            {
+                foreach (var entry in rows)
+                {
+                    DrawRow(canvas, entry, avatars, y, barMax, nameFont, valueFont, smallFont, rankFont,
+                        Pad, Width - Pad, compact: false);
+                    y += RowH;
+                }
             }
 
             DrawFooter(canvas, smallFont, info.Height);
@@ -338,9 +380,10 @@ public sealed class XpLeaderboardRenderer
 
     private void DrawRow(
         SKCanvas canvas, XpBoardEntry entry, IReadOnlyDictionary<ulong, SKImage> avatars,
-        int top, int barMax, SKFont nameFont, SKFont valueFont, SKFont smallFont, SKFont rankFont)
+        int top, int barMax, SKFont nameFont, SKFont valueFont, SKFont smallFont, SKFont rankFont,
+        float left, float right, bool compact)
     {
-        var rect = new SKRect(Pad, top + 4f, Width - Pad, top + RowH - 4f);
+        var rect = new SKRect(left, top + 4f, right, top + RowH - 4f);
 
         using (var bg = new SKPaint
                {
@@ -379,21 +422,31 @@ public sealed class XpLeaderboardRenderer
         var midY = rect.MidY;
         var baseline = midY - (nameFont.Metrics.Ascent + nameFont.Metrics.Descent) / 2f;
 
-        DrawRightAligned(canvas, entry.Place.ToString(), rect.Left + 68f, baseline, rankFont,
+        var rankX   = compact ? 40f  : 68f;
+        var avatarX = compact ? 64f  : 108f;
+        var avatarR = compact ? 16f  : 21f;
+        var nameOff = compact ? 88f  : 142f;
+
+        DrawRightAligned(canvas, entry.Place.ToString(), rect.Left + rankX, baseline, rankFont,
             entry.Place <= 10 ? gold : muted);
 
-        DrawAvatar(canvas, avatars, entry.UserId, rect.Left + 108f, midY, 21f, SKColor.Parse(MutedHex).WithAlpha(90));
+        DrawAvatar(canvas, avatars, entry.UserId, rect.Left + avatarX, midY, avatarR,
+            SKColor.Parse(MutedHex).WithAlpha(90));
 
-        var nameX = rect.Left + 142f;
-        var levelText = $"Lv {entry.Level}";
+        var nameX = rect.Left + nameOff;
         var xpText = $"{entry.Xp:N0} XP";
         var xpW = valueFont.MeasureText(xpText);
-        var lvW = smallFont.MeasureText(levelText);
-        var nameMax = rect.Right - nameX - xpW - lvW - 70f;
+
+        // The level chip is dropped in compact mode. In a narrow column it costs
+        // ~45px that the name needs far more, and the level is already on the
+        // podium cards, on /xp and in the level-up DM.
+        var levelText = compact ? string.Empty : $"Lv {entry.Level}";
+        var lvW = compact ? 0f : smallFont.MeasureText(levelText);
+        var nameMax = rect.Right - nameX - xpW - lvW - (compact ? 28f : 70f);
 
         canvas.DrawText(Ellipsize(entry.Name, nameFont, nameMax), nameX, baseline, nameFont, white);
-        DrawRightAligned(canvas, levelText, rect.Right - xpW - 34f, baseline, smallFont, muted);
-        DrawRightAligned(canvas, xpText, rect.Right - 20f, baseline, valueFont, white);
+        if (!compact) DrawRightAligned(canvas, levelText, rect.Right - xpW - 34f, baseline, smallFont, muted);
+        DrawRightAligned(canvas, xpText, rect.Right - (compact ? 14f : 20f), baseline, valueFont, white);
     }
 
     private void DrawFooter(SKCanvas canvas, SKFont font, int canvasHeight)
