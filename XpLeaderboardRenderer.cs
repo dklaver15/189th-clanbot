@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using ClanGuardBot.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using System.Text;
 using SkiaSharp;
 
 namespace ClanGuardBot.Services;
@@ -60,7 +61,23 @@ public sealed class XpLeaderboardRenderer
     // ── Layout (pixels, 2× logical) ─────────────────────────────────────
     // 1200 wide renders at roughly 600 CSS px in Discord's message column,
     // so every edge lands on a whole device pixel on a retina display.
-    private const int Width      = 1200;
+    /// <summary>
+    /// Canvas width. Deliberately narrower than it looks like it should be.
+    ///
+    /// Discord scales this image to the embed's width on a phone, so the apparent
+    /// size of the text depends ONLY on the ratio of font size to canvas width, not
+    /// on the pixel size of either. At 1200 the 25-name board rendered names about
+    /// six pixels tall on a phone. Dropping to 900 with the font sizes unchanged
+    /// makes every glyph a third larger on screen for free.
+    ///
+    /// The cost is on desktop, where the embed is capped by HEIGHT instead: the
+    /// image is no shorter than before, so a narrower one renders slightly smaller
+    /// there. That trade was made deliberately, mobile first.
+    ///
+    /// Everything horizontal is derived from this constant. Nothing below should
+    /// hardcode an x position or a card width.
+    /// </summary>
+    private const int Width      = 900;
     private const int Pad        = 44;
     private const int HeaderH    = 172;
     private const int PodiumH    = 320;
@@ -145,7 +162,9 @@ public sealed class XpLeaderboardRenderer
             using var seasonFont   = new SKFont(boldFace, 24f);
             using var subtitleFont = new SKFont(bodyFace, 20f);
             using var nameFont     = new SKFont(boldFace, 25f);
-            using var podiumName   = new SKFont(boldFace, 26f);
+            using var podiumName   = new SKFont(boldFace, 23f);   // see note at Width: the podium
+            // cards are a fraction of the canvas, so narrowing it narrowed them. At 26 a
+            // normal clan name like "2ndLT.SparkyRam" ellipsized on the podium of all places.
             using var valueFont    = new SKFont(boldFace, 24f);
             using var smallFont    = new SKFont(bodyFace, 19f);
             using var rankFont     = new SKFont(boldFace, 27f);
@@ -255,11 +274,14 @@ public sealed class XpLeaderboardRenderer
         const float cardTop = 50f;     // clear of the header rule above
 
         // (place, centre x, card width, avatar radius, accent)
+        // Widths are a FRACTION of the canvas, not absolute pixels. At 310/360 on a
+        // 900px canvas the runner-up card ran from x=64 to x=296 while the winner's
+        // started at x=315: fine at 1200, overlapping the moment the canvas narrowed.
         var slots = new (int Place, float Cx, float W, float R, string Accent)[]
         {
-            (2, Width * 0.20f, 310f, 48f, SilverHex),
-            (1, Width * 0.50f, 360f, 56f, GoldHex),
-            (3, Width * 0.80f, 310f, 48f, BronzeHex),
+            (2, Width * 0.20f, Width * 0.2583f, 48f, SilverHex),
+            (1, Width * 0.50f, Width * 0.3000f, 56f, GoldHex),
+            (3, Width * 0.80f, Width * 0.2583f, 48f, BronzeHex),
         };
 
         foreach (var slot in slots)
@@ -418,7 +440,22 @@ public sealed class XpLeaderboardRenderer
                     $"{_config.XpPerMessage} XP / message", _config.XpPerMessage, BlurpleHex));
 
             const int rowH = 66;
-            var height = 150 + rows.Count * rowH + 96;
+
+            // Wrapped, not hardcoded. These two sentences used to be drawn as two
+            // fixed lines whose length had been eyeballed against a 1200px canvas;
+            // the moment Width changed, the first ran off the right edge. Measuring
+            // means the copy and the canvas can each change without the other
+            // needing to know.
+            const int noteLineH = 28;
+            var noteFontProbe = new SKFont(ResolveTypeface(SKFontStyle.Normal), 19f);
+            var noteLines = WrapText(
+                "Event and meeting XP is automatic. It comes from being in the voice channel " +
+                "during the event. AFK doesn't count. Short voice hops don't count. Chat is " +
+                "capped, on purpose.",
+                noteFontProbe, Width - Pad * 2);
+            noteFontProbe.Dispose();
+
+            var height = 150 + rows.Count * rowH + 44 + noteLines.Count * noteLineH + 28;
 
             var info = new SKImageInfo(Width, height);
             using var surface = SKSurface.Create(info);
@@ -490,12 +527,12 @@ public sealed class XpLeaderboardRenderer
                 y += rowH;
             }
 
-            canvas.DrawText(
-                "Event and meeting XP is automatic — it comes from being in the voice channel during the event.",
-                Pad, y + 44f, noteFont, muted);
-            canvas.DrawText(
-                "AFK doesn't count. Short voice hops don't count. Chat is capped, on purpose.",
-                Pad, y + 72f, noteFont, muted);
+            var noteY = y + 44f;
+            foreach (var line in noteLines)
+            {
+                canvas.DrawText(line, Pad, noteY, noteFont, muted);
+                noteY += noteLineH;
+            }
 
             using var image = surface.Snapshot();
             using var png = image.Encode(SKEncodedImageFormat.Png, 100);
@@ -534,7 +571,9 @@ public sealed class XpLeaderboardRenderer
             using var titleFont    = new SKFont(boldFace, 46f);
             using var seasonFont   = new SKFont(boldFace, 24f);
             using var subtitleFont = new SKFont(bodyFace, 20f);
-            using var podiumName   = new SKFont(boldFace, 26f);
+            using var podiumName   = new SKFont(boldFace, 23f);   // see note at Width: the podium
+            // cards are a fraction of the canvas, so narrowing it narrowed them. At 26 a
+            // normal clan name like "2ndLT.SparkyRam" ellipsized on the podium of all places.
             using var valueFont    = new SKFont(boldFace, 24f);
             using var smallFont    = new SKFont(bodyFace, 19f);
             using var rankFont     = new SKFont(boldFace, 27f);
@@ -731,7 +770,102 @@ public sealed class XpLeaderboardRenderer
     /// wildly — an estimate overflows the column on exactly the names people care
     /// most about seeing.
     /// </summary>
-    private static string Ellipsize(string text, SKFont font, float maxWidth)
+    private static string Ellipsize(string text, SKFont font, float maxWidth) =>
+        EllipsizeCore(RenderableText(text, font), font, maxWidth);
+
+    /// <summary>
+    /// Makes a Discord display name actually drawable.
+    ///
+    /// ── The problem ──
+    /// Members set names in "fancy fonts", which are not fonts at all: they are
+    /// distinct Unicode code points that merely look like letters. 𝓑𝓻𝓪𝓷𝓭𝓽 is the
+    /// Mathematical Alphanumeric Symbols block, Ｂｒａｎｄｔ is Halfwidth and Fullwidth
+    /// Forms, Ⓑⓡⓐⓝⓓⓣ is Enclosed Alphanumerics. DejaVu Sans, the only font present
+    /// in the container, has glyphs for none of them.
+    ///
+    /// Skia does not fail loudly on a missing glyph. It draws .notdef, which is
+    /// blank in this face, while still reporting a normal advance width from
+    /// MeasureText. The result on the board was a correctly sized, correctly
+    /// spaced, completely invisible name.
+    ///
+    /// ── The fix ──
+    /// NFKC normalisation is exactly the right tool: those blocks are defined as
+    /// COMPATIBILITY equivalents of plain ASCII, so the mapping back is part of the
+    /// Unicode standard rather than a table we would have to guess at and maintain.
+    /// Verified against all four styles above.
+    ///
+    /// Anything still unrenderable after that (emoji, private-use characters, box
+    /// drawing the face lacks) is dropped rather than drawn as an invisible or tofu
+    /// box that silently eats column width. Characters the face CAN draw are left
+    /// alone, including genuine accents and the small-caps letters, which are real
+    /// glyphs in DejaVu and not compatibility characters.
+    ///
+    /// If stripping leaves nothing at all, the raw text comes back instead: a row of
+    /// tofu is bad, a nameless row on a leaderboard is worse.
+    /// </summary>
+    private static string RenderableText(string text, SKFont font)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+
+        string normalized;
+        try { normalized = text.Normalize(NormalizationForm.FormKC); }
+        catch (ArgumentException) { normalized = text; }   // invalid surrogate pair
+
+        var face = font.Typeface;
+        if (face is null) return normalized;
+
+        var sb = new StringBuilder(normalized.Length);
+        var dropped = false;
+
+        foreach (var rune in normalized.EnumerateRunes())
+        {
+            // Whitespace has no glyph to look up but must survive.
+            if (Rune.IsWhiteSpace(rune)) { sb.Append(rune); continue; }
+
+            if (face.GetGlyph(rune.Value) != 0) sb.Append(rune);
+            else dropped = true;
+        }
+
+        if (!dropped) return normalized;
+
+        var cleaned = sb.ToString().Trim();
+        return cleaned.Length > 0 ? cleaned : normalized;
+    }
+
+    /// <summary>
+    /// Greedy word wrap to a pixel width. Measures each candidate line rather than
+    /// counting characters, for the same reason Ellipsize does: proportional type
+    /// and clan naming conventions make character counts meaningless.
+    ///
+    /// A single word longer than the line is left to overflow rather than being
+    /// broken mid-word. Nothing in this copy is that long, and hyphenating a URL or
+    /// a rank prefix would read worse than the overhang.
+    /// </summary>
+    private static List<string> WrapText(string text, SKFont font, float maxWidth)
+    {
+        var lines = new List<string>();
+        if (string.IsNullOrWhiteSpace(text)) return lines;
+
+        var current = new StringBuilder();
+        foreach (var word in text.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var candidate = current.Length == 0 ? word : $"{current} {word}";
+            if (current.Length > 0 && font.MeasureText(candidate) > maxWidth)
+            {
+                lines.Add(current.ToString());
+                current.Clear().Append(word);
+            }
+            else
+            {
+                current.Clear().Append(candidate);
+            }
+        }
+
+        if (current.Length > 0) lines.Add(current.ToString());
+        return lines;
+    }
+
+    private static string EllipsizeCore(string text, SKFont font, float maxWidth)
     {
         if (string.IsNullOrEmpty(text)) return string.Empty;
         if (maxWidth <= 0) return string.Empty;
