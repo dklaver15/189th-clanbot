@@ -3,6 +3,23 @@ services:
     build: .
     container_name: clanguard-bot
     restart: unless-stopped
+    # -- Memory limits --
+    # Sized for the 2 GB droplet: 640 + 640 + 256 = 1536m for containers,
+    # leaving ~512m for the host OS and the Docker daemon. Without limits
+    # every container sees the whole box, so a spike in one (the whisper
+    # model in the transcriber, most likely) gets the OOM killer to pick a
+    # victim by size, and that victim is this container.
+    #
+    # Idle draw is ~220MiB, so 640m is roughly 3x headroom. The spikes are
+    # SkiaSharp/ScottPlot renders (XP leaderboard PNG, Satisfactory charts,
+    # member activity charts); those allocate natively, outside the managed
+    # heap, so they will not show up in .NET memory counters.
+    #
+    # memswap_limit is TOTAL memory + swap, not swap on its own. Setting it
+    # to 896m allows 256m of swap: enough to ride out a render spike instead
+    # of being killed, not enough to sit and thrash.
+    mem_limit: 640m
+    memswap_limit: 896m
     depends_on:
       - recorder
       - transcriber
@@ -73,6 +90,10 @@ services:
     build: ./Recorder
     container_name: clanguard-recorder
     restart: unless-stopped
+    # Idle draw is ~10MiB; it only grows while buffering voice packets during
+    # a recording. 256m is generous for that.
+    mem_limit: 256m
+    memswap_limit: 256m
     environment:
       - RECORDER_BOT_TOKEN=${RECORDER_BOT_TOKEN}
       - RECORDER_SHARED_SECRET=${RECORDER_SHARED_SECRET}
@@ -90,6 +111,21 @@ services:
     build: ./Transcriber
     container_name: clanguard-transcriber
     restart: unless-stopped
+    # app.py loads WhisperModel at import, not per request, so the model is
+    # meant to stay resident for the life of the container. On the old 1 GB
+    # box it did not: docker stats showed this container at 5.4MiB RSS, which
+    # is less than an empty Python process, so the kernel had swapped the
+    # model out and every meeting had to page it back off disk first.
+    #
+    # memswap_limit == mem_limit means no swap at all for this container,
+    # which is the point: a resident model is the whole reason it is loaded
+    # up front. base.en at int8 is small, so 640m is well clear of what it
+    # needs and it should never reach the limit.
+    #
+    # If transcription ever starts failing after a model change (small.en or
+    # larger), raise both numbers together rather than allowing swap back in.
+    mem_limit: 640m
+    memswap_limit: 640m
     environment:
       - TRANSCRIBER_SHARED_SECRET=${TRANSCRIBER_SHARED_SECRET}
       - TRANSCRIBER_PORT=8090
