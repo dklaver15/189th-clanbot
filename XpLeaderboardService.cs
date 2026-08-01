@@ -334,8 +334,6 @@ public sealed class XpLeaderboardService : BackgroundService
     private async Task UpdateGuideAsync(SocketGuild guild, IUserMessage guide, CancellationToken ct)
     {
         var (season, scheduled) = await GetSeasonStateAsync(guild.Id, ct);
-        var hasImage = guide.Attachments.Any(a => a.Filename == XpGuide.RatesImageFileName);
-        var embed = XpGuide.Build(_config, season, scheduled, hasImage);
 
         // Most of the economy appears ONLY inside the rendered card, so a text-only
         // comparison would let a retuned rate (meeting XP, streak bonuses, the voice
@@ -345,6 +343,31 @@ public sealed class XpLeaderboardService : BackgroundService
         var ratesChanged = !_lastRatesSignature.TryGetValue(guild.Id, out var lastRates)
                            || lastRates != ratesSignature;
 
+        // ── Keeping the embed and the attachment in agreement ──
+        // An embed shows the card by pointing at attachment://xp-rates.png. Discord
+        // only draws an attachment INSIDE the embed when that reference exists; with
+        // no reference it renders the same file loose, above the embed, while the
+        // embed falls back to listing the rates as text. So the message ends up
+        // showing the rates twice, once as a stray graphic and once as a list.
+        //
+        // That is what happened in production. The old code decided whether to
+        // reference the card by reading guide.Attachments off a possibly stale
+        // cached message, and only re-rendered when `ratesChanged && hasImage`. Once
+        // that read came back empty the guide dropped to text, no upload was ever
+        // attempted again because hasImage stayed false, and the orphaned attachment
+        // sat above it indefinitely.
+        //
+        // The fix is to stop inferring and start deciding. Re-upload when the economy
+        // moved OR when the message is missing the card it ought to have, then build
+        // the embed to reference the card if and only if the message will actually
+        // carry one once this edit lands.
+        var currentlyHasCard = guide.Attachments.Any(a => a.Filename == XpGuide.RatesImageFileName);
+        var needsUpload      = ratesChanged || !currentlyHasCard;
+        var png              = needsUpload ? _renderer.TryRenderRatesCard() : null;
+        var willHaveCard     = png is not null || (!needsUpload && currentlyHasCard);
+
+        var embed = XpGuide.Build(_config, season, scheduled, willHaveCard);
+
         var current = guide.Embeds.FirstOrDefault();
         var textUnchanged = current is not null
             && current.Description == embed.Description
@@ -352,12 +375,10 @@ public sealed class XpLeaderboardService : BackgroundService
             && current.Fields.Length == embed.Fields.Length
             && !current.Fields.Where((f, i) => f.Value != embed.Fields[i].Value).Any();
 
-        if (textUnchanged && !ratesChanged) return;
+        if (textUnchanged && !needsUpload) return;
 
         try
         {
-            var png = ratesChanged && hasImage ? _renderer.TryRenderRatesCard() : null;
-
             if (png is not null)
             {
                 using var fa = new FileAttachment(new MemoryStream(png), XpGuide.RatesImageFileName);
@@ -367,8 +388,21 @@ public sealed class XpLeaderboardService : BackgroundService
                     m.Attachments = new List<FileAttachment> { fa };
                 });
             }
+            else if (!willHaveCard)
+            {
+                // No card is going up and none should be shown, so drop any file
+                // still hanging off the message. Leaving it there is exactly the
+                // stray-graphic-above-the-embed state this method exists to avoid.
+                await guide.ModifyAsync(m =>
+                {
+                    m.Embed = embed;
+                    m.Attachments = new List<FileAttachment>();
+                });
+            }
             else
             {
+                // Card already present and still current: text-only edit, and
+                // omitting Attachments leaves the existing upload untouched.
                 await guide.ModifyAsync(m => m.Embed = embed);
             }
 
