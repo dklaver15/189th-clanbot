@@ -30,11 +30,13 @@ jobs:
           host: ${{ secrets.DROPLET_HOST }}
           username: root
           key: ${{ secrets.DROPLET_SSH_KEY }}
-          # Default command_timeout is 10m. `docker compose build --no-cache`
-          # rebuilds all three images (clanguard + recorder + transcriber) from
-          # scratch every deploy, and the heavy transcriber image regularly
-          # pushes total build time past 10m → "Run Command Timeout". 30m gives
-          # plenty of headroom.
+          # Default command_timeout is 10m. Builds used to run --no-cache across
+          # all three images, and the transcriber (pip install + a build-time
+          # HuggingFace model download) regularly pushed total build time past
+          # 10m → "Run Command Timeout". The sidecars now use layer cache (see
+          # the build steps below), so typical deploys are much shorter, but 30m
+          # stays: a dependency change in the transcriber still triggers the full
+          # slow path, and the droplet is a single shared vCPU.
           command_timeout: 30m
           envs: GOOGLE_CREDENTIALS_BASE64,ANTHROPIC_API_KEY
           script: |
@@ -43,7 +45,30 @@ jobs:
             git fetch origin main
             git reset --hard origin/main
             echo "$GOOGLE_CREDENTIALS_BASE64" | base64 --decode > google-credentials.json
-            docker compose build --no-cache
+            # --no-cache is deliberate on clanguard and ONLY on clanguard.
+            #
+            # We hit builds where the running bot did not reflect pushed code
+            # changes, and rebuilding this image from scratch every deploy is
+            # what stopped it. This is the image whose source actually changes on
+            # every push, so it is the one that needs the guarantee. Do not
+            # "optimise" this back to a cached build.
+            docker compose build --no-cache clanguard
+            #
+            # The sidecars are a different story. Their inputs are
+            # Transcriber/requirements.txt and Recorder/package.json, which
+            # change maybe a few times a year, and neither was involved in the
+            # stale-build problem above. Rebuilding them from scratch on every
+            # push meant re-running pip install AND re-downloading the whisper
+            # model from HuggingFace (see the RUN python -c line in
+            # Transcriber/Dockerfile), plus a full npm install, on a single
+            # shared vCPU. That was the bulk of every deploy.
+            #
+            # Layer cache invalidates correctly when those dependency files
+            # change, so this stays honest. If a sidecar ever does go stale,
+            # rebuild it explicitly on the droplet rather than putting
+            # --no-cache back across the board:
+            #   docker compose build --no-cache transcriber
+            docker compose build recorder transcriber
             docker compose up -d --force-recreate
         env:
           GOOGLE_CREDENTIALS_BASE64: ${{ secrets.GOOGLE_CREDENTIALS_BASE64 }}
