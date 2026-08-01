@@ -255,10 +255,12 @@ public sealed class XpCommandHandler
 
         try
         {
-            // The disabled "Page 2 / 5" label. Discord shouldn't deliver a click
-            // for a disabled button, but acknowledging costs nothing and avoids a
-            // stuck "thinking" spinner if it ever does.
-            if (id == "xp:noop")
+            // The disabled "Page 2 / 5" label, and the inert ids the pager gives
+            // Prev on the first page and Next on the last (they exist only so two
+            // buttons in one message can never share a custom id). Discord
+            // shouldn't deliver a click for a disabled button, but acknowledging
+            // costs nothing and avoids a stuck "thinking" spinner if it ever does.
+            if (id.StartsWith("xp:noop", StringComparison.Ordinal))
             {
                 await component.DeferAsync();
                 return;

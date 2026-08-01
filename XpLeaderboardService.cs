@@ -808,9 +808,30 @@ public sealed class XpLeaderboardService : BackgroundService
             return builder.Build();
         }
 
-        builder.WithButton("◀ Prev", $"xp:page:{Math.Max(1, page - 1)}", ButtonStyle.Secondary, disabled: page <= 1);
+        // One page means no pager. Four buttons where three of them are dead is
+        // noise, and it sidesteps the duplicate-id trap below entirely.
+        if (totalPages <= 1)
+        {
+            builder.WithButton("🔎 Find me", "xp:find", ButtonStyle.Primary);
+            return builder.Build();
+        }
+
+        // Every custom id in a single message must be UNIQUE. Discord rejects the
+        // whole payload with 50035 COMPONENT_CUSTOM_ID_DUPLICATED otherwise, which
+        // fails the send, not just the button.
+        //
+        // Clamping the target page produced exactly that: on the first page Prev
+        // clamped to xp:page:1 and on the last page Next clamped to the same value
+        // as the page it was already on, so a one-page view emitted xp:page:1 twice
+        // and /xp-leaderboard threw for every member. Disabled buttons still carry
+        // an id and are still validated, so the ends get their own inert ids rather
+        // than a clamped real one.
+        var prevId = page > 1 ? $"xp:page:{page - 1}" : "xp:noop:first";
+        var nextId = page < totalPages ? $"xp:page:{page + 1}" : "xp:noop:last";
+
+        builder.WithButton("◀ Prev", prevId, ButtonStyle.Secondary, disabled: page <= 1);
         builder.WithButton($"Page {page} / {totalPages}", "xp:noop", ButtonStyle.Secondary, disabled: true);
-        builder.WithButton("Next ▶", $"xp:page:{Math.Min(totalPages, page + 1)}", ButtonStyle.Secondary, disabled: page >= totalPages);
+        builder.WithButton("Next ▶", nextId, ButtonStyle.Secondary, disabled: page >= totalPages);
         builder.WithButton("🔎 Find me", "xp:find", ButtonStyle.Primary);
 
         return builder.Build();
