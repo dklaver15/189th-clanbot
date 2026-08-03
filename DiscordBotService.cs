@@ -60,6 +60,7 @@ public class DiscordBotService : IHostedService
     private readonly PollGatewayVoteHandler _pollGatewayVoteHandler;
     private readonly UfcCommandHandler _ufcCommandHandler;
     private readonly FinalsCommandHandler _finalsCommandHandler;
+    private readonly SleeperCommandHandler _sleeperCommandHandler;
     private readonly XpCommandHandler _xpCommandHandler;
     private readonly PalworldCommandHandler _palworldCommandHandler;
     private readonly SatisfactoryCommandHandler _satisfactoryCommandHandler;
@@ -149,6 +150,7 @@ public class DiscordBotService : IHostedService
         PollGatewayVoteHandler pollGatewayVoteHandler,
         UfcCommandHandler ufcCommandHandler,
         FinalsCommandHandler finalsCommandHandler,
+        SleeperCommandHandler sleeperCommandHandler,
         XpCommandHandler xpCommandHandler,
         PalworldCommandHandler palworldCommandHandler,
         SatisfactoryCommandHandler satisfactoryCommandHandler,
@@ -230,6 +232,7 @@ public class DiscordBotService : IHostedService
         _pollGatewayVoteHandler      = pollGatewayVoteHandler;
         _ufcCommandHandler           = ufcCommandHandler;
         _finalsCommandHandler        = finalsCommandHandler;
+        _sleeperCommandHandler       = sleeperCommandHandler;
         _xpCommandHandler            = xpCommandHandler;
         _palworldCommandHandler      = palworldCommandHandler;
         _satisfactoryCommandHandler  = satisfactoryCommandHandler;
@@ -331,6 +334,7 @@ public class DiscordBotService : IHostedService
         _pollGatewayVoteHandler.Register(_client);
         _ufcCommandHandler.Register(_client);
         _finalsCommandHandler.Register(_client);
+        _sleeperCommandHandler.Register(_client);
         _xpCommandHandler.Register(_client);
         _palworldCommandHandler.Register(_client);
         _satisfactoryCommandHandler.Register(_client);
@@ -540,6 +544,17 @@ public class DiscordBotService : IHostedService
                 // public reply; gated by BotConfig.FinalsEnabled. Same handler as
                 // /finals-rank. NOTE: keep CommandsCommandHandler.BuildCatalog in sync.
                 FinalsCommandHandler.BuildClubCommand(),
+
+                // /sleeper-*: the clan's Sleeper fantasy football league. Open to
+                // all members; public replies for the two read commands, ephemeral
+                // for linking. Runtime-gated by BotConfig.SleeperEnabled plus a
+                // league id; there is no API key, Sleeper's read API is anonymous.
+                // Standings are a command rather than a pinned board on purpose:
+                // the league is a side activity, so it is pulled when wanted.
+                // NOTE: keep CommandsCommandHandler.BuildCatalog in sync.
+                SleeperCommandHandler.BuildStandingsCommand(),
+                SleeperCommandHandler.BuildMatchupsCommand(),
+                SleeperCommandHandler.BuildLinkCommand(),
 
                 // /xp, /xp-leaderboard — the seasonal clan XP ladder. Open to all
                 // members. XP is a recognition/engagement layer only: it does NOT

@@ -63,6 +63,9 @@ public class BotDbContext : DbContext
     public DbSet<SatisfactoryDailySnapshot> SatisfactoryDailySnapshots => Set<SatisfactoryDailySnapshot>();
     public DbSet<SatisfactoryMetricSample>  SatisfactoryMetricSamples  => Set<SatisfactoryMetricSample>();
     public DbSet<SatisfactoryCircuitSample> SatisfactoryCircuitSamples => Set<SatisfactoryCircuitSample>();
+    // ── Sleeper fantasy football ──
+    public DbSet<SleeperLink>          SleeperLinks          => Set<SleeperLink>();
+    public DbSet<SleeperWeekPost>      SleeperWeekPosts      => Set<SleeperWeekPost>();
     // ── XP ladder ──
     public DbSet<XpSeason>             XpSeasons             => Set<XpSeason>();
     public DbSet<XpAward>              XpAwards              => Set<XpAward>();
@@ -644,6 +647,26 @@ public class BotDbContext : DbContext
         {
             e.HasIndex(l => new { l.GuildId, l.DiscordUserId }).IsUnique();
             e.HasIndex(l => new { l.GuildId, l.SatisfactoryPlayerName }).IsUnique();
+        });
+
+        // ── Sleeper ↔ Discord links ───────────────────────────────────
+        // Unique in BOTH directions, same shape as the Palworld and Satisfactory
+        // links: the handler clears the other side before inserting, and these
+        // indexes are the structural backstop against two members claiming the
+        // same Sleeper account.
+        modelBuilder.Entity<SleeperLink>(e =>
+        {
+            e.HasIndex(l => new { l.GuildId, l.DiscordUserId }).IsUnique();
+            e.HasIndex(l => new { l.GuildId, l.SleeperUserId }).IsUnique();
+        });
+
+        // ── Sleeper weekly posts ──────────────────────────────────────
+        // One row per fantasy week, looked up by exactly that key on every cycle,
+        // and unique so a race between two cycles cannot create a second row and
+        // start a duplicate scoreboard.
+        modelBuilder.Entity<SleeperWeekPost>(e =>
+        {
+            e.HasIndex(p => new { p.GuildId, p.Season, p.Week }).IsUnique();
         });
 
         // ── Satisfactory milestones / research ────────────────────────

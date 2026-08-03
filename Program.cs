@@ -546,6 +546,19 @@ try
     builder.Services.AddSingleton<FinalsCommandHandler>();
     builder.Services.AddHostedService<FinalsLeaderboardService>();
 
+    // ── Sleeper fantasy football ─────────────────────────────────────
+    // SleeperApiService is the keyless Sleeper client (one cache shared by every
+    // surface); SleeperLinkService holds the Discord/Sleeper mapping in memory;
+    // SleeperCommandHandler owns /sleeper-standings, /sleeper-matchups and
+    // /sleeper-link (Register() called from DiscordBotService);
+    // SleeperMatchupService posts the weekly preview, live scoreboard and recap.
+    // All gated by BotConfig.Sleeper*, idle until SleeperEnabled and a league id
+    // are set. There is no API key: Sleeper's read API is public and anonymous.
+    builder.Services.AddSingleton<SleeperApiService>();
+    builder.Services.AddSingleton<SleeperLinkService>();
+    builder.Services.AddSingleton<SleeperCommandHandler>();
+    builder.Services.AddHostedService<SleeperMatchupService>();
+
     // ── XP ladder / seasonal leaderboard ─────────────────────────────
     // XpService is the stateless rules engine (level maths, season lifecycle,
     // the idempotent award ledger) shared by everything below.

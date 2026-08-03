@@ -1175,6 +1175,92 @@ public class BotConfig
     /// </summary>
     public bool FinalsSeasonRolloverReminderEnabled { get; set; } = true;
 
+    // ─── Sleeper fantasy football ────────────────────────────────────
+    /// <summary>
+    /// Master switch for the fantasy football feature: the /sleeper-standings,
+    /// /sleeper-matchups and /sleeper-link commands, and the weekly matchup posts.
+    ///
+    /// Sleeper's read API takes no key, no token and no OAuth, so this switch plus
+    /// <see cref="SleeperLeagueId"/> is the entire setup. Nothing here can write to
+    /// Sleeper: no roster moves, no lineup changes, no trades. Default false, opt-in.
+    /// </summary>
+    public bool SleeperEnabled { get; set; } = false;
+
+    /// <summary>
+    /// The Sleeper league id, an 18-digit number. Found at the end of the league's
+    /// URL on sleeper.com, or in the mobile app under league settings.
+    ///
+    /// This changes every season: Sleeper creates a NEW league id when a league is
+    /// rolled over to the next year, and the old id keeps serving the old season's
+    /// data forever rather than erroring. A stale value here therefore shows last
+    /// season's standings quite happily, so it has to be updated each year.
+    /// </summary>
+    public string SleeperLeagueId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Channel the weekly matchup preview, live scoreboard and recap are posted to.
+    /// 0 disables all three, leaving the slash commands working anywhere.
+    /// </summary>
+    public ulong SleeperChannelId { get; set; } = default;
+
+    /// <summary>
+    /// Role allowed to link a Sleeper account on someone else's behalf. 0 means
+    /// only server administrators can. Anyone can always link themselves.
+    /// </summary>
+    public ulong SleeperAdminRoleId { get; set; } = default;
+
+    /// <summary>
+    /// Post the week's matchups once, when a new NFL week opens. Skipped for a week
+    /// that already has scores when the bot first sees it, since a preview after
+    /// kickoff is just a worse scoreboard. Default true.
+    /// </summary>
+    public bool SleeperMatchupPreviewEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Maintain a single live scoreboard message, edited in place while games are
+    /// on. The edit is skipped when no score moved since the previous cycle.
+    /// Default true.
+    /// </summary>
+    public bool SleeperLiveScoresEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Post a results recap once the NFL clock moves past a week the bot covered:
+    /// final scores plus the week's high score, closest game and biggest blowout.
+    /// Default true.
+    /// </summary>
+    public bool SleeperRecapEnabled { get; set; } = true;
+
+    /// <summary>
+    /// How often (minutes) the background service checks for score changes. Floored
+    /// at 5 in code, which keeps the bot far inside Sleeper's stated limit of 1000
+    /// requests per minute. Default 10.
+    /// </summary>
+    public int SleeperRefreshIntervalMinutes { get; set; } = 10;
+
+    /// <summary>
+    /// Render a linked member's Discord mention next to their team name on fantasy
+    /// surfaces. Turn off to show Sleeper display names only. Default true.
+    /// </summary>
+    public bool SleeperMentionLinkedMembers { get; set; } = true;
+
+    /// <summary>
+    /// Whether the weekly posts actually NOTIFY the people they mention.
+    ///
+    /// Default false: mentions still render as clickable names, they just do not
+    /// fire a notification. Sixteen pings a week from a side activity is how a
+    /// channel gets muted. Set true if the league wants the nudge.
+    /// </summary>
+    public bool SleeperPingOnPost { get; set; } = false;
+
+    /// <summary>
+    /// Keep the NFL player directory in memory so scores can name who put them up
+    /// (the recap's "top performer" line). Sleeper's directory is a single ~5 MB
+    /// document, refreshed at most daily as Sleeper asks; the trimmed copy the bot
+    /// retains is a few MB. Turn off to save that RAM and lose only that one line.
+    /// Default true.
+    /// </summary>
+    public bool SleeperPlayerCacheEnabled { get; set; } = true;
+
     // ─── Server protection: Account-Age Gate ─────────────────────────
     /// <summary>
     /// Operating mode for the account-age gate on UserJoined. One of:
