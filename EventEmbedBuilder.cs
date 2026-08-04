@@ -41,20 +41,20 @@ public static class EventEmbedBuilder
 
     private static readonly Color Blurple = new(0x5865F2);
 
-    // Invisible Braille-blank (U+2800) run. Unlike normal spaces it has real
-    // width and isn't collapsed, so a line of these pushes the embed out to
-    // Discord's max width on desktop. This has to carry the full width now that
-    // banner images are downscaled (EventImage.Downscale) — a small/square image
-    // no longer widens the embed on its own. Desktop caps at its max and wraps
-    // the rest invisibly (no downside to overshooting); the only cost is a little
-    // extra blank height on mobile. Tune the count if needed.
-    // One desktop line of invisible Braille blanks. Its only jobs are to (a)
-    // break the inline row so the rosters get their own clean row and (b) nudge
-    // the embed toward Discord's max desktop width when no wide image is present.
-    // Kept to ~one line on purpose: a longer run just WRAPS (Discord caps embed
+    // One desktop line of invisible Braille blanks (U+2800). Unlike normal spaces
+    // they have real width and aren't collapsed.
+    //
+    // Its jobs are (a) breaking the inline row so the rosters get their own clean
+    // row and (b) nudging the embed toward Discord's max desktop width on posts
+    // with NO image. It cannot rescue a post that HAS one: when an image is
+    // present Discord sizes the embed to the rendered image and this text just
+    // wraps inside that width, adding vertical gap and nothing else. Banner width
+    // is handled at the source instead, by EventImage.Widen, which crops narrow
+    // banners to 4:3 so they render at Discord's full 400px image cap.
+    //
+    // Kept to ~one line on purpose: a longer run only WRAPS (Discord caps embed
     // width), and the wrapped lines are pure vertical gap between Host and the
-    // rosters — exactly the bloat we're avoiding. Tune the count if a 2-line gap
-    // appears (lower it) or the embed looks narrow with no image (raise it).
+    // rosters. Tune the count down if a 2-line gap appears on image-less posts.
     private static readonly string WidthSpacer = new('\u2800', 50);
 
     public static Embed BuildEmbed(

@@ -311,7 +311,11 @@ public sealed class EventManagementHandler
             }
 
             var imgName = EventImage.Sanitize(attachment.Filename);
-            pending = new PendingImage(EventImage.Downscale(bytes, imgName), imgName, Clear: false, DateTime.UtcNow);
+            // Crop to 4:3 here so an image swapped in via /event image is right
+            // immediately: RerenderImageAsync edits the live message in place, so
+            // it never passes through ResolveAsync.
+            var (imgBytes, imgFile) = EventImage.Widen(EventImage.Downscale(bytes, imgName), imgName);
+            pending = new PendingImage(imgBytes, imgFile, Clear: false, DateTime.UtcNow);
         }
         else
         {
@@ -321,7 +325,8 @@ public sealed class EventManagementHandler
                 await command.FollowupAsync(res.Error ?? "Couldn't use that link.", ephemeral: true);
                 return;
             }
-            pending = new PendingImage(EventImage.Downscale(res.Bytes!, res.FileName), res.FileName, Clear: false, DateTime.UtcNow);
+            var (linkBytes, linkFile) = EventImage.Widen(EventImage.Downscale(res.Bytes!, res.FileName), res.FileName);
+            pending = new PendingImage(linkBytes, linkFile, Clear: false, DateTime.UtcNow);
         }
 
         _pendingImages[command.User.Id] = pending;

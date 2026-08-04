@@ -255,6 +255,15 @@ public sealed class EventPublisher : IEventPublisher
             return;
         }
 
+        // Crop a square/portrait banner to 4:3 before it becomes the message
+        // attachment. Discord sizes the WHOLE embed to the rendered image, so a
+        // narrow banner pins Time, Host and the rosters to its width (see
+        // EventImage.MinAspectRatio). Done here as well as in ResolveAsync so a
+        // brand new one-off is right on its FIRST post, instead of staying narrow
+        // until the next sort re-posts it.
+        if (attachImageBytes is { Length: > 0 })
+            (attachImageBytes, imageFileName) = EventImage.Widen(attachImageBytes, imageFileName);
+
         var postChannelId = _config.GetEventPostChannelId();
         var channel = _client.GetChannel(postChannelId) as IMessageChannel;
 
