@@ -24,9 +24,14 @@ namespace ClanGuardBot.Services;
 /// directory's TTL is a day.
 ///
 /// ── Cache shape ──
-/// Same stale-while-revalidate contract as <see cref="FinalsApiService"/>: a read
-/// returns whatever is cached immediately and kicks off a background refresh when
-/// the slot is stale, so nothing on the gateway thread ever waits on the network.
+/// Each read is served from a cache slot with its own TTL. Within the TTL the
+/// cached value is returned directly; once expired, the caller WAITS for a fresh
+/// fetch rather than being handed the previous one. That last part is deliberate
+/// and was a correction: these surfaces are on-demand commands run a couple of
+/// times a day, so a stale-while-revalidate slot is always expired when it is read
+/// and would serve the previous invocation's snapshot every single time. See
+/// <see cref="CacheSlot{T}"/> for the incident that proved it.
+///
 /// A failed refresh keeps the previous value and retries sooner than a full TTL,
 /// which is what stops one flaky minute from blanking the standings.
 /// </summary>
@@ -511,20 +516,42 @@ public sealed class SleeperApiService
     // ─── Cache slot ──────────────────────────────────────────────────────────
 
     /// <summary>
-    /// One stale-while-revalidate cache entry.
+    /// One cache entry: fresh within its TTL, refreshed on demand once it expires.
     ///
-    /// A read returns the cached value at once and starts a background refresh if
-    /// the value is stale, so no caller waits on the network. A refresh that fails
-    /// or returns nothing leaves the previous value in place and shortens the TTL
-    /// instead of clearing it, which is what keeps a single bad minute from
-    /// blanking a surface that was fine a moment ago.
+    /// ── Why this is NOT stale-while-revalidate ──
+    /// It was, and that was wrong here. Under stale-while-revalidate an expired
+    /// read returns the OLD value and merely kicks off a refresh in the background,
+    /// so the caller who triggered the refresh never sees its result. That is fine
+    /// for a surface something else polls on a timer, because the next tick is
+    /// seconds away. It is wrong for a slash command that gets run twice a day: the
+    /// entry is always expired by then, so EVERY invocation serves the previous
+    /// invocation's snapshot.
     ///
-    /// The very first read has nothing to serve, so it awaits the in-flight
-    /// refresh. That is the one place a caller can block, and it happens once per
-    /// slot per process.
+    /// That shipped, and it bit exactly as described (2026-08-05): a member who had
+    /// joined the league the day before was told he was not in it, and running the
+    /// same command a second time worked, because the first run had populated the
+    /// cache. "Run it twice and it works" is the signature of this bug.
+    ///
+    /// So an expired read now AWAITS the refresh. Every caller is already off the
+    /// gateway thread and past a DeferAsync, which buys 15 minutes, so waiting a
+    /// few hundred milliseconds for correct data costs nothing that matters.
+    ///
+    /// ── What is kept from the old design ──
+    /// A refresh that fails or returns nothing leaves the previous value in place
+    /// and shortens the TTL rather than clearing it, so one bad minute at Sleeper
+    /// degrades to slightly old data instead of blanking the surface. Concurrent
+    /// callers share one in-flight refresh rather than each firing their own.
     /// </summary>
     private sealed class CacheSlot<T> where T : class
     {
+        /// <summary>
+        /// Ceiling on how long a caller waits for a refresh before falling back to
+        /// the last good value. Sits above the 20s HTTP timeout so in practice the
+        /// fetch always resolves first; this exists only so a wedged task can never
+        /// hang a command forever.
+        /// </summary>
+        private static readonly TimeSpan MaxWait = TimeSpan.FromSeconds(25);
+
         private readonly object _lock = new();
         private T? _value;
         private DateTime _expiresUtc = DateTime.MinValue;
@@ -532,23 +559,33 @@ public sealed class SleeperApiService
 
         public async Task<T?> GetAsync(TimeSpan ttl, TimeSpan failureTtl, Func<Task<T?>> fetch)
         {
-            Task<T?>? wait = null;
+            Task<T?> wait;
+            T? stale;
 
             lock (_lock)
             {
-                var fresh = DateTime.UtcNow < _expiresUtc;
-                if (fresh && _value is not null) return _value;
+                if (DateTime.UtcNow < _expiresUtc && _value is not null) return _value;
 
                 if (_inFlight is null || _inFlight.IsCompleted)
                     _inFlight = RefreshAsync(ttl, failureTtl, fetch);
 
-                // Nothing cached yet, so there is no stale value to serve: wait.
-                if (_value is null) wait = _inFlight;
-                else return _value;
+                wait = _inFlight;
+                stale = _value;
             }
 
-            try { return await wait!; }
-            catch { return null; }
+            // Expired: wait for the real answer rather than handing back the last
+            // one. RefreshAsync never throws and already falls back to the retained
+            // value when the fetch fails, so this returns the best available data.
+            try
+            {
+                var done = await Task.WhenAny(wait, Task.Delay(MaxWait));
+                if (!ReferenceEquals(done, wait)) return stale; // refresh wedged; last good value beats nothing
+                return await wait;
+            }
+            catch
+            {
+                return stale;
+            }
         }
 
         private async Task<T?> RefreshAsync(TimeSpan ttl, TimeSpan failureTtl, Func<Task<T?>> fetch)
