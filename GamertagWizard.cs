@@ -97,14 +97,10 @@ public sealed partial class GamertagWizard
     {
         PruneExpired();
 
-        IDMChannel dm;
-        try
+        var (dm, dmFailure) = await DmGuard.TryOpenAsync(user);
+        if (dm is null)
         {
-            dm = await user.CreateDMChannelAsync();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogInformation(ex, "Could not open DM with {User} for /gamertags", user.Id);
+            _logger.LogInformation("Could not open DM with {User} for /gamertags: {Failure}", user.Id, dmFailure);
             return false;
         }
 

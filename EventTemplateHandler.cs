@@ -160,14 +160,12 @@ public sealed class EventTemplateHandler
             return;
         }
 
-        IDMChannel dm;
-        try { dm = await user.CreateDMChannelAsync(); }
-        catch (Exception ex)
+        var (dm, dmFailure) = await DmGuard.TryOpenAsync(user);
+        if (dm is null)
         {
-            _logger.LogInformation(ex, "Could not open DM with {User} for template save", user.Id);
-            await command.FollowupAsync(
-                "I couldn't DM you. Enable **Direct Messages** from server members (Privacy Settings) and try again.",
-                ephemeral: true);
+            _logger.LogInformation("Could not open DM with {User} for template save: {Failure}",
+                user.Id, dmFailure);
+            await command.FollowupAsync(DmGuard.AdviceFor(dmFailure), ephemeral: true);
             return;
         }
 
@@ -939,8 +937,7 @@ public sealed class EventTemplateHandler
                     $"🕒 {EventTimeParser.Stamp(startUtc, 'F')} ({EventTimeParser.Stamp(startUtc, 'R')})")
                 .Build();
 
-            var dm = await host.CreateDMChannelAsync();
-            await dm.SendMessageAsync(embed: embed);
+            await DmGuard.TrySendAsync(host, embed);
         }
         catch (Exception ex)
         {
@@ -1019,14 +1016,14 @@ public sealed class EventTemplateHandler
             return;
         }
 
-        IDMChannel dm;
-        try { dm = await component.User.CreateDMChannelAsync(); }
-        catch (Exception ex)
+        var (dm, dmFailure) = await DmGuard.TryOpenAsync(component.User);
+        if (dm is null)
         {
-            _logger.LogDebug(ex, "Couldn't open DM for template edit ({User})", component.User.Id);
+            _logger.LogDebug("Couldn't open DM for template edit ({User}): {Failure}",
+                component.User.Id, dmFailure);
             await component.UpdateAsync(m =>
             {
-                m.Content = "I couldn't DM you — enable Direct Messages from server members and try again.";
+                m.Content    = DmGuard.AdviceFor(dmFailure);
                 m.Components = Empty();
             });
             return;

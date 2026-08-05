@@ -128,6 +128,21 @@ public sealed class EventManagementHandler
             _ => _ = SweepEditSessionsAsync(), null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
     }
 
+    // Event posts waiting to be re-rendered after a member display-name change,
+    // plus the gate that keeps exactly one drainer running.
+    //
+    // A promotion round is several renames within a couple of minutes, and the
+    // promoted members are usually on the same upcoming events, so refreshing per
+    // member would edit the same posts once per member. Collecting event ids and
+    // draining them once turns (renames x events) edits into (distinct events)
+    // edits, which matters because every edit shares one per-channel rate limit
+    // bucket at roughly one edit per two seconds.
+    private readonly ConcurrentDictionary<int, byte> _dirtyEventPosts = new();
+    private readonly SemaphoreSlim _postRefreshGate = new(1, 1);
+
+    // Settle window before draining, so a burst of renames collapses into one pass.
+    private static readonly TimeSpan PostRefreshDebounce = TimeSpan.FromSeconds(5);
+
     public void Register(DiscordSocketClient client)
     {
         client.SelectMenuExecuted += OnSelectAsync;
@@ -146,46 +161,120 @@ public sealed class EventManagementHandler
     /// display-name changes (not the far more frequent role/avatar updates) and to
     /// the events that actually show the member, to keep it cheap.
     /// </summary>
-    private async Task OnGuildMemberUpdatedAsync(Cacheable<SocketGuildUser, ulong> before, SocketGuildUser after)
+    private Task OnGuildMemberUpdatedAsync(Cacheable<SocketGuildUser, ulong> before, SocketGuildUser after)
     {
         // Only act on a real display-name change. If "before" isn't cached we can't
         // tell, so skip (AlwaysDownloadUsers keeps it warm, so genuine renames are
         // caught; a rare miss self-heals on the next render).
-        if (before.Value is not { } prev || prev.DisplayName == after.DisplayName) return;
+        if (before.Value is not { } prev || prev.DisplayName == after.DisplayName)
+            return Task.CompletedTask;
 
+        // Never run the refresh on the gateway task. One rename fans out into a
+        // message edit per upcoming event the member appears in, every edit lands
+        // in the same per-channel rate limit bucket, and Discord.NET waits out each
+        // retry-after inline. Twelve events is over a minute of held gateway, and
+        // while it is held nothing gets acknowledged inside Discord's 3 second
+        // interaction window: every command run in that period fails with "The
+        // application did not respond". That is what broke /qotd for three members
+        // on 2026-08-05, during a round of three promotions plus nickname changes.
+        _ = Task.Run(() => QueuePostRefreshAsync(prev.DisplayName, after));
+
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Works out which posted events show this member, marks them dirty, then kicks
+    /// the drainer. Runs off the gateway task.
+    /// </summary>
+    private async Task QueuePostRefreshAsync(string oldDisplayName, SocketGuildUser after)
+    {
         try
         {
-            using var scope = _services.CreateScope();
-            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+            using (var scope = _services.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
-            var now = DateTime.UtcNow;
-            var rsvpEventIds = await db.EventRsvps
-                .Where(r => r.UserId == after.Id)
-                .Select(r => r.ClanEventId)
-                .ToListAsync();
+                var now = DateTime.UtcNow;
+                var rsvpEventIds = await db.EventRsvps
+                    .Where(r => r.UserId == after.Id)
+                    .Select(r => r.ClanEventId)
+                    .ToListAsync();
 
-            var events = await db.ClanEvents
-                .Where(e => e.GuildId == after.Guild.Id
-                         && e.Status == ClanEventStatus.Scheduled
-                         && e.EndUtc > now
-                         && e.MessageId != 0   // only posted occurrences have a message to update
-                         && (rsvpEventIds.Contains(e.Id)
-                             || e.HostId == after.Id
-                             || (e.HostId == null && e.OrganizerId == after.Id)))
-                .ToListAsync();
+                var ids = await db.ClanEvents
+                    .Where(e => e.GuildId == after.Guild.Id
+                             && e.Status == ClanEventStatus.Scheduled
+                             && e.EndUtc > now
+                             && e.MessageId != 0   // only posted occurrences have a message to update
+                             && (rsvpEventIds.Contains(e.Id)
+                                 || e.HostId == after.Id
+                                 || (e.HostId == null && e.OrganizerId == after.Id)))
+                    .Select(e => e.Id)
+                    .ToListAsync();
 
-            if (events.Count == 0) return;
+                if (ids.Count == 0) return;
 
-            foreach (var ev in events)
-                await UpdatePostAsync(db, ev);
+                foreach (var id in ids) _dirtyEventPosts.TryAdd(id, 0);
 
-            _logger.LogInformation(
-                "Re-rendered {Count} event(s) after {User} changed display name '{Old}' → '{New}'",
-                events.Count, after.Id, prev.DisplayName, after.DisplayName);
+                _logger.LogInformation(
+                    "Queued {Count} event post(s) after {User} changed display name '{Old}' → '{New}'",
+                    ids.Count, after.Id, oldDisplayName, after.DisplayName);
+            }
+
+            await DrainDirtyEventPostsAsync();
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to refresh events after display-name change for {User}", after.Id);
+            _logger.LogError(ex, "Failed to queue event refresh after display-name change for {User}", after.Id);
+        }
+    }
+
+    /// <summary>
+    /// Re-renders every event post currently marked dirty, one at a time, after a
+    /// short settle window. Only one drainer runs at a time: a caller that finds the
+    /// gate taken returns immediately, because the running drainer loops until the
+    /// set is empty and so picks up whatever that caller just added.
+    /// </summary>
+    private async Task DrainDirtyEventPostsAsync()
+    {
+        // Outer loop closes a narrow but real gap: a queuer can mark an event dirty
+        // and find the gate taken in the instant between this drainer's last
+        // emptiness check and its release, and that event would then sit unrendered
+        // until something else happened to dirty it. So after releasing, look again,
+        // and take another pass if anything arrived. If a different drainer got in
+        // first, this one returns and lets that one do the work.
+        while (true)
+        {
+            if (!await _postRefreshGate.WaitAsync(0)) return;
+
+            try
+            {
+                await Task.Delay(PostRefreshDebounce);
+
+                while (!_dirtyEventPosts.IsEmpty)
+                {
+                    var ids = _dirtyEventPosts.Keys.ToList();
+                    foreach (var id in ids) _dirtyEventPosts.TryRemove(id, out _);
+
+                    using var scope = _services.CreateScope();
+                    var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+                    var events = await db.ClanEvents.Where(e => ids.Contains(e.Id)).ToListAsync();
+                    foreach (var ev in events)
+                        await UpdatePostAsync(db, ev);
+
+                    _logger.LogInformation("Re-rendered {Count} event post(s)", events.Count);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed while re-rendering event posts");
+            }
+            finally
+            {
+                _postRefreshGate.Release();
+            }
+
+            if (_dirtyEventPosts.IsEmpty) return;
         }
     }
 
@@ -195,7 +284,16 @@ public sealed class EventManagementHandler
     /// "Going" slot they freed. Past/ended events keep their roster as history, and
     /// unposted recurring occurrences just lose the stale RSVP row (no post to edit).
     /// </summary>
-    private async Task OnUserLeftAsync(SocketGuild guild, SocketUser user)
+    private Task OnUserLeftAsync(SocketGuild guild, SocketUser user)
+    {
+        // Off the gateway task for the same reason as the rename refresh above:
+        // this fans out into a message edit per affected event plus a DM per
+        // promoted waitlister, and all of those are rate limited.
+        _ = Task.Run(() => HandleUserLeftAsync(guild, user));
+        return Task.CompletedTask;
+    }
+
+    private async Task HandleUserLeftAsync(SocketGuild guild, SocketUser user)
     {
         try
         {
@@ -837,9 +935,12 @@ public sealed class EventManagementHandler
     /// menu. Returns false if the DM couldn't be opened (closed DMs).</summary>
     private async Task<bool> BeginEditDmAsync(SocketUser user, ClanEvent ev, string scope)
     {
-        IDMChannel dm;
-        try { dm = await user.CreateDMChannelAsync(); }
-        catch (Exception ex) { _logger.LogDebug(ex, "Couldn't open DM for edit ({User})", user.Id); return false; }
+        var (dm, dmFailure) = await DmGuard.TryOpenAsync(user);
+        if (dm is null)
+        {
+            _logger.LogDebug("Couldn't open DM for edit ({User}): {Failure}", user.Id, dmFailure);
+            return false;
+        }
 
         var session = new EditSession
         {
@@ -1969,9 +2070,7 @@ public sealed class EventManagementHandler
                 user ??= await _client.Rest.GetUserAsync(uid);
                 if (user is null) continue;
 
-                var dm = await user.CreateDMChannelAsync();
-                await dm.SendMessageAsync(embed: embed);
-                sent++;
+                if (await DmGuard.TrySendAsync(user, embed)) sent++;
             }
             catch
             {
@@ -2393,8 +2492,7 @@ public sealed class EventManagementHandler
                     $"[Jump to the event]({jump})")
                 .Build();
 
-            var dm = await host.CreateDMChannelAsync();
-            await dm.SendMessageAsync(embed: embed);
+            await DmGuard.TrySendAsync(host, embed);
             return string.Empty;
         }
         catch (Exception ex)

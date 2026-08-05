@@ -96,11 +96,10 @@ public sealed class ReminderCreationWizard
     {
         PruneExpired();
 
-        IDMChannel dm;
-        try { dm = await user.CreateDMChannelAsync(); }
-        catch (Exception ex)
+        var (dm, dmFailure) = await DmGuard.TryOpenAsync(user);
+        if (dm is null)
         {
-            _logger.LogInformation(ex, "Could not open DM with {User} for /reminder", user.Id);
+            _logger.LogInformation("Could not open DM with {User} for /reminder: {Failure}", user.Id, dmFailure);
             return false;
         }
 

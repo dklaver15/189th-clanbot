@@ -1,4 +1,5 @@
 using ClanGuardBot.Models;
+using ClanGuardBot.Services;
 using Discord;
 using Discord.WebSocket;
 using Microsoft.Extensions.Logging;
@@ -106,17 +107,12 @@ public sealed class QotdCommandHandler
             return;
         }
 
-        IDMChannel dm;
-        try
+        var (dm, dmFailure) = await DmGuard.TryOpenAsync(command.User);
+        if (dm is null)
         {
-            dm = await command.User.CreateDMChannelAsync();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogInformation(ex, "Could not open DM with {User} for /qotd", command.User.Id);
-            await command.FollowupAsync(
-                "I couldn't DM you. Enable **Direct Messages** from server members (Privacy Settings) and try again.",
-                ephemeral: true);
+            _logger.LogInformation("Could not open DM with {User} for /qotd: {Failure}",
+                command.User.Id, dmFailure);
+            await command.FollowupAsync(DmGuard.AdviceFor(dmFailure), ephemeral: true);
             return;
         }
 

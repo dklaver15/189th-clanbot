@@ -67,6 +67,12 @@ public class RankTrackingHandler
     /// </summary>
     private const int MaxRealtimeDemotionGap = 2;
 
+    // Single FIFO queue for all role-change processing. See OnGuildMemberUpdated
+    // for why the work leaves the gateway task, and why it is one global queue
+    // rather than one per member.
+    private readonly object _queueLock = new();
+    private Task _roleChangeQueue = Task.CompletedTask;
+
     public RankTrackingHandler(
         IServiceProvider services,
         ILogger<RankTrackingHandler> logger,
@@ -85,19 +91,84 @@ public class RankTrackingHandler
         client.GuildMemberUpdated += OnGuildMemberUpdated;
     }
 
-    private async Task OnGuildMemberUpdated(
+    private Task OnGuildMemberUpdated(
         Cacheable<SocketGuildUser, ulong> beforeCacheable,
         SocketGuildUser after)
     {
         // We need the cached "before" state to compare roles
-        if (!beforeCacheable.HasValue) return;
+        if (!beforeCacheable.HasValue) return Task.CompletedTask;
         var before = beforeCacheable.Value;
 
-        // Quick check: did roles change at all?
-        var beforeRoleIds = before.Roles.Select(r => r.Id).ToHashSet();
-        var afterRoleIds = after.Roles.Select(r => r.Id).ToHashSet();
-        if (beforeRoleIds.SetEquals(afterRoleIds)) return;
+        // Snapshot the post-change roles once, here, on the gateway task.
+        // "after" is the live cache entry and Discord.NET mutates it in place, so
+        // once the work below is queued rather than run inline, reading the member's
+        // roles later would report whatever they are by then instead of what this
+        // event actually carried. That matters: /promote issues RemoveRoleAsync then
+        // AddRoleAsync, so one promotion arrives as two events, and each has to be
+        // judged on its own state for the RankHistory bookkeeping to behave exactly
+        // as it does today. The live "after" object is still used for the REST
+        // calls, where current state is the right thing to act on.
+        var afterRoles = after.Roles.ToList();
 
+        // Cheap filter, deliberately left on the gateway task: pure set comparison,
+        // no I/O, and it rejects the overwhelming majority of GuildMemberUpdated
+        // events, so nickname, avatar and presence changes never reach the queue.
+        var beforeRoleIds = before.Roles.Select(r => r.Id).ToHashSet();
+        var afterRoleIds = afterRoles.Select(r => r.Id).ToHashSet();
+        if (beforeRoleIds.SetEquals(afterRoleIds)) return Task.CompletedTask;
+
+        // Everything past this point does DB work and REST calls: a role removal, a
+        // nickname edit, an AWOL embed delete per open record, and a Google Sheets
+        // write. Discord.NET dispatches gateway events one at a time and awaits each
+        // handler, so running that inline delays every interaction queued behind it
+        // past Discord's 3 second acknowledgement window, and those interactions die
+        // with "The application did not respond".
+        //
+        // Queued rather than fired off with a bare Task.Run, and one global queue
+        // rather than one per member, because that preserves today's ordering
+        // exactly: one role change fully processed before the next begins. Two
+        // concurrent passes for the same member could both see "no RankHistory row"
+        // and insert duplicates, or apply a change and its correction backwards.
+        lock (_queueLock)
+        {
+            _roleChangeQueue = _roleChangeQueue.ContinueWith(
+                _ => RunQueuedRoleChangeAsync(before, after, afterRoles),
+                CancellationToken.None,
+                TaskContinuationOptions.None,
+                TaskScheduler.Default).Unwrap();
+        }
+
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Backstop for the queue. The queue is one long task chain, so an exception
+    /// escaping here would surface as an unobserved task fault instead of a log
+    /// line. Each section inside has its own try/catch already; this covers the
+    /// code between them.
+    /// </summary>
+    private async Task RunQueuedRoleChangeAsync(
+        SocketGuildUser before,
+        SocketGuildUser after,
+        List<SocketRole> afterRoles)
+    {
+        try
+        {
+            await ProcessRoleChangeAsync(before, after, afterRoles);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Unhandled error processing role change for {Username} in {Guild}",
+                after.Username, after.Guild.Name);
+        }
+    }
+
+    private async Task ProcessRoleChangeAsync(
+        SocketGuildUser before,
+        SocketGuildUser after,
+        List<SocketRole> afterRoles)
+    {
         // ── Exempt-role transition handling ──
         // Run this BEFORE the rank-change logic because:
         //   1. Reserve / Admin / etc. can be added without any rank change,
@@ -108,7 +179,7 @@ public class RankTrackingHandler
         // the rank-tracking logic below.
         try
         {
-            await HandleExemptRoleGainedAsync(before, after);
+            await HandleExemptRoleGainedAsync(before, after, afterRoles);
         }
         catch (Exception ex)
         {
@@ -124,7 +195,7 @@ public class RankTrackingHandler
         // same reasons as the exempt transition above.
         try
         {
-            await HandleAwolRoleRemovedAsync(before, after);
+            await HandleAwolRoleRemovedAsync(before, after, afterRoles);
         }
         catch (Exception ex)
         {
@@ -136,7 +207,7 @@ public class RankTrackingHandler
         // Determine rank before and after using the configured rank roles list
         var rankRoles = _config.GetRankRolesList();
         var beforeRank = GetHighestRank(before.Roles.Select(r => r.Name), rankRoles);
-        var afterRank = GetHighestRank(after.Roles.Select(r => r.Name), rankRoles);
+        var afterRank = GetHighestRank(afterRoles.Select(r => r.Name), rankRoles);
 
         // If the rank didn't change, ignore (could be a non-rank role change)
         if (string.Equals(beforeRank, afterRank, StringComparison.OrdinalIgnoreCase)) return;
@@ -270,7 +341,7 @@ public class RankTrackingHandler
             // ── Detect "RCT gained" transition (used by two side effects below) ──
             // Fires when the RCT role is present after but was not present before.
             var rctGained =
-                after.Roles.Any(r => r.Name.Equals("RCT", StringComparison.OrdinalIgnoreCase)) &&
+                afterRoles.Any(r => r.Name.Equals("RCT", StringComparison.OrdinalIgnoreCase)) &&
                 !before.Roles.Any(r => r.Name.Equals("RCT", StringComparison.OrdinalIgnoreCase));
 
             if (rctGained)
@@ -309,13 +380,14 @@ public class RankTrackingHandler
     /// gains happen on members who weren't AWOL, and we don't want to spam the
     /// log or do unnecessary DB work for them.
     /// </summary>
-    private async Task HandleExemptRoleGainedAsync(SocketGuildUser before, SocketGuildUser after)
+    private async Task HandleExemptRoleGainedAsync(
+        SocketGuildUser before, SocketGuildUser after, List<SocketRole> afterRoles)
     {
         var exemptRoles = _config.GetExemptRolesList();
 
         var wasExempt = before.Roles.Any(r =>
             exemptRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase));
-        var isExempt = after.Roles.Any(r =>
+        var isExempt = afterRoles.Any(r =>
             exemptRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase));
 
         // Only react to the "became exempt" transition.
@@ -326,12 +398,12 @@ public class RankTrackingHandler
             r.Name.Equals(_config.AwolRoleName, StringComparison.OrdinalIgnoreCase));
         if (awolRole is null) return;
 
-        var hasAwol = after.Roles.Any(r => r.Id == awolRole.Id);
+        var hasAwol = afterRoles.Any(r => r.Id == awolRole.Id);
         if (!hasAwol) return;
 
         // Identify which exempt role(s) triggered this for the audit log line.
         var triggeringRoles = string.Join(", ",
-            after.Roles.Where(r => exemptRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase))
+            afterRoles.Where(r => exemptRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase))
                        .Select(r => r.Name));
 
         try
@@ -419,14 +491,15 @@ public class RankTrackingHandler
     /// by the exemption itself, and resetting the window would be meaningless
     /// (exempt members are never evaluated for activity).
     /// </summary>
-    private async Task HandleAwolRoleRemovedAsync(SocketGuildUser before, SocketGuildUser after)
+    private async Task HandleAwolRoleRemovedAsync(
+        SocketGuildUser before, SocketGuildUser after, List<SocketRole> afterRoles)
     {
         var awolRole = after.Guild.Roles.FirstOrDefault(r =>
             r.Name.Equals(_config.AwolRoleName, StringComparison.OrdinalIgnoreCase));
         if (awolRole is null) return;
 
         var hadAwol = before.Roles.Any(r => r.Id == awolRole.Id);
-        var hasAwol = after.Roles.Any(r => r.Id == awolRole.Id);
+        var hasAwol = afterRoles.Any(r => r.Id == awolRole.Id);
 
         // Only react to the AWOL present → absent transition.
         if (!hadAwol || hasAwol) return;
@@ -434,7 +507,7 @@ public class RankTrackingHandler
         // Exempt members are handled by the exempt-transition path; their AWOL
         // suppression comes from the exemption, not a window reset.
         var exemptRoles = _config.GetExemptRolesList();
-        var isExempt = after.Roles.Any(r =>
+        var isExempt = afterRoles.Any(r =>
             exemptRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase));
         if (isExempt) return;
 
