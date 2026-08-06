@@ -3,6 +3,7 @@ using ClanGuardBot.Data;
 using ClanGuardBot.Models;
 using Microsoft.EntityFrameworkCore;
 using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
 
 namespace ClanGuardBot.Services;
@@ -35,23 +36,50 @@ public static class EventImage
     public const int MaxImageDimension = 512;
 
     /// <summary>
-    /// Aspect ratio a banner is cropped to by <see cref="Widen"/>.
+    /// Aspect ratio a banner is widened to by <see cref="Widen"/> when it is
+    /// narrower than this.
     ///
     /// ── Why this exists ──
     /// Discord scales an embed's main image to fit a 400x300 box on desktop and
     /// then sizes the WHOLE embed to the result. A square banner is therefore
     /// height-limited to 300px, renders only ~300px wide, and drags every field
     /// in the embed (Time, Host, the RSVP rosters) down to that width, so the
-    /// post looks comically narrow next to a landscape one. Anything 4:3 OR WIDER
+    /// post looks comically narrow next to a landscape one. Anything 4:3 or wider
     /// hits the 400px cap instead, which is the widest an embed carrying an image
-    /// can get. 4:3 is therefore the ratio that buys the full width for the least
-    /// crop: a square banner loses ~12.5% off the top and ~12.5% off the bottom.
+    /// can get. 4:3 is therefore the ratio that buys the full width with the
+    /// smallest change to the banner.
     ///
-    /// Raise it (e.g. 16.0/9.0) for a shorter, more banner-shaped post at the
-    /// cost of cutting a lot more off the art. Lower it to 1.0 to disable the
-    /// crop entirely. Desktop width does NOT improve past 4:3.
+    /// Nothing is gained past 4:3, so a banner ALREADY wider than this keeps its
+    /// own shape. Forcing everything to 4:3 would put pointless bars above and
+    /// below a landscape poster that was already rendering perfectly.
     /// </summary>
     public const double MinAspectRatio = 4.0 / 3.0;
+
+    /// <summary>
+    /// Width, in pixels, that Discord renders an embed's main image at when the
+    /// source is at least this wide.
+    ///
+    /// ── The second, less obvious cause of a narrow post ──
+    /// Discord NEVER upscales an embed image. A banner whose source is only 340px
+    /// wide renders at 340px no matter what its aspect ratio is, and the embed
+    /// shrinks to match. Aspect ratio alone is therefore not enough: a small 4:3
+    /// banner still produces a narrow post. <see cref="Downscale"/> deliberately
+    /// never upscales either, so nothing else in the pipeline was fixing this.
+    /// <see cref="Widen"/> is what puts a floor under it.
+    /// </summary>
+    private const int DiscordImageDisplayWidth = 400;
+
+    /// <summary>
+    /// Blur strength of the backdrop <see cref="Widen"/> paints behind a narrow
+    /// banner, as a fraction of the canvas width. Big enough that no detail
+    /// survives (the backdrop must never compete with the real banner), small
+    /// enough to keep the colours of the art it came from.
+    /// </summary>
+    private const float BackdropBlurFraction = 1f / 28f;
+
+    /// <summary>How far the backdrop is dimmed, so the sharp banner on top of it
+    /// clearly reads as the foreground. 1.0 = untouched.</summary>
+    private const float BackdropBrightness = 0.55f;
 
     public static readonly string[] AllowedExtensions = { ".png", ".jpg", ".jpeg", ".gif", ".webp" };
 
@@ -96,28 +124,51 @@ public static class EventImage
     }
 
     /// <summary>
-    /// Centre-crops a banner narrower than <see cref="MinAspectRatio"/> down to
-    /// that ratio, so Discord renders it (and therefore the whole embed) at its
-    /// full 400px width instead of pinning the post to the image's own narrow
-    /// footprint. See <see cref="MinAspectRatio"/> for why.
+    /// Makes a banner render at Discord's full embed width, so the post stops
+    /// being pinned to a narrow image. Two things can pin it, and this fixes both:
+    /// a banner narrower than <see cref="MinAspectRatio"/> gets widened to that
+    /// ratio, and a banner whose source is under
+    /// <see cref="DiscordImageDisplayWidth"/> gets scaled up (Discord will not
+    /// upscale it for us). A banner that is already wide enough on both counts is
+    /// returned untouched.
     ///
-    /// Cropping rather than letterboxing was chosen deliberately (2026-08-04).
-    /// Padding would have needed transparent bars, which needs an alpha channel,
-    /// which turns every JPEG into a PNG and therefore renames the file. It also
-    /// buys nothing on mobile, where the embed is already screen-width and the
-    /// bars would only shrink the art by about a quarter. Cropping keeps the
-    /// banner full-bleed on phones, keeps the format and file name untouched, and
-    /// gets the same 400px on desktop. The cost is the trimmed top and bottom, so
-    /// art with a title or a face near an edge will lose some of it, and a tall
-    /// portrait source loses a lot. If that ever becomes a problem, the fallback
-    /// is to pad instead of crop past some height ratio.
+    /// ── Nothing is ever cut off ──
+    /// The banner is scaled to FIT the new canvas, never cropped, and whatever
+    /// space is left over is filled with a blurred, dimmed, zoomed copy of the
+    /// banner itself: the treatment a video player uses for a portrait clip. The
+    /// frame ends up full of the art's own colours, so the post reads as
+    /// deliberate rather than as an image floating in empty bars, and not one
+    /// pixel of the original is lost.
     ///
-    /// Idempotent: an image already at or past the ratio comes back byte-identical
-    /// (same array reference) with its name untouched, so this is safe to run on
-    /// every re-post. Any failure returns the original bytes, because a crop
-    /// hiccup must never cost the post its image. Animated GIFs are cropped
-    /// frame-by-frame and left alone if re-encoding would push them past
-    /// <see cref="MaxBytes"/>.
+    /// An earlier version centre-cropped to 4:3 instead. It was replaced on
+    /// 2026-08-06 because it ate the title off the top and the detail bar off the
+    /// bottom of real event posters, and (because it did nothing about width) it
+    /// could leave a small banner both cut off AND still narrow. Do not
+    /// reintroduce cropping here.
+    ///
+    /// Every treated banner comes out exactly <see cref="MaxImageDimension"/>
+    /// wide, so every event post ends up the same width instead of each one being
+    /// sized by whatever art someone happened to upload. Scaling a small banner up
+    /// costs some sharpness, which is the accepted trade: Discord displays it at
+    /// 400px regardless, so the alternative is not a crisper banner, it is a
+    /// narrow post.
+    ///
+    /// The result covers the canvas completely, so there is no transparency to
+    /// preserve and the image keeps its original format AND file name. Keep it
+    /// that way: <see cref="ClanEvent.ImageFileName"/> is both the attachment name
+    /// and what EventRsvpInteractionHandler re-renders <c>attachment://</c> from
+    /// WITHOUT re-attaching, so a variant that renamed the file could drift out of
+    /// sync with the live message and make the banner silently vanish on the next
+    /// RSVP click.
+    ///
+    /// Animated GIFs get a cheaper treatment (a flat fill in a colour sampled from
+    /// the banner's own edges, applied frame by frame) because compositing a
+    /// blurred backdrop under every frame is not worth the CPU on a 1 vCPU box.
+    ///
+    /// Idempotent: its own output is already wide enough, so a second pass returns
+    /// the same array reference and this is safe to run on every re-post. Any
+    /// failure returns the original bytes, because a widening hiccup must never
+    /// cost the post its banner.
     /// </summary>
     public static (byte[] bytes, string fileName) Widen(byte[] bytes, string? fileName)
     {
@@ -125,42 +176,66 @@ public static class EventImage
 
         try
         {
-            using var image = Image.Load(bytes);
+            using var image = Image.Load<Rgba32>(bytes);
 
             if (image.Width <= 0 || image.Height <= 0) return (bytes, name);
-            if (image.Width >= image.Height * MinAspectRatio) return (bytes, name);
 
-            // Keep the full width and take the height down to match, so the crop
-            // only ever trims top and bottom.
-            var targetW = image.Width;
-            var targetH = Math.Max(1, (int)Math.Round(image.Width / MinAspectRatio));
+            var wideEnough  = image.Width >= image.Height * MinAspectRatio;
+            var largeEnough = image.Width >= DiscordImageDisplayWidth;
+            if (wideEnough && largeEnough) return (bytes, name);
 
-            // Stay inside the stored-size cap. ResizeMode.Crop scales the source to
-            // fill the box first, so this shrinks the whole banner rather than
-            // cutting more off it.
-            if (targetW > MaxImageDimension)
-            {
-                var scale = (double)MaxImageDimension / targetW;
-                targetW = MaxImageDimension;
-                targetH = Math.Max(1, (int)Math.Round(targetH * scale));
-            }
+            // Keep a landscape banner's own shape; only a narrow one is widened.
+            var ratio   = Math.Max(MinAspectRatio, (double)image.Width / image.Height);
+            var targetW = MaxImageDimension;
+            var targetH = Math.Max(1, (int)Math.Round(targetW / ratio));
 
-            image.Mutate(x => x.Resize(new ResizeOptions
-            {
-                Size     = new Size(targetW, targetH),
-                Mode     = ResizeMode.Crop,
-                Position = AnchorPositionMode.Center,
-            }));
-
-            // Same format in, same format out, so the file name never changes.
+            var isGif = Path.GetExtension(name) == ".gif";
             using var ms = new MemoryStream();
-            switch (Path.GetExtension(name))
+
+            if (isGif)
             {
-                case ".jpg":
-                case ".jpeg": image.SaveAsJpeg(ms); break;
-                case ".webp": image.SaveAsWebp(ms); break;
-                case ".gif":  image.SaveAsGif(ms);  break;
-                default:      image.SaveAsPng(ms);  break;
+                var pad = EdgeColor(image);
+                image.Mutate(x => x.Resize(new ResizeOptions
+                {
+                    Size     = new Size(targetW, targetH),
+                    Mode     = ResizeMode.Pad,
+                    PadColor = pad,
+                }));
+                image.SaveAsGif(ms);
+            }
+            else
+            {
+                // Backdrop: the banner zoomed to cover the canvas, blurred past
+                // recognition and dimmed.
+                using var backdrop = image.Clone(x => x
+                    .Resize(new ResizeOptions
+                    {
+                        Size     = new Size(targetW, targetH),
+                        Mode     = ResizeMode.Crop,
+                        Position = AnchorPositionMode.Center,
+                    })
+                    .GaussianBlur(Math.Max(1f, targetW * BackdropBlurFraction))
+                    .Brightness(BackdropBrightness));
+
+                // Foreground: the complete banner, scaled to fit, centred.
+                using var front = image.Clone(x => x.Resize(new ResizeOptions
+                {
+                    Size = new Size(targetW, targetH),
+                    Mode = ResizeMode.Max,
+                }));
+
+                using var canvas = new Image<Rgba32>(targetW, targetH);
+                canvas.Mutate(x => x
+                    .DrawImage(backdrop, new Point(0, 0), 1f)
+                    .DrawImage(front, new Point((targetW - front.Width) / 2, (targetH - front.Height) / 2), 1f));
+
+                switch (Path.GetExtension(name))
+                {
+                    case ".jpg":
+                    case ".jpeg": canvas.SaveAsJpeg(ms); break;
+                    case ".webp": canvas.SaveAsWebp(ms); break;
+                    default:      canvas.SaveAsPng(ms);  break;
+                }
             }
 
             var outBytes = ms.ToArray();
@@ -172,6 +247,29 @@ public static class EventImage
         {
             return (bytes, name);
         }
+    }
+
+    /// <summary>
+    /// Average colour of the banner's left and right edge columns. Used as the
+    /// flat fill behind an animated GIF, where a blurred backdrop is too
+    /// expensive: sampling the edges means the fill usually continues whatever
+    /// the art already has at its sides.
+    /// </summary>
+    private static Color EdgeColor(Image<Rgba32> image)
+    {
+        long r = 0, g = 0, b = 0;
+        var right = image.Width - 1;
+        for (var y = 0; y < image.Height; y++)
+        {
+            var l  = image[0, y];
+            var rp = image[right, y];
+            r += l.R + rp.R;
+            g += l.G + rp.G;
+            b += l.B + rp.B;
+        }
+
+        var n = Math.Max(1, image.Height * 2);
+        return Color.FromRgb((byte)(r / n), (byte)(g / n), (byte)(b / n));
     }
 
     public static bool IsAllowedExtension(string? fileName)
@@ -217,22 +315,17 @@ public static class EventImage
     /// One-off events carry their own bytes; series occurrences fall back to the
     /// series' bytes. Returns (null, null) when the event has no image.
     ///
-    /// Also runs <see cref="Widen"/> and writes the cropped result back onto
+    /// Also runs <see cref="Widen"/> and writes the widened result back onto
     /// whichever row owns the blob. Two reasons that happens HERE rather than only
     /// at upload. Every event already stored, including live recurring series,
     /// gets widened on its next re-post with no migration and no re-upload. And
-    /// the write-back means the crop is paid for once instead of on every sort
-    /// pass (the droplet is 1 vCPU and a sort re-posts every event in a loop).
+    /// the write-back means the compositing is paid for once instead of on every
+    /// sort pass (the droplet is 1 vCPU and a sort re-posts every event in a loop).
     ///
     /// The write-back is deliberately NOT saved here. All three call sites
     /// (EventPublisher, EventChannelSorter, ClanEventReconciliationService) post
     /// the message and then SaveChangesAsync immediately, so it lands alongside
-    /// the new MessageId. <see cref="Widen"/> keeps the file name identical, so
-    /// EventRsvpInteractionHandler (which re-renders the embed from the STORED
-    /// <see cref="ClanEvent.ImageFileName"/> without re-attaching) stays correct
-    /// either way. Do not change that: if a future variant ever renames the file,
-    /// the stored name and the live message's attachment could drift apart, and
-    /// the banner would silently vanish on the next RSVP click.
+    /// the new MessageId.
     /// </summary>
     public static async Task<(byte[]? bytes, string? fileName)> ResolveAsync(BotDbContext db, ClanEvent ev)
     {

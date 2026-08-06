@@ -49,7 +49,7 @@ public static class EventEmbedBuilder
     // with NO image. It cannot rescue a post that HAS one: when an image is
     // present Discord sizes the embed to the rendered image and this text just
     // wraps inside that width, adding vertical gap and nothing else. Banner width
-    // is handled at the source instead, by EventImage.Widen, which crops narrow
+    // is handled at the source instead, by EventImage.Widen, which widens narrow
     // banners to 4:3 so they render at Discord's full 400px image cap.
     //
     // Kept to ~one line on purpose: a longer run only WRAPS (Discord caps embed

@@ -255,7 +255,7 @@ public sealed class EventPublisher : IEventPublisher
             return;
         }
 
-        // Crop a square/portrait banner to 4:3 before it becomes the message
+        // Widen a square/portrait banner to 4:3 before it becomes the message
         // attachment. Discord sizes the WHOLE embed to the rendered image, so a
         // narrow banner pins Time, Host and the rosters to its width (see
         // EventImage.MinAspectRatio). Done here as well as in ResolveAsync so a

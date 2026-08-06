@@ -409,7 +409,7 @@ public sealed class EventManagementHandler
             }
 
             var imgName = EventImage.Sanitize(attachment.Filename);
-            // Crop to 4:3 here so an image swapped in via /event image is right
+            // Widen to 4:3 here so an image swapped in via /event image is right
             // immediately: RerenderImageAsync edits the live message in place, so
             // it never passes through ResolveAsync.
             var (imgBytes, imgFile) = EventImage.Widen(EventImage.Downscale(bytes, imgName), imgName);
