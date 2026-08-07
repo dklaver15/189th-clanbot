@@ -1,3 +1,4 @@
+using System.Text;
 using ClanGuardBot.Data;
 using ClanGuardBot.Models;
 using Discord;
@@ -147,17 +148,44 @@ public sealed class PollClosingService
                     $"{label} · {max} {(max == 1 ? "vote" : "votes")} ({pct}%)");
             }
 
-            // Full breakdown, highest first. Counts only — safe for anonymous polls.
-            var lines = options
+            // Full breakdown, highest first, each row led by a bar scaled to the
+            // front-runner (see PollEmbedBuilder.Bar for why it isn't scaled by
+            // percentage). Bar first, not last: it's fixed width, so putting it at
+            // the start of the line is what makes every bar line up under the one
+            // above regardless of how long the labels are. Counts only, never
+            // identities, so this stays safe for anonymous polls.
+            var ranked = options
                 .OrderByDescending(o => tally.CountsByOptionId.GetValueOrDefault(o.Id))
                 .ThenBy(o => o.Position)
-                .Select(o =>
-                {
-                    var c = tally.CountsByOptionId.GetValueOrDefault(o.Id);
-                    var p = tally.TotalVotes == 0 ? 0 : (int)Math.Round(c * 100.0 / tally.TotalVotes);
-                    return $"{Emoji(o)}{Trim(o.Label, 80)} — **{c}** ({p}%)";
-                });
-            eb.AddField("Results", string.Join("\n", lines));
+                .ToList();
+
+            var lead = ranked.Count == 0 ? 0 : tally.CountsByOptionId.GetValueOrDefault(ranked[0].Id);
+
+            // Discord rejects an embed field whose value exceeds 1024 characters,
+            // and a rejected field kills the whole announcement. Ten options with
+            // long labels have to degrade to a truncated list, not to no post at
+            // all. Reserve room for the "…and N more" tail before filling.
+            const int FieldLimit  = 1024;
+            const int TailReserve = 24;
+
+            var body  = new StringBuilder();
+            var shown = 0;
+
+            foreach (var o in ranked)
+            {
+                var c = tally.CountsByOptionId.GetValueOrDefault(o.Id);
+                var p = tally.TotalVotes == 0 ? 0 : (int)Math.Round(c * 100.0 / tally.TotalVotes);
+                var line = $"`{PollEmbedBuilder.Bar(c, lead)}` {Emoji(o)}{Trim(o.Label, 56)} · **{c}** ({p}%)\n";
+
+                if (body.Length + line.Length > FieldLimit - TailReserve) break;
+
+                body.Append(line);
+                shown++;
+            }
+
+            if (shown < ranked.Count) body.Append($"…and {ranked.Count - shown} more");
+
+            eb.AddField("Results", body.Length == 0 ? "*(no options)*" : body.ToString().TrimEnd());
 
             eb.AddField("​",
                 $"{tally.TotalVoters} {(tally.TotalVoters == 1 ? "voter" : "voters")} · " +

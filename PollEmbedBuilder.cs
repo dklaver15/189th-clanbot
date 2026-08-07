@@ -62,7 +62,7 @@ public static class PollEmbedBuilder
             var head = string.IsNullOrWhiteSpace(opt.Emoji) ? "" : opt.Emoji + " ";
             var label = Trim(opt.Label, 80);
             sb.Append(leader ? "👑 " : "").Append(head).Append("**").Append(label).Append("**\n");
-            sb.Append('`').Append(Bar(pct)).Append("` ")
+            sb.Append('`').Append(Bar(count, maxCount)).Append("` ")
               .Append(count).Append(count == 1 ? " vote" : " votes")
               .Append(" · ").Append(pct).Append("%\n\n");
         }
@@ -130,11 +130,31 @@ public static class PollEmbedBuilder
         try { return new Emoji(raw); } catch { return null; }
     }
 
-    private static string Bar(int pct)
+    /// <summary>
+    /// A text meter, scaled RELATIVE TO THE LEADING OPTION (<paramref name="max"/>)
+    /// rather than to each option's share of the total vote. On a multiselect poll
+    /// the front-runner routinely holds well under half of all votes, so scaling by
+    /// percentage leaves the winner stubby and draws a 1-vote option as a completely
+    /// empty bar. The shape stops carrying information exactly when you want to read
+    /// it. Scaling to the leader keeps the comparison legible at any turnout, and the
+    /// percentage printed beside the bar still reports the true share, so nothing is
+    /// overstated.
+    ///
+    /// Uses U+2588 / U+2591, full-cell block glyphs that every font Discord falls
+    /// back to renders at the same width, so the bar stays rectangular. Glyphs that
+    /// only LOOK equal width (▰▱) drift on mobile and the bar comes out ragged.
+    /// Callers wrap the result in a code span.
+    ///
+    /// Any non-zero count gets at least one filled cell: "one person voted for this"
+    /// must never render identically to "nobody did".
+    /// </summary>
+    public static string Bar(int count, int max, int width = BarWidth)
     {
-        var filled = (int)Math.Round(pct / 100.0 * BarWidth);
-        filled = Math.Clamp(filled, 0, BarWidth);
-        return new string('█', filled) + new string('░', BarWidth - filled);
+        if (count <= 0 || max <= 0) return new string('░', width);
+
+        var filled = (int)Math.Round((double)count / max * width);
+        filled = Math.Clamp(filled, 1, width);
+        return new string('█', filled) + new string('░', width - filled);
     }
 
     private static string Trim(string? s, int max)
