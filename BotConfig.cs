@@ -373,6 +373,34 @@ public class BotConfig
     public bool EventRsvpEnabled { get; set; } = true;
 
     // ──────────────────────────────────────────────────────────────────────
+    //  Post as the bot (/say)
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Master switch for /say. When false the command still registers but
+    /// refuses to open, which is the quickest way to shut it off without a
+    /// redeploy of the command list.
+    /// </summary>
+    public bool SayEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Minimum rank that can post a message as the bot via /say. Default "CPT",
+    /// a step above the general officer floor: the post carries no author name,
+    /// so it is deliberately a smaller circle than /reminder. Administrator /
+    /// Manage Roles always pass. Must match a rank name in RankRoles
+    /// (case-insensitive).
+    /// </summary>
+    public string SayCommandMinRank { get; set; } = "CPT";
+
+    /// <summary>
+    /// Channel that /say writes its audit entry to (who wrote it, where it
+    /// went, and the full text). 0 falls back to <see cref="HqChannelId"/>.
+    /// Kept as its own key so the trail can be sent somewhere quieter than the
+    /// main HQ channel.
+    /// </summary>
+    public ulong SayAuditChannelId { get; set; } = default;
+
+    // ──────────────────────────────────────────────────────────────────────
     //  Question of the Day (/qotd)
     // ──────────────────────────────────────────────────────────────────────
 

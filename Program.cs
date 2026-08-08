@@ -496,6 +496,19 @@ try
     builder.Services.AddSingleton<ReminderCommandHandler>();
     builder.Services.AddHostedService<ReminderSchedulerService>();
 
+    // /say post|edit|delete. Post a message as the bot: a modal collects the text
+    // (line breaks and long copy, which a slash option cannot carry), the slash
+    // options carry the destination channel, plain-or-embed and the optional ping.
+    // Each post is recorded as a SayMessage row, which is both the allow-list for
+    // /say edit (the bot's own rendered posts must not be hand-edited) and the
+    // source the edit modal prefills from, so opening it needs no REST call.
+    // Gated by BotConfig.SayEnabled + SayCommandMinRank, and every post, edit and
+    // delete is mirrored to SayAuditChannelId (falling back to HqChannelId) so an
+    // anonymous bot message still has an author on record. Self-registers slash +
+    // modal events.
+    // NOTE: keep CommandsCommandHandler.BuildCatalog in sync.
+    builder.Services.AddSingleton<SayCommandHandler>();
+
     // /qotd — Question of the Day. Self-contained handler: gated SGT+, opens a
     // DM to collect the question, previews + confirms, then posts an embed (with
     // the 189th logo) to BotConfig.QotdChannelId. Self-registers slash + DM +

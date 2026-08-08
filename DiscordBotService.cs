@@ -53,6 +53,7 @@ public class DiscordBotService : IHostedService
     private readonly EventRsvpInteractionHandler _eventRsvpHandler;
     private readonly EventManagementHandler _eventMgmtHandler;
     private readonly EventTemplateHandler _eventTemplateHandler;
+    private readonly SayCommandHandler _sayCommandHandler;
     private readonly QotdCommandHandler _qotdCommandHandler;
     private readonly JotdCommandHandler _jotdCommandHandler;
     private readonly PollCommandHandler _pollCommandHandler;
@@ -143,6 +144,7 @@ public class DiscordBotService : IHostedService
         EventRsvpInteractionHandler eventRsvpHandler,
         EventManagementHandler eventMgmtHandler,
         EventTemplateHandler eventTemplateHandler,
+        SayCommandHandler sayCommandHandler,
         QotdCommandHandler qotdCommandHandler,
         JotdCommandHandler jotdCommandHandler,
         PollCommandHandler pollCommandHandler,
@@ -225,6 +227,7 @@ public class DiscordBotService : IHostedService
         _eventRsvpHandler            = eventRsvpHandler;
         _eventMgmtHandler            = eventMgmtHandler;
         _eventTemplateHandler        = eventTemplateHandler;
+        _sayCommandHandler           = sayCommandHandler;
         _qotdCommandHandler          = qotdCommandHandler;
         _jotdCommandHandler          = jotdCommandHandler;
         _pollCommandHandler          = pollCommandHandler;
@@ -327,6 +330,7 @@ public class DiscordBotService : IHostedService
         _eventRsvpHandler.Register(_client);
         _eventMgmtHandler.Register(_client);
         _eventTemplateHandler.Register(_client);
+        _sayCommandHandler.Register(_client);
         _qotdCommandHandler.Register(_client);
         _jotdCommandHandler.Register(_client);
         _pollCommandHandler.Register(_client);
@@ -512,6 +516,14 @@ public class DiscordBotService : IHostedService
                 // (create/list/cancel/edit). DM wizard + ReminderSchedulerService.
                 // NOTE: keep CommandsCommandHandler.BuildCatalog in sync.
                 ReminderCommandHandler.BuildCommand(_config.ReminderCommandMinRank),
+
+                // /say post|edit|delete. Post a message as the bot (gated by
+                // SayCommandMinRank, default CPT). The slash options pick the channel,
+                // plain or embed, and an optional ping; the text is typed into a modal
+                // so line breaks survive. edit/delete only reach messages /say itself
+                // posted, matched by row in SayMessages.
+                // NOTE: keep CommandsCommandHandler.BuildCatalog in sync.
+                SayCommandHandler.BuildCommand(_config.SayCommandMinRank),
 
                 // /qotd — Question of the Day. Opens a DM wizard (gated by
                 // QotdMinRank, default SGT) to collect the question, then posts an

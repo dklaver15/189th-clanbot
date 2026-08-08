@@ -698,6 +698,9 @@ public class CommandsCommandHandler
             new("reminder", "Schedule a one-off or recurring announcement",
                 $"{config.ReminderCommandMinRank}+", MinRank(config.ReminderCommandMinRank)),
 
+            new("say", "Post a message as the bot, then edit or delete it",
+                $"{config.SayCommandMinRank}+", MinRank(config.SayCommandMinRank)),   // SyncWithHandlers: SayCommandHandler.HasPermission
+
             new("qotd", "Post a Question of the Day — set it up in DMs",
                 $"{config.QotdMinRank}+", MinRank(config.QotdMinRank)),   // SyncWithHandlers: QotdCommandHandler.HasPermission
 

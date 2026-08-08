@@ -66,6 +66,8 @@ public class BotDbContext : DbContext
     // ── Sleeper fantasy football ──
     public DbSet<SleeperLink>          SleeperLinks          => Set<SleeperLink>();
     public DbSet<SleeperWeekPost>      SleeperWeekPosts      => Set<SleeperWeekPost>();
+    // ── Post as the bot (/say) ──
+    public DbSet<SayMessage>           SayMessages           => Set<SayMessage>();
     // ── XP ladder ──
     public DbSet<XpSeason>             XpSeasons             => Set<XpSeason>();
     public DbSet<XpAward>              XpAwards              => Set<XpAward>();
@@ -658,6 +660,18 @@ public class BotDbContext : DbContext
         {
             e.HasIndex(l => new { l.GuildId, l.DiscordUserId }).IsUnique();
             e.HasIndex(l => new { l.GuildId, l.SleeperUserId }).IsUnique();
+        });
+
+        // ── Messages posted through /say ──────────────────────────────
+        // Looked up by message id on every /say edit and /say delete, and
+        // unique because one Discord message is one row. The index is what makes
+        // "did /say post this?" a cheap question, which is the whole gate on
+        // editing: anything the bot renders from its own state must not be
+        // hand-editable.
+        modelBuilder.Entity<SayMessage>(e =>
+        {
+            e.HasIndex(m => m.MessageId).IsUnique();
+            e.HasIndex(m => new { m.GuildId, m.PostedUtc });
         });
 
         // ── Sleeper weekly posts ──────────────────────────────────────

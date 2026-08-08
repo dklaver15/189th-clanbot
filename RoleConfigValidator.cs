@@ -189,6 +189,8 @@ public static class RoleConfigValidator
             "the event template management gate cannot resolve");
         yield return ("ReminderCommandMinRank", config.ReminderCommandMinRank,
             "the /reminder rank gate cannot resolve");
+        yield return ("SayCommandMinRank", config.SayCommandMinRank,
+            "the /say rank gate cannot resolve");
         yield return ("QotdMinRank", config.QotdMinRank,
             "the /qotd rank gate cannot resolve");
         yield return ("JotdMinRank", config.JotdMinRank,
