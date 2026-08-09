@@ -77,16 +77,6 @@ public sealed class SatisfactoryRailMapRenderer
 
     private const float MaxPlotHeight = 1150;
 
-    /// <summary>
-    /// Above this many stations the labels are dropped and only the markers are
-    /// drawn. Overlapping text turns a readable map into a smear, and the
-    /// station board command is the right place to read names anyway.
-    /// </summary>
-    private const int MaxStationLabels = 24;
-
-    /// <summary>Same idea for train names, at a lower bound: they move and overlap more.</summary>
-    private const int MaxTrainLabels = 14;
-
     // ── Palette ──────────────────────────────────────────────────────────────
     private const string BgTopHex    = "141b28";
     private const string BgBottomHex = "080a10";
@@ -290,9 +280,26 @@ public sealed class SatisfactoryRailMapRenderer
         using var smallBoldFont = Font(12, bold: true);
 
         DrawRails(canvas, polylines, ToPixel);
-        DrawStations(canvas, stations, labelFont, ToPixel);
-        DrawTrains(canvas, trains, labelFont, ToPixel);
-        DrawScaleBar(canvas, smallBoldFont, scale, plotLeft, plotBottom);
+
+        // Markers first, labels last, in one pass over the whole map. Drawing
+        // each category's labels next to its own markers is what produced the
+        // unreadable smear over the clan's yard: five stations and a train
+        // inside 200 pixels, every label centred on its own marker with no idea
+        // the others existed.
+        var labels = new List<MapLabel>();
+        var occupied = new List<SKRect>();
+
+        // The header and the legend own the top strip. Reserving it means a
+        // label near the top of the network gets nudged down rather than
+        // printed through the title.
+        occupied.Add(new SKRect(0, 0, CanvasWidth, MarginTop - 20f));
+
+        DrawStations(canvas, stations, ToPixel, labels, occupied);
+        DrawTrains(canvas, trains, ToPixel, labels, occupied);
+
+        var hidden = DrawLabels(canvas, labelFont, labels, occupied, canvasHeight);
+
+        DrawScaleBar(canvas, smallBoldFont, scale, plotLeft, plotBottom, hidden);
         DrawHeader(canvas, titleFont, subtitleFont, subtitle);
         DrawLegend(canvas, labelFont, trains);
 
@@ -348,8 +355,9 @@ public sealed class SatisfactoryRailMapRenderer
     private static void DrawStations(
         SKCanvas canvas,
         IReadOnlyList<FrmTrainStation> stations,
-        SKFont font,
-        Func<FrmLocation, SKPoint> toPixel)
+        Func<FrmLocation, SKPoint> toPixel,
+        List<MapLabel> labels,
+        List<SKRect> occupied)
     {
         using var fill = new SKPaint { Color = Hex(StationHex, 230), IsAntialias = true };
         using var ring = new SKPaint
@@ -359,22 +367,21 @@ public sealed class SatisfactoryRailMapRenderer
             StrokeWidth = 2f,
             IsAntialias = true,
         };
-        using var label = new SKPaint { Color = Hex(InkHex, 175), IsAntialias = true };
 
-        var withLocation = stations.Where(s => s.Location is not null).ToList();
-        var showLabels = withLocation.Count <= MaxStationLabels;
-
-        foreach (var station in withLocation)
+        foreach (var station in stations.Where(s => s.Location is not null))
         {
             var p = toPixel(station.Location!);
 
             canvas.DrawCircle(p, 8f, ring);
             canvas.DrawRect(new SKRect(p.X - 3.5f, p.Y - 3.5f, p.X + 3.5f, p.Y + 3.5f), fill);
 
-            if (!showLabels) continue;
+            // The marker is an obstacle in its own right. Without this a label
+            // pushed clear of other TEXT can still land on top of a neighbouring
+            // station's dot, which reads as a mislabelled station rather than as
+            // a collision.
+            occupied.Add(new SKRect(p.X - 9f, p.Y - 9f, p.X + 9f, p.Y + 9f));
 
-            var text = SatisfactoryRail.DisplayName(station);
-            canvas.DrawText(text, p.X - font.MeasureText(text) / 2f, p.Y - 14f, font, label);
+            labels.Add(new MapLabel(p, SatisfactoryRail.DisplayName(station), StationHex, PriorityStation));
         }
     }
 
@@ -388,15 +395,11 @@ public sealed class SatisfactoryRailMapRenderer
     private static void DrawTrains(
         SKCanvas canvas,
         IReadOnlyList<FrmTrain> trains,
-        SKFont font,
-        Func<FrmLocation, SKPoint> toPixel)
+        Func<FrmLocation, SKPoint> toPixel,
+        List<MapLabel> labels,
+        List<SKRect> occupied)
     {
-        using var label = new SKPaint { Color = Hex(InkHex, 210), IsAntialias = true };
-
-        var withLocation = trains.Where(t => t.Location is not null).ToList();
-        var showLabels = withLocation.Count <= MaxTrainLabels;
-
-        foreach (var train in withLocation)
+        foreach (var train in trains.Where(t => t.Location is not null))
         {
             var p = toPixel(train.Location!);
 
@@ -431,11 +434,211 @@ public sealed class SatisfactoryRailMapRenderer
                 canvas.DrawLine(p, tip, tick);
             }
 
-            if (!showLabels) continue;
+            occupied.Add(new SKRect(p.X - 12f, p.Y - 12f, p.X + 12f, p.Y + 12f));
 
-            var text = SatisfactoryRail.DisplayName(train);
-            canvas.DrawText(text, p.X - font.MeasureText(text) / 2f, p.Y + 24f, font, label);
+            // A derailed or stopped train outranks a station name for the last
+            // free slot in a crowded yard: the station is on the map every day
+            // and the stopped train is the reason somebody opened it.
+            var priority = train.Derailed ? PriorityUrgent
+                : SatisfactoryRail.IsStationary(train) ? PriorityUrgent
+                : PriorityTrain;
+
+            labels.Add(new MapLabel(p, SatisfactoryRail.DisplayName(train), hex, priority));
         }
+    }
+
+    // ─── Labels ──────────────────────────────────────────────────────────────
+
+    private const int PriorityUrgent  = 0;
+    private const int PriorityStation = 1;
+    private const int PriorityTrain   = 2;
+
+    /// <summary>One thing wanting a name printed near it.</summary>
+    private sealed record MapLabel(SKPoint Anchor, string Text, string Hex, int Priority);
+
+    /// <summary>
+    /// Candidate offsets for a label, in the order they are tried: the anchor
+    /// point plus this vector gives the text's left-baseline.
+    ///
+    /// <para>Ordered by how naturally each reads, not by distance. Directly
+    /// above is the convention for a map pin, so it goes first; below is the
+    /// obvious second. The side placements come next because horizontal space
+    /// is usually what a crowded yard has left. The long offsets at the end get
+    /// a leader line, which costs a little clutter and is still far better than
+    /// dropping the name.</para>
+    /// </summary>
+    private static readonly SKPoint[] LabelOffsets =
+    {
+        new(0, -14), new(0, 22),
+        new(13, 5), new(-13, 5),
+        new(11, -13), new(-11, -13), new(11, 20), new(-11, 20),
+        new(0, -30), new(0, 38), new(26, 5), new(-26, 5),
+        new(0, -46), new(0, 54), new(42, 5), new(-42, 5),
+        new(0, -62), new(0, 70), new(62, 5), new(-62, 5),
+    };
+
+    /// <summary>
+    /// Beyond this much offset the label no longer visually belongs to its
+    /// marker, so a leader line is drawn to reconnect them.
+    /// </summary>
+    private const float LeaderThreshold = 26f;
+
+    /// <summary>
+    /// A marker with another marker this close is "crowded", and its label gets
+    /// a leader line no matter how near it was placed.
+    ///
+    /// <para>This is the yard case, and proximity alone is the reason. Five
+    /// stations eight pixels apart get five labels fanned neatly around them
+    /// and the map is still lying by omission: nothing says WHICH dot is
+    /// "Steel Dispatch". A short leader off each label gives every name a
+    /// distinct angle back to its own marker, which is the only cue that
+    /// survives at this zoom.</para>
+    /// </summary>
+    private const float CrowdRadius = 34f;
+
+    /// <summary>
+    /// Bound on how many labels are considered. Placement is O(n²) against the
+    /// occupied list, and past this point the map is a wall of text anyway.
+    /// </summary>
+    private const int MaxLabels = 60;
+
+    /// <summary>
+    /// Places every label greedily, highest priority first, in the first
+    /// candidate slot that hits nothing already drawn.
+    ///
+    /// <para>Greedy rather than an optimising pass because the failure mode
+    /// matters more than the packing: with priorities, the labels that get
+    /// dropped when a yard is genuinely too dense are the least useful ones,
+    /// and that is worth more than fitting one extra name.</para>
+    ///
+    /// <para>Returns how many were dropped, which the caller prints. A map that
+    /// silently omits names looks complete and is not, and somebody hunting for
+    /// a station that isn't drawn has no way to tell the difference.</para>
+    /// </summary>
+    private static int DrawLabels(
+        SKCanvas canvas,
+        SKFont font,
+        IReadOnlyList<MapLabel> labels,
+        List<SKRect> occupied,
+        int canvasHeight)
+    {
+        var metrics = font.Metrics;
+        var ascent = -metrics.Ascent;
+        var descent = metrics.Descent;
+
+        // Text over track needs an outline to stay legible. Drawn as a stroke
+        // under the fill rather than a drop shadow: a shadow only works against
+        // a lighter background, and here the text can land on a pale rail line
+        // or on the dark panel with equal likelihood.
+        using var halo = new SKPaint
+        {
+            Color = Hex(BgBottomHex, 215),
+            Style = SKPaintStyle.Stroke,
+            StrokeWidth = 3.2f,
+            StrokeJoin = SKStrokeJoin.Round,
+            IsAntialias = true,
+        };
+
+        // Bright enough to actually trace. The first attempt used alpha 70 and
+        // the lines were invisible against the panel at the exact zoom where
+        // they were the only thing telling five stacked names apart.
+        using var leader = new SKPaint
+        {
+            Color = Hex(InkHex, 120),
+            Style = SKPaintStyle.Stroke,
+            StrokeWidth = 1.1f,
+            IsAntialias = true,
+        };
+
+        var dropped = 0;
+
+        var ordered = labels
+            .OrderBy(l => l.Priority)
+            .ThenBy(l => l.Anchor.Y)
+            .Take(MaxLabels)
+            .ToList();
+
+        dropped += Math.Max(0, labels.Count - ordered.Count);
+
+        // Computed against EVERY anchor, not just the ones that got placed: a
+        // marker whose own label was dropped still crowds its neighbours.
+        var anchors = labels.Select(l => l.Anchor).ToList();
+
+        bool IsCrowded(SKPoint p) => anchors.Any(other =>
+            !(Math.Abs(other.X - p.X) < 0.01f && Math.Abs(other.Y - p.Y) < 0.01f)
+            && Math.Abs(other.X - p.X) < CrowdRadius
+            && Math.Abs(other.Y - p.Y) < CrowdRadius);
+
+        foreach (var label in ordered)
+        {
+            var width = font.MeasureText(label.Text);
+            SKRect? placed = null;
+            SKPoint baseline = default;
+
+            foreach (var offset in LabelOffsets)
+            {
+                // Offsets are expressed from the label's CENTRE so the vertical
+                // candidates stay centred over the marker; the baseline is
+                // derived from that.
+                var candidateBaseline = new SKPoint(
+                    label.Anchor.X + offset.X - width / 2f,
+                    label.Anchor.Y + offset.Y);
+
+                // Side placements read better anchored to their inner edge than
+                // centred, or the text sits half on top of the marker.
+                if (offset.X > 0) candidateBaseline.X = label.Anchor.X + offset.X;
+                else if (offset.X < 0) candidateBaseline.X = label.Anchor.X + offset.X - width;
+
+                var rect = new SKRect(
+                    candidateBaseline.X - 3f,
+                    candidateBaseline.Y - ascent - 2f,
+                    candidateBaseline.X + width + 3f,
+                    candidateBaseline.Y + descent + 2f);
+
+                // Off-canvas is a rejection like any other. A name clipped by
+                // the edge is worse than one nudged to the other side.
+                if (rect.Left < 4 || rect.Right > CanvasWidth - 4
+                    || rect.Top < 4 || rect.Bottom > canvasHeight - 4) continue;
+
+                if (occupied.Any(o => o.IntersectsWith(rect))) continue;
+
+                placed = rect;
+                baseline = candidateBaseline;
+                break;
+            }
+
+            if (placed is null)
+            {
+                dropped++;
+                continue;
+            }
+
+            occupied.Add(placed.Value);
+
+            var pushed = Math.Abs(baseline.Y - label.Anchor.Y) > LeaderThreshold
+                         || Math.Abs(baseline.X + width / 2f - label.Anchor.X) > LeaderThreshold;
+
+            if (pushed || IsCrowded(label.Anchor))
+            {
+                // Meet the label box at the point nearest the anchor, so the
+                // line ends ON the text rather than crossing it.
+                var edge = new SKPoint(
+                    Math.Clamp(label.Anchor.X, placed.Value.Left, placed.Value.Right),
+                    Math.Clamp(label.Anchor.Y, placed.Value.Top, placed.Value.Bottom));
+
+                canvas.DrawLine(label.Anchor, edge, leader);
+            }
+
+            canvas.DrawText(label.Text, baseline.X, baseline.Y, font, halo);
+
+            // Tinted toward the marker's own colour rather than plain white, so
+            // in a cluster the eye can pair a name with its dot even when the
+            // leader line is short.
+            using var ink = new SKPaint { Color = Hex(label.Hex, 235), IsAntialias = true };
+            canvas.DrawText(label.Text, baseline.X, baseline.Y, font, ink);
+        }
+
+        return dropped;
     }
 
     /// <summary>
@@ -446,7 +649,7 @@ public sealed class SatisfactoryRailMapRenderer
     /// continent-spanning main line: both fill the frame.</para>
     /// </summary>
     private static void DrawScaleBar(
-        SKCanvas canvas, SKFont font, double pixelsPerUnit, float left, float bottom)
+        SKCanvas canvas, SKFont font, double pixelsPerUnit, float left, float bottom, int hiddenLabels)
     {
         var pixelsPerMetre = pixelsPerUnit * UnitsPerMetre;
         if (pixelsPerMetre <= 0 || !double.IsFinite(pixelsPerMetre)) return;
@@ -477,6 +680,15 @@ public sealed class SatisfactoryRailMapRenderer
         using var text = new SKPaint { Color = Hex(InkHex, 150), IsAntialias = true };
         var caption = metres >= 1000 ? $"{metres / 1000:0.#} km" : $"{metres:0} m";
         canvas.DrawText(caption, left + width + 10f, y + 4f, font, text);
+
+        // Say so when names were dropped. An incomplete map that looks complete
+        // sends somebody hunting for a station that was never drawn.
+        if (hiddenLabels <= 0) return;
+
+        using var note = new SKPaint { Color = Hex(InkHex, 95), IsAntialias = true };
+        canvas.DrawText(
+            $"{hiddenLabels} label(s) hidden, too crowded to place",
+            left + width + 10f + font.MeasureText(caption) + 22f, y + 4f, font, note);
     }
 
     private static void DrawHeader(SKCanvas canvas, SKFont titleFont, SKFont subtitleFont, string subtitle)
