@@ -256,6 +256,178 @@ public sealed record FrmMod(
     string DocsUrl,
     string SupportUrl);
 
+// ─── Rail ───────────────────────────────────────────────────────────────────
+//
+// getTrains and getTrainStation were captured from the clan's live server on
+// 2026-08-09 and match the docs field-for-field, which is a first for this API.
+// What the docs did NOT say, and what the capture cost three bugs to find:
+//
+//   • The code fields are ENUM-PREFIXED. A perfectly healthy train reports
+//     SelfDriving "SDLE_NoError", Docking "TDS_None", Path "PDE_NoError".
+//     A naive "is this string empty" test reads that as three faults.
+//   • TrainStation carries the sentinel "No Station", not an empty string,
+//     for a train with nowhere to be.
+//   • An empty cargo platform reports "Inventory": [] rather than a zeroed
+//     stack, so there is no capacity to divide by and "starved" is
+//     indistinguishable from "unknown" without knowing the platform type.
+//     LoadingMode is the discriminator, and a station lists its DECORATIVE
+//     platforms too ("LoadingMode": "Empty Platform").
+//
+// All three are handled in SatisfactoryRail, not here: these records stay a
+// faithful transcription of the wire format.
+//
+// FrmRailSegment is still UNVERIFIED, modelled from docs.ficsit.app alone.
+// getTrainRails is the one rail endpoint nobody has captured, so treat
+// SplineData, Location0/Location1 and Length as hypotheses. Everything is
+// nullable or defaulted, so a wrong guess costs a blank map rather than an
+// exception.
+
+/// <summary>One stack in a freight car or a station platform.</summary>
+public sealed record FrmInventoryItem(
+    string? Name,
+    string? ClassName,
+    double Amount,
+    double MaxAmount);
+
+/// <summary>
+/// One vehicle in a consist: a locomotive or a freight car. FRM reports the
+/// train as a whole AND its individual cars, and the per-car payload is the
+/// only way to tell a loaded train from an empty one running back.
+/// </summary>
+public sealed record FrmTrainCar(
+    string? Name,
+    string? ClassName,
+    double TotalMass,
+    double PayloadMass,
+    double MaxPayloadMass,
+    IReadOnlyList<FrmInventoryItem>? Inventory);
+
+/// <summary>One stop on a train's timetable. FRM returns only the name.</summary>
+public sealed record FrmTimeTableStop(string? StationName);
+
+/// <summary>
+/// One train.
+///
+/// <para><b><see cref="SelfDriving"/>, <see cref="Docking"/> and
+/// <see cref="Path"/> are ENUM-PREFIXED code strings</b>, and a healthy train
+/// still fills all three: "SDLE_NoError", "TDS_None", "PDE_NoError" on the live
+/// server. <see cref="Status"/> is friendlier prose ("Parked"). Nothing here
+/// switches on a specific literal; <c>SatisfactoryRail.Code</c> owns deciding
+/// which of these means "nothing to report".</para>
+///
+/// <para><b><see cref="TrainStation"/> is "current OR next stop", and reads
+/// "No Station" when there is neither.</b> It does not distinguish "sitting at
+/// Iron Loading" from "on its way to Iron Loading", so never render it as a
+/// location on its own. Pair it with <see cref="ForwardSpeed"/>, which does
+/// answer that.</para>
+///
+/// <para><b>Mass is in the game's own units</b> and FRM does not say which.
+/// Observed magnitudes: an Electric Locomotive is 300000 and an empty Freight
+/// Car is 30000 with a 70000 max payload, so it is very likely kilograms, but
+/// "very likely" is not good enough to print a suffix nobody has checked
+/// against the in-game HUD. Ratios (payload against max payload) are safe
+/// because the unit cancels, and that is why every display here is a
+/// percentage.</para>
+///
+/// <para>Note <see cref="MaxPayloadMass"/> is 0 on locomotives, so a train's
+/// capacity is the sum over its freight cars and an all-engine consist is
+/// legitimately 0. Guard the division.</para>
+/// </summary>
+public sealed record FrmTrain(
+    string? Id,
+    string? Name,
+    string? ClassName,
+    FrmLocation? Location,
+    double TotalMass,
+    double PayloadMass,
+    double MaxPayloadMass,
+    double ForwardSpeed,
+    double ThrottlePercent,
+    string? TrainStation,
+    bool Derailed,
+    bool PendingDerail,
+    string? Status,
+    IReadOnlyList<FrmTimeTableStop>? TimeTable,
+    int TimeTableIndex,
+    string? SelfDriving,
+    string? Docking,
+    string? Path,
+    IReadOnlyList<FrmTrainCar>? Vehicles,
+    FrmPowerInfo? PowerInfo);
+
+/// <summary>
+/// One docking platform on a station, with whatever it is currently holding.
+///
+/// <para><see cref="LoadingMode"/> is what makes a buffer reading meaningful:
+/// a full buffer on a LOADING platform is a train that hasn't come to collect,
+/// and a full buffer on an UNLOADING platform is a factory that isn't consuming.
+/// Same number, opposite problem, so the station board must not flag one
+/// without knowing which it is.</para>
+/// </summary>
+public sealed record FrmStationPlatform(
+    string? Name,
+    string? ClassName,
+    string? LoadingMode,
+    string? LoadingStatus,
+    string? DockingStatus,
+    IReadOnlyList<FrmInventoryItem>? Inventory);
+
+/// <summary>
+/// One train station and its platforms.
+///
+/// <para>The station's own <c>Inventory</c> is not modelled: the items live on
+/// the platforms in <see cref="CargoInventory"/>, and the docs show the root
+/// level repeating the platform shape rather than aggregating it.</para>
+/// </summary>
+public sealed record FrmTrainStation(
+    string? Id,
+    string? Name,
+    string? ClassName,
+    FrmLocation? Location,
+    double TransferRate,
+    double InflowRate,
+    double OutflowRate,
+    IReadOnlyList<FrmStationPlatform>? CargoInventory,
+    FrmPowerInfo? PowerInfo);
+
+/// <summary>
+/// One piece of track.
+///
+/// <para><b><see cref="SplineData"/> is the drawable part, and it is confirmed
+/// present and dense</b> (2026-08-09 capture: points under a metre apart along
+/// a curve, each a bare <c>{x,y,z}</c> with no rotation key, which is why
+/// <see cref="FrmLocation"/>'s Rotation defaults to 0 here). A rail is a curve,
+/// so its <see cref="Location"/> is only its origin: drawing from Location
+/// alone produces a scatter of dots.</para>
+///
+/// <para><b><see cref="Length"/>, <see cref="Location0"/>,
+/// <see cref="Location1"/> and the Connected flags were NOT in the captured
+/// response</b>, which listed only ID, Name, ClassName, location, BoundingBox,
+/// ColorSlot and SplineData before the capture was truncated. They may exist
+/// further down the object or may be doc fiction. Nothing depends on them:
+/// track length is measured off the spline by
+/// <c>SatisfactoryRail.LengthUnits</c>, and the endpoints are only a fallback
+/// for a segment with no spline. They stay modelled so a real value is picked
+/// up for free if it is there.</para>
+///
+/// <para><see cref="BoundingBox"/> is not modelled. In the capture its min and
+/// max were identical (both equal to the segment origin), so it says nothing
+/// the spline does not.</para>
+/// </summary>
+public sealed record FrmRailSegment(
+    string? Id,
+    string? Name,
+    string? ClassName,
+    FrmLocation? Location,
+    [property: System.Text.Json.Serialization.JsonPropertyName("location0")]
+    FrmLocation? Location0,
+    [property: System.Text.Json.Serialization.JsonPropertyName("location1")]
+    FrmLocation? Location1,
+    bool Connected0,
+    bool Connected1,
+    double Length,
+    IReadOnlyList<FrmLocation>? SplineData);
+
 /// <summary>
 /// Client for the Ficsit Remote Monitoring mod's own HTTP server.
 ///
@@ -425,6 +597,47 @@ public sealed class FrmApiService
     /// </summary>
     public Task<IReadOnlyList<FrmMod>?> GetModListAsync(CancellationToken ct = default) =>
         GetListAsync<FrmMod>("getModList", ct);
+
+    // ─── Rail ────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Every train, with position, speed, consist and derail state.
+    ///
+    /// <para>Small and cheap: one object per train, and a clan-sized network has
+    /// a handful. This is the only rail endpoint suitable for a poll loop.</para>
+    ///
+    /// <para>Null = unreachable. An EMPTY list means no trains exist, which is
+    /// the normal state before anyone unlocks Railway, and callers must not
+    /// treat it as a fault.</para>
+    /// </summary>
+    public Task<IReadOnlyList<FrmTrain>?> GetTrainsAsync(CancellationToken ct = default) =>
+        GetListAsync<FrmTrain>("getTrains", ct);
+
+    /// <summary>
+    /// Every train station with its platforms and their buffers.
+    ///
+    /// <para>Middleweight: it carries a full inventory per platform, so it grows
+    /// with the network rather than staying flat. Poll it in minutes, not
+    /// seconds. Null = unreachable.</para>
+    /// </summary>
+    public Task<IReadOnlyList<FrmTrainStation>?> GetTrainStationsAsync(CancellationToken ct = default) =>
+        GetListAsync<FrmTrainStation>("getTrainStation", ct);
+
+    /// <summary>
+    /// Every piece of track, with spline geometry.
+    ///
+    /// <para><b>The heaviest rail endpoint by a wide margin.</b> It returns one
+    /// object per rail segment with a point list on each, so a mature network is
+    /// thousands of entries and megabytes of JSON. Track geometry also changes
+    /// only when somebody builds, which makes it the one rail read that should
+    /// be cached hard and never polled. <see cref="SatisfactoryRailMapRenderer"/>
+    /// is the only caller and holds it for
+    /// <see cref="BotConfig.SatisfactoryRailMapCacheMinutes"/>.</para>
+    ///
+    /// <para>Null = unreachable.</para>
+    /// </summary>
+    public Task<IReadOnlyList<FrmRailSegment>?> GetTrainRailsAsync(CancellationToken ct = default) =>
+        GetListAsync<FrmRailSegment>("getTrainRails", ct);
 
     // ─── Transport ───────────────────────────────────────────────────────────
 

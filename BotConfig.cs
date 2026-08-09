@@ -2151,6 +2151,66 @@ public class BotConfig
     /// </summary>
     public int SatisfactoryMetricsRetentionDays { get; set; } = 30;
 
+    // ─── Satisfactory: rail network ──────────────────────────────────
+    // All of this rides FRM's rail endpoints. Everything here is idle when
+    // FrmEnabled is false, regardless of these values.
+    // SyncWithHandlers: SatisfactoryTrainWatch, SatisfactoryRailMapRenderer,
+    // SatisfactoryCommandHandler (/satisfactory-trains).
+
+    /// <summary>
+    /// Whether to announce derailed and stopped trains in the feed channel.
+    ///
+    /// <para>Rides <see cref="SatisfactoryAlertsEnabled"/>'s poll, so switching
+    /// the power alerts off switches these off too. This key only controls
+    /// whether the rail half of that tick says anything.</para>
+    /// </summary>
+    public bool SatisfactoryTrainAlertsEnabled { get; set; } = true;
+
+    /// <summary>
+    /// How long a train with a route has to sit still before it counts as
+    /// stopped. Clamped 2–240, default 10.
+    ///
+    /// <para>The floor is 2 rather than 0 because a train loading at a platform
+    /// is legitimately stationary, and a window shorter than a normal dwell
+    /// would announce every delivery. Ten minutes is far past any dwell and
+    /// still well inside "somebody should look at this".</para>
+    /// </summary>
+    public int SatisfactoryTrainStuckMinutes { get; set; } = 10;
+
+    /// <summary>
+    /// Minutes between station reads. Clamped 1–240, default 10.
+    ///
+    /// <para>Deliberately slower than the train poll. getTrains is one small
+    /// object per train; getTrainStation carries a full inventory per platform
+    /// and grows with the network. Buffer levels also move on the timescale of
+    /// a train round trip, so reading them every two minutes would cost more
+    /// and say the same thing.</para>
+    /// </summary>
+    public int SatisfactoryTrainStationPollMinutes { get; set; } = 10;
+
+    /// <summary>
+    /// Fill percentage at or below which a LOADING platform counts as starved.
+    /// Default 5.
+    /// </summary>
+    public double SatisfactoryStationStarvedPercent { get; set; } = 5;
+
+    /// <summary>
+    /// Fill percentage at or above which a platform counts as backed up.
+    /// Default 95.
+    /// </summary>
+    public double SatisfactoryStationBackedUpPercent { get; set; } = 95;
+
+    /// <summary>
+    /// How long the rail map holds its track geometry. Clamped 1–1440,
+    /// default 60.
+    ///
+    /// <para>getTrainRails is the heaviest endpoint this bot touches (one object
+    /// per rail segment, each with a spline point list) and track only changes
+    /// when somebody builds. Trains and stations are always read fresh, so a
+    /// long cache costs an out-of-date piece of NEW track and nothing else.</para>
+    /// </summary>
+    public int SatisfactoryRailMapCacheMinutes { get; set; } = 60;
+
     // ─── SQLite Backup Settings ──────────────────────────────────────
     /// <summary>
     /// Master switch for SqliteBackupService. When false, the service exits

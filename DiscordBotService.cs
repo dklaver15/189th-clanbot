@@ -626,6 +626,7 @@ public class DiscordBotService : IHostedService
                 SatisfactoryCommandHandler.BuildLeaderboardCommand(),
                 SatisfactoryCommandHandler.BuildGraphCommand(),
                 SatisfactoryCommandHandler.BuildProductionCommand(),
+                SatisfactoryCommandHandler.BuildTrainsCommand(),
                 SatisfactoryCommandHandler.BuildLinkCommand(),
 
                 new SlashCommandBuilder()

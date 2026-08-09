@@ -51,8 +51,15 @@ public class SatisfactoryCommandHandler
         "satisfactory-leaderboard",
         "satisfactory-graph",
         "satisfactory-production",
+        "satisfactory-trains",
         "satisfactory-link",
     };
+
+    /// <summary>
+    /// Cap on rows in the train roll call and the station board, so the embed
+    /// can't blow the 4096-character description limit on a big network.
+    /// </summary>
+    private const int MaxRailRows = 25;
 
     /// <summary>Cap on leaderboard rows, so the embed can't blow the description limit.</summary>
     private const int MaxLeaderboardRows = 15;
@@ -63,6 +70,7 @@ public class SatisfactoryCommandHandler
     private readonly FrmApiService _frm;
     private readonly SatisfactoryDigestBuilder _digest;
     private readonly SatisfactoryChartRenderer _charts;
+    private readonly SatisfactoryRailMapRenderer _railMap;
     private readonly IServiceProvider _services;
 
     public SatisfactoryCommandHandler(
@@ -72,6 +80,7 @@ public class SatisfactoryCommandHandler
         FrmApiService frm,
         SatisfactoryDigestBuilder digest,
         SatisfactoryChartRenderer charts,
+        SatisfactoryRailMapRenderer railMap,
         IServiceProvider services)
     {
         _logger = logger;
@@ -80,6 +89,7 @@ public class SatisfactoryCommandHandler
         _frm = frm;
         _digest = digest;
         _charts = charts;
+        _railMap = railMap;
         _services = services;
     }
 
@@ -153,7 +163,8 @@ public class SatisfactoryCommandHandler
                 .WithType(ApplicationCommandOptionType.String)
                 .WithRequired(true)
                 .AddChoice("Power", "power")
-                .AddChoice("Playtime", "playtime"))
+                .AddChoice("Playtime", "playtime")
+                .AddChoice("Freight", "freight"))
             .AddOption(new SlashCommandOptionBuilder()
                 .WithName("range")
                 .WithDescription("How far back to look (default 24 hours for power, 14 days for playtime)")
@@ -177,6 +188,43 @@ public class SatisfactoryCommandHandler
         new SlashCommandBuilder()
             .WithName("satisfactory-production")
             .WithDescription("Every item the factory is producing or consuming, with efficiency")
+            .Build();
+
+    /// <summary>
+    /// /satisfactory-trains — the rail network: roll call, one train, the
+    /// station board, or a rendered map.
+    ///
+    /// <para>Subcommands rather than four top-level commands. They share a data
+    /// source and an audience, and four more entries in the picker for one
+    /// subsystem is how a command list stops being scannable.</para>
+    ///
+    /// <para><c>show</c> takes a free-text name instead of a choice list because
+    /// the choices would have to be baked in at registration time, and trains
+    /// get built and renamed mid-session. Matching is a case-insensitive
+    /// substring, so a partial name is enough.</para>
+    /// </summary>
+    public static SlashCommandProperties BuildTrainsCommand() =>
+        new SlashCommandBuilder()
+            .WithName("satisfactory-trains")
+            .WithDescription("The clan's Satisfactory rail network: trains, stations, and a live map")
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("list")
+                .WithDescription("Every train, with speed, load and where it's headed")
+                .WithType(ApplicationCommandOptionType.SubCommand))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("show")
+                .WithDescription("One train in detail, including its timetable and why it might be stuck")
+                .WithType(ApplicationCommandOptionType.SubCommand)
+                .AddOption("name", ApplicationCommandOptionType.String,
+                    "Train name, or any part of it", isRequired: true))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("stations")
+                .WithDescription("Station buffers: which ones are starved, and which are backed up")
+                .WithType(ApplicationCommandOptionType.SubCommand))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("map")
+                .WithDescription("Render the whole rail network with live train positions")
+                .WithType(ApplicationCommandOptionType.SubCommand))
             .Build();
 
     public static SlashCommandProperties BuildLinkCommand() =>
@@ -261,6 +309,7 @@ public class SatisfactoryCommandHandler
             case "satisfactory-leaderboard": await HandleLeaderboardAsync(command); break;
             case "satisfactory-graph":       await HandleGraphAsync(command); break;
             case "satisfactory-production":  await HandleProductionAsync(command); break;
+            case "satisfactory-trains":      await HandleTrainsAsync(command); break;
             case "satisfactory-link":        await HandleLinkAsync(command); break;
         }
     }
@@ -701,6 +750,19 @@ public class SatisfactoryCommandHandler
                 days, DigestZone(), $"Last {days} days  ·  hours per player");
             fileName = "playtime.png";
         }
+        else if (string.Equals(type, "freight", StringComparison.OrdinalIgnoreCase))
+        {
+            var window = range switch
+            {
+                "7d"  => TimeSpan.FromDays(7),
+                "30d" => TimeSpan.FromDays(30),
+                _     => TimeSpan.FromHours(24),
+            };
+
+            var label = window.TotalHours <= 24 ? "Last 24 hours" : $"Last {(int)window.TotalDays} days";
+            png = await _charts.TryRenderFreightChartAsync(window, DigestZone(), $"{label}  ·  rail network");
+            fileName = "freight.png";
+        }
         else
         {
             var window = range switch
@@ -718,8 +780,9 @@ public class SatisfactoryCommandHandler
         if (png is null)
         {
             await command.FollowupAsync(
-                "Not enough data for that chart yet. Power history builds up from the alert poll " +
-                "(a couple of hours gives a useful picture), and playtime needs at least one recorded session.",
+                "Not enough data for that chart yet. Power and freight history build up from the alert poll " +
+                "(a couple of hours gives a useful picture), playtime needs at least one recorded session, " +
+                "and the freight chart also needs somebody to have built a train.",
                 ephemeral: true);
             return;
         }
@@ -868,6 +931,353 @@ public class SatisfactoryCommandHandler
 
         await command.FollowupAsync(embed: embed.Build());
     }
+
+    // ─── /satisfactory-trains ────────────────────────────────────────────────
+
+    /// <summary>
+    /// Deferred immediately and publicly. Every subcommand makes at least one
+    /// FRM call and the map makes three plus a render, all comfortably past
+    /// Discord's 3-second initial-response window.
+    /// </summary>
+    private async Task HandleTrainsAsync(SocketSlashCommand command)
+    {
+        await command.DeferAsync();
+
+        if (!await EnsureFrmAsync(command)) return;
+
+        var sub = command.Data.Options.FirstOrDefault();
+
+        switch (sub?.Name)
+        {
+            case "show":     await HandleTrainShowAsync(command, sub); break;
+            case "stations": await HandleStationBoardAsync(command); break;
+            case "map":      await HandleRailMapAsync(command); break;
+            default:         await HandleTrainListAsync(command); break;
+        }
+    }
+
+    /// <summary>
+    /// Roll call, ordered by how much attention each train wants: derailed
+    /// first, then stopped, then everything running.
+    ///
+    /// <para>Ordering by name instead would bury the one derailed train in the
+    /// middle of a healthy list, which is the only reason anybody runs this
+    /// while something is wrong.</para>
+    /// </summary>
+    private async Task HandleTrainListAsync(SocketSlashCommand command)
+    {
+        var trains = await _frm.GetTrainsAsync();
+
+        if (trains is null)
+        {
+            await command.FollowupAsync(embed: UnreachableEmbed());
+            return;
+        }
+
+        if (trains.Count == 0)
+        {
+            await command.FollowupAsync(
+                "No trains on the server yet. They show up here as soon as somebody builds one.");
+            return;
+        }
+
+        var ordered = trains
+            .OrderByDescending(t => t.Derailed)
+            .ThenByDescending(t => SatisfactoryRail.IsStationary(t) && SatisfactoryRail.HasRoute(t))
+            .ThenBy(t => SatisfactoryRail.DisplayName(t), StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var lines = ordered.Take(MaxRailRows).Select(TrainLine).ToList();
+
+        if (ordered.Count > MaxRailRows)
+            lines.Add($"_...and {ordered.Count - MaxRailRows} more._");
+
+        var moving = trains.Count(t => !t.Derailed && !SatisfactoryRail.IsStationary(t));
+        var derailed = trains.Count(t => t.Derailed);
+
+        var embed = new EmbedBuilder()
+            .WithColor(derailed > 0 ? Color.Red : new Color(0x00D4FF))
+            .WithTitle("🚂 Trains")
+            .WithDescription(string.Join("\n", lines))
+            .WithFooter($"{trains.Count} train(s), {moving} moving" + (derailed > 0 ? $", {derailed} derailed" : ""))
+            .WithCurrentTimestamp()
+            .Build();
+
+        await command.FollowupAsync(embed: embed);
+    }
+
+    private static string TrainLine(FrmTrain train)
+    {
+        var bits = new List<string>();
+
+        if (train.Derailed) bits.Add("**derailed**");
+        else if (SatisfactoryRail.IsStationary(train)) bits.Add("stopped");
+        else bits.Add($"{SatisfactoryRail.SpeedKph(train):0} km/h");
+
+        if (train.MaxPayloadMass > 0)
+            bits.Add($"{100.0 * train.PayloadMass / train.MaxPayloadMass:0}% loaded");
+
+        if (SatisfactoryRail.NextStop(train) is { } next)
+            bits.Add($"next: {Escape(next)}");
+
+        var marker = train.Derailed ? "🔴"
+            : SatisfactoryRail.IsStationary(train) ? "🟡"
+            : "🟢";
+
+        return $"{marker} **{Escape(SatisfactoryRail.DisplayName(train))}** · {string.Join(" · ", bits)}";
+    }
+
+    /// <summary>
+    /// One train in full, including the raw diagnostic codes.
+    ///
+    /// <para>The codes are the point of this subcommand. "Why is my train just
+    /// sitting there" is answerable from the game's own self-driving and pathing
+    /// output, and reading it here beats logging in to look.</para>
+    /// </summary>
+    private async Task HandleTrainShowAsync(SocketSlashCommand command, SocketSlashCommandDataOption sub)
+    {
+        var query = (sub.Options.FirstOrDefault(o => o.Name == "name")?.Value as string ?? "").Trim();
+
+        var trains = await _frm.GetTrainsAsync();
+
+        if (trains is null)
+        {
+            await command.FollowupAsync(embed: UnreachableEmbed());
+            return;
+        }
+
+        // Exact match wins over a substring, so a train called "Ore" is still
+        // reachable when "Ore Loop 2" also exists.
+        var train = trains.FirstOrDefault(t =>
+                        string.Equals(SatisfactoryRail.DisplayName(t), query, StringComparison.OrdinalIgnoreCase))
+                    ?? trains.FirstOrDefault(t =>
+                        SatisfactoryRail.DisplayName(t).Contains(query, StringComparison.OrdinalIgnoreCase));
+
+        if (train is null)
+        {
+            var known = trains.Count == 0
+                ? "There are no trains on the server yet."
+                : "On the server right now: " + string.Join(", ",
+                    trains.Take(MaxRailRows).Select(t => Escape(SatisfactoryRail.DisplayName(t))));
+
+            await command.FollowupAsync($"No train matching **{Escape(query)}**. {known}", ephemeral: true);
+            return;
+        }
+
+        var name = SatisfactoryRail.DisplayName(train);
+
+        var state = train.Derailed ? "Derailed"
+            : SatisfactoryRail.IsStationary(train) ? "Stopped"
+            : $"Running at {SatisfactoryRail.SpeedKph(train):0} km/h";
+
+        var embed = new EmbedBuilder()
+            .WithColor(train.Derailed ? Color.Red
+                : SatisfactoryRail.IsStationary(train) ? new Color(0xF1C40F)
+                : new Color(0x00D4FF))
+            .WithTitle($"🚂 {Truncate(name, 200)}")
+            .WithDescription(state)
+            .AddField("Throttle", $"{train.ThrottlePercent:0}%", true)
+            .WithCurrentTimestamp();
+
+        if (train.MaxPayloadMass > 0)
+            embed.AddField("Load",
+                $"{100.0 * train.PayloadMass / train.MaxPayloadMass:0}% of capacity", true);
+
+        if (train.Vehicles is { Count: > 0 })
+            embed.AddField("Consist", $"{train.Vehicles.Count} unit(s)", true);
+
+        if (SatisfactoryRail.NextStop(train) is { } next)
+            embed.AddField("Next stop", Escape(next), true);
+
+        AddTimeTableField(embed, train);
+        AddCodesField(embed, train);
+
+        // Only offered when it would actually say something. A manual train with
+        // no route that happens to be parked is not a problem to explain.
+        if (!train.Derailed && SatisfactoryRail.IsStationary(train) && SatisfactoryRail.HasRoute(train))
+            embed.AddField("If it's not meant to be stopped",
+                "Check power on the track, a block signal it can't clear, and whether a switch or a missing "
+                + "piece of track has left it with no path to its next stop.");
+
+        await command.FollowupAsync(embed: embed.Build());
+    }
+
+    /// <summary>
+    /// The timetable with the next stop marked. Capped, because a long route
+    /// would otherwise run past the 1024-character field limit.
+    /// </summary>
+    private static void AddTimeTableField(EmbedBuilder embed, FrmTrain train)
+    {
+        var table = train.TimeTable;
+        if (table is null || table.Count == 0) return;
+
+        var lines = new List<string>();
+
+        for (var i = 0; i < table.Count && i < 12; i++)
+        {
+            var stop = Escape(table[i].StationName ?? "(unnamed)");
+            lines.Add(i == train.TimeTableIndex ? $"**➜ {stop}**" : $"　 {stop}");
+        }
+
+        if (table.Count > 12) lines.Add($"_...and {table.Count - 12} more stops._");
+
+        embed.AddField("Timetable", string.Join("\n", lines));
+    }
+
+    /// <summary>
+    /// Whatever diagnostic codes the game is reporting, verbatim. Same reasoning
+    /// as the alert path: the values are undocumented, and the exact string is
+    /// what somebody can search for.
+    /// </summary>
+    private static void AddCodesField(EmbedBuilder embed, FrmTrain train)
+    {
+        var codes = new List<string>();
+
+        if (SatisfactoryRail.Code(train.Status) is { } status) codes.Add($"Status: `{status}`");
+        if (SatisfactoryRail.Code(train.SelfDriving) is { } driving) codes.Add($"Self-driving: `{driving}`");
+        if (SatisfactoryRail.Code(train.Docking) is { } docking) codes.Add($"Docking: `{docking}`");
+        if (SatisfactoryRail.Code(train.Path) is { } path) codes.Add($"Path: `{path}`");
+
+        if (codes.Count > 0) embed.AddField("What the game says", string.Join("\n", codes));
+    }
+
+    /// <summary>
+    /// Station buffers, worst first.
+    ///
+    /// <para>A fill percentage on its own is not a verdict, so each line says
+    /// what the number MEANS for that platform: a full loading platform is a
+    /// train that never came, a full unloading platform is a factory that has
+    /// stopped eating, and an empty loading platform is production that isn't
+    /// keeping up. Same number, three different problems.</para>
+    /// </summary>
+    private async Task HandleStationBoardAsync(SocketSlashCommand command)
+    {
+        var stations = await _frm.GetTrainStationsAsync();
+
+        if (stations is null)
+        {
+            await command.FollowupAsync(embed: UnreachableEmbed());
+            return;
+        }
+
+        if (stations.Count == 0)
+        {
+            await command.FollowupAsync("No train stations on the server yet.");
+            return;
+        }
+
+        var starvedBelow = Math.Clamp(_config.SatisfactoryStationStarvedPercent, 0, 100) / 100.0;
+        var backedAbove = Math.Clamp(_config.SatisfactoryStationBackedUpPercent, 0, 100) / 100.0;
+
+        var rows = new List<(double Sort, string Line)>();
+
+        foreach (var station in stations)
+        {
+            var platforms = (station.CargoInventory ?? Array.Empty<FrmStationPlatform>())
+                .Select(p => (Platform: p, Fill: SatisfactoryRail.Fill(p)))
+                .Where(x => x.Fill is not null)
+                .ToList();
+
+            var name = Escape(SatisfactoryRail.DisplayName(station));
+
+            if (platforms.Count == 0)
+            {
+                rows.Add((0.5, $"⚪ **{name}** · no cargo platforms"));
+                continue;
+            }
+
+            // The worst platform speaks for the station. A station is a place
+            // people go to fix something, and they will see the rest when they
+            // get there.
+            var worst = platforms
+                .OrderByDescending(x => PlatformSeverity(
+                    x.Fill!.Value, SatisfactoryRail.IsLoading(x.Platform), starvedBelow, backedAbove))
+                .First();
+
+            var fill = worst.Fill!.Value;
+            var loading = SatisfactoryRail.IsLoading(worst.Platform);
+            var severity = PlatformSeverity(fill, loading, starvedBelow, backedAbove);
+
+            var verdict =
+                loading && fill <= starvedBelow ? "starved, production isn't keeping up"
+                : loading && fill >= backedAbove ? "full, no train is collecting"
+                : !loading && fill >= backedAbove ? "full, nothing downstream is consuming"
+                : "healthy";
+
+            var marker = severity >= 1.0 ? "🔴" : severity >= 0.5 ? "🟡" : "🟢";
+            var mode = loading ? "loading" : "unloading";
+
+            rows.Add((severity, $"{marker} **{name}** · {mode} {fill * 100:0}% · {verdict}"));
+        }
+
+        var ordered = rows.OrderByDescending(r => r.Sort).Select(r => r.Line).ToList();
+        var shown = ordered.Take(MaxRailRows).ToList();
+
+        if (ordered.Count > MaxRailRows)
+            shown.Add($"_...and {ordered.Count - MaxRailRows} more._");
+
+        await command.FollowupAsync(embed: new EmbedBuilder()
+            .WithColor(new Color(0xFFD86B))
+            .WithTitle("🏗️ Station board")
+            .WithDescription(string.Join("\n", shown))
+            .WithFooter($"{stations.Count} station(s). Starved below {starvedBelow * 100:0}%, backed up above {backedAbove * 100:0}%.")
+            .WithCurrentTimestamp()
+            .Build());
+    }
+
+    /// <summary>
+    /// How much attention a platform wants, 0 to 1.
+    ///
+    /// <para>Only an EMPTY LOADING platform counts as starved. An empty
+    /// unloading platform is a platform between trains, which is the normal
+    /// state and would otherwise put every healthy destination at the top of
+    /// the board.</para>
+    /// </summary>
+    private static double PlatformSeverity(double fill, bool loading, double starvedBelow, double backedAbove) =>
+        (loading && fill <= starvedBelow) || fill >= backedAbove ? 1.0
+        : fill <= starvedBelow * 2 || fill >= backedAbove * 0.9 ? 0.5
+        : 0.0;
+
+    private async Task HandleRailMapAsync(SocketSlashCommand command)
+    {
+        var png = await _railMap.TryRenderAsync("189th Clanguard  ·  live positions");
+
+        if (png is null)
+        {
+            await command.FollowupAsync(
+                "Nothing to map yet. This draws the track, the stations and where the trains are, so it needs "
+                + "at least some rail built and the monitoring mod answering.",
+                ephemeral: true);
+            return;
+        }
+
+        using var ms = new MemoryStream(png);
+        await command.FollowupWithFileAsync(ms, "rail-map.png");
+    }
+
+    /// <summary>
+    /// The rail subcommands read FRM, not the game's own API, so the standard
+    /// <see cref="EnsureEnabledAsync"/> check would pass while every one of them
+    /// returned nothing.
+    /// </summary>
+    private async Task<bool> EnsureFrmAsync(SocketSlashCommand command)
+    {
+        if (_config.SatisfactoryEnabled && _frm.IsConfigured) return true;
+
+        await command.FollowupAsync(
+            "Rail data comes from the Ficsit Remote Monitoring mod, which isn't set up here "
+            + "(`FrmEnabled` / `FrmBaseUrl`). Ask an admin.",
+            ephemeral: true);
+        return false;
+    }
+
+    private Embed UnreachableEmbed() =>
+        new EmbedBuilder()
+            .WithColor(Color.Red)
+            .WithTitle("Can't reach the server")
+            .WithDescription(OfflineHint())
+            .WithCurrentTimestamp()
+            .Build();
 
     // ─── /satisfactory-link ──────────────────────────────────────────────────
 

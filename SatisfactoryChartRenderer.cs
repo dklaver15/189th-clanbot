@@ -803,6 +803,248 @@ public sealed class SatisfactoryChartRenderer
         return png.ToArray();
     }
 
+    // ─── Freight ─────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// How hard the rail network is working, over the given window.
+    ///
+    /// <para><b>Both series are percentages, and that is the whole design.</b>
+    /// FRM reports payload as a bare number and never says what the unit is, so
+    /// an axis in "mass" would be a number nobody can check and a tonnage figure
+    /// would be an outright guess. Payload against fleet CAPACITY is unit-free:
+    /// the unknown unit cancels, and "the fleet is running two-thirds full" is
+    /// the question people actually have.</para>
+    ///
+    /// <para>The second series is the share of the fleet that is moving, which
+    /// separates the two ways a rail network underperforms. Low load with
+    /// everything moving means the trains are running empty; high load with
+    /// nothing moving means freight is sitting on stopped trains.</para>
+    /// </summary>
+    /// <param name="zone">Timezone the x-axis is labelled in.</param>
+    /// <returns>PNG bytes, or null if there's nothing worth drawing.</returns>
+    public async Task<byte[]?> TryRenderFreightChartAsync(
+        TimeSpan window, TimeZoneInfo zone, string subtitle, CancellationToken ct = default)
+    {
+        try
+        {
+            using var scope = _services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+            var since = DateTime.UtcNow - window;
+
+            // Scope to the current world, same reasoning as the power chart: a
+            // save wipe inside the retention window would otherwise splice two
+            // unrelated networks into one line.
+            var currentSeed = await db.SatisfactoryTrainSamples
+                .AsNoTracking()
+                .OrderByDescending(s => s.SampledUtc)
+                .Select(s => s.Seed)
+                .FirstOrDefaultAsync(ct);
+
+            var samples = await db.SatisfactoryTrainSamples
+                .AsNoTracking()
+                .Where(s => s.SampledUtc >= since && (s.Seed == currentSeed || s.Seed == 0))
+                .OrderBy(s => s.SampledUtc)
+                .ToListAsync(ct);
+
+            if (samples.Count < 3)
+            {
+                _logger.LogDebug(
+                    "Skipping the Satisfactory freight chart: only {Count} sample(s) in the last {Hours}h",
+                    samples.Count, (int)window.TotalHours);
+                return null;
+            }
+
+            // Rows exist but no trains do. A flat pair of zero lines is a chart
+            // that says nothing, and "nobody has built a train" is better said
+            // in words by the caller.
+            if (samples.All(s => s.TrainCount == 0))
+            {
+                _logger.LogDebug("Skipping the Satisfactory freight chart: no trains in the window");
+                return null;
+            }
+
+            ct.ThrowIfCancellationRequested();
+
+            return RenderFreightChart(samples, zone, subtitle);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to render the Satisfactory freight chart");
+            return null;
+        }
+    }
+
+    private byte[] RenderFreightChart(
+        IReadOnlyList<SatisfactoryTrainSample> samples, TimeZoneInfo zone, string subtitle)
+    {
+        // Guarded division throughout. A fleet with no payload capacity (every
+        // train an engine and no freight cars) is a real state, and it must read
+        // as 0% rather than produce a NaN that silently poisons the axis and the
+        // gridline loop.
+        var load = samples
+            .Select(s => s.MaxPayloadMass > 0 ? 100.0 * s.PayloadMass / s.MaxPayloadMass : 0)
+            .ToArray();
+
+        var moving = samples
+            .Select(s => s.TrainCount > 0 ? 100.0 * s.MovingCount / s.TrainCount : 0)
+            .ToArray();
+
+        // Fixed 0-100 axis rather than one fitted to the data. Both series are
+        // shares of a whole, so a fitted axis would make a quiet day look like a
+        // busy one: 8% load drawn to the top of the frame reads as saturation.
+        const double yMax = 100;
+        const double yStep = 20;
+
+        const float plotLeft = MarginLeft;
+        const float plotRight = CanvasWidth - MarginRight;
+        const float plotTop = MarginTop;
+        const float plotBottom = CanvasHeight - MarginBottom;
+        const float plotWidth = plotRight - plotLeft;
+        const float plotHeight = plotBottom - plotTop;
+
+        var t0 = samples[0].SampledUtc;
+        var span = samples[^1].SampledUtc - t0;
+        if (span <= TimeSpan.Zero) span = TimeSpan.FromMinutes(1);
+
+        float XToPixel(DateTime t) =>
+            plotLeft + (float)((t - t0).TotalSeconds / span.TotalSeconds) * plotWidth;
+        float YToPixel(double y) => plotBottom - (float)(y / yMax) * plotHeight;
+
+        var info = new SKImageInfo(CanvasWidth, CanvasHeight);
+        using var surface = SKSurface.Create(info);
+        var canvas = surface.Canvas;
+
+        DrawBackground(canvas);
+        DrawPanel(canvas, plotLeft, plotTop, plotRight, plotBottom);
+
+        using var titleFont = Font(26, bold: true);
+        using var subtitleFont = Font(14);
+        using var labelFont = Font(14);
+        using var smallFont = Font(12);
+
+        DrawYAxis(canvas, labelFont, yMax, yStep, plotLeft, plotRight, YToPixel, v => $"{v:0}%");
+
+        // ── Derailments ──
+        // Full-height bands behind the series, for the same reason the power
+        // chart bands its fuse trips: a marker on the data point would sit
+        // wherever the load happened to be, which is not where the eye looks.
+        foreach (var s in samples.Where(s => s.DerailedCount > 0))
+        {
+            var x = XToPixel(s.SampledUtc);
+
+            using var shader = SKShader.CreateLinearGradient(
+                new SKPoint(0, plotBottom), new SKPoint(0, plotTop),
+                new[] { Hex(DangerHex, 150), Hex(DangerHex, 10) },
+                SKShaderTileMode.Clamp);
+            using var paint = new SKPaint { Shader = shader, IsAntialias = true };
+            canvas.DrawRect(new SKRect(x - 2.5f, plotTop, x + 2.5f, plotBottom), paint);
+        }
+
+        DrawSeries(canvas, samples, moving, XToPixel, YToPixel, BatteryHex, BatteryHiHex, 2.2f);
+        DrawSeries(canvas, samples, load, XToPixel, YToPixel, DrawLoHex, DrawHiHex, 3.2f);
+
+        // ── Time axis ──
+        var format = span <= TimeSpan.FromHours(36) ? "HH:mm" : "MMM d";
+        var ticks = Math.Min(XAxisTickCount, samples.Count);
+
+        using (var axisPaint = new SKPaint { Color = Hex(AxisHex, 150), IsAntialias = true })
+        {
+            for (var t = 0; t < ticks && ticks >= 2; t++)
+            {
+                var index = (int)Math.Round((double)t / (ticks - 1) * (samples.Count - 1));
+                var sampledUtc = samples[index].SampledUtc;
+
+                // Label in local time, position from the UTC instant. Converting
+                // before XToPixel would shift every point by the offset.
+                var text = TimeZoneInfo.ConvertTimeFromUtc(sampledUtc, zone).ToString(format);
+
+                canvas.DrawText(text,
+                    XToPixel(sampledUtc) - labelFont.MeasureText(text) / 2f, plotBottom + 30f,
+                    labelFont, axisPaint);
+            }
+        }
+
+        using (var notePaint = new SKPaint { Color = Hex(AxisHex, 90), IsAntialias = true })
+        {
+            var fleet = samples[^1].TrainCount;
+            var note = format == "HH:mm"
+                ? $"{fleet} train(s) in the fleet  ·  times {ZoneLabel(zone, samples[^1].SampledUtc)}"
+                : $"{fleet} train(s) in the fleet";
+
+            canvas.DrawText(note, plotLeft, plotBottom + 52f, smallFont, notePaint);
+        }
+
+        DrawHeader(canvas, titleFont, subtitleFont, "Freight", subtitle);
+
+        var legend = new List<(string, string, string)>
+        {
+            (DrawLoHex, DrawHiHex, "Fleet loaded"),
+            (BatteryHex, BatteryHiHex, "Fleet moving"),
+        };
+
+        // Only when it happened. A permanent "Derailed" swatch on a healthy
+        // week teaches people to stop reading the legend.
+        if (samples.Any(s => s.DerailedCount > 0)) legend.Add((DangerLoHex, DangerHex, "Derailed"));
+
+        DrawLegend(canvas, labelFont, legend);
+
+        using var image = surface.Snapshot();
+        using var png = image.Encode(SKEncodedImageFormat.Png, 100);
+        return png.ToArray();
+    }
+
+    /// <summary>
+    /// One percentage series as a plain polyline with a soft glow.
+    ///
+    /// <para>Straight segments, not the smoothed spline the power chart uses.
+    /// These series are counts divided by counts, so they genuinely step: a
+    /// fleet of three trains moves in thirds, and a curve through those points
+    /// would invent intermediate values that never existed.</para>
+    /// </summary>
+    private static void DrawSeries(
+        SKCanvas canvas,
+        IReadOnlyList<SatisfactoryTrainSample> samples,
+        IReadOnlyList<double> values,
+        Func<DateTime, float> xToPixel,
+        Func<double, float> yToPixel,
+        string loHex,
+        string hiHex,
+        float strokeWidth)
+    {
+        using var path = new SKPath();
+
+        for (var i = 0; i < samples.Count; i++)
+        {
+            var point = new SKPoint(xToPixel(samples[i].SampledUtc), yToPixel(values[i]));
+            if (i == 0) path.MoveTo(point);
+            else path.LineTo(point);
+        }
+
+        using (var glow = Glow(hiHex, 55, 12f, 6f)) canvas.DrawPath(path, glow);
+
+        using var shader = SKShader.CreateLinearGradient(
+            new SKPoint(0, yToPixel(0)), new SKPoint(0, yToPixel(100)),
+            new[] { Hex(loHex), Hex(hiHex) },
+            SKShaderTileMode.Clamp);
+
+        using var paint = new SKPaint
+        {
+            Shader = shader,
+            StrokeWidth = strokeWidth,
+            Style = SKPaintStyle.Stroke,
+            StrokeCap = SKStrokeCap.Round,
+            StrokeJoin = SKStrokeJoin.Round,
+            IsAntialias = true,
+        };
+
+        canvas.DrawPath(path, paint);
+    }
+
     // ─── Chrome ──────────────────────────────────────────────────────────────
 
     /// <summary>

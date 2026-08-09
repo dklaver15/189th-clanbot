@@ -669,6 +669,22 @@ try
     // (/satisfactory-graph), so it must not be scoped.
     builder.Services.AddSingleton<SatisfactoryChartRenderer>();
 
+    // SatisfactoryRailMapRenderer draws the rail map PNG. MUST be a singleton,
+    // and not for the usual stateless reason: it caches getTrainRails, which is
+    // the heaviest endpoint on the server. A scoped registration would give
+    // every command its own empty cache and refetch the whole track network on
+    // each /satisfactory-trains map, which is exactly what the cache exists to
+    // prevent. Shared with the digest, which reads the cached track length
+    // without triggering a fetch of its own.
+    builder.Services.AddSingleton<SatisfactoryRailMapRenderer>();
+
+    // SatisfactoryTrainWatch is the rail half of the alert tick: derailed and
+    // stopped trains, plus the freight sample. Registered as a plain singleton
+    // rather than a hosted service on purpose. It holds per-train alert state
+    // that must survive between ticks, and it rides SatisfactoryFactoryService's
+    // existing poll instead of opening a second loop against the same server.
+    builder.Services.AddSingleton<SatisfactoryTrainWatch>();
+
     builder.Services.AddHostedService<SatisfactoryFactoryService>();
 
     // SatisfactoryUnlockService announces milestones and M.A.M. research. Its

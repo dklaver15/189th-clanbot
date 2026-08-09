@@ -63,6 +63,7 @@ public class BotDbContext : DbContext
     public DbSet<SatisfactoryDailySnapshot> SatisfactoryDailySnapshots => Set<SatisfactoryDailySnapshot>();
     public DbSet<SatisfactoryMetricSample>  SatisfactoryMetricSamples  => Set<SatisfactoryMetricSample>();
     public DbSet<SatisfactoryCircuitSample> SatisfactoryCircuitSamples => Set<SatisfactoryCircuitSample>();
+    public DbSet<SatisfactoryTrainSample>   SatisfactoryTrainSamples   => Set<SatisfactoryTrainSample>();
     // ── Sleeper fantasy football ──
     public DbSet<SleeperLink>          SleeperLinks          => Set<SleeperLink>();
     public DbSet<SleeperWeekPost>      SleeperWeekPosts      => Set<SleeperWeekPost>();
@@ -726,6 +727,16 @@ public class BotDbContext : DbContext
         modelBuilder.Entity<SatisfactoryCircuitSample>(e =>
         {
             e.HasIndex(s => new { s.CircuitGroupId, s.SampledUtc });
+            e.HasIndex(s => s.SampledUtc);
+        });
+
+        // ── Satisfactory: rail network samples ────────────────────────
+        // One index, unlike the per-circuit table above: this one is aggregate,
+        // so every reader (the freight chart, the digest, the retention prune)
+        // asks the same time-window question and none of them filters by
+        // anything else first.
+        modelBuilder.Entity<SatisfactoryTrainSample>(e =>
+        {
             e.HasIndex(s => s.SampledUtc);
         });
 

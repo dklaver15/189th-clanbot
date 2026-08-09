@@ -15,8 +15,12 @@ namespace ClanGuardBot.Services;
 /// Remote Monitoring mod:
 ///
 ///   • <b>Alerts</b> — a fast poll for things somebody needs to know about NOW:
-///     a tripped fuse, or a battery bank running down. Posted on the transition
-///     into the bad state, and again when it clears.
+///     a tripped fuse, a battery bank running down, or a train derailed or
+///     stopped on its route. Posted on the transition into the bad state, and
+///     again when it clears. The rail half lives in
+///     <see cref="SatisfactoryTrainWatch"/> and rides this poll rather than
+///     opening a second loop against the same server; it decides what to say
+///     and this service decides where it goes.
 ///   • <b>Digest</b> — a once-a-day factory report: session age, power, AWESOME
 ///     Sink progress, space-elevator phase, and who's been playing.
 ///
@@ -50,6 +54,7 @@ public sealed class SatisfactoryFactoryService : BackgroundService
     private readonly FrmApiService _frm;
     private readonly SatisfactoryDigestBuilder _digest;
     private readonly SatisfactoryChartRenderer _charts;
+    private readonly SatisfactoryTrainWatch _trains;
     private readonly IServiceProvider _services;
     private readonly BotConfig _config;
     private readonly ILogger<SatisfactoryFactoryService> _logger;
@@ -146,6 +151,7 @@ public sealed class SatisfactoryFactoryService : BackgroundService
         FrmApiService frm,
         SatisfactoryDigestBuilder digest,
         SatisfactoryChartRenderer charts,
+        SatisfactoryTrainWatch trains,
         IServiceProvider services,
         IOptions<BotConfig> config,
         ILogger<SatisfactoryFactoryService> logger)
@@ -154,6 +160,7 @@ public sealed class SatisfactoryFactoryService : BackgroundService
         _frm = frm;
         _digest = digest;
         _charts = charts;
+        _trains = trains;
         _services = services;
         _config = config.Value;
         _logger = logger;
@@ -202,6 +209,13 @@ public sealed class SatisfactoryFactoryService : BackgroundService
             try
             {
                 if (_config.SatisfactoryAlertsEnabled) await CheckAlertsAsync(stoppingToken);
+
+                // Deliberately NOT behind SatisfactoryAlertsEnabled. The watch
+                // gates its own two halves: with alerts off it still records the
+                // freight sample, which is what keeps the chart continuous
+                // through a period where somebody muted the feed.
+                await CheckTrainsAsync(stoppingToken);
+
                 if (_config.SatisfactoryDigestEnabled) await MaybePostDigestAsync(stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -302,6 +316,38 @@ public sealed class SatisfactoryFactoryService : BackgroundService
                 _logger.LogInformation(
                     "Satisfactory alerts seeded on boot: {Fuses} tripped fuse(s), {Batteries} low batter(ies) — not announced",
                     _fuseAlerted.Count, _batteryAlerted.Count);
+        }
+    }
+
+    /// <summary>
+    /// The rail half of the tick.
+    ///
+    /// <para>Wrapped in its own try/catch rather than relying on the loop's,
+    /// because the loop's catch skips whatever comes after the throw: an
+    /// exception in here would otherwise cost the digest check that follows it,
+    /// every poll, for as long as the fault lasted.</para>
+    /// </summary>
+    private async Task CheckTrainsAsync(CancellationToken ct)
+    {
+        try
+        {
+            // Resolved here rather than inside the watch so both samplers stamp
+            // the same world on the same tick, and so the hourly refresh is
+            // shared instead of doubled.
+            var seed = await ResolveSeedAsync(ct);
+
+            var alerts = await _trains.EvaluateAsync(seed, ct);
+
+            foreach (var alert in alerts)
+                await PostAlertAsync(alert, ct, "train alert");
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Satisfactory train check failed; will retry on next poll");
         }
     }
 
@@ -714,10 +760,14 @@ public sealed class SatisfactoryFactoryService : BackgroundService
             .Where(s => s.SampledUtc < cutoff)
             .ExecuteDeleteAsync(ct);
 
-        if (removed > 0 || removedCircuits > 0)
+        // Same window for the rail table, so all three age out together and
+        // there is only ever one retention setting to reason about.
+        var removedTrains = await SatisfactoryTrainWatch.PruneAsync(db, cutoff, ct);
+
+        if (removed > 0 || removedCircuits > 0 || removedTrains > 0)
             _logger.LogInformation(
-                "Pruned {Count} Satisfactory power sample(s) and {Circuits} per-circuit sample(s) older than {Days}d",
-                removed, removedCircuits, days);
+                "Pruned {Count} Satisfactory power sample(s), {Circuits} per-circuit sample(s) and {Trains} rail sample(s) older than {Days}d",
+                removed, removedCircuits, removedTrains, days);
     }
 
     /// <summary>

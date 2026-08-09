@@ -78,17 +78,20 @@ public sealed class SatisfactoryDigestBuilder
 
     private readonly FrmApiService _frm;
     private readonly SatisfactoryApiService _api;
+    private readonly SatisfactoryRailMapRenderer _railMap;
     private readonly IServiceProvider _services;
     private readonly ILogger<SatisfactoryDigestBuilder> _logger;
 
     public SatisfactoryDigestBuilder(
         FrmApiService frm,
         SatisfactoryApiService api,
+        SatisfactoryRailMapRenderer railMap,
         IServiceProvider services,
         ILogger<SatisfactoryDigestBuilder> logger)
     {
         _frm = frm;
         _api = api;
+        _railMap = railMap;
         _services = services;
         _logger = logger;
     }
@@ -221,6 +224,13 @@ public sealed class SatisfactoryDigestBuilder
         AddProductionField(embed, prod);
         AddSinkField(embed, sink);
         AddElevatorField(embed, elevators);
+
+        // Wrapped like the database sections rather than called bare: it makes
+        // two more FRM requests, and the rail endpoints are the newest and least
+        // verified in this codebase. A wrong guess about their shape should cost
+        // one field, not the whole report.
+        if (session is not null)
+            await SafelyAsync("rail", ct, () => AddRailFieldAsync(embed, ct));
 
         if (day is null)
             await SafelyAsync("recent players", ct, () => AddRecentPlayersFieldAsync(embed, ct));
@@ -691,6 +701,66 @@ public sealed class SatisfactoryDigestBuilder
 
         var filled = (int)Math.Round(Math.Min(fraction, 1.0) * width);
         return new string('█', filled) + new string('░', width - filled);
+    }
+
+    /// <summary>
+    /// The rail network in one line: fleet size, how loaded it is, and anything
+    /// wrong.
+    ///
+    /// <para>Omitted entirely when there are no trains, which is the normal
+    /// state before somebody unlocks Railway. A permanent "Rail: 0 trains" line
+    /// is noise in a report people are meant to skim.</para>
+    ///
+    /// <para><b>Track length is read from the map renderer's CACHE and never
+    /// fetched.</b> getTrainRails is the heaviest endpoint on the server, and a
+    /// digest that pulled it every morning would cost far more than the line is
+    /// worth. So it appears once somebody has run the map recently, and is
+    /// silently absent otherwise.</para>
+    /// </summary>
+    private async Task AddRailFieldAsync(EmbedBuilder embed, CancellationToken ct)
+    {
+        var trains = await _frm.GetTrainsAsync(ct);
+        if (trains is null || trains.Count == 0) return;
+
+        var lines = new List<string>();
+
+        var moving = trains.Count(t => !SatisfactoryRail.IsStationary(t));
+        var capacity = trains.Sum(t => t.MaxPayloadMass);
+
+        var fleet = $"**{trains.Count}** train(s), {moving} moving";
+        if (capacity > 0) fleet += $" · {100.0 * trains.Sum(t => t.PayloadMass) / capacity:0}% loaded";
+        lines.Add(fleet);
+
+        var derailed = trains.Where(t => t.Derailed).ToList();
+        if (derailed.Count > 0)
+            lines.Add("🔴 Derailed: " + string.Join(", ",
+                derailed.Take(5).Select(t => Escape(SatisfactoryRail.DisplayName(t)))));
+
+        var stations = await _frm.GetTrainStationsAsync(ct);
+        if (stations is { Count: > 0 })
+        {
+            var platforms = stations
+                .SelectMany(s => s.CargoInventory ?? Array.Empty<FrmStationPlatform>())
+                .Select(p => (Platform: p, Fill: SatisfactoryRail.Fill(p)))
+                .Where(x => x.Fill is not null)
+                .ToList();
+
+            // Fixed thresholds rather than the configurable ones the station
+            // board uses. This is a summary line, not the diagnostic, and the
+            // two would have to be kept in step for no benefit.
+            var starved = platforms.Count(x => x.Fill <= 0.05 && SatisfactoryRail.IsLoading(x.Platform));
+            var backed = platforms.Count(x => x.Fill >= 0.95);
+
+            var stationLine = $"**{stations.Count}** station(s)";
+            if (starved > 0) stationLine += $" · {starved} starved";
+            if (backed > 0) stationLine += $" · {backed} backed up";
+            lines.Add(stationLine);
+        }
+
+        if (_railMap.CachedTrackMetres() is { } metres && metres > 0)
+            lines.Add(metres >= 1000 ? $"{metres / 1000:0.#} km of track" : $"{metres:0} m of track");
+
+        AddField(embed, "🚂 Rail", string.Join("\n", lines));
     }
 
     private static void AddSinkField(EmbedBuilder embed, IReadOnlyList<FrmResourceSink>? sink)
