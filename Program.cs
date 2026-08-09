@@ -678,6 +678,14 @@ try
     // without triggering a fetch of its own.
     builder.Services.AddSingleton<SatisfactoryRailMapRenderer>();
 
+    // SatisfactoryFactoryMapRenderer draws the factory map. Singleton for the
+    // same reason and more so: it caches getFactory, getBelts, getPipes and
+    // getResourceNode, which together are by far the largest responses this bot
+    // ever reads. A scoped registration would refetch all of them per command.
+    // It reads rail geometry THROUGH SatisfactoryRailMapRenderer rather than
+    // fetching its own, so the heaviest endpoint is cached exactly once.
+    builder.Services.AddSingleton<SatisfactoryFactoryMapRenderer>();
+
     // SatisfactoryTrainWatch is the rail half of the alert tick: derailed and
     // stopped trains, plus the freight sample. Registered as a plain singleton
     // rather than a hosted service on purpose. It holds per-train alert state

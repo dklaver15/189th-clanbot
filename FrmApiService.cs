@@ -143,7 +143,15 @@ public sealed record FrmGenerator(
     string? NuclearWarning,
     FrmGeneratorSupplement? Supplement,
     IReadOnlyList<FrmFuelStack>? FuelInventory,
-    FrmPowerInfo? PowerInfo);
+    FrmPowerInfo? PowerInfo,
+
+    // Added for the factory map. Appended rather than slotted in beside the
+    // other identity fields so the positional order the 2026-07-25 capture was
+    // modelled against stays intact and reviewable. Both are nullable: if the
+    // live response turns out not to carry them, generators quietly stop
+    // appearing on the map and every other consumer is unaffected.
+    FrmLocation? Location = null,
+    FrmBoundingBox? BoundingBox = null);
 
 /// <summary>
 /// One powered building, from getPowerUsage.
@@ -428,6 +436,102 @@ public sealed record FrmRailSegment(
     double Length,
     IReadOnlyList<FrmLocation>? SplineData);
 
+// ─── Factory geometry ───────────────────────────────────────────────────────
+//
+// The types the factory MAP needs. All modelled from docs.ficsit.app and
+// UNVERIFIED against the clan's server, same caveat as FrmRailSegment.
+//
+// Every one of these deliberately omits the heavy nested arrays the endpoint
+// actually returns: getFactory carries a full production list, ingredient list
+// and both inventories per building, and getBelts/getPipes carry per-item
+// contents. System.Text.Json SKIPS tokens with no matching member, so leaving
+// them out means a multi-megabyte response is walked once and never
+// materialized. That is not a style choice on a 1 vCPU / 2 GB droplet where RAM
+// is the binding constraint: it is the difference between a map and an OOM.
+// Same trick FrmSchematic uses to survive getSchematics at 1.1 MB.
+
+/// <summary>An axis-aligned world box. Min and max can be equal.</summary>
+public sealed record FrmBoundingBox(FrmLocation? Min, FrmLocation? Max);
+
+/// <summary>
+/// One production building from getFactory.
+///
+/// <para><see cref="IsConfigured"/> is the quietly useful one: a machine with no
+/// recipe set is not "idle", it is unfinished, and on a map those want
+/// different colours. <see cref="IsProducing"/> false with a recipe set is the
+/// real fault state.</para>
+/// </summary>
+public sealed record FrmBuilding(
+    string? Id,
+    string? Name,
+    string? ClassName,
+    FrmLocation? Location,
+    FrmBoundingBox? BoundingBox,
+    string? Recipe,
+    bool IsConfigured,
+    bool IsProducing,
+    bool IsPaused,
+    double ProdPercent,
+    double ManuSpeed,
+    FrmPowerInfo? PowerInfo);
+
+/// <summary>
+/// One conveyor from getBelts, or one pipe from getPipes (identical shape, so
+/// one record serves both).
+///
+/// <para><see cref="ItemsPerMinute"/> is the belt's rated SPEED, not its
+/// observed throughput. Colouring a map by it shows which tier of belt was
+/// used, not where the bottleneck is, and the two are easy to confuse.</para>
+/// </summary>
+public sealed record FrmConveyor(
+    string? Id,
+    string? Name,
+    string? ClassName,
+    [property: System.Text.Json.Serialization.JsonPropertyName("location0")]
+    FrmLocation? Location0,
+    [property: System.Text.Json.Serialization.JsonPropertyName("location1")]
+    FrmLocation? Location1,
+    bool Connected0,
+    bool Connected1,
+    double Length,
+    double ItemsPerMinute,
+    IReadOnlyList<FrmLocation>? SplineData);
+
+/// <summary>One miner, pump or well extractor.</summary>
+public sealed record FrmExtractor(
+    string? Id,
+    string? Name,
+    string? ClassName,
+    FrmLocation? Location,
+    string? Recipe,
+    bool IsConfigured,
+    bool IsProducing,
+    bool IsPaused,
+    double ProdPercent,
+    double CurrentProd,
+    double MaxProd,
+    FrmPowerInfo? PowerInfo);
+
+/// <summary>
+/// One resource node.
+///
+/// <para><see cref="Exploited"/> means something is built on it. That single
+/// bool is what turns a map layer into a to-do list: unexploited pure nodes are
+/// exactly what somebody planning the next build wants to find.</para>
+///
+/// <para>Static for the life of a save, so it is the one layer that can be
+/// cached indefinitely rather than on a timer.</para>
+/// </summary>
+public sealed record FrmResourceNode(
+    string? Id,
+    string? Name,
+    string? ClassName,
+    string? ResourceForm,
+    string? Purity,
+    string? NodeType,
+    bool Exploited,
+    FrmLocation? Location);
+
 /// <summary>
 /// Client for the Ficsit Remote Monitoring mod's own HTTP server.
 ///
@@ -479,6 +583,19 @@ public sealed record FrmRailSegment(
 public sealed class FrmApiService
 {
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// Deadline for the map endpoints. They can be megabytes off a game server,
+    /// which the 15-second default would abort partway through and report as
+    /// "unreachable", sending somebody to check a server that was fine.
+    /// </summary>
+    private static readonly TimeSpan HeavyRequestTimeout = TimeSpan.FromSeconds(90);
+
+    /// <summary>
+    /// Sentinel meaning "apply the configured heavy-response cap", so call sites
+    /// don't each have to resolve config to ask for the guard.
+    /// </summary>
+    private const long MaxHeavyResponseBytes = -1;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -639,6 +756,48 @@ public sealed class FrmApiService
     public Task<IReadOnlyList<FrmRailSegment>?> GetTrainRailsAsync(CancellationToken ct = default) =>
         GetListAsync<FrmRailSegment>("getTrainRails", ct);
 
+    // ─── Factory geometry ────────────────────────────────────────────────────
+    //
+    // Everything here feeds the factory MAP, and every one of them is heavy
+    // enough to want the size guard (see MaxHeavyResponseBytes). None of them
+    // belongs anywhere near a poll loop; SatisfactoryFactoryMapRenderer caches
+    // the lot.
+
+    /// <summary>
+    /// Every production building in the save.
+    ///
+    /// <para><b>The heaviest endpoint FRM offers, by a wide margin.</b> It walks
+    /// the whole factory and returns recipes, production lists and inventories
+    /// per building. <see cref="FrmBuilding"/> reads only a dozen scalar fields
+    /// off each one so the parse stays cheap, but the transfer does not.</para>
+    ///
+    /// <para>Null = unreachable, or the response blew the size guard.</para>
+    /// </summary>
+    public Task<IReadOnlyList<FrmBuilding>?> GetFactoryAsync(CancellationToken ct = default) =>
+        GetListAsync<FrmBuilding>("getFactory", ct, MaxHeavyResponseBytes);
+
+    /// <summary>Every conveyor belt, with spline geometry. Heavy. Null = unreachable.</summary>
+    public Task<IReadOnlyList<FrmConveyor>?> GetBeltsAsync(CancellationToken ct = default) =>
+        GetListAsync<FrmConveyor>("getBelts", ct, MaxHeavyResponseBytes);
+
+    /// <summary>Every pipe, same shape as belts. Heavy. Null = unreachable.</summary>
+    public Task<IReadOnlyList<FrmConveyor>?> GetPipesAsync(CancellationToken ct = default) =>
+        GetListAsync<FrmConveyor>("getPipes", ct, MaxHeavyResponseBytes);
+
+    /// <summary>Miners, pumps and well extractors. Null = unreachable.</summary>
+    public Task<IReadOnlyList<FrmExtractor>?> GetExtractorsAsync(CancellationToken ct = default) =>
+        GetListAsync<FrmExtractor>("getExtractor", ct, MaxHeavyResponseBytes);
+
+    /// <summary>
+    /// Every resource node in the world, exploited or not.
+    ///
+    /// <para>Large but STATIC: nodes are world generation and never move, so
+    /// this is the one layer that can be cached for the life of the process
+    /// rather than on a timer. Null = unreachable.</para>
+    /// </summary>
+    public Task<IReadOnlyList<FrmResourceNode>?> GetResourceNodesAsync(CancellationToken ct = default) =>
+        GetListAsync<FrmResourceNode>("getResourceNode", ct, MaxHeavyResponseBytes);
+
     // ─── Transport ───────────────────────────────────────────────────────────
 
     /// <summary>Endpoints that return a bare JSON object rather than an array.</summary>
@@ -663,9 +822,10 @@ public sealed class FrmApiService
     /// Endpoints that return a JSON array. Tolerates a single object too, since
     /// a couple of FRM endpoints collapse to one when there's exactly one result.
     /// </summary>
-    private async Task<IReadOnlyList<T>?> GetListAsync<T>(string endpoint, CancellationToken ct)
+    private async Task<IReadOnlyList<T>?> GetListAsync<T>(
+        string endpoint, CancellationToken ct, long maxBytes = 0)
     {
-        var body = await GetRawAsync(endpoint, ct);
+        var body = await GetRawAsync(endpoint, ct, maxBytes);
         if (body is null) return null;
 
         try
@@ -697,7 +857,20 @@ public sealed class FrmApiService
     /// The single request path. Returns the raw body, or null on ANY failure.
     /// Never throws except on caller cancellation.
     /// </summary>
-    private async Task<string?> GetRawAsync(string endpoint, CancellationToken ct)
+    /// <param name="maxBytes">
+    /// 0 for no cap (the small endpoints), or
+    /// <see cref="MaxHeavyResponseBytes"/> to apply
+    /// <see cref="BotConfig.FrmMaxResponseMegabytes"/>.
+    ///
+    /// <para><b>Why a cap exists at all.</b> getFactory, getBelts and
+    /// getResourceNode grow with the save, without bound, and the bot runs on a
+    /// 1 vCPU / 2 GB droplet where RAM is the binding constraint. An unbounded
+    /// read means the day somebody's factory crosses a threshold, the bot stops
+    /// being killed by a bug and starts being killed by success. Refusing to
+    /// draw a map is a far better failure than the process dying and taking the
+    /// AWOL sweep, the event scheduler and the alerts with it.</para>
+    /// </param>
+    private async Task<string?> GetRawAsync(string endpoint, CancellationToken ct, long maxBytes = 0)
     {
         if (!IsConfigured)
         {
@@ -705,10 +878,15 @@ public sealed class FrmApiService
             return null;
         }
 
+        var heavy = maxBytes != 0;
+        var cap = heavy
+            ? Math.Clamp(_config.FrmMaxResponseMegabytes, 1, 256) * 1024L * 1024L
+            : long.MaxValue;
+
         try
         {
             using var http = _httpClientFactory.CreateClient();
-            http.Timeout = RequestTimeout;
+            http.Timeout = heavy ? HeavyRequestTimeout : RequestTimeout;
             http.DefaultRequestHeaders.UserAgent.ParseAdd("ClanGuardBot/1.0 (Discord bot for the 189th clan)");
 
             // Reads don't need this, but sending it is harmless and means write
@@ -716,7 +894,12 @@ public sealed class FrmApiService
             if (!string.IsNullOrWhiteSpace(_config.FrmAuthToken))
                 http.DefaultRequestHeaders.TryAddWithoutValidation("X-FRM-Authorization", _config.FrmAuthToken);
 
-            using var resp = await http.GetAsync(Url(endpoint), ct);
+            // Headers first on the heavy path, so an oversized response can be
+            // refused from Content-Length without pulling the body at all.
+            using var resp = await http.GetAsync(
+                Url(endpoint),
+                heavy ? HttpCompletionOption.ResponseHeadersRead : HttpCompletionOption.ResponseContentRead,
+                ct);
 
             if (!resp.IsSuccessStatusCode)
             {
@@ -729,7 +912,18 @@ public sealed class FrmApiService
                 return null;
             }
 
-            return await resp.Content.ReadAsStringAsync(ct);
+            if (!heavy) return await resp.Content.ReadAsStringAsync(ct);
+
+            if (resp.Content.Headers.ContentLength is { } declared && declared > cap)
+            {
+                _logger.LogWarning(
+                    "FRM {Endpoint} declared {Megabytes:0.#} MB, over the {Cap} MB limit. Not read. "
+                    + "Raise BotConfig.FrmMaxResponseMegabytes if the droplet can take it.",
+                    endpoint, declared / 1024.0 / 1024.0, _config.FrmMaxResponseMegabytes);
+                return null;
+            }
+
+            return await ReadBoundedAsync(resp, endpoint, cap, ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -742,6 +936,49 @@ public sealed class FrmApiService
             _logger.LogDebug(ex, "FRM {Endpoint} failed (server offline, or its web server didn't bind its port?)", endpoint);
             return null;
         }
+    }
+
+    /// <summary>
+    /// Streams a response, abandoning it the moment it crosses the cap.
+    ///
+    /// <para>Needed because Content-Length is only advisory: FRM may answer with
+    /// chunked encoding and no length at all, and an honest declaration is
+    /// exactly what a runaway response would not have. Checking as it arrives is
+    /// the only check that cannot be lied to.</para>
+    ///
+    /// <para>Peak memory is roughly twice the body (the buffer, then the
+    /// string), which the cap is set with in mind: see
+    /// <see cref="BotConfig.FrmMaxResponseMegabytes"/>.</para>
+    /// </summary>
+    private async Task<string?> ReadBoundedAsync(
+        HttpResponseMessage resp, string endpoint, long cap, CancellationToken ct)
+    {
+        await using var stream = await resp.Content.ReadAsStreamAsync(ct);
+
+        using var buffer = new MemoryStream(capacity: 1 << 20);
+        var chunk = new byte[81920];
+        long total = 0;
+
+        while (true)
+        {
+            var read = await stream.ReadAsync(chunk, ct);
+            if (read <= 0) break;
+
+            total += read;
+
+            if (total > cap)
+            {
+                _logger.LogWarning(
+                    "FRM {Endpoint} exceeded the {Cap} MB limit while downloading and was abandoned. "
+                    + "Raise BotConfig.FrmMaxResponseMegabytes if the droplet can take it.",
+                    endpoint, _config.FrmMaxResponseMegabytes);
+                return null;
+            }
+
+            buffer.Write(chunk, 0, read);
+        }
+
+        return Encoding.UTF8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length);
     }
 
     // ─── Writes ──────────────────────────────────────────────────────────────

@@ -655,6 +655,8 @@ public class CommandsCommandHandler
                 "Everyone", everyone),
             new("satisfactory-trains", "The Satisfactory rail network: trains, stations, and a live map",
                 "Everyone", everyone),
+            new("satisfactory-map", "Map the factory: belts, pipes, machines, power and extraction",
+                "Everyone", everyone),
             new("satisfactory-link", "Link your Discord account to your Satisfactory in-game name",
                 "Everyone", everyone),
             new("patrol", "Toggle your visibility on Patrol Watch embeds (off/on/info)",

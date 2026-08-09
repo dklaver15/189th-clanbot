@@ -52,6 +52,7 @@ public class SatisfactoryCommandHandler
         "satisfactory-graph",
         "satisfactory-production",
         "satisfactory-trains",
+        "satisfactory-map",
         "satisfactory-link",
     };
 
@@ -71,6 +72,7 @@ public class SatisfactoryCommandHandler
     private readonly SatisfactoryDigestBuilder _digest;
     private readonly SatisfactoryChartRenderer _charts;
     private readonly SatisfactoryRailMapRenderer _railMap;
+    private readonly SatisfactoryFactoryMapRenderer _factoryMap;
     private readonly IServiceProvider _services;
 
     public SatisfactoryCommandHandler(
@@ -81,6 +83,7 @@ public class SatisfactoryCommandHandler
         SatisfactoryDigestBuilder digest,
         SatisfactoryChartRenderer charts,
         SatisfactoryRailMapRenderer railMap,
+        SatisfactoryFactoryMapRenderer factoryMap,
         IServiceProvider services)
     {
         _logger = logger;
@@ -90,6 +93,7 @@ public class SatisfactoryCommandHandler
         _digest = digest;
         _charts = charts;
         _railMap = railMap;
+        _factoryMap = factoryMap;
         _services = services;
     }
 
@@ -227,6 +231,50 @@ public class SatisfactoryCommandHandler
                 .WithType(ApplicationCommandOptionType.SubCommand))
             .Build();
 
+    /// <summary>
+    /// /satisfactory-map — the factory itself: belts, pipes, machines coloured
+    /// by what they are doing, generators, extractors and resource nodes.
+    ///
+    /// <para><b>Flat options rather than subcommands</b>, unlike
+    /// /satisfactory-trains. There is one thing to do here (draw a map) with
+    /// three ways to vary it, and wrapping that in subcommands would make
+    /// "focus" and "layers" mutually exclusive when they are the combination
+    /// people actually want.</para>
+    ///
+    /// <para><c>focus</c> is free text rather than a choice list for the same
+    /// reason /satisfactory-trains show is: choices bake in at registration
+    /// time, and buildings appear and get renamed mid-session.</para>
+    /// </summary>
+    public static SlashCommandProperties BuildMapCommand() =>
+        new SlashCommandBuilder()
+            .WithName("satisfactory-map")
+            .WithDescription("Map the factory: belts, pipes, machines, power and extraction")
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("focus")
+                .WithDescription("Zoom in on a station, machine or recipe by name. Leave blank for the whole base.")
+                .WithType(ApplicationCommandOptionType.String)
+                .WithRequired(false))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("radius")
+                .WithDescription("How wide a focused view is (default 250 m). Ignored without a focus.")
+                .WithType(ApplicationCommandOptionType.Integer)
+                .WithRequired(false)
+                .AddChoice("100 m", 100)
+                .AddChoice("250 m", 250)
+                .AddChoice("500 m", 500)
+                .AddChoice("1 km", 1000))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("layers")
+                .WithDescription("What to draw (default everything except resource nodes)")
+                .WithType(ApplicationCommandOptionType.String)
+                .WithRequired(false)
+                .AddChoice("Everything", "everything")
+                .AddChoice("Logistics (belts, pipes, rail)", "logistics")
+                .AddChoice("Machines only", "production")
+                .AddChoice("Power and extraction", "power")
+                .AddChoice("Resource nodes", "nodes"))
+            .Build();
+
     public static SlashCommandProperties BuildLinkCommand() =>
         new SlashCommandBuilder()
             .WithName("satisfactory-link")
@@ -310,6 +358,7 @@ public class SatisfactoryCommandHandler
             case "satisfactory-graph":       await HandleGraphAsync(command); break;
             case "satisfactory-production":  await HandleProductionAsync(command); break;
             case "satisfactory-trains":      await HandleTrainsAsync(command); break;
+            case "satisfactory-map":         await HandleFactoryMapAsync(command); break;
             case "satisfactory-link":        await HandleLinkAsync(command); break;
         }
     }
@@ -1253,6 +1302,56 @@ public class SatisfactoryCommandHandler
 
         using var ms = new MemoryStream(png);
         await command.FollowupWithFileAsync(ms, "rail-map.png");
+    }
+
+    // ─── /satisfactory-map ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// The factory map.
+    ///
+    /// <para>Deferred immediately and given a long leash. This can pull
+    /// getFactory and getBelts, which are megabytes off a game server, and then
+    /// render a canvas with thousands of paths. On a cold cache it is the
+    /// slowest thing this bot does on demand.</para>
+    /// </summary>
+    private async Task HandleFactoryMapAsync(SocketSlashCommand command)
+    {
+        await command.DeferAsync();
+
+        if (!await EnsureFrmAsync(command)) return;
+
+        var focus = (command.Data.Options.FirstOrDefault(o => o.Name == "focus")?.Value as string)?.Trim();
+        var radius = command.Data.Options.FirstOrDefault(o => o.Name == "radius")?.Value as long?;
+        var choice = command.Data.Options.FirstOrDefault(o => o.Name == "layers")?.Value as string;
+
+        var layers = choice switch
+        {
+            "logistics"  => FactoryMapLayers.Logistics,
+            "production" => FactoryMapLayers.Production,
+            "power"      => FactoryMapLayers.Power | FactoryMapLayers.Extraction,
+            "nodes"      => FactoryMapLayers.Nodes | FactoryMapLayers.Extraction,
+            _            => FactoryMapLayers.Everything,
+        };
+
+        var png = await _factoryMap.TryRenderAsync(focus, radius, layers);
+
+        if (png is null)
+        {
+            // Two different failures land here and they need different advice,
+            // so the message splits on whether a focus was given rather than
+            // offering one vague explanation for both.
+            await command.FollowupAsync(
+                string.IsNullOrWhiteSpace(focus)
+                    ? "Nothing to map yet. This needs the monitoring mod answering and something built. "
+                      + "If the factory is large, it may also have hit the response size limit; the bot log says so."
+                    : $"Nothing matched **{Escape(focus!)}**. Try a station name, a machine name, or a recipe "
+                      + "like `Iron Plate`. Leave it blank to map the whole base.",
+                ephemeral: true);
+            return;
+        }
+
+        using var ms = new MemoryStream(png);
+        await command.FollowupWithFileAsync(ms, "factory-map.png");
     }
 
     /// <summary>

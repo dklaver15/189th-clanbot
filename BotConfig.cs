@@ -2211,6 +2211,47 @@ public class BotConfig
     /// </summary>
     public int SatisfactoryRailMapCacheMinutes { get; set; } = 60;
 
+    // ─── Satisfactory: factory map ───────────────────────────────────────
+    // SyncWithHandlers: SatisfactoryFactoryMapRenderer, FrmApiService,
+    // SatisfactoryCommandHandler (/satisfactory-map).
+
+    /// <summary>
+    /// Ceiling on a single heavy FRM response, in megabytes. Clamped 1–256,
+    /// default 16.
+    ///
+    /// <para>getFactory, getBelts and getResourceNode grow with the save,
+    /// without bound, and this bot runs on a 1 vCPU / 2 GB droplet where RAM is
+    /// the binding constraint. Peak usage is roughly twice this while a response
+    /// is being read, so 16 MB is about 32 MB transient, which the box absorbs.
+    /// Refusing to draw a map is a much better failure than the process dying
+    /// and taking the AWOL sweep and the event scheduler with it.</para>
+    ///
+    /// <para>Raise it if the factory outgrows the limit and the droplet has
+    /// headroom. The log names this key when it bites.</para>
+    /// </summary>
+    public int FrmMaxResponseMegabytes { get; set; } = 16;
+
+    /// <summary>
+    /// How long the factory map holds its geometry. Clamped 1–1440, default 15.
+    ///
+    /// <para>Shorter than the rail cache because machines change state (idle,
+    /// paused, unconfigured) far more often than track gets built, and state is
+    /// most of what the map is for. Belts, pipes and resource nodes are cached
+    /// separately and for longer inside the renderer, since those really are
+    /// geometry.</para>
+    /// </summary>
+    public int SatisfactoryFactoryMapCacheMinutes { get; set; } = 15;
+
+    /// <summary>
+    /// Default radius in metres for <c>/satisfactory-map focus:</c>. Clamped
+    /// 10–5000, default 250.
+    ///
+    /// <para>250 m is about 30 foundations across, which frames one production
+    /// block. The whole point of focus mode is that a machine is 8 m and a
+    /// fitted view of a kilometre-scale base renders it smaller than a pixel.</para>
+    /// </summary>
+    public int SatisfactoryMapFocusRadiusMetres { get; set; } = 250;
+
     // ─── SQLite Backup Settings ──────────────────────────────────────
     /// <summary>
     /// Master switch for SqliteBackupService. When false, the service exits
