@@ -348,10 +348,11 @@ public class MeetingRecordingScheduler : BackgroundService
                 if (now - rec.StateUpdatedUtc >= StartWindow)
                 {
                     rec.ErrorMessage = "Recorder could not be started within the start window.";
-                    _logger.LogWarning("Recording '{Title}' (#{Id}) never started — Failed.",
+                    _logger.LogWarning("Recording '{Title}' (#{Id}) never started, Failed.",
                         rec.MeetingTitle, rec.Id);
                     await DeleteAnnouncementAsync(rec, ct);
                     Transition(rec, MeetingRecordingState.Failed, now);
+                    await MeetingFailureNotice.PostAsync(_client, _config, _logger, rec, "Announced", ct);
                     continue;
                 }
 
@@ -427,10 +428,11 @@ public class MeetingRecordingScheduler : BackgroundService
         {
             // Genuinely nothing captured — fail (the only legitimate Failed here).
             rec.ErrorMessage = "No audio was captured for this meeting.";
-            _logger.LogWarning("Recording for '{Title}' (#{Id}) produced no audio ({Reason}) — Failed.",
+            _logger.LogWarning("Recording for '{Title}' (#{Id}) produced no audio ({Reason}), Failed.",
                 rec.MeetingTitle, rec.Id, reason);
             await DeleteAnnouncementAsync(rec, ct);
             Transition(rec, MeetingRecordingState.Failed, now);
+            await MeetingFailureNotice.PostAsync(_client, _config, _logger, rec, "Recording", ct);
             return;
         }
 

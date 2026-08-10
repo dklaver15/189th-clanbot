@@ -822,6 +822,28 @@ public class BotConfig
     /// </summary>
     public int MeetingMinutesChunkChars { get; set; } = 150_000;
 
+    /// <summary>
+    /// How many days a FAILED recording keeps its captured audio before the
+    /// retention sweep reclaims it.
+    ///
+    /// This used to be zero: a failed row's audio was deleted on the very next
+    /// sweep. On 2026-08-09 the transcriber sidecar was being OOM-killed mid-run,
+    /// so two meetings sat in Transcribing until the 6h cap failed them out, and
+    /// minutes later their audio was gone. Both recordings were unrecoverable and
+    /// there was nothing left to diagnose from. A failure is nearly always an
+    /// infrastructure problem worth retrying, so the audio now outlives the row's
+    /// failure by default. Set 0 to restore the old delete-immediately behaviour.
+    /// </summary>
+    public int MeetingFailedAudioRetentionDays { get; set; } = 7;
+
+    /// <summary>
+    /// Channel ID for meeting-pipeline failure notices. 0 falls back to
+    /// <see cref="HqChannelId"/>; if that is also unset nothing is posted and the
+    /// failure stays in the log, which is exactly the blind spot that let the
+    /// pipeline fail silently from 2026-06-28 to 2026-08-10.
+    /// </summary>
+    public ulong MeetingFailureAlertChannelId { get; set; } = default;
+
     // ─── Voice Activity Safeguards ───────────────────────────────────
 
     /// <summary>

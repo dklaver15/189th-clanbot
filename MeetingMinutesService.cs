@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -38,12 +39,36 @@ public class MeetingMinutesService : BackgroundService
     /// <summary>A row sitting in Transcribing/Summarized longer than this is failed out.</summary>
     private static readonly TimeSpan MaxProcessingAge = TimeSpan.FromHours(6);
 
+    /// <summary>Ceiling on the retry backoff, so a row is still retried periodically.</summary>
+    private static readonly TimeSpan MaxBackoff = TimeSpan.FromMinutes(30);
+
     private readonly IServiceProvider _services;
     private readonly DiscordSocketClient _client;
     private readonly IMeetingTranscriber _transcriber;
     private readonly IAiService _ai;
     private readonly ILogger<MeetingMinutesService> _logger;
     private readonly BotConfig _config;
+
+    /// <summary>
+    /// Per-recording retry backoff: recording id -> (consecutive failures, earliest next attempt).
+    ///
+    /// ── Why ────────────────────────────────────────────────────────────────
+    /// Without this, a failing row is retried every poll (2 min) for the full 6h
+    /// processing window. On 2026-08-09 that turned ONE recurring crash in the
+    /// transcriber into roughly 180 full-restart transcription attempts, pinning
+    /// the droplet's single core all night and finishing no closer than it
+    /// started. Backing off turns the same fault into a handful of attempts.
+    ///
+    /// It also unblocks the queue. TickAsync processes one row per poll, oldest
+    /// first, so a poisoned recording used to starve every later meeting for the
+    /// whole 6h. A row that is waiting out its backoff is skipped, which lets the
+    /// meetings behind it through.
+    ///
+    /// Deliberately in-memory, not a DB column. Backoff state is inherently
+    /// transient, and a bot restart is a legitimate reason to try again
+    /// immediately, so persisting it would buy nothing worth a migration.
+    /// </summary>
+    private readonly ConcurrentDictionary<int, (int Failures, DateTime NextAttemptUtc)> _backoff = new();
 
     public MeetingMinutesService(
         IServiceProvider services,
@@ -105,27 +130,42 @@ public class MeetingMinutesService : BackgroundService
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
         var now = DateTime.UtcNow;
 
-        // Process one in-flight recording per tick (transcription is heavy).
-        var rec = await db.MeetingRecordings
+        // Still one in-flight recording per tick (transcription is heavy), but the
+        // oldest row no longer gets an unconditional claim on the slot: one that is
+        // serving a backoff steps aside so the meetings behind it can run.
+        var inFlight = await db.MeetingRecordings
             .Where(m => m.State == MeetingRecordingState.Transcribing
                      || m.State == MeetingRecordingState.Summarized)
             .OrderBy(m => m.MeetingStartUtc)
-            .FirstOrDefaultAsync(ct);
+            .ToListAsync(ct);
+
+        PruneBackoff(inFlight);
+
+        // Age-out is checked across ALL in-flight rows, not just the one we pick,
+        // so a row cannot outlive the processing window simply by being in backoff.
+        foreach (var stale in inFlight.Where(m => now - m.StateUpdatedUtc > MaxProcessingAge).ToList())
+        {
+            // Capture the stage before the transition overwrites it: "died in
+            // Transcribing" and "died in Summarized" point at very different causes.
+            var stage = stale.State.ToString();
+            stale.ErrorMessage = $"Stuck in {stage} for over {MaxProcessingAge.TotalHours:0}h, giving up.";
+            _logger.LogWarning("Minutes pipeline for '{Title}' (#{Id}) {Msg}",
+                stale.MeetingTitle, stale.Id, stale.ErrorMessage);
+            Transition(stale, MeetingRecordingState.Failed, now);
+            await db.SaveChangesAsync(ct);
+            _backoff.TryRemove(stale.Id, out _);
+            await MeetingFailureNotice.PostAsync(_client, _config, _logger, stale, stage, ct);
+            inFlight.Remove(stale);
+        }
+
+        var rec = inFlight.FirstOrDefault(m =>
+            !_backoff.TryGetValue(m.Id, out var b) || now >= b.NextAttemptUtc);
 
         if (rec is null)
         {
-            // Nothing to process — still run retention so prunable audio gets cleaned.
+            // Either nothing is in flight, or everything in flight is waiting out a
+            // backoff. Either way there is time to run retention.
             await RunRetentionAsync(db, now, ct);
-            return;
-        }
-
-        if (now - rec.StateUpdatedUtc > MaxProcessingAge)
-        {
-            rec.ErrorMessage = $"Stuck in {rec.State} for over {MaxProcessingAge.TotalHours:0}h — giving up.";
-            _logger.LogWarning("Minutes pipeline for '{Title}' (#{Id}) {Msg}",
-                rec.MeetingTitle, rec.Id, rec.ErrorMessage);
-            Transition(rec, MeetingRecordingState.Failed, now);
-            await db.SaveChangesAsync(ct);
             return;
         }
 
@@ -136,9 +176,11 @@ public class MeetingMinutesService : BackgroundService
                 if (string.IsNullOrWhiteSpace(rec.AudioDirPath))
                 {
                     rec.ErrorMessage = "No audio was captured for this meeting.";
-                    _logger.LogWarning("'{Title}' (#{Id}) has no audio dir — failing.", rec.MeetingTitle, rec.Id);
+                    _logger.LogWarning("'{Title}' (#{Id}) has no audio dir, failing.", rec.MeetingTitle, rec.Id);
                     Transition(rec, MeetingRecordingState.Failed, now);
                     await db.SaveChangesAsync(ct);
+                    _backoff.TryRemove(rec.Id, out _);
+                    await MeetingFailureNotice.PostAsync(_client, _config, _logger, rec, "Transcribing", ct);
                     return;
                 }
 
@@ -149,10 +191,12 @@ public class MeetingMinutesService : BackgroundService
                     if (string.IsNullOrWhiteSpace(result.Transcript))
                     {
                         rec.ErrorMessage = "Transcript was empty (no speech captured).";
-                        _logger.LogWarning("'{Title}' (#{Id}) produced an empty transcript — failing.",
+                        _logger.LogWarning("'{Title}' (#{Id}) produced an empty transcript, failing.",
                             rec.MeetingTitle, rec.Id);
                         Transition(rec, MeetingRecordingState.Failed, now);
                         await db.SaveChangesAsync(ct);
+                        _backoff.TryRemove(rec.Id, out _);
+                        await MeetingFailureNotice.PostAsync(_client, _config, _logger, rec, "Transcribing", ct);
                         return;
                     }
 
@@ -162,6 +206,8 @@ public class MeetingMinutesService : BackgroundService
                     // Persist the transcript BEFORE the costly Claude call so a
                     // crash here doesn't re-run Whisper.
                     await db.SaveChangesAsync(ct);
+                    // Real progress: whatever was failing has stopped failing.
+                    _backoff.TryRemove(rec.Id, out _);
                 }
 
                 var (minutes, actionItemsJson) = await GenerateMinutesAsync(rec, ct);
@@ -170,15 +216,31 @@ public class MeetingMinutesService : BackgroundService
                 rec.ErrorMessage = null;
                 Transition(rec, MeetingRecordingState.Summarized, now);
                 await db.SaveChangesAsync(ct);
+                _backoff.TryRemove(rec.Id, out _);
             }
 
             if (rec.State == MeetingRecordingState.Summarized)
             {
                 var messageId = await PostMinutesAsync(rec, ct);
-                if (messageId.HasValue) rec.MinutesMessageId = messageId;
+                if (messageId is null)
+                {
+                    // Nothing reached Discord, so this is NOT Posted. Marking it
+                    // Posted anyway (the old behaviour) meant an unresolvable
+                    // minutes channel looked like success: the row read Posted, the
+                    // audio was pruned on schedule, and nobody ever saw the minutes.
+                    // Staying Summarized retries next tick, and the age-out will
+                    // fail it loudly if the channel stays unreachable.
+                    rec.ErrorMessage = "Minutes were generated but the minutes channel could not be resolved.";
+                    await db.SaveChangesAsync(ct);
+                    BackOff(rec, now);
+                    return;
+                }
+
+                rec.MinutesMessageId = messageId;
                 rec.ErrorMessage = null;
                 Transition(rec, MeetingRecordingState.Posted, now);
                 await db.SaveChangesAsync(ct);
+                _backoff.TryRemove(rec.Id, out _);
                 _logger.LogInformation("Posted minutes for '{Title}' (#{Id}).", rec.MeetingTitle, rec.Id);
 
                 await RunRetentionAsync(db, now, ct);
@@ -190,7 +252,40 @@ public class MeetingMinutesService : BackgroundService
             _logger.LogError(ex, "Minutes pipeline failed for '{Title}' (#{Id}); will retry.",
                 rec.MeetingTitle, rec.Id);
             await db.SaveChangesAsync(ct);
+            BackOff(rec, now);
         }
+    }
+
+    /// <summary>
+    /// Push this recording's next attempt out, doubling each consecutive failure up
+    /// to <see cref="MaxBackoff"/>. Over the 6h processing window that turns ~180
+    /// attempts into roughly a dozen, which is the difference between a wasted night
+    /// of CPU and a handful of log lines.
+    /// </summary>
+    private void BackOff(MeetingRecording rec, DateTime now)
+    {
+        var failures = _backoff.TryGetValue(rec.Id, out var prior) ? prior.Failures + 1 : 1;
+        // Cap the exponent before the shift, not the result, so this cannot overflow
+        // on a row that somehow fails a very large number of times.
+        var minutes = Math.Min(Math.Pow(2, Math.Min(failures, 10)), MaxBackoff.TotalMinutes);
+        var next = now.AddMinutes(minutes);
+        _backoff[rec.Id] = (failures, next);
+
+        _logger.LogWarning(
+            "Recording '{Title}' (#{Id}) has failed {Failures} time(s) in a row; " +
+            "next attempt no earlier than {Next:HH:mm} UTC ({Minutes:0} min).",
+            rec.MeetingTitle, rec.Id, failures, next, minutes);
+    }
+
+    /// <summary>
+    /// Drop backoff entries for recordings that are no longer in flight, so the map
+    /// tracks the queue rather than growing for the life of the process.
+    /// </summary>
+    private void PruneBackoff(IEnumerable<MeetingRecording> inFlight)
+    {
+        var live = inFlight.Select(m => m.Id).ToHashSet();
+        foreach (var id in _backoff.Keys.Where(id => !live.Contains(id)).ToList())
+            _backoff.TryRemove(id, out _);
     }
 
     /// <summary>
@@ -480,8 +575,19 @@ public class MeetingMinutesService : BackgroundService
         // above only tracks successful (Posted) rows, so a Failed row that captured
         // audio (e.g. an empty transcript, or a row aged out while Transcribing)
         // would otherwise leave its audio dir on disk forever.
+        //
+        // But NOT immediately. This originally deleted a failed row's audio on the
+        // very next sweep, which on 2026-08-09 destroyed two meetings' recordings
+        // within minutes of a transcriber crash loop failing them out: no retry was
+        // possible and there was nothing left to diagnose. A failure is nearly
+        // always infrastructure, so the audio now outlives the failure by
+        // MeetingFailedAudioRetentionDays and the disk is still bounded.
+        var graceDays = Math.Max(0, _config.MeetingFailedAudioRetentionDays);
+        var failedCutoff = now - TimeSpan.FromDays(graceDays);
         var failedWithAudio = await db.MeetingRecordings
-            .Where(m => m.AudioDirPath != null && m.State == MeetingRecordingState.Failed)
+            .Where(m => m.AudioDirPath != null
+                     && m.State == MeetingRecordingState.Failed
+                     && m.StateUpdatedUtc <= failedCutoff)
             .ToListAsync(ct);
         foreach (var rec in failedWithAudio)
         {

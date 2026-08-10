@@ -196,6 +196,39 @@ public class HealthCommandHandler
         var upcomingEvents = await db.CalendarEvents
             .CountAsync(e => e.StartUtc > now && e.StartUtc < now.AddDays(7));
 
+        // ── Meeting recordings ──
+        // The pipeline has no other surface: no meeting command exists, and every
+        // terminal failure used to be a log line only. That is how a transcriber
+        // crash loop ran unnoticed from 2026-06-28 to 2026-08-10 while members kept
+        // meeting and no minutes ever appeared. The two numbers that matter are
+        // whether anything is stuck in flight and when minutes last actually posted.
+        var meetingInFlight = await db.MeetingRecordings
+            .Where(m => m.State == MeetingRecordingState.Announced
+                     || m.State == MeetingRecordingState.Recording
+                     || m.State == MeetingRecordingState.Transcribing
+                     || m.State == MeetingRecordingState.Summarized)
+            .OrderBy(m => m.StateUpdatedUtc)
+            .Select(m => new { m.Id, m.MeetingTitle, m.State, m.StateUpdatedUtc })
+            .ToListAsync();
+        var meetingLastPosted = await db.MeetingRecordings
+            .Where(m => m.MinutesMessageId != null)
+            .OrderByDescending(m => m.StateUpdatedUtc)
+            .Select(m => (DateTime?)m.StateUpdatedUtc)
+            .FirstOrDefaultAsync();
+        var meetingFailureCutoff = now.AddDays(-7);
+        // Counted separately from the listed sample below, so the header total is
+        // the real number and not "however many we chose to print".
+        var meetingFailureCount = await db.MeetingRecordings
+            .CountAsync(m => m.State == MeetingRecordingState.Failed
+                          && m.StateUpdatedUtc >= meetingFailureCutoff);
+        var meetingRecentFailures = await db.MeetingRecordings
+            .Where(m => m.State == MeetingRecordingState.Failed
+                     && m.StateUpdatedUtc >= meetingFailureCutoff)
+            .OrderByDescending(m => m.StateUpdatedUtc)
+            .Select(m => new { m.Id, m.MeetingTitle, m.ErrorMessage, m.StateUpdatedUtc })
+            .Take(3)
+            .ToListAsync();
+
         // ── Security (last 24h, grouped) ──
         var since24h = now.AddHours(-24);
         var securityRows = await db.SecurityAuditRecords
@@ -307,6 +340,39 @@ public class HealthCommandHandler
             $"Officer apps awaiting review: **{pendingApplications}**\n" +
             $"Events upcoming (next 7d): **{upcomingEvents}**",
             inline: false);
+
+        // Meeting recordings
+        // A row in flight is normal during and just after a meeting, so the warning
+        // is on how LONG it has been sitting, not on its existence.
+        var meetingSb = new StringBuilder();
+        if (meetingInFlight.Count == 0)
+        {
+            meetingSb.AppendLine("Idle");
+        }
+        else
+        {
+            foreach (var m in meetingInFlight)
+            {
+                var age = now - m.StateUpdatedUtc;
+                var warn = age > TimeSpan.FromHours(1) ? "⚠️ " : "";
+                meetingSb.AppendLine(
+                    $"{warn}#{m.Id} {Truncate(m.MeetingTitle, 40)}: **{m.State}** for {FormatDuration(age)}");
+            }
+        }
+
+        meetingSb.AppendLine(meetingLastPosted.HasValue
+            ? $"Last minutes posted: **{FormatDuration(now - meetingLastPosted.Value)}** ago"
+            : "Last minutes posted: **never**");
+
+        foreach (var f in meetingRecentFailures)
+            meetingSb.AppendLine(
+                $"❌ #{f.Id} {Truncate(f.MeetingTitle, 30)} " +
+                $"({FormatDuration(now - f.StateUpdatedUtc)} ago): `{Truncate(f.ErrorMessage ?? "no detail", 90)}`");
+        if (meetingFailureCount > meetingRecentFailures.Count)
+            meetingSb.AppendLine($"…and **{meetingFailureCount - meetingRecentFailures.Count}** more");
+
+        embed.AddField($"🎙️ Meeting recordings (failures 7d: {meetingFailureCount})",
+            meetingSb.ToString().TrimEnd(), inline: false);
 
         // Security (last 24h)
         var secLine = securityTotal == 0
