@@ -1289,14 +1289,35 @@ public class SatisfactoryCommandHandler
 
     private async Task HandleRailMapAsync(SocketSlashCommand command)
     {
-        var png = await _railMap.TryRenderAsync("189th Clanguard  ·  live positions");
+        var render = await _railMap.TryRenderAsync("189th Clanguard  ·  live positions");
 
-        if (png is null)
+        if (render.Png is not { } png)
         {
-            await command.FollowupAsync(
-                "Nothing to map yet. This draws the track, the stations and where the trains are, so it needs "
-                + "at least some rail built and the monitoring mod answering.",
-                ephemeral: true);
+            // An outage gets the same red embed as every other rail subcommand,
+            // instead of a line implying nobody has built any track.
+            if (render.Outcome == MapOutcome.Unreachable)
+            {
+                await command.FollowupAsync(embed: UnreachableEmbed());
+                return;
+            }
+
+            await command.FollowupAsync(render.Outcome switch
+            {
+                MapOutcome.Failed =>
+                    "The rail map failed to draw. That's a bug on our side, not the server — the error is in the bot log.",
+
+                MapOutcome.Unreadable => UnreadableText,
+
+                // No rail endpoint is size-capped today, so this can't currently
+                // fire — it's here so that capping one later never turns a
+                // healthy server into a "can't reach the server" embed.
+                MapOutcome.TooLarge =>
+                    "The server's fine, but the track came back too big to read. An admin can raise "
+                    + "`FrmMaxResponseMegabytes`.",
+
+                _ => "No track or stations built yet. This draws the rail network and where the trains are on it, "
+                     + "so it needs somebody to lay some track first.",
+            }, ephemeral: true);
             return;
         }
 
@@ -1333,25 +1354,108 @@ public class SatisfactoryCommandHandler
             _            => FactoryMapLayers.Everything,
         };
 
-        var png = await _factoryMap.TryRenderAsync(focus, radius, layers);
+        var render = await _factoryMap.TryRenderAsync(focus, radius, layers);
 
-        if (png is null)
+        if (render.Png is not { } png)
         {
-            // Two different failures land here and they need different advice,
-            // so the message splits on whether a focus was given rather than
-            // offering one vague explanation for both.
-            await command.FollowupAsync(
-                string.IsNullOrWhiteSpace(focus)
-                    ? "Nothing to map yet. This needs the monitoring mod answering and something built. "
-                      + "If the factory is large, it may also have hit the response size limit; the bot log says so."
-                    : $"Nothing matched **{Escape(focus!)}**. Try a station name, a machine name, or a recipe "
-                      + "like `Iron Plate`. Leave it blank to map the whole base.",
-                ephemeral: true);
+            // Every one of these used to be the same sentence. They are not the
+            // same problem: one is an outage, one is a config number, one is our
+            // bug, and one is a typo in what the person asked for. Telling
+            // somebody to go read a log they can't see is not an answer.
+            if (render.Outcome == MapOutcome.Unreachable)
+            {
+                await command.FollowupAsync(embed: UnreachableEmbed());
+                return;
+            }
+
+            // A crash is reported even when a layer was also skipped for size,
+            // because those are two independent problems and the size note alone
+            // would quietly swallow the fact that the render threw.
+            if (render.Outcome == MapOutcome.Failed)
+            {
+                var crash = "The map failed to draw. That's a bug on our side, not the server — the error is in the bot log.";
+
+                await command.FollowupAsync(
+                    OversizeText(render) is { } also ? $"{crash}\n\n{also}" : crash,
+                    ephemeral: true);
+                return;
+            }
+
+            // A size failure outranks what's left, even a NoMatch: if getFactory
+            // was skipped, the thing being searched for was never in the data to
+            // be matched, and "nothing matched Iron Plate" would send somebody
+            // hunting for a typo that isn't there.
+            var text = OversizeText(render) ?? render.Outcome switch
+            {
+                MapOutcome.NoMatch =>
+                    $"Nothing matched **{Escape(focus ?? "")}**. Try a station name, a machine name, or a recipe "
+                    + "like `Iron Plate`. Leave it blank to map the whole base.",
+
+                MapOutcome.Unreadable => UnreadableText,
+
+                // Belt and braces. TooLarge normally never reaches here because
+                // OversizeText short-circuits above, but it only does that when
+                // the endpoint list is populated — and falling through to
+                // "nothing built" would be the old bug all over again.
+                MapOutcome.TooLarge =>
+                    "The server's fine, but the map came back too big to read. An admin can raise "
+                    + "`FrmMaxResponseMegabytes`, or use `focus:` with a small `radius:` to map one area at a time.",
+
+                // Reached only when the server actually answered, so this now
+                // means what it says instead of doubling as the outage message.
+                _ => "The server's answering, but there's nothing built to draw yet.",
+            };
+
+            await command.FollowupAsync(text, ephemeral: true);
             return;
         }
 
         using var ms = new MemoryStream(png);
         await command.FollowupWithFileAsync(ms, "factory-map.png");
+
+        // A partial map is the dangerous case: it looks like a complete map of a
+        // smaller factory. Say what's missing, under the image, only when
+        // something actually was.
+        if (OversizeText(render) is { } note)
+            await command.FollowupAsync(note, ephemeral: true);
+    }
+
+    /// <summary>
+    /// Said when FRM answered with something we couldn't parse. Points at the
+    /// mod version rather than the server, because the server is up: the fix is
+    /// a model change in this codebase, not a restart.
+    /// </summary>
+    private const string UnreadableText =
+        "The server answered, but the monitoring mod sent something the bot couldn't read — usually an FRM "
+        + "update changing a response. Nothing to restart; the parse error is in the bot log.";
+
+    /// <summary>
+    /// The size-cap explanation, or null when nothing was capped.
+    ///
+    /// <para>Names both the endpoint and the config key. The cap is a deliberate
+    /// defence of a 2 GB droplet, so raising it is a judgement call somebody has
+    /// to make with the number in front of them — and of every way this map
+    /// fails, it is the one most likely to be misread as the server being
+    /// broken.</para>
+    ///
+    /// <para>The number quoted is the ENFORCED cap, not the raw setting: the
+    /// guard clamps to 1–256, so a config of 0 or 500 would otherwise be
+    /// reported back as a limit that was never applied, along with advice to
+    /// raise a key that is already past its ceiling.</para>
+    /// </summary>
+    private string? OversizeText(MapRender render)
+    {
+        if (render.Oversized.Count == 0) return null;
+
+        var which = string.Join(", ", render.Oversized.Select(e => $"`{e}`"));
+
+        var lead = render.Png is null
+            ? "The server's fine, but the map came back too big to read."
+            : "⚠️ Mapped what fits, but part of the factory is missing.";
+
+        return $"{lead} {which} went over the {_frm.EffectiveMaxResponseMegabytes} MB response limit "
+             + $"and {(render.Oversized.Count == 1 ? "was" : "were")} skipped to keep the bot inside its memory budget. "
+             + "An admin can raise `FrmMaxResponseMegabytes`, or use `focus:` with a small `radius:` to map one area at a time.";
     }
 
     /// <summary>

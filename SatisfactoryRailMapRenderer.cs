@@ -76,10 +76,14 @@ public sealed class SatisfactoryRailMapRenderer
         TimeSpan.FromMinutes(Math.Clamp(_config.SatisfactoryRailMapCacheMinutes, 1, 1440));
 
     /// <summary>
-    /// Renders the map. Returns null when there is nothing to draw or the server
-    /// can't be reached.
+    /// Renders the map, or says why it couldn't.
+    ///
+    /// <para>Same reasoning as the factory map: "no track built yet" and "the
+    /// game server is offline" are opposite situations for whoever typed the
+    /// command, and collapsing both into one null meant they got one sentence
+    /// covering both. See <see cref="MapOutcome"/>.</para>
     /// </summary>
-    public async Task<byte[]?> TryRenderAsync(string subtitle, CancellationToken ct = default)
+    public async Task<MapRender> TryRenderAsync(string subtitle, CancellationToken ct = default)
     {
         try
         {
@@ -88,8 +92,11 @@ public sealed class SatisfactoryRailMapRenderer
             // Stations and trains are cheap and always fresh. Both are optional:
             // a network under construction has track and no trains, and that is
             // still a map worth looking at.
-            var stations = await _frm.GetTrainStationsAsync(ct) ?? Array.Empty<FrmTrainStation>();
-            var trains = await _frm.GetTrainsAsync(ct) ?? Array.Empty<FrmTrain>();
+            var stationRead = await _frm.GetTrainStationsWithStatusAsync(ct);
+            var trainRead = await _frm.GetTrainsWithStatusAsync(ct);
+
+            var stations = stationRead.Data ?? Array.Empty<FrmTrainStation>();
+            var trains = trainRead.Data ?? Array.Empty<FrmTrain>();
 
             var polylines = (rails ?? Array.Empty<FrmRailSegment>())
                 .Select(SatisfactoryRail.Points)
@@ -98,13 +105,47 @@ public sealed class SatisfactoryRailMapRenderer
 
             if (polylines.Count == 0 && stations.Count == 0)
             {
-                _logger.LogDebug("Skipping the Satisfactory rail map: no track or stations to draw");
-                return null;
+                // The verdict rests on the STATION read alone, and deliberately
+                // so. Emptiness here means "no track and no stations", and of the
+                // three reads only that one both went to the server just now and
+                // feeds the test: getTrainRails comes from a cache that hands
+                // back a stale copy during an outage without saying it did, and
+                // getTrains isn't part of the test at all — an FRM update that
+                // changed only the train shape would otherwise have us announce
+                // a mod problem to somebody whose real situation is that nobody
+                // has laid any track yet.
+                var why = stationRead.Status switch
+                {
+                    // Answered, and said there are none. The only definitive case.
+                    FrmApiService.FrmReadStatus.Ok => MapOutcome.Empty,
+
+                    // Answered with something we can't read: the server is up and
+                    // restarting it would fix nothing.
+                    FrmApiService.FrmReadStatus.Unparseable => MapOutcome.Unreadable,
+
+                    // Can't happen while no rail endpoint is capped, and listed
+                    // anyway: letting it fall into the catch-all below would
+                    // report a healthy server that merely sent too much as an
+                    // outage, which is the whole failure this change removes.
+                    FrmApiService.FrmReadStatus.TooLarge => MapOutcome.TooLarge,
+
+                    // Didn't answer. We have no idea whether anything is built, so
+                    // the honest report is the outage, not an empty world.
+                    _ => MapOutcome.Unreachable,
+                };
+
+                // Information, not Debug: production logs at Information, so the
+                // old Debug line was never written anywhere anybody could read it.
+                _logger.LogInformation(
+                    "Satisfactory rail map drew nothing ({Why}). getTrainStation={Stations}, getTrains={Trains}",
+                    why, stationRead.Status, trainRead.Status);
+
+                return MapRender.No(why);
             }
 
             ct.ThrowIfCancellationRequested();
 
-            return Render(polylines, stations, trains, subtitle);
+            return MapRender.Ok(Render(polylines, stations, trains, subtitle));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -113,7 +154,7 @@ public sealed class SatisfactoryRailMapRenderer
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to render the Satisfactory rail map");
-            return null;
+            return MapRender.No(MapOutcome.Failed);
         }
     }
 

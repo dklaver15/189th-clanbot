@@ -145,21 +145,51 @@ public sealed class SatisfactoryFactoryMapRenderer
     /// centre on. Null renders the whole base fitted to its own extent.
     /// </param>
     /// <param name="radiusMetres">Half-width of a focused view. Ignored without a focus.</param>
-    /// <returns>PNG bytes, or null when there is nothing to draw.</returns>
-    public async Task<byte[]?> TryRenderAsync(
+    /// <returns>
+    /// The PNG, or the reason there isn't one. The reason matters: this command
+    /// is typed by a person who is waiting, and "the server is down" and "the
+    /// factory is bigger than the size cap" need opposite responses from them.
+    /// See <see cref="MapOutcome"/>.
+    /// </returns>
+    public async Task<MapRender> TryRenderAsync(
         string? focus,
         double? radiusMetres,
         FactoryMapLayers layers,
         CancellationToken ct = default)
     {
+        // Hoisted out of the try so the catch below can still report a size
+        // failure. Otherwise a factory that blew the cap AND then threw in the
+        // draw would be reported as purely our bug, losing the one detail that
+        // tells an admin what to change.
+        var fetch = FetchReport.Nothing;
+
         try
         {
-            var data = await LoadAsync(layers, ct);
+            MapData data;
+            (data, fetch) = await LoadAsync(layers, ct);
 
             if (data.IsEmpty)
             {
-                _logger.LogDebug("Skipping the Satisfactory factory map: nothing came back to draw");
-                return null;
+                // Order matters, most specific first. A size failure names a
+                // config key, so it wins outright. Unreadable beats Unreachable
+                // because a parse failure PROVES the server answered. "Nothing
+                // built" is claimed last, and only when something answered to
+                // say so.
+                var why =
+                    fetch.Oversized.Count > 0  ? MapOutcome.TooLarge
+                    : fetch.Unreadable.Count > 0 ? MapOutcome.Unreadable
+                    : fetch.Answered == 0      ? MapOutcome.Unreachable
+                    : MapOutcome.Empty;
+
+                // Information, not Debug: production runs at Information, so a
+                // Debug line here is a line nobody has ever read.
+                _logger.LogInformation(
+                    "Satisfactory factory map drew nothing ({Why}). {Answered}/{Attempted} FRM endpoint(s) answered{Oversized}{Unreadable}",
+                    why, fetch.Answered, fetch.Attempted,
+                    fetch.Oversized.Count > 0 ? "; over the size cap: " + string.Join(", ", fetch.Oversized) : "",
+                    fetch.Unreadable.Count > 0 ? "; unparseable: " + string.Join(", ", fetch.Unreadable) : "");
+
+                return MapRender.No(why, fetch.Oversized);
             }
 
             ct.ThrowIfCancellationRequested();
@@ -173,8 +203,9 @@ public sealed class SatisfactoryFactoryMapRenderer
 
                 if (centre is null)
                 {
-                    _logger.LogDebug("Satisfactory factory map: nothing matched focus \"{Focus}\"", focus);
-                    return null;
+                    _logger.LogInformation(
+                        "Satisfactory factory map: nothing matched focus \"{Focus}\"", focus);
+                    return MapRender.No(MapOutcome.NoMatch, fetch.Oversized);
                 }
             }
 
@@ -185,7 +216,10 @@ public sealed class SatisfactoryFactoryMapRenderer
                 ? SatisfactoryMapCanvas.Fit(Extent(data))
                 : SatisfactoryMapCanvas.Focus(centre, radius);
 
-            return Draw(canvas, data, layers, focusName, radius);
+            // Oversized rides along on a SUCCESSFUL render too. A map missing
+            // every machine still draws, and looks exactly like a factory with no
+            // machines in it, so the caller has to be able to footnote it.
+            return MapRender.Ok(Draw(canvas, data, layers, focusName, radius), fetch.Oversized);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -194,7 +228,7 @@ public sealed class SatisfactoryFactoryMapRenderer
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to render the Satisfactory factory map");
-            return null;
+            return MapRender.No(MapOutcome.Failed, fetch.Oversized);
         }
     }
 
@@ -222,6 +256,38 @@ public sealed class SatisfactoryFactoryMapRenderer
     }
 
     /// <summary>
+    /// What the fetch phase learned, as opposed to what it returned.
+    ///
+    /// <para>An empty <see cref="MapData"/> on its own is ambiguous — nobody has
+    /// built anything, the server is down, and the response was too big all look
+    /// identical once every list has been coalesced to empty. This is the record
+    /// of which one it was.</para>
+    /// </summary>
+    /// <param name="Attempted">
+    /// Reads that actually went to the server this render. A cache HIT is not
+    /// one: it asked nothing, so it is evidence of neither reachability nor its
+    /// absence, and counting it either way makes the tally lie.
+    /// </param>
+    /// <param name="Answered">
+    /// How many came back with a body — INCLUDING one we couldn't parse, because
+    /// a parse failure still proves the server is up. <b>Zero answered is the
+    /// definition of unreachable</b>; anything above zero means the server is
+    /// there and an empty map is the truth.
+    /// </param>
+    /// <param name="Oversized">Endpoints refused for size, by FRM endpoint name.</param>
+    /// <param name="Unreadable">Endpoints that answered with something unparseable.</param>
+    private sealed record FetchReport(
+        int Attempted,
+        int Answered,
+        IReadOnlyList<string> Oversized,
+        IReadOnlyList<string> Unreadable)
+    {
+        /// <summary>The state before anything has been fetched.</summary>
+        public static readonly FetchReport Nothing =
+            new(0, 0, Array.Empty<string>(), Array.Empty<string>());
+    }
+
+    /// <summary>
     /// Fetches every requested layer, serialised behind one gate.
     ///
     /// <para>The gate is not about thread safety on the fields; it is about the
@@ -229,58 +295,125 @@ public sealed class SatisfactoryFactoryMapRenderer
     /// miss the cache and both pull getFactory and getBelts at the same moment,
     /// which is precisely the load these caches exist to prevent.</para>
     /// </summary>
-    private async Task<MapData> LoadAsync(FactoryMapLayers layers, CancellationToken ct)
+    private async Task<(MapData Data, FetchReport Fetch)> LoadAsync(
+        FactoryMapLayers layers, CancellationToken ct)
     {
         await _gate.WaitAsync(ct);
         try
         {
             var now = DateTime.UtcNow;
 
+            var attempted = 0;
+            var answered = 0;
+            var oversized = new List<string>();
+            var unreadable = new List<string>();
+
+            // Every layer routes its status through here, so the tally can't
+            // drift from what was actually fetched.
+            void Note(string endpoint, FrmApiService.FrmReadStatus status)
+            {
+                attempted++;
+
+                switch (status)
+                {
+                    case FrmApiService.FrmReadStatus.Ok:
+                        answered++;
+                        break;
+
+                    // Answered, just not in a shape we understand. Counted as an
+                    // answer so an FRM version change can never be reported as
+                    // the server being down.
+                    case FrmApiService.FrmReadStatus.Unparseable:
+                        answered++;
+                        unreadable.Add(endpoint);
+                        break;
+
+                    // Also an answer: the server responded, we just refused to
+                    // hold the response. Reporting this as an outage would send
+                    // somebody to restart a perfectly healthy machine.
+                    case FrmApiService.FrmReadStatus.TooLarge:
+                        answered++;
+                        oversized.Add(endpoint);
+                        break;
+                }
+            }
+
             // Stations are always fetched, whatever the layers. They are the
             // only named landmarks on the map, they are few, and an overview
-            // with no labels at all is impossible to orient in.
-            var stations = await _frm.GetTrainStationsAsync(ct) ?? Array.Empty<FrmTrainStation>();
+            // with no labels at all is impossible to orient in. That also makes
+            // them the cheapest reachability probe the map has.
+            var stationRead = await _frm.GetTrainStationsWithStatusAsync(ct);
+            Note("getTrainStation", stationRead.Status);
+            var stations = stationRead.Data ?? Array.Empty<FrmTrainStation>();
 
-            var rails = layers.HasFlag(FactoryMapLayers.Rail)
-                ? await _rail.GetCachedRailsAsync(ct) ?? Array.Empty<FrmRailSegment>()
-                : Array.Empty<FrmRailSegment>();
+            var rails = Array.Empty<FrmRailSegment>() as IReadOnlyList<FrmRailSegment>;
+
+            if (layers.HasFlag(FactoryMapLayers.Rail))
+            {
+                // Borrowed from the rail renderer's cache rather than fetched
+                // again, so the heaviest response FRM serves is held once.
+                //
+                // DELIBERATELY NOT NOTED. GetCachedRailsAsync answers non-null
+                // in three different situations — a fresh cache hit, a real
+                // fetch, and a FAILED fetch that kept a stale copy — and does not
+                // say which. Treating non-null as "the server answered" would let
+                // a stale empty list vote the server healthy during an outage,
+                // and the map would tell people nothing is built while the box is
+                // down. That is the exact bug this whole change exists to remove,
+                // so track is left out of the tally entirely and reachability is
+                // judged only on reads that definitely just happened.
+                rails = await _rail.GetCachedRailsAsync(ct) ?? Array.Empty<FrmRailSegment>();
+            }
 
             var belts = layers.HasFlag(FactoryMapLayers.Belts)
                 ? await CachedAsync(() => _belts, v => _belts = v, () => _beltsAt, t => _beltsAt = t,
-                    GeometryCacheFor, now, "getBelts", () => _frm.GetBeltsAsync(ct))
+                    GeometryCacheFor, now, "getBelts", () => _frm.GetBeltsWithStatusAsync(ct), Note)
                 : Array.Empty<FrmConveyor>();
 
             var pipes = layers.HasFlag(FactoryMapLayers.Pipes)
                 ? await CachedAsync(() => _pipes, v => _pipes = v, () => _pipesAt, t => _pipesAt = t,
-                    GeometryCacheFor, now, "getPipes", () => _frm.GetPipesAsync(ct))
+                    GeometryCacheFor, now, "getPipes", () => _frm.GetPipesWithStatusAsync(ct), Note)
                 : Array.Empty<FrmConveyor>();
 
             var buildings = layers.HasFlag(FactoryMapLayers.Production)
                 ? await CachedAsync(() => _buildings, v => _buildings = v, () => _buildingsAt, t => _buildingsAt = t,
-                    StateCacheFor, now, "getFactory", () => _frm.GetFactoryAsync(ct))
+                    StateCacheFor, now, "getFactory", () => _frm.GetFactoryWithStatusAsync(ct), Note)
                 : Array.Empty<FrmBuilding>();
 
             var extractors = layers.HasFlag(FactoryMapLayers.Extraction)
                 ? await CachedAsync(() => _extractors, v => _extractors = v, () => _extractorsAt, t => _extractorsAt = t,
-                    StateCacheFor, now, "getExtractor", () => _frm.GetExtractorsAsync(ct))
+                    StateCacheFor, now, "getExtractor", () => _frm.GetExtractorsWithStatusAsync(ct), Note)
                 : Array.Empty<FrmExtractor>();
 
             // Generators are not cached: getGenerators is already polled by the
             // alert path, it is small, and fuel state is the whole reason to
             // look at one.
-            var generators = layers.HasFlag(FactoryMapLayers.Power)
-                ? await _frm.GetGeneratorsAsync(ct) ?? Array.Empty<FrmGenerator>()
-                : Array.Empty<FrmGenerator>();
+            var generators = Array.Empty<FrmGenerator>() as IReadOnlyList<FrmGenerator>;
+
+            if (layers.HasFlag(FactoryMapLayers.Power))
+            {
+                var read = await _frm.GetGeneratorsWithStatusAsync(ct);
+                Note("getGenerators", read.Status);
+                generators = read.Data ?? Array.Empty<FrmGenerator>();
+            }
 
             var nodes = Array.Empty<FrmResourceNode>() as IReadOnlyList<FrmResourceNode>;
 
             if (layers.HasFlag(FactoryMapLayers.Nodes))
             {
-                _nodes ??= await _frm.GetResourceNodesAsync(ct);
+                if (_nodes is null)
+                {
+                    var read = await _frm.GetResourceNodesWithStatusAsync(ct);
+                    Note("getResourceNode", read.Status);
+                    _nodes = read.Data;
+                }
+
                 nodes = _nodes ?? Array.Empty<FrmResourceNode>();
             }
 
-            return new MapData(rails, stations, belts, pipes, buildings, generators, extractors, nodes);
+            return (
+                new MapData(rails, stations, belts, pipes, buildings, generators, extractors, nodes),
+                new FetchReport(attempted, answered, oversized, unreadable));
         }
         finally
         {
@@ -294,6 +427,11 @@ public sealed class SatisfactoryFactoryMapRenderer
     /// <para>A failed fetch KEEPS the previous value rather than clearing it.
     /// Stale geometry beats no map, and a server blip should not turn a working
     /// command into an error for the length of the outage.</para>
+    ///
+    /// <para><paramref name="note"/> is told the outcome of every fetch this
+    /// actually performs. A cache HIT is deliberately not reported: it did not
+    /// ask the server anything, so it is evidence of neither reachability nor
+    /// its absence, and counting it either way would make the tally lie.</para>
     /// </summary>
     private async Task<IReadOnlyList<T>> CachedAsync<T>(
         Func<IReadOnlyList<T>?> get,
@@ -303,16 +441,18 @@ public sealed class SatisfactoryFactoryMapRenderer
         TimeSpan ttl,
         DateTime now,
         string endpoint,
-        Func<Task<IReadOnlyList<T>?>> fetch)
+        Func<Task<(IReadOnlyList<T>? Data, FrmApiService.FrmReadStatus Status)>> fetch,
+        Action<string, FrmApiService.FrmReadStatus> note)
     {
         var cached = get();
         if (cached is not null && now - getStamp() < ttl) return cached;
 
-        var fetched = await fetch();
+        var (fetched, status) = await fetch();
+        note(endpoint, status);
 
         if (fetched is null)
         {
-            _logger.LogDebug("FRM {Endpoint} was unreachable; keeping the cached copy", endpoint);
+            _logger.LogDebug("FRM {Endpoint} came back {Status}; keeping the cached copy", endpoint, status);
             return cached ?? Array.Empty<T>();
         }
 

@@ -3,6 +3,78 @@ using SkiaSharp;
 namespace ClanGuardBot.Services;
 
 /// <summary>
+/// Why a map render produced no image.
+///
+/// <para><b>The reason this type exists.</b> Both renderers used to answer
+/// <c>byte[]?</c>, so "the game server is down", "nobody has built anything",
+/// "the response was too big for the droplet" and "the draw threw" all arrived
+/// at the command handler as the same null. The handler could then only write
+/// one message covering all of them, which is how <c>/satisfactory-map</c> came
+/// to answer an outage with "Nothing to map yet" and a suggestion to go read a
+/// log that — at the production Information level — had nothing in it. A map
+/// that can't be drawn is normal. A map that won't say why costs somebody an
+/// evening.</para>
+/// </summary>
+public enum MapOutcome
+{
+    /// <summary>There is a PNG.</summary>
+    Drawn,
+
+    /// <summary>Nothing answered. The server is down, or FRM isn't listening on its port.</summary>
+    Unreachable,
+
+    /// <summary>The server answered and there is genuinely nothing built to draw.</summary>
+    Empty,
+
+    /// <summary>
+    /// The server is healthy, but a response blew
+    /// <c>BotConfig.FrmMaxResponseMegabytes</c>. The factory outgrew the cap,
+    /// which is a config decision rather than a fault, and the message must not
+    /// read as an outage.
+    /// </summary>
+    TooLarge,
+
+    /// <summary>
+    /// The server answered and we couldn't parse what it said — almost always an
+    /// FRM update changing a response shape.
+    ///
+    /// <para>Kept separate from <see cref="Unreachable"/> on purpose. Both mean
+    /// "no data", but this one means the server is HEALTHY, and reporting it as
+    /// an outage sends somebody to restart a machine that is fine while the
+    /// actual fix is a model change in this codebase.</para>
+    /// </summary>
+    Unreadable,
+
+    /// <summary>A focus was given and nothing in the world matched it.</summary>
+    NoMatch,
+
+    /// <summary>The draw threw. A code bug; the stack is in the log at Error.</summary>
+    Failed,
+}
+
+/// <summary>
+/// The result of a render: the image, or the reason there isn't one.
+///
+/// <para><see cref="Oversized"/> lists the endpoints skipped for size, and is
+/// populated even when the rest of the map drew FINE. A map that quietly omits
+/// every machine looks exactly like a map of a factory with no machines, so the
+/// caller has to be able to say so underneath an image that did render.</para>
+/// </summary>
+public sealed record MapRender(
+    byte[]? Png,
+    MapOutcome Outcome,
+    IReadOnlyList<string> Oversized)
+{
+    private static readonly string[] None = Array.Empty<string>();
+
+    public static MapRender Ok(byte[] png, IReadOnlyList<string>? oversized = null) =>
+        new(png, MapOutcome.Drawn, oversized ?? None);
+
+    public static MapRender No(MapOutcome outcome, IReadOnlyList<string>? oversized = null) =>
+        new(null, outcome, oversized ?? None);
+}
+
+/// <summary>
 /// The shared drawing surface behind every Satisfactory map: the world-to-pixel
 /// projection, the label placer, and the chrome (background, header, legend,
 /// scale bar).

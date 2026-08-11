@@ -582,6 +582,42 @@ public sealed record FrmResourceNode(
 /// </summary>
 public sealed class FrmApiService
 {
+    /// <summary>
+    /// Why a read came back with nothing.
+    ///
+    /// <para>The plain reads collapse this to null and that is fine for a
+    /// poller, which only ever asks "do I have numbers to act on". It is NOT
+    /// fine for a command somebody just typed: "the server isn't answering" and
+    /// "the response was too big to read" want completely different sentences
+    /// back, and guessing between them in the message is how
+    /// <c>/satisfactory-map</c> ended up telling people to go read the bot log.
+    /// The <c>*WithStatusAsync</c> reads keep the reason so a user-facing
+    /// caller can say which one happened.</para>
+    /// </summary>
+    public enum FrmReadStatus
+    {
+        /// <summary>The server answered and the body parsed.</summary>
+        Ok,
+
+        /// <summary>
+        /// Offline, timed out, refused, DNS, or a non-success status. Includes
+        /// "FRM isn't configured here", which is unreachable from the caller's
+        /// point of view.
+        /// </summary>
+        Unreachable,
+
+        /// <summary>
+        /// The server answered and the body was over
+        /// <see cref="BotConfig.FrmMaxResponseMegabytes"/>, so it was refused or
+        /// abandoned mid-download. The server is HEALTHY; the factory outgrew
+        /// the cap. Never report this as an outage.
+        /// </summary>
+        TooLarge,
+
+        /// <summary>Answered, but the body was not JSON we could read. A code bug or a mod version change.</summary>
+        Unparseable,
+    }
+
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(15);
 
     /// <summary>
@@ -623,6 +659,19 @@ public sealed class FrmApiService
     /// <summary>True when the feature is switched on and a base URL is set.</summary>
     public bool IsConfigured =>
         _config.FrmEnabled && !string.IsNullOrWhiteSpace(_config.FrmBaseUrl);
+
+    /// <summary>
+    /// The heavy-response cap actually enforced, in MB.
+    ///
+    /// <para>Public because the size failure is now reported to a USER, and the
+    /// number in that message has to be the number that bit. Reading
+    /// <see cref="BotConfig.FrmMaxResponseMegabytes"/> raw would tell an admin
+    /// who set it to 0 that the limit is 0 MB, and tell one who set it to 500
+    /// that it is 500 MB, when in both cases the clamp below is what decided.
+    /// One property so the guard, the log and the message can never disagree.</para>
+    /// </summary>
+    public int EffectiveMaxResponseMegabytes =>
+        Math.Clamp(_config.FrmMaxResponseMegabytes, 1, 256);
 
     // ─── Reads ───────────────────────────────────────────────────────────────
 
@@ -798,12 +847,67 @@ public sealed class FrmApiService
     public Task<IReadOnlyList<FrmResourceNode>?> GetResourceNodesAsync(CancellationToken ct = default) =>
         GetListAsync<FrmResourceNode>("getResourceNode", ct, MaxHeavyResponseBytes);
 
+    // ─── Factory geometry, with the reason attached ──────────────────────────
+    //
+    // Same five endpoints, same cost, but they hand back WHY they failed. Only
+    // the factory map uses these: it is the one caller that has to explain
+    // itself to a human who is standing there waiting for a picture. Everything
+    // else wants the plain null and is right to.
+    //
+    // These are one-liners on purpose. Naming the endpoint string in exactly one
+    // place per endpoint is what keeps a typo a compile error's worth of work
+    // rather than a 404 nobody sees (see the 404 branch in GetRawAsync).
+
+    /// <inheritdoc cref="GetFactoryAsync"/>
+    public Task<(IReadOnlyList<FrmBuilding>? Data, FrmReadStatus Status)> GetFactoryWithStatusAsync(
+        CancellationToken ct = default) =>
+        GetListWithStatusAsync<FrmBuilding>("getFactory", ct, MaxHeavyResponseBytes);
+
+    /// <inheritdoc cref="GetBeltsAsync"/>
+    public Task<(IReadOnlyList<FrmConveyor>? Data, FrmReadStatus Status)> GetBeltsWithStatusAsync(
+        CancellationToken ct = default) =>
+        GetListWithStatusAsync<FrmConveyor>("getBelts", ct, MaxHeavyResponseBytes);
+
+    /// <inheritdoc cref="GetPipesAsync"/>
+    public Task<(IReadOnlyList<FrmConveyor>? Data, FrmReadStatus Status)> GetPipesWithStatusAsync(
+        CancellationToken ct = default) =>
+        GetListWithStatusAsync<FrmConveyor>("getPipes", ct, MaxHeavyResponseBytes);
+
+    /// <inheritdoc cref="GetExtractorsAsync"/>
+    public Task<(IReadOnlyList<FrmExtractor>? Data, FrmReadStatus Status)> GetExtractorsWithStatusAsync(
+        CancellationToken ct = default) =>
+        GetListWithStatusAsync<FrmExtractor>("getExtractor", ct, MaxHeavyResponseBytes);
+
+    /// <inheritdoc cref="GetResourceNodesAsync"/>
+    public Task<(IReadOnlyList<FrmResourceNode>? Data, FrmReadStatus Status)> GetResourceNodesWithStatusAsync(
+        CancellationToken ct = default) =>
+        GetListWithStatusAsync<FrmResourceNode>("getResourceNode", ct, MaxHeavyResponseBytes);
+
+    /// <summary>
+    /// Train stations, with the reason attached. Not heavy, but the factory map
+    /// fetches it on EVERY render whatever the layers and never caches it, which
+    /// makes it the map's cheapest evidence that the server is up at all.
+    /// </summary>
+    public Task<(IReadOnlyList<FrmTrainStation>? Data, FrmReadStatus Status)> GetTrainStationsWithStatusAsync(
+        CancellationToken ct = default) =>
+        GetListWithStatusAsync<FrmTrainStation>("getTrainStation", ct);
+
+    /// <inheritdoc cref="GetTrainsAsync"/>
+    public Task<(IReadOnlyList<FrmTrain>? Data, FrmReadStatus Status)> GetTrainsWithStatusAsync(
+        CancellationToken ct = default) =>
+        GetListWithStatusAsync<FrmTrain>("getTrains", ct);
+
+    /// <inheritdoc cref="GetGeneratorsAsync"/>
+    public Task<(IReadOnlyList<FrmGenerator>? Data, FrmReadStatus Status)> GetGeneratorsWithStatusAsync(
+        CancellationToken ct = default) =>
+        GetListWithStatusAsync<FrmGenerator>("getGenerators", ct);
+
     // ─── Transport ───────────────────────────────────────────────────────────
 
     /// <summary>Endpoints that return a bare JSON object rather than an array.</summary>
     private async Task<T?> GetObjectAsync<T>(string endpoint, CancellationToken ct) where T : class
     {
-        var body = await GetRawAsync(endpoint, ct);
+        var (body, _) = await GetRawAsync(endpoint, ct);
         if (body is null) return null;
 
         try
@@ -821,41 +925,55 @@ public sealed class FrmApiService
     /// <summary>
     /// Endpoints that return a JSON array. Tolerates a single object too, since
     /// a couple of FRM endpoints collapse to one when there's exactly one result.
+    ///
+    /// <para>The plain overload. Discards the reason, which is what every poller
+    /// wants.</para>
     /// </summary>
     private async Task<IReadOnlyList<T>?> GetListAsync<T>(
+        string endpoint, CancellationToken ct, long maxBytes = 0) =>
+        (await GetListWithStatusAsync<T>(endpoint, ct, maxBytes)).Data;
+
+    /// <summary>
+    /// <see cref="GetListAsync{T}"/>, keeping the reason. Data is non-null if and
+    /// only if the status is <see cref="FrmReadStatus.Ok"/>, so a caller can
+    /// still just check for null and ignore the rest.
+    /// </summary>
+    private async Task<(IReadOnlyList<T>? Data, FrmReadStatus Status)> GetListWithStatusAsync<T>(
         string endpoint, CancellationToken ct, long maxBytes = 0)
     {
-        var body = await GetRawAsync(endpoint, ct, maxBytes);
-        if (body is null) return null;
+        var (body, status) = await GetRawAsync(endpoint, ct, maxBytes);
+        if (body is null) return (null, status);
 
         try
         {
             using var doc = JsonDocument.Parse(body);
 
             if (doc.RootElement.ValueKind == JsonValueKind.Array)
-                return JsonSerializer.Deserialize<List<T>>(body, JsonOpts) ?? new List<T>();
+                return (JsonSerializer.Deserialize<List<T>>(body, JsonOpts) ?? new List<T>(), FrmReadStatus.Ok);
 
             if (doc.RootElement.ValueKind == JsonValueKind.Object)
             {
                 var single = JsonSerializer.Deserialize<T>(body, JsonOpts);
-                return single is null ? new List<T>() : new List<T> { single };
+                return (single is null ? new List<T>() : new List<T> { single }, FrmReadStatus.Ok);
             }
 
             _logger.LogWarning("FRM {Endpoint} returned unexpected JSON kind {Kind}",
                 endpoint, doc.RootElement.ValueKind);
-            return null;
+            return (null, FrmReadStatus.Unparseable);
         }
         catch (JsonException ex)
         {
             _logger.LogWarning(ex, "FRM {Endpoint} returned unparseable JSON: {Body}",
                 endpoint, Truncate(body, 300));
-            return null;
+            return (null, FrmReadStatus.Unparseable);
         }
     }
 
     /// <summary>
-    /// The single request path. Returns the raw body, or null on ANY failure.
-    /// Never throws except on caller cancellation.
+    /// The single request path. Returns the raw body plus WHY when there isn't
+    /// one. Body is non-null if and only if the status is
+    /// <see cref="FrmReadStatus.Ok"/>. Never throws except on caller
+    /// cancellation.
     /// </summary>
     /// <param name="maxBytes">
     /// 0 for no cap (the small endpoints), or
@@ -870,17 +988,18 @@ public sealed class FrmApiService
     /// draw a map is a far better failure than the process dying and taking the
     /// AWOL sweep, the event scheduler and the alerts with it.</para>
     /// </param>
-    private async Task<string?> GetRawAsync(string endpoint, CancellationToken ct, long maxBytes = 0)
+    private async Task<(string? Body, FrmReadStatus Status)> GetRawAsync(
+        string endpoint, CancellationToken ct, long maxBytes = 0)
     {
         if (!IsConfigured)
         {
             _logger.LogDebug("FRM {Endpoint} skipped — not enabled or no base URL", endpoint);
-            return null;
+            return (null, FrmReadStatus.Unreachable);
         }
 
         var heavy = maxBytes != 0;
         var cap = heavy
-            ? Math.Clamp(_config.FrmMaxResponseMegabytes, 1, 256) * 1024L * 1024L
+            ? EffectiveMaxResponseMegabytes * 1024L * 1024L
             : long.MaxValue;
 
         try
@@ -909,18 +1028,18 @@ public sealed class FrmApiService
                     ? LogLevel.Warning
                     : LogLevel.Debug;
                 _logger.Log(level, "FRM {Endpoint} returned {Status}", endpoint, (int)resp.StatusCode);
-                return null;
+                return (null, FrmReadStatus.Unreachable);
             }
 
-            if (!heavy) return await resp.Content.ReadAsStringAsync(ct);
+            if (!heavy) return (await resp.Content.ReadAsStringAsync(ct), FrmReadStatus.Ok);
 
             if (resp.Content.Headers.ContentLength is { } declared && declared > cap)
             {
                 _logger.LogWarning(
                     "FRM {Endpoint} declared {Megabytes:0.#} MB, over the {Cap} MB limit. Not read. "
                     + "Raise BotConfig.FrmMaxResponseMegabytes if the droplet can take it.",
-                    endpoint, declared / 1024.0 / 1024.0, _config.FrmMaxResponseMegabytes);
-                return null;
+                    endpoint, declared / 1024.0 / 1024.0, EffectiveMaxResponseMegabytes);
+                return (null, FrmReadStatus.TooLarge);
             }
 
             return await ReadBoundedAsync(resp, endpoint, cap, ct);
@@ -932,9 +1051,12 @@ public sealed class FrmApiService
         catch (Exception ex)
         {
             // Offline / timeout / DNS. Debug, not Error: a game server being down
-            // is routine and the poller runs every minute.
+            // is routine and the poller runs every minute. The on-demand callers
+            // now carry the reason back to the user instead of relying on this
+            // line being visible, which at the production Information level it
+            // never was.
             _logger.LogDebug(ex, "FRM {Endpoint} failed (server offline, or its web server didn't bind its port?)", endpoint);
-            return null;
+            return (null, FrmReadStatus.Unreachable);
         }
     }
 
@@ -950,7 +1072,7 @@ public sealed class FrmApiService
     /// string), which the cap is set with in mind: see
     /// <see cref="BotConfig.FrmMaxResponseMegabytes"/>.</para>
     /// </summary>
-    private async Task<string?> ReadBoundedAsync(
+    private async Task<(string? Body, FrmReadStatus Status)> ReadBoundedAsync(
         HttpResponseMessage resp, string endpoint, long cap, CancellationToken ct)
     {
         await using var stream = await resp.Content.ReadAsStreamAsync(ct);
@@ -971,14 +1093,14 @@ public sealed class FrmApiService
                 _logger.LogWarning(
                     "FRM {Endpoint} exceeded the {Cap} MB limit while downloading and was abandoned. "
                     + "Raise BotConfig.FrmMaxResponseMegabytes if the droplet can take it.",
-                    endpoint, _config.FrmMaxResponseMegabytes);
-                return null;
+                    endpoint, EffectiveMaxResponseMegabytes);
+                return (null, FrmReadStatus.TooLarge);
             }
 
             buffer.Write(chunk, 0, read);
         }
 
-        return Encoding.UTF8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length);
+        return (Encoding.UTF8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length), FrmReadStatus.Ok);
     }
 
     // ─── Writes ──────────────────────────────────────────────────────────────
