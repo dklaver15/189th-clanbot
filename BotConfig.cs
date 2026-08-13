@@ -394,11 +394,12 @@ public class BotConfig
 
     /// <summary>
     /// Channel that /say writes its audit entry to (who wrote it, where it
-    /// went, and the full text). 0 falls back to <see cref="HqChannelId"/>.
-    /// Kept as its own key so the trail can be sent somewhere quieter than the
-    /// main HQ channel.
+    /// went, and the full text). Defaults to the moderator notice log, the
+    /// same channel the other operational alerts use -- HqChannelId points at
+    /// #awol-list here, which is a review queue, not a place for bot audit
+    /// trails. 0 falls back to <see cref="HqChannelId"/>.
     /// </summary>
-    public ulong SayAuditChannelId { get; set; } = default;
+    public ulong SayAuditChannelId { get; set; } = 1407959078105514046;
 
     // ──────────────────────────────────────────────────────────────────────
     //  Question of the Day (/qotd)
