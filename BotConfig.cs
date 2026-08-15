@@ -340,6 +340,27 @@ public class BotConfig
     /// </summary>
     public string EventTemplateManageMinRank { get; set; } = "CPT";
 
+    /// <summary>
+    /// The role allowed to run /event view, the past-event RSVP lookup. Set to
+    /// the HQ role.
+    ///
+    /// Deliberately a ROLE and not a rank threshold, for the same reason
+    /// <see cref="XpAdjustRoleId"/> is. /event view is the one event command that
+    /// reports on people rather than acting on an event: it lists who said they
+    /// were coming and was then not credited for turning up. That is a smaller
+    /// audience than the officers who can create events, and one whose membership
+    /// should change by handing out a role rather than by a promotion.
+    ///
+    /// Its own key rather than a reuse of TicketHqRoleId, OfficerAppHqRoleId or
+    /// XpAdjustRoleId: the ids happen to match today, and the concerns should be
+    /// able to diverge without one silently changing the others.
+    ///
+    /// Fails CLOSED. If it names a role that does not exist in the guild, nobody
+    /// but an Administrator can run the command and the handler logs why. Set to
+    /// 0 to fall back to the ordinary <see cref="EventCommandMinRank"/> gate.
+    /// </summary>
+    public ulong EventViewRoleId { get; set; } = 1408089365816541264;
+
     // ── /reminder (scheduled announcements) ──
 
     /// <summary>

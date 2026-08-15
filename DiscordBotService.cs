@@ -53,6 +53,7 @@ public class DiscordBotService : IHostedService
     private readonly EventRsvpInteractionHandler _eventRsvpHandler;
     private readonly EventManagementHandler _eventMgmtHandler;
     private readonly EventTemplateHandler _eventTemplateHandler;
+    private readonly EventViewHandler _eventViewHandler;
     private readonly SayCommandHandler _sayCommandHandler;
     private readonly QotdCommandHandler _qotdCommandHandler;
     private readonly JotdCommandHandler _jotdCommandHandler;
@@ -144,6 +145,7 @@ public class DiscordBotService : IHostedService
         EventRsvpInteractionHandler eventRsvpHandler,
         EventManagementHandler eventMgmtHandler,
         EventTemplateHandler eventTemplateHandler,
+        EventViewHandler eventViewHandler,
         SayCommandHandler sayCommandHandler,
         QotdCommandHandler qotdCommandHandler,
         JotdCommandHandler jotdCommandHandler,
@@ -227,6 +229,7 @@ public class DiscordBotService : IHostedService
         _eventRsvpHandler            = eventRsvpHandler;
         _eventMgmtHandler            = eventMgmtHandler;
         _eventTemplateHandler        = eventTemplateHandler;
+        _eventViewHandler            = eventViewHandler;
         _sayCommandHandler           = sayCommandHandler;
         _qotdCommandHandler          = qotdCommandHandler;
         _jotdCommandHandler          = jotdCommandHandler;
@@ -330,6 +333,7 @@ public class DiscordBotService : IHostedService
         _eventRsvpHandler.Register(_client);
         _eventMgmtHandler.Register(_client);
         _eventTemplateHandler.Register(_client);
+        _eventViewHandler.Register(_client);
         _sayCommandHandler.Register(_client);
         _qotdCommandHandler.Register(_client);
         _jotdCommandHandler.Register(_client);

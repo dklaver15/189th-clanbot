@@ -30,6 +30,7 @@ public sealed class EventCommandHandler
     private readonly EventTimeParser _timeParser;
     private readonly EventManagementHandler _management;
     private readonly EventTemplateHandler _templates;
+    private readonly EventViewHandler _view;
 
     public EventCommandHandler(
         IServiceProvider services,
@@ -38,7 +39,8 @@ public sealed class EventCommandHandler
         EventCreationWizard wizard,
         EventTimeParser timeParser,
         EventManagementHandler management,
-        EventTemplateHandler templates)
+        EventTemplateHandler templates,
+        EventViewHandler view)
     {
         _services   = services;
         _logger     = logger;
@@ -47,6 +49,7 @@ public sealed class EventCommandHandler
         _timeParser = timeParser;
         _management = management;
         _templates  = templates;
+        _view       = view;
     }
 
     public void Register(DiscordSocketClient client)
@@ -70,6 +73,19 @@ public sealed class EventCommandHandler
                 .WithName("cancel")
                 .WithDescription("Cancel one of your upcoming events")
                 .WithType(ApplicationCommandOptionType.SubCommand))
+            // Past events only. The event option is filled by autocomplete (its
+            // values are ClanEvent ids); leaving it blank falls through to a
+            // dropdown of the most recent finished events.
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("view")
+                .WithDescription("Look up the RSVPs from an event that already happened (HQ only)")
+                .WithType(ApplicationCommandOptionType.SubCommand)
+                .AddOption(new SlashCommandOptionBuilder()
+                    .WithName(EventViewHandler.EventOptionName)
+                    .WithDescription("Start typing an event name, or leave blank to pick from a list")
+                    .WithType(ApplicationCommandOptionType.String)
+                    .WithRequired(false)
+                    .WithAutocomplete(true)))
             .AddOption(new SlashCommandOptionBuilder()
                 .WithName("sort")
                 .WithDescription("Re-post all upcoming events in chronological order (officers only)")
@@ -151,6 +167,7 @@ public sealed class EventCommandHandler
             case "create": await HandleCreateAsync(command);          break;
             case "edit":   await _management.StartEditAsync(command);  break;
             case "cancel": await _management.StartCancelAsync(command); break;
+            case "view":   await _view.StartViewAsync(command);         break;
             case "sort":   await _management.StartSortAsync(command);   break;
             case "image":  await _management.StartImageAsync(command);  break;
             case "template":
