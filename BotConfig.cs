@@ -423,6 +423,48 @@ public class BotConfig
     public ulong SayAuditChannelId { get; set; } = 1407959078105514046;
 
     // ──────────────────────────────────────────────────────────────────────
+    //  Rank-loss notice
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// When true, the bot posts a notice whenever a member who held a rank role
+    /// ends up holding none. Nothing in ClanGuard takes a member's last rank
+    /// role away, so this always reflects something done outside the bot: the
+    /// rules-accept reaction role being un-toggled, a manual role edit, a role
+    /// menu. Left unnoticed the member still looks ranked (the nickname prefix
+    /// and any platoon role stay put) while counting as unranked for the AWOL
+    /// window. Default true.
+    /// </summary>
+    public bool RankLossAlertEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Channel the rank-loss notice posts to. Defaults to the moderator notice
+    /// log, the same channel /say writes its audit entry to. Deliberately does
+    /// NOT fall back to <see cref="HqChannelId"/>: that points at the AWOL
+    /// review queue here, which is not a place for bot notices. 0 switches the
+    /// notice off the same way RankLossAlertEnabled = false does.
+    /// </summary>
+    public ulong RankLossAlertChannelId { get; set; } = 1407959078105514046;
+
+    /// <summary>
+    /// Seconds to wait before posting the rank-loss notice, after which the
+    /// member's roles are read again and the notice is dropped if a rank role
+    /// came back. /promote and /demote strip the old rank role and then add the
+    /// new one, so a normal promotion arrives as two gateway events and the
+    /// member genuinely holds no rank role in between. Waiting and re-checking
+    /// is what keeps every promotion from firing a false notice, so this must
+    /// comfortably exceed the gap between those two REST calls.
+    /// </summary>
+    public int RankLossAlertGraceSeconds { get; set; } = 20;
+
+    /// <summary>
+    /// Minutes to suppress repeat rank-loss notices for the same member, so a
+    /// role that flaps (someone clicking a reaction on and off) posts once
+    /// rather than every time. 0 disables the suppression.
+    /// </summary>
+    public int RankLossAlertCooldownMinutes { get; set; } = 60;
+
+    // ──────────────────────────────────────────────────────────────────────
     //  Question of the Day (/qotd)
     // ──────────────────────────────────────────────────────────────────────
 

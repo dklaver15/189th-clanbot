@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using ClanGuardBot.Data;
 using ClanGuardBot.Models;
 using ClanGuardBot.Services;
@@ -27,6 +28,12 @@ namespace ClanGuardBot.Handlers;
 ///      seconds; the periodic sweep is the safety net for missed gateway
 ///      events (bot offline during the role change, etc.).
 ///
+///   3. Rank-loss notices — when a member who held a rank role ends up
+///      holding none, post to BotConfig.RankLossAlertChannelId. Nothing in
+///      the bot removes a member's last rank role, so it always means
+///      something outside the bot did, and it is easy to miss. See
+///      TryAlertRankLossAsync for why it waits before deciding.
+///
 /// ── Seed field handling ──
 /// Whenever this handler updates RankHistory.RankName, it also resets the seed
 /// fields (EventsAttendedAtRankBeforeBot + SeedAppliedAt) to their empty state.
@@ -51,6 +58,15 @@ public class RankTrackingHandler
     /// having to clear a placeholder first.
     /// </summary>
     private const string AutoLogPendingMarker = "";
+
+    /// <summary>
+    /// When the last rank-loss notice was posted for a member, keyed by guild
+    /// and user, so BotConfig.RankLossAlertCooldownMinutes can stop a role that
+    /// flaps from posting every time. Only holds members who actually lost a
+    /// rank role, and expired entries are dropped after each post, so it stays
+    /// small.
+    /// </summary>
+    private readonly ConcurrentDictionary<(ulong GuildId, ulong UserId), DateTime> _lastRankLossAlert = new();
 
     /// <summary>
     /// Maximum apparent demotion (in number of rank-list indices) the realtime
@@ -245,6 +261,14 @@ public class RankTrackingHandler
                         "Rank removed: {Username} lost rank {OldRank} in {Guild}",
                         after.Username, beforeRank, after.Guild.Name);
                 }
+
+                // Tell a human. Keyed off the role transition rather than the
+                // RankHistory row on purpose: a member whose rank predates the
+                // bot has no row, and their loss is exactly as worth knowing
+                // about. Detached because it waits out a grace period before
+                // deciding, and this runs on the shared role-change queue where
+                // a delay would hold up every other member's role change.
+                _ = TryAlertRankLossAsync(after, rankRecord?.RankName ?? beforeRank!, rankRoles);
             }
             else if (rankRecord is null)
             {
@@ -635,6 +659,136 @@ public class RankTrackingHandler
             _logger.LogError(ex,
                 "Failed to auto-log recruit {RecruitName} ({UserId}) to sheet",
                 recruitName, member.Id);
+        }
+    }
+
+    /// <summary>
+    /// Posts a notice when a member who held a rank role ends up holding none.
+    ///
+    /// Nothing in ClanGuard takes a member's last rank role away: /promote and
+    /// /demote always add a replacement, and every other role call in the bot
+    /// touches only AWOL or Reserve. So this always reflects something done
+    /// outside the bot, and it is easy to miss, because the nickname prefix and
+    /// any platoon role stay exactly where they were while the member starts
+    /// counting as unranked for the AWOL window.
+    ///
+    /// Waits <see cref="BotConfig.RankLossAlertGraceSeconds"/> and reads the
+    /// member's roles again before posting. /promote and /demote strip the old
+    /// rank role and then add the new one, so a normal promotion passes through
+    /// a real "no rank role" state for a moment; re-checking is what tells the
+    /// two apart. Runs detached from the role-change queue so the wait does not
+    /// hold up other members' role changes, which means it owns its own
+    /// try/catch: an exception here has nothing above it to log.
+    /// </summary>
+    private async Task TryAlertRankLossAsync(
+        SocketGuildUser member, string lostRank, List<string> rankRoles)
+    {
+        try
+        {
+            if (!_config.RankLossAlertEnabled || _config.RankLossAlertChannelId == 0) return;
+
+            var guild = member.Guild;
+            var grace = Math.Max(0, _config.RankLossAlertGraceSeconds);
+            if (grace > 0) await Task.Delay(TimeSpan.FromSeconds(grace));
+
+            // Read the member back out of the guild cache rather than trusting
+            // the object we were handed: we want current state, and Discord.NET
+            // keeps the cached member up to date in place.
+            var current = guild.GetUser(member.Id);
+            if (current is null)
+            {
+                _logger.LogInformation(
+                    "No rank-loss notice for {Username} ({UserId}): they are no longer in {Guild}",
+                    member.Username, member.Id, guild.Name);
+                return;
+            }
+
+            var rankNow = GetHighestRank(current.Roles.Select(r => r.Name), rankRoles);
+            if (rankNow is not null)
+            {
+                _logger.LogDebug(
+                    "Rank loss for {Username} ({UserId}) resolved within the grace period (now {Rank}), no notice posted",
+                    current.Username, current.Id, rankNow);
+                return;
+            }
+
+            if (guild.GetTextChannel(_config.RankLossAlertChannelId) is not SocketTextChannel channel)
+            {
+                _logger.LogWarning(
+                    "RankLossAlertChannelId {ChannelId} did not resolve in {Guild}, so the rank-loss notice for {UserId} was not posted",
+                    _config.RankLossAlertChannelId, guild.Name, member.Id);
+                return;
+            }
+
+            // Claim the cooldown slot in one step. A role that flaps produces
+            // one of these tasks per removal event, each with its own wait, so
+            // two can reach this point together; checking and writing
+            // separately would let both post.
+            var cooldown = TimeSpan.FromMinutes(Math.Max(0, _config.RankLossAlertCooldownMinutes));
+            var now = DateTime.UtcNow;
+            var claimed = _lastRankLossAlert.AddOrUpdate(
+                (guild.Id, member.Id),
+                now,
+                (_, previous) => now - previous < cooldown ? previous : now);
+
+            if (claimed != now)
+            {
+                _logger.LogDebug(
+                    "Skipping rank-loss notice for {Username} ({UserId}): one was posted {Minutes:F0} minutes ago",
+                    current.Username, current.Id, (now - claimed).TotalMinutes);
+                return;
+            }
+
+            var eb = new EmbedBuilder()
+                .WithColor(Color.Orange)
+                .WithTitle("Rank role removed")
+                .WithDescription(
+                    $"{current.Mention} no longer holds any rank role. ClanGuard never takes the last "
+                    + "rank role away, so this came from somewhere else. The server audit log will show "
+                    + "who or what did it.")
+                .AddField("Member", current.DisplayName, true)
+                .AddField("Was", lostRank, true)
+                .AddField("User ID", current.Id.ToString(), true)
+                .WithFooter("They now count as unranked, which shortens their AWOL window. /timeline has the full history.")
+                .WithCurrentTimestamp();
+
+            try
+            {
+                await channel.SendMessageAsync(embed: eb.Build(), allowedMentions: AllowedMentions.None);
+            }
+            catch
+            {
+                // Give the slot back, or a failed post would silence the retry
+                // that a later removal event would otherwise produce.
+                _lastRankLossAlert.TryRemove((guild.Id, member.Id), out _);
+                throw;
+            }
+
+            PruneRankLossAlertCooldowns(cooldown);
+
+            _logger.LogInformation(
+                "Posted rank-loss notice for {Username} ({UserId}) in {Guild}: lost {Rank}",
+                current.Username, current.Id, guild.Name, lostRank);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to post the rank-loss notice for {Username} ({UserId})",
+                member.Username, member.Id);
+        }
+    }
+
+    /// <summary>
+    /// Drops cooldown entries that have aged out. Called after each post so the
+    /// dictionary only ever holds members inside the current cooldown window
+    /// instead of growing for the life of the process.
+    /// </summary>
+    private void PruneRankLossAlertCooldowns(TimeSpan cooldown)
+    {
+        var cutoff = DateTime.UtcNow - cooldown;
+        foreach (var entry in _lastRankLossAlert)
+        {
+            if (entry.Value < cutoff) _lastRankLossAlert.TryRemove(entry.Key, out _);
         }
     }
 
