@@ -213,7 +213,13 @@ public class RankReconcileService : BackgroundService
 
         if (candidates.Count == 0)
         {
-            _logger.LogDebug("Rank reconcile sweep: nothing to repair in {Guild}", guild.Name);
+            // Information, not Debug: production runs at Information, so a Debug
+            // line here would make "everything is in order" and "the sweep never
+            // ran" look identical in the log. The whole point of the sweep is
+            // that someone can check it.
+            _logger.LogInformation(
+                "Rank reconcile sweep: every ranked member in {Guild} has a RankHistory row, nothing to repair",
+                guild.Name);
             return;
         }
 
@@ -221,7 +227,7 @@ public class RankReconcileService : BackgroundService
             "Rank reconcile sweep: {Count} member(s) in {Guild} hold a rank role with no RankHistory row{Mode}",
             candidates.Count, guild.Name, dryRun ? " (DRY RUN, nothing will be written)" : string.Empty);
 
-        var repaired = 0;
+        var actioned = 0;
         foreach (var member in candidates)
         {
             ct.ThrowIfCancellationRequested();
@@ -232,7 +238,10 @@ public class RankReconcileService : BackgroundService
                     dryRun: dryRun,
                     allowSideEffects: !dryRun);
 
-                if (outcome.Repaired) repaired++;
+                // Dry run reports what it would have done, so the tally has to
+                // count those too or the summary reads "0 of 12 would be
+                // repaired", which is the opposite of what it means.
+                if (outcome.Repaired || outcome.WouldRepair) actioned++;
             }
             catch (Exception ex)
             {
@@ -242,8 +251,8 @@ public class RankReconcileService : BackgroundService
         }
 
         _logger.LogInformation(
-            "Rank reconcile sweep finished: {Repaired} of {Count} {Verb}",
-            repaired, candidates.Count, dryRun ? "would be repaired" : "repaired");
+            "Rank reconcile sweep finished: {Actioned} of {Count} {Verb}",
+            actioned, candidates.Count, dryRun ? "would be repaired" : "repaired");
     }
 
     // ── Shared repair ────────────────────────────────────────────────────
@@ -254,12 +263,13 @@ public class RankReconcileService : BackgroundService
     /// </summary>
     private sealed record ReconcileOutcome(
         bool Repaired,
+        bool WouldRepair,
         string? Rank,
         DateTime AssignedAt,
         string DateSource);
 
     private static readonly ReconcileOutcome NoAction =
-        new(false, null, default, string.Empty);
+        new(false, false, null, default, string.Empty);
 
     /// <summary>
     /// Creates the missing RankHistory row for one member, or does nothing.
@@ -290,7 +300,7 @@ public class RankReconcileService : BackgroundService
             _logger.LogInformation(
                 "Rank reconcile (dry run): would record {Username} ({UserId}) as {Rank}, dated {AssignedAt:u} from {Source}",
                 member.Username, member.Id, rank, assignedAt, dateSource);
-            return NoAction;
+            return new ReconcileOutcome(false, true, rank, assignedAt, dateSource);
         }
 
         db.RankHistories.Add(new RankHistory
@@ -331,7 +341,7 @@ public class RankReconcileService : BackgroundService
 
         if (allowSideEffects) await RunRecruitSideEffectsAsync(member, rank, rankRoles);
 
-        return new ReconcileOutcome(true, rank, assignedAt, dateSource);
+        return new ReconcileOutcome(true, false, rank, assignedAt, dateSource);
     }
 
     /// <summary>
