@@ -51,6 +51,7 @@ public class RankTrackingHandler
     private readonly ILogger<RankTrackingHandler> _logger;
     private readonly BotConfig _config;
     private readonly GoogleSheetsService _sheetsService;
+    private readonly RoleAuditLookupService _roleAudit;
 
     /// <summary>
     /// Value written to the "Logged By" column when a recruit is auto-logged.
@@ -93,12 +94,14 @@ public class RankTrackingHandler
         IServiceProvider services,
         ILogger<RankTrackingHandler> logger,
         IOptions<BotConfig> config,
-        GoogleSheetsService sheetsService)
+        GoogleSheetsService sheetsService,
+        RoleAuditLookupService roleAudit)
     {
         _services = services;
         _logger = logger;
         _config = config.Value;
         _sheetsService = sheetsService;
+        _roleAudit = roleAudit;
     }
 
     /// <summary>Register the GuildMemberUpdated event handler on the Discord client.</summary>
@@ -610,7 +613,7 @@ public class RankTrackingHandler
     /// Applies the "RCT." prefix to a member's nickname if they don't already have a rank prefix.
     /// Returns the new nickname on success, or null if no change was made or the update failed.
     /// </summary>
-    private async Task<string?> TryApplyRctNicknameAsync(SocketGuildUser after, List<string> rankRoles)
+    public async Task<string?> TryApplyRctNicknameAsync(SocketGuildUser after, List<string> rankRoles)
     {
         try
         {
@@ -645,7 +648,7 @@ public class RankTrackingHandler
     /// Runs fire-and-forget so a sheets outage cannot block the rest of the rank-tracking flow.
     /// Errors are caught and logged — the member's role/nickname state is already correct.
     /// </summary>
-    private async Task TryLogRecruitAsync(string recruitName, SocketGuildUser member)
+    public async Task TryLogRecruitAsync(string recruitName, SocketGuildUser member)
     {
         try
         {
@@ -739,18 +742,33 @@ public class RankTrackingHandler
                 return;
             }
 
+            // Name the culprit. ClanGuard records no actor of its own on a rank
+            // change, so this reads it back out of Discord's audit log. Scoped to
+            // the last hour because the removal happened moments ago: a tight
+            // cutoff usually settles it inside one page.
+            var actor = await _roleAudit.FindRoleRemovalAsync(
+                guild, member.Id, lostRank, DateTime.UtcNow.AddHours(-1));
+
+            var byLine = actor is null
+                ? "The server audit log has no matching entry, so this may predate its 45 day retention."
+                : $"Removed by {(actor.ActorId is ulong id ? MentionUtils.MentionUser(id) : actor.ActorName)}"
+                  + (actor.ActorIsClanGuard ? " (that is ClanGuard itself, which should not happen)" : string.Empty)
+                  + ".";
+
             var eb = new EmbedBuilder()
                 .WithColor(Color.Orange)
                 .WithTitle("Rank role removed")
                 .WithDescription(
                     $"{current.Mention} no longer holds any rank role. ClanGuard never takes the last "
-                    + "rank role away, so this came from somewhere else. The server audit log will show "
-                    + "who or what did it.")
+                    + $"rank role away, so this came from somewhere else. {byLine}")
                 .AddField("Member", current.DisplayName, true)
                 .AddField("Was", lostRank, true)
                 .AddField("User ID", current.Id.ToString(), true)
                 .WithFooter("They now count as unranked, which shortens their AWOL window. /timeline has the full history.")
                 .WithCurrentTimestamp();
+
+            if (actor?.Reason is string reason)
+                eb.AddField("Reason given", Truncate(reason, 512));
 
             try
             {
@@ -779,6 +797,13 @@ public class RankTrackingHandler
     }
 
     /// <summary>
+    /// Clips text to fit an embed field, marking the cut so a reader can tell a
+    /// short reason from a trimmed one.
+    /// </summary>
+    private static string Truncate(string text, int max) =>
+        text.Length <= max ? text : text[..(max - 1)] + "…";
+
+    /// <summary>
     /// Drops cooldown entries that have aged out. Called after each post so the
     /// dictionary only ever holds members inside the current cooldown window
     /// instead of growing for the life of the process.
@@ -795,7 +820,7 @@ public class RankTrackingHandler
     /// <summary>
     /// Returns the highest rank role name from the member's roles, or null if they have no rank roles.
     /// </summary>
-    private static string? GetHighestRank(IEnumerable<string> memberRoleNames, List<string> rankRoles)
+    public static string? GetHighestRank(IEnumerable<string> memberRoleNames, List<string> rankRoles)
     {
         for (int i = rankRoles.Count - 1; i >= 0; i--)
         {

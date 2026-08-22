@@ -95,6 +95,15 @@ public class TimelineCommandHandler
     private const int SecurityRecordsLimit = 5;
 
     /// <summary>
+    /// How many audit-log role changes to pull when role history is asked for.
+    /// Deliberately smaller than MaxTimelineEntries: role churn is the noisiest
+    /// thing on the server (every self-select game role is one of these), and a
+    /// member with dozens of them would otherwise push their own joins, ranks
+    /// and AWOL history off the bottom of the list.
+    /// </summary>
+    private const int RoleAuditEntriesLimit = 12;
+
+    /// <summary>
     /// Soft cap on chronological-list entries — applied first, before
     /// the character-budget check below. 35 was chosen so that even at
     /// an average ~60 chars per entry the description sits well under
@@ -133,6 +142,7 @@ public class TimelineCommandHandler
     private readonly DiscordSocketClient _client;
     private readonly BotConfig _config;
     private readonly MemberActivityChartRenderer _chartRenderer;
+    private readonly RoleAuditLookupService _roleAudit;
     private readonly ILogger<TimelineCommandHandler> _logger;
 
     public TimelineCommandHandler(
@@ -140,12 +150,14 @@ public class TimelineCommandHandler
         DiscordSocketClient client,
         IOptions<BotConfig> config,
         MemberActivityChartRenderer chartRenderer,
+        RoleAuditLookupService roleAudit,
         ILogger<TimelineCommandHandler> logger)
     {
         _services      = services;
         _client        = client;
         _config        = config.Value;
         _chartRenderer = chartRenderer;
+        _roleAudit     = roleAudit;
         _logger        = logger;
     }
 
@@ -159,6 +171,9 @@ public class TimelineCommandHandler
             .WithDescription("Show a member's complete history — joins, ranks, AWOL, applications, events (Officer+ only)")
             .AddOption("user", ApplicationCommandOptionType.User,
                 "The member whose timeline you want to see", isRequired: true)
+            .AddOption("role_history", ApplicationCommandOptionType.Boolean,
+                "Also read role changes from the server audit log: who added or removed what (last 45 days)",
+                isRequired: false)
             .Build();
 
     public void Register(DiscordSocketClient client)
@@ -199,11 +214,14 @@ public class TimelineCommandHandler
             return;
         }
 
+        var includeRoleHistory =
+            command.Data.Options.FirstOrDefault(o => o.Name == "role_history")?.Value as bool? ?? false;
+
         await command.DeferAsync(ephemeral: true);
 
         try
         {
-            var result = await BuildTimelineAsync(command.GuildId.Value, targetUser);
+            var result = await BuildTimelineAsync(command.GuildId.Value, targetUser, includeRoleHistory);
 
             if (result.ChartPng is byte[] png)
             {
@@ -242,9 +260,10 @@ public class TimelineCommandHandler
     /// </summary>
     private sealed record TimelineResult(Embed Embed, byte[]? ChartPng, string ChartFileName);
 
-    private async Task<TimelineResult> BuildTimelineAsync(ulong guildId, SocketUser targetUser)
+    private async Task<TimelineResult> BuildTimelineAsync(
+        ulong guildId, SocketUser targetUser, bool includeRoleHistory)
     {
-        var embed = await BuildTimelineEmbedAsync(guildId, targetUser);
+        var embed = await BuildTimelineEmbedAsync(guildId, targetUser, includeRoleHistory);
 
         // Chart rendering is intentionally best-effort: it fires its own
         // scope and DbContext (so a long render can't block the embed
@@ -285,7 +304,8 @@ public class TimelineCommandHandler
             ?? targetUser.Username;
     }
 
-    private async Task<Embed> BuildTimelineEmbedAsync(ulong guildId, SocketUser targetUser)
+    private async Task<Embed> BuildTimelineEmbedAsync(
+        ulong guildId, SocketUser targetUser, bool includeRoleHistory)
     {
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
@@ -507,6 +527,38 @@ public class TimelineCommandHandler
                 $"Attended event ({ev.AttendedMinutes} min)"));
         }
 
+        // ── Role changes from Discord's own audit log (opt-in) ──────────
+        // Off by default because it is the only part of this command that costs
+        // REST calls, and most /timeline runs do not need it. Asked for, it is
+        // the only way to see WHO changed a member's roles: the bot's own
+        // RankChange rows record the transition but never the actor.
+        RoleAuditResult? roleAudit = null;
+        if (includeRoleHistory && guild is not null)
+        {
+            roleAudit = await _roleAudit.GetRoleChangesAsync(
+                guild, targetUser.Id, maxChanges: RoleAuditEntriesLimit);
+
+            foreach (var change in roleAudit.Changes)
+            {
+                var parts = new List<string>();
+                if (change.Added.Count > 0)
+                    parts.Add("added **" + string.Join("**, **", change.Added.Select(EscapeMarkdown)) + "**");
+                if (change.Removed.Count > 0)
+                    parts.Add("removed **" + string.Join("**, **", change.Removed.Select(EscapeMarkdown)) + "**");
+
+                // Mention the actor rather than printing a username: it resolves
+                // bots and ex-members alike, and embeds never ping.
+                var actor = change.ActorId is ulong actorId
+                    ? MentionUtils.MentionUser(actorId)
+                    : EscapeMarkdown(change.ActorName);
+
+                entries.Add(new TimelineEntry(
+                    change.ChangedAtUtc,
+                    "🧾",
+                    $"{actor} {string.Join(", ", parts)}"));
+            }
+        }
+
         // ── Sort newest-first ───────────────────────────────────────────
         // Newest at the top so a viewer's eye lands on "what happened most
         // recently" first — relevant for moderation context (was this
@@ -609,6 +661,31 @@ public class TimelineCommandHandler
         embed.AddField("Lifetime Events",
             totalRealEvents.ToString(),
             inline: true);
+
+        // Say plainly what the audit-log scan could and could not see. A silent
+        // empty result would read as "nothing happened", which is exactly the
+        // wrong conclusion when the truth is "we could not look" or "we stopped
+        // early".
+        if (roleAudit is not null)
+        {
+            var note = roleAudit.Status switch
+            {
+                RoleAuditStatus.PermissionDenied =>
+                    "Could not read it: the bot is missing the View Audit Log permission.",
+                RoleAuditStatus.Failed =>
+                    "The lookup failed. Check the bot log.",
+                _ when roleAudit.Changes.Count == 0 =>
+                    $"No role changes on file for them. Discord only keeps {RoleAuditLookupService.AuditRetentionDays} days, "
+                    + "so an older change is gone rather than absent.",
+                _ when roleAudit.BoundHit =>
+                    $"Showing the {roleAudit.Changes.Count} most recent. Older ones exist but were not fetched.",
+                _ =>
+                    $"{roleAudit.Changes.Count} change(s) found, back to "
+                    + (roleAudit.OldestScannedUtc is DateTime oldest ? DiscordTimestamp(oldest, 'd') : "the start of retention")
+                    + ".",
+            };
+            embed.AddField("Role history (audit log)", note);
+        }
 
         embed.WithFooter($"User ID: {targetUser.Id}");
         embed.WithCurrentTimestamp();

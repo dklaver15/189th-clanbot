@@ -465,6 +465,68 @@ public class BotConfig
     public int RankLossAlertCooldownMinutes { get; set; } = 60;
 
     // ──────────────────────────────────────────────────────────────────────
+    //  Rank reconcile
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// When true, the bot repairs members who hold a rank role with no
+    /// RankHistory row: on join, and on a periodic sweep. Rank tracking is
+    /// otherwise driven entirely by live role-change events, and a role granted
+    /// as part of the join (Discord's onboarding role picker does exactly this)
+    /// produces no such event, so the member ends up ranked in Discord and
+    /// unranked everywhere in the bot with nothing to fix it. Default true.
+    /// </summary>
+    public bool RankReconcileEnabled { get; set; } = true;
+
+    /// <summary>
+    /// When true the periodic sweep only reports what it would do. Default
+    /// TRUE, on purpose. The join path always runs live and is safe: it repairs
+    /// one member who just arrived. The sweep is the risky one, because on a
+    /// server older than the bot it will find long-standing members whose rank
+    /// predates rank tracking, and recording them all at once starts their
+    /// promotion clocks together. Read the first run's log, then set this false
+    /// if the list looks right.
+    /// </summary>
+    public bool RankReconcileSweepDryRun { get; set; } = true;
+
+    /// <summary>Hours between reconcile sweeps. The sweep also runs at startup.</summary>
+    public int RankReconcileSweepHours { get; set; } = 12;
+
+    /// <summary>
+    /// Seconds to wait after someone joins before checking whether their rank
+    /// was recorded. Long enough that the live handler has had its chance and
+    /// any onboarding roles have settled, so the reconcile only ever fires on a
+    /// genuine miss rather than racing the normal path.
+    /// </summary>
+    public int RankReconcileJoinDelaySeconds { get; set; } = 45;
+
+    /// <summary>
+    /// How recently a member must have joined for a repair to also apply the
+    /// RCT nickname prefix and write the recruit-log row. Outside this window
+    /// the repair records the rank and nothing else: a sweep over an established
+    /// server would otherwise rename members who have gone years without a
+    /// prefix and file each of them as a new recruit.
+    /// </summary>
+    public int RankReconcileSideEffectWindowHours { get; set; } = 48;
+
+    /// <summary>
+    /// Furthest back a repaired RankHistory row may be dated. AssignedAt drives
+    /// every promotion calculation, so a row dated years ago would hand that
+    /// member every event since as credit toward their next promotion. Anything
+    /// resolving older than this is dated to the reconcile instead. Discord's
+    /// audit log only retains 45 days anyway, which is where the default comes
+    /// from.
+    /// </summary>
+    public int RankReconcileMaxBackdateDays { get; set; } = 45;
+
+    /// <summary>
+    /// Channel the "rank recorded after the fact" notice posts to. Defaults to
+    /// the moderator notice log, alongside the rank-loss notice. 0 records the
+    /// repair in the bot log only.
+    /// </summary>
+    public ulong RankReconcileNoticeChannelId { get; set; } = 1407959078105514046;
+
+    // ──────────────────────────────────────────────────────────────────────
     //  Question of the Day (/qotd)
     // ──────────────────────────────────────────────────────────────────────
 

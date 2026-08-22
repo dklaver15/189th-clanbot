@@ -106,6 +106,26 @@ try
     builder.Services.AddSingleton<MemberRosterReconciler>();
     builder.Services.AddHostedService(sp => sp.GetRequiredService<MemberRosterReconciler>());
 
+    // RoleAuditLookupService: reads member role changes back out of Discord's
+    // server audit log. The bot records that a rank changed but never who
+    // changed it (RankChange has no actor column, and AuditLogWatcherHandler
+    // does not subscribe to MemberRoleUpdated), so this is the only way to
+    // answer "who removed this member's rank". Used by /timeline's role-history
+    // option, by the rank-loss notice, and by RankReconcileService to date a
+    // rank the bot failed to observe live.
+    builder.Services.AddSingleton<RoleAuditLookupService>();
+
+    // RankReconcileService: self-healing for rank roles the bot never saw
+    // arrive. RankTrackingHandler only ever writes RankHistory from a live
+    // GuildMemberUpdated diff, so a role applied as part of the join (Discord's
+    // onboarding role picker), or granted while the bot was down, leaves the
+    // member ranked in Discord and unranked in every table the bot owns, with
+    // nothing to repair it. Repairs on join, plus a sweep that DEFAULTS TO DRY
+    // RUN (see BotConfig.RankReconcileSweepDryRun for why). Singleton + hosted;
+    // Register() is called from DiscordBotService.
+    builder.Services.AddSingleton<RankReconcileService>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<RankReconcileService>());
+
     // GamertagRosterReconciler: offline-gap cleanup for the gamertag roster
     // sheet. The live path (MemberLifecycleHandler on UserLeft) removes a row
     // the moment someone leaves; this sweep catches departures that happened

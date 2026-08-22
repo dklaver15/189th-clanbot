@@ -31,6 +31,7 @@ public class DiscordBotService : IHostedService
     private readonly MemberLifecycleHandler _memberLifecycleHandler;
     private readonly DepartureCaptureHandler _departureCaptureHandler;
     private readonly MemberRosterReconciler _memberRosterReconciler;
+    private readonly RankReconcileService _rankReconcileService;
     private readonly AccountAgeGateHandler _accountAgeGateHandler;
     private readonly InviteLinkFilterHandler _inviteLinkFilterHandler;
     private readonly AuditLogWatcherHandler _auditLogWatcherHandler;
@@ -123,6 +124,7 @@ public class DiscordBotService : IHostedService
         MemberLifecycleHandler memberLifecycleHandler,
         DepartureCaptureHandler departureCaptureHandler,
         MemberRosterReconciler memberRosterReconciler,
+        RankReconcileService rankReconcileService,
         AccountAgeGateHandler accountAgeGateHandler,
         InviteLinkFilterHandler inviteLinkFilterHandler,
         AuditLogWatcherHandler auditLogWatcherHandler,
@@ -207,6 +209,7 @@ public class DiscordBotService : IHostedService
         _memberLifecycleHandler      = memberLifecycleHandler;
         _departureCaptureHandler     = departureCaptureHandler;
         _memberRosterReconciler      = memberRosterReconciler;
+        _rankReconcileService        = rankReconcileService;
         _accountAgeGateHandler       = accountAgeGateHandler;
         _inviteLinkFilterHandler     = inviteLinkFilterHandler;
         _auditLogWatcherHandler      = auditLogWatcherHandler;
@@ -296,6 +299,7 @@ public class DiscordBotService : IHostedService
         _memberLifecycleHandler.Register(_client);
         _departureCaptureHandler.Register(_client);
         _memberRosterReconciler.Register(_client);
+        _rankReconcileService.Register(_client);
         _accountAgeGateHandler.Register(_client);
         _inviteLinkFilterHandler.Register(_client);
         _auditLogWatcherHandler.Register(_client);
