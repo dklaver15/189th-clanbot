@@ -152,17 +152,56 @@ public class RosterExportService : BackgroundService
 
                     if (rankRecord is null)
                     {
-                        // First time seeing this user — seed with join date as best approximation
+                        // First time seeing this user, so seed with their join date
+                        // as the best approximation of when the rank was assigned.
+                        //
+                        // ── Why the floor ──
+                        // AssignedAt drives every promotion calculation: time in
+                        // rank, and which events count toward the next promotion.
+                        // A member who joined years ago but has no row (their rank
+                        // predates rank tracking, or the live handler never saw the
+                        // role arrive) would otherwise be seeded with their entire
+                        // tenure as time in rank AND every event they have ever
+                        // attended as credit, which can make them instantly
+                        // promotable off the back of a bookkeeping repair. Anything
+                        // older than the floor is dated to now instead: a recent
+                        // recruit still gets their exact join date, and nobody gets
+                        // handed years of back-credit.
+                        //
+                        // Shares RankReconcileMaxBackdateDays with
+                        // RankReconcileService on purpose. Both services create this
+                        // same row, and two different backdate limits would mean the
+                        // promotion clock depended on which one got there first.
+                        var floor = now.AddDays(-Math.Max(1, _config.RankReconcileMaxBackdateDays));
+                        var joinedAt = member.JoinedAt?.UtcDateTime;
+                        var assignedAt = joinedAt is not null && joinedAt.Value >= floor
+                            ? joinedAt.Value
+                            : now;
+
                         rankRecord = new RankHistory
                         {
                             GuildId = guild.Id,
                             UserId = member.Id,
                             RankName = currentRank,
-                            AssignedAt = member.JoinedAt?.UtcDateTime ?? now,
+                            AssignedAt = assignedAt,
                             EventsAttendedAtRankBeforeBot = 0,
                             SeedAppliedAt = null,
                         };
                         db.RankHistories.Add(rankRecord);
+
+                        // Information, not Debug: production runs at Information, so
+                        // a quieter line would leave this path invisible. It writes a
+                        // row that changes someone's promotion eligibility, which is
+                        // not something to do silently in the middle of a roster
+                        // export.
+                        _logger.LogInformation(
+                            "Roster export: {User} ({UserId}) holds {Rank} with no RankHistory row, " +
+                            "recording it dated {AssignedAt:u} ({Source}). The live role-change event " +
+                            "never arrived for them",
+                            member.Username, member.Id, currentRank, assignedAt,
+                            assignedAt == joinedAt
+                                ? "their join date"
+                                : $"reconcile time, since their join date is older than the {Math.Max(1, _config.RankReconcileMaxBackdateDays)} day floor");
                     }
                     else if (!rankRecord.RankName.Equals(currentRank, StringComparison.OrdinalIgnoreCase))
                     {
