@@ -125,6 +125,36 @@ public sealed class LeadMatcher
         "bf6 clan",
         "battlefield 6 clan",
         "battlefield clan",
+        "redsec clan",
+
+        // ── REDSEC / ranked squad asks ──
+        // Added 2026-08-23. REDSEC is Battlefield 6's free-to-play battle
+        // royale (launched 2025-10-28) and it has its own Ranked ladder, so
+        // a large share of BF6 group-finding now happens in REDSEC and
+        // ranked vernacular rather than "clan" vernacular. None of the
+        // phrasings below were reachable before: the phrase regex needs the
+        // words contiguous, so an intervening "ranked" broke every existing
+        // pattern ("LF ranked duo" did not match "lf duo", "looking for a
+        // ranked squad" did not match "looking for a squad").
+        //
+        // These are all ASK-shaped, i.e. they name a group the poster wants.
+        // A bare topic mention ("redsec ranked is unbalanced") is
+        // deliberately NOT a positive keyword: it would surface every
+        // opinion thread on r/Battlefield as a lead. Game recognition is the
+        // aliases' job (PatrolWatch:MatchedGames[].RedditAliases now carries
+        // "redsec"), not tier 1's.
+        "ranked duo",
+        "ranked squad",
+        "ranked team",
+        "ranked trio",
+        "ranked partner",
+        "ranked buddy",
+        "lf ranked",
+        "redsec duo",
+        "redsec squad",
+        "redsec team",
+        "redsec trio",
+        "redsec buddies",
 
         // ── "looking for + people-noun" patterns ──
         // Casual-friend phrasings dominant on r/GamerPals, r/LookingForGroup,
