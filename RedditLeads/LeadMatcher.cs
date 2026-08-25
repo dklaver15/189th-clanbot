@@ -156,6 +156,27 @@ public sealed class LeadMatcher
         "redsec trio",
         "redsec buddies",
 
+        // ── WARDOGS asks ──
+        // Added 2026-08-23 ahead of the 2026-09-10 early access launch.
+        // WARDOGS is BULKHEAD/Team17's 100-player tactical FPS, three teams
+        // fighting over a control zone. Its closed beta peaked above 100k
+        // concurrent on Steam, higher than Squad, Hell Let Loose or Arma
+        // ever reached, so the audience overlaps our Hell Let Loose players
+        // rather than our BF6 players.
+        //
+        // Squad-based by design, so posters ask for a "squad" far more than
+        // a "clan". Both spellings are covered because BuildPattern needs
+        // the words contiguous and "war dogs squad" is a different literal
+        // from "wardogs squad".
+        "wardogs clan",
+        "wardogs squad",
+        "wardogs team",
+        "wardogs duo",
+        "wardogs platoon",
+        "war dogs clan",
+        "war dogs squad",
+        "war dogs team",
+
         // ── "looking for + people-noun" patterns ──
         // Casual-friend phrasings dominant on r/GamerPals, r/LookingForGroup,
         // r/FindAClan. These are not "I want a clan" asks but the audience
