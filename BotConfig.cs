@@ -520,11 +520,24 @@ public class BotConfig
     public int RankReconcileMaxBackdateDays { get; set; } = 45;
 
     /// <summary>
-    /// Channel the "rank recorded after the fact" notice posts to. Defaults to
-    /// the moderator notice log, alongside the rank-loss notice. 0 records the
-    /// repair in the bot log only.
+    /// When true, the bot posts a notice whenever a member's RCT role and their
+    /// "RCT." name prefix disagree, in either direction: the role without the
+    /// prefix, or the prefix without the role.
+    ///
+    /// Those two are the only states a human needs to act on. A member sitting
+    /// there with neither is not broken, they simply have not accepted the rules
+    /// yet, and a member with both is correct however they got there. Repairing
+    /// a missing RankHistory row is routine and belongs in the log, not in a
+    /// channel someone has to read.
     /// </summary>
-    public ulong RankReconcileNoticeChannelId { get; set; } = 1407959078105514046;
+    public bool RctMismatchNoticeEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Channel the role/name mismatch notice posts to. Defaults to the moderator
+    /// notice log, alongside the rank-loss notice. 0 switches the notice off the
+    /// same way RctMismatchNoticeEnabled = false does.
+    /// </summary>
+    public ulong RctMismatchNoticeChannelId { get; set; } = 1407959078105514046;
 
     // ──────────────────────────────────────────────────────────────────────
     //  Question of the Day (/qotd)

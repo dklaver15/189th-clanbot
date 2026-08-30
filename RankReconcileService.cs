@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using ClanGuardBot.Data;
 using ClanGuardBot.Handlers;
 using ClanGuardBot.Models;
@@ -53,6 +54,13 @@ namespace ClanGuardBot.Services;
 /// years of tenure from being handed years of back-credit toward their next
 /// promotion by a repair pass.
 ///
+/// ── Second job: the RCT role / name mismatch notice ──
+/// This service also watches for the only two states a human actually needs to
+/// act on: a member holding the RCT role whose name has no "RCT." prefix, and a
+/// member whose name carries the prefix without the role. Everything else is
+/// either correct or simply someone who has not accepted the rules yet. See
+/// CheckRctNameMismatchAsync.
+///
 /// ── Never touches an existing row ──
 /// A member who already has a RankHistory row is skipped outright, even when the
 /// recorded rank disagrees with their roles. Correcting a live rank is
@@ -74,6 +82,18 @@ public class RankReconcileService : BackgroundService
     private readonly BotConfig _config;
     private readonly RoleAuditLookupService _roleAudit;
     private readonly RankTrackingHandler _rankHandler;
+
+    /// <summary>
+    /// Members already reported as mismatched, and which way round the mismatch
+    /// was. Stops the 12-hourly sweep from re-posting the same unresolved
+    /// mismatch every cycle, while still re-posting if it flips to the other
+    /// direction. Cleared the moment the member's role and name agree again.
+    ///
+    /// In memory on purpose: no table, no migration. A restart therefore
+    /// re-announces anything still outstanding, which is the right behaviour for
+    /// a notice that means "somebody needs to fix this".
+    /// </summary>
+    private readonly ConcurrentDictionary<(ulong GuildId, ulong UserId), string> _reportedMismatches = new();
 
     public RankReconcileService(
         IServiceProvider services,
@@ -130,13 +150,19 @@ public class RankReconcileService : BackgroundService
 
             if (outcome.Repaired)
             {
+                // Log only. A repair is routine (see BotConfig.RctMismatchNoticeEnabled
+                // for why it is not worth a channel post), and the notice that
+                // does get posted is the mismatch check below.
                 _logger.LogInformation(
                     "Rank reconcile (join): repaired {Username} ({UserId}) as {Rank}, dated {AssignedAt:u} from {Source}. " +
-                    "The live role-change event never arrived for them",
+                    "No live role-change event was seen for them",
                     member.Username, member.Id, outcome.Rank, outcome.AssignedAt, outcome.DateSource);
-
-                await PostRepairNoticeAsync(guild, member, outcome, "they joined");
             }
+
+            // Runs whether or not anything was repaired, and whether or not they
+            // are ranked: a member who has not accepted the rules has neither the
+            // role nor the prefix, which agree, so they are silently fine.
+            await CheckRctNameMismatchAsync(guild, member);
         }
         catch (Exception ex)
         {
@@ -193,6 +219,28 @@ public class RankReconcileService : BackgroundService
         // an incomplete cache would look like a pile of missing rows.
         await guild.DownloadUsersAsync();
 
+        var members = guild.Users.Where(u => !u.IsBot).ToList();
+
+        // Mismatch pass first, and before any DbContext exists. It is outside the
+        // dry-run gate because it only reads and posts, so a dry run has nothing
+        // to hold back; and it is outside the scope because each unreported
+        // mismatch waits to confirm itself, and holding a context open across all
+        // of that would be pure waste.
+        foreach (var member in members)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                await CheckRctNameMismatchAsync(guild, member);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "Rank reconcile sweep: mismatch check failed on {Username} ({UserId})",
+                    member.Username, member.Id);
+            }
+        }
+
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
         var rankRoles = _config.GetRankRolesList();
@@ -205,8 +253,7 @@ public class RankReconcileService : BackgroundService
             .ToListAsync(ct))
             .ToHashSet();
 
-        var candidates = guild.Users
-            .Where(u => !u.IsBot)
+        var candidates = members
             .Where(u => !tracked.Contains(u.Id))
             .Where(u => RankTrackingHandler.GetHighestRank(u.Roles.Select(r => r.Name), rankRoles) is not null)
             .ToList();
@@ -427,43 +474,164 @@ public class RankReconcileService : BackgroundService
         return (now, "reconcile time");
     }
 
-    // ── Notice ───────────────────────────────────────────────────────────
+    // ── Mismatch notice ──────────────────────────────────────────────────
 
-    private async Task PostRepairNoticeAsync(
-        SocketGuild guild, SocketGuildUser member, ReconcileOutcome outcome, string context)
+    /// <summary>
+    /// The RCT role and the "RCT." name prefix should always travel together.
+    /// This posts when they do not, in either direction, and nothing else.
+    ///
+    /// ── Why these two states and no others ──
+    /// A member with neither is not broken: they joined and have not accepted
+    /// the rules, so they have no rank and no prefix, and that is a normal way
+    /// to sit in the server. A member with both is correct no matter which code
+    /// path got them there. Only the two disagreements need a human:
+    ///
+    ///   • role, no prefix — MEE6 gave them RCT but the rename never happened,
+    ///     so they read as unranked everywhere people actually look.
+    ///   • prefix, no role — the rename stuck but the role is gone, so they read
+    ///     as a recruit while counting as unranked for the AWOL window. This is
+    ///     what an un-toggled rules reaction leaves behind.
+    ///
+    /// ── Why it re-reads before reporting ──
+    /// /promote and /demote strip the old rank role, add the new one, then
+    /// rename, so a member passes through both mismatch states for a moment
+    /// during an ordinary promotion. Confirming after a short wait is what keeps
+    /// every promotion from posting two false notices.
+    ///
+    /// Reports each member once per direction until it resolves, so an
+    /// unfixed mismatch does not repost every sweep.
+    /// </summary>
+    private async Task CheckRctNameMismatchAsync(SocketGuild guild, SocketGuildUser member)
     {
-        var channelId = _config.RankReconcileNoticeChannelId;
-        if (channelId == 0) return;
+        if (!_config.RctMismatchNoticeEnabled || _config.RctMismatchNoticeChannelId == 0) return;
+        if (member.IsBot) return;
 
-        if (guild.GetTextChannel(channelId) is not SocketTextChannel channel)
+        var key = (guild.Id, member.Id);
+        var state = DescribeMismatch(member);
+
+        if (state is null)
+        {
+            // Role and name agree. Forget them, so if it breaks again later they
+            // get reported again rather than being suppressed forever.
+            _reportedMismatches.TryRemove(key, out _);
+            return;
+        }
+
+        // Same mismatch we already reported: stay quiet.
+        if (_reportedMismatches.TryGetValue(key, out var reported) && reported == state.Kind)
+            return;
+
+        // Re-read after a pause to rule out a promotion in flight.
+        await Task.Delay(TimeSpan.FromSeconds(MismatchConfirmSeconds));
+
+        var current = guild.GetUser(member.Id);
+        if (current is null)
+        {
+            _reportedMismatches.TryRemove(key, out _);
+            return;
+        }
+
+        var confirmed = DescribeMismatch(current);
+        if (confirmed is null || confirmed.Kind != state.Kind)
+        {
+            _reportedMismatches.TryRemove(key, out _);
+            return;
+        }
+
+        // Claim it before posting, atomically, so the join check and a sweep
+        // cannot both report the same member when they overlap. Whoever loses
+        // the swap stays quiet.
+        if (_reportedMismatches.TryGetValue(key, out var existing))
+        {
+            if (existing == confirmed.Kind) return;
+            if (!_reportedMismatches.TryUpdate(key, confirmed.Kind, existing)) return;
+        }
+        else if (!_reportedMismatches.TryAdd(key, confirmed.Kind))
+        {
+            return;
+        }
+
+        if (guild.GetTextChannel(_config.RctMismatchNoticeChannelId) is not SocketTextChannel channel)
         {
             _logger.LogWarning(
-                "RankReconcileNoticeChannelId {ChannelId} did not resolve in {Guild}, repair notice not posted",
-                channelId, guild.Name);
+                "RctMismatchNoticeChannelId {ChannelId} did not resolve in {Guild}, mismatch notice for {UserId} not posted",
+                _config.RctMismatchNoticeChannelId, guild.Name, member.Id);
             return;
         }
 
         try
         {
             var eb = new EmbedBuilder()
-                .WithColor(Color.Gold)
-                .WithTitle("Rank recorded after the fact")
-                .WithDescription(
-                    $"{member.Mention} was holding **{outcome.Rank}** with nothing recorded against it, so the bot "
-                    + $"never saw the role arrive when {context}. It has been recorded now, and their timeline, "
-                    + "promotion clock and recruit log are back in step.")
-                .AddField("Member", member.DisplayName, true)
-                .AddField("Rank", outcome.Rank ?? "unknown", true)
-                .AddField("Dated", $"<t:{new DateTimeOffset(DateTime.SpecifyKind(outcome.AssignedAt, DateTimeKind.Utc)).ToUnixTimeSeconds()}:f> ({outcome.DateSource})")
-                .WithFooter("Run /timeline with role history on to see what the audit log says happened.")
+                .WithColor(Color.Orange)
+                .WithTitle(confirmed.Title)
+                .WithDescription($"{current.Mention} {confirmed.Description}")
+                .AddField("Name", current.DisplayName, true)
+                .AddField("Has RCT role", HasRctRole(current) ? "Yes" : "No", true)
+                .AddField("Name has RCT. prefix", HasRctPrefix(current) ? "Yes" : "No", true)
+                .WithFooter($"User ID: {current.Id}")
                 .WithCurrentTimestamp();
 
             await channel.SendMessageAsync(embed: eb.Build(), allowedMentions: AllowedMentions.None);
+
+            _logger.LogInformation(
+                "RCT mismatch: {Username} ({UserId}) in {Guild} — {Kind}",
+                current.Username, current.Id, guild.Name, confirmed.Kind);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex,
-                "Could not post the rank reconcile notice for {UserId}", member.Id);
+            // Let go of the claim so the next sweep tries again rather than
+            // treating a failed post as reported.
+            _reportedMismatches.TryRemove(key, out _);
+            _logger.LogWarning(ex, "Could not post the RCT mismatch notice for {UserId}", member.Id);
         }
+    }
+
+    /// <summary>Seconds to wait and re-check before reporting a mismatch.</summary>
+    private const int MismatchConfirmSeconds = 20;
+
+    private sealed record MismatchState(string Kind, string Title, string Description);
+
+    /// <summary>
+    /// Null when the RCT role and the "RCT." prefix agree, whether both are
+    /// present or both absent.
+    /// </summary>
+    private static MismatchState? DescribeMismatch(SocketGuildUser member)
+    {
+        var hasRole = HasRctRole(member);
+        var hasPrefix = HasRctPrefix(member);
+
+        if (hasRole == hasPrefix) return null;
+
+        return hasRole
+            ? new MismatchState(
+                "role-without-prefix",
+                "RCT role, but no RCT. in their name",
+                "has the RCT role, but their server name was never given the **RCT.** prefix. "
+                + "Anyone reading the member list sees them as unranked.")
+            : new MismatchState(
+                "prefix-without-role",
+                "RCT. in their name, but no RCT role",
+                "has **RCT.** in their server name but does not hold the RCT role. "
+                + "They read as a recruit while counting as unranked for the AWOL window.");
+    }
+
+    /// <summary>
+    /// The role name is the literal "RCT", matching RankTrackingHandler's own
+    /// checks and the prefix it builds. Kept literal rather than configurable so
+    /// all three stay in step.
+    /// </summary>
+    private static bool HasRctRole(SocketGuildUser member) =>
+        member.Roles.Any(r => r.Name.Equals("RCT", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// Mirrors the tolerance in RankTrackingHandler.TryApplyRctNicknameAsync,
+    /// which accepts a spaced "RCT . " as an existing prefix, so a name that
+    /// handler would leave alone is not reported here as missing one.
+    /// </summary>
+    private static bool HasRctPrefix(SocketGuildUser member)
+    {
+        var name = member.DisplayName ?? string.Empty;
+        return name.StartsWith("RCT.", StringComparison.OrdinalIgnoreCase)
+            || name.StartsWith("RCT . ", StringComparison.OrdinalIgnoreCase);
     }
 }
