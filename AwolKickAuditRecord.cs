@@ -55,6 +55,13 @@ public class AwolKickAuditRecord
     ///                          403 catch (which handles the case of roles
     ///                          changing between snapshot and kick).
     ///   "SkippedProtected"   — at/above protected min rank (leadership safety)
+    ///   "SkippedNotListed"   — has the AWOL role but no record of ever being
+    ///                          posted to the HQ AWOL list (still inside the
+    ///                          grace period, role added by hand, or the
+    ///                          notification was suppressed/given up on)
+    ///   "SkippedListedRecently" — posted to the AWOL list less than
+    ///                          BotConfig.AwolKickMinListedDays ago, so their
+    ///                          review window hasn't elapsed yet
     ///   "UserAlreadyLeft"    — Discord returned 404 at kick-time because the
     ///                          member left the guild between AWOL list
     ///                          enumeration and the kick attempt. Not a

@@ -88,6 +88,27 @@ public class BotConfig
     public int AwolNotificationMaxAgeDays { get; set; } = 4;
 
     /// <summary>
+    /// How long a member must have been listed in the HQ AWOL channel before
+    /// /kick-awols will remove them, in days.
+    ///
+    /// The AWOL role alone is not enough: the member is only kickable once the
+    /// "AWOL Member — Ready for Review" embed has been sitting in
+    /// <see cref="HqChannelName"/> for this long (measured from
+    /// AwolRecord.NotificationSentAt). This gives officers — and the member —
+    /// a guaranteed review window between "shows up on the list" and "gets
+    /// removed", so a member flagged days before a wipe run isn't kicked the
+    /// moment they appear.
+    ///
+    /// /clear-awol-list honors the same threshold from the other side: listings
+    /// younger than this are LEFT in the channel when the list is cleared, so a
+    /// member never loses their review window to a wipe.
+    ///
+    /// Set to 0 to disable both behaviors (kick everyone flagged AWOL, clear
+    /// every message).
+    /// </summary>
+    public int AwolKickMinListedDays { get; set; } = 7;
+
+    /// <summary>
     /// When true, the bot posts a reminder in <see cref="AwolWipeReminderChannelId"/>
     /// on the <see cref="AwolWipeReminderDayOfMonth"/> of every month (at
     /// <see cref="AwolWipeReminderHourEt"/>), tagging

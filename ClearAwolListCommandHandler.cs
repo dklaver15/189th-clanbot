@@ -17,6 +17,15 @@ namespace ClanGuardBot.Handlers;
 ///     leave them intact. Protection keys off pin status, not position, so it
 ///     survives reordering. (Discord's delete endpoints don't spare pinned
 ///     messages on their own, so we filter them out explicitly.)
+///   • RECENT messages are PRESERVED — anything posted within the last
+///     BotConfig.AwolKickMinListedDays stays. That's the same threshold
+///     /kick-awols uses to decide who is old enough on the list to remove:
+///     members flagged too recently aren't kicked, so wiping their listing
+///     would erase the review window they haven't had yet (and, since the
+///     embed is only ever posted once per AWOL spell, it would never come
+///     back). A listing's message timestamp IS its listing time, so message
+///     age is the exact same clock the kick gate runs on. Set the config
+///     value to 0 to go back to clearing everything unpinned.
 ///   • Discord's bulk-delete endpoint only accepts messages younger than 14 days.
 ///     Anything older has to be deleted one at a time, which is slow and
 ///     rate-limit-sensitive — but on a channel that's only ever posted to by
@@ -95,9 +104,15 @@ public class ClearAwolListCommandHandler
         var confirm = (bool)(cmd.Data.Options.FirstOrDefault(o => o.Name == "confirm")?.Value ?? false);
         if (!confirm)
         {
+            var keepDays = _config.AwolKickMinListedDays;
+            var recentNote = keepDays > 0
+                ? $" and anything posted in the last **{keepDays} days** " +
+                  "(those members haven't been on the list long enough to be kicked yet)"
+                : string.Empty;
+
             await cmd.FollowupAsync(
                 $"ℹ️ This will permanently delete all messages in `#{_config.HqChannelName}` " +
-                "**except pinned messages** (the instructions stay). " +
+                $"**except pinned messages** (the instructions stay){recentNote}. " +
                 "Pass `confirm:true` to proceed.",
                 ephemeral: true);
             return;
@@ -153,6 +168,14 @@ public class ClearAwolListCommandHandler
         var slowDeleted = 0;
         var failedSlow  = 0;
         var skippedPinned = 0;
+        var skippedRecent = 0;
+
+        // Messages newer than this are left alone: the members they list
+        // haven't been on the list long enough for /kick-awols to remove them,
+        // so their listing has to survive the wipe. 0 disables the guard.
+        var recentCutoff = _config.AwolKickMinListedDays > 0
+            ? DateTimeOffset.UtcNow.AddDays(-_config.AwolKickMinListedDays)
+            : DateTimeOffset.MinValue;
         // Use a 1-minute buffer below Discord's 14-day cutoff to avoid the
         // edge case where a message is 13d 23h 59m old at fetch time but
         // crosses the threshold by the time bulk delete is called.
@@ -196,8 +219,18 @@ public class ClearAwolListCommandHandler
             // have to exclude them explicitly here.
             skippedPinned += batchList.Count(m => m.IsPinned);
 
-            var recent = batchList.Where(m => !m.IsPinned && m.Timestamp > bulkCutoff).ToList();
-            var old    = batchList.Where(m => !m.IsPinned && m.Timestamp <= bulkCutoff).ToList();
+            // ── Protect recent listings ──────────────────────────────────
+            // Same threshold /kick-awols uses. Deleting these would wipe the
+            // review window of members who are deliberately NOT being kicked
+            // yet, and the embed is never re-posted for the same AWOL spell.
+            skippedRecent += batchList.Count(m => !m.IsPinned && m.Timestamp > recentCutoff);
+
+            var deletable = batchList
+                .Where(m => !m.IsPinned && m.Timestamp <= recentCutoff)
+                .ToList();
+
+            var recent = deletable.Where(m => m.Timestamp > bulkCutoff).ToList();
+            var old    = deletable.Where(m => m.Timestamp <= bulkCutoff).ToList();
 
             // ── Bulk-delete recent messages ──────────────────────────────
             if (recent.Count >= 2)
@@ -288,6 +321,10 @@ public class ClearAwolListCommandHandler
         if (skippedPinned > 0)
             summary += $"\n• Kept (pinned): {skippedPinned}";
 
+        if (skippedRecent > 0)
+            summary += $"\n• Kept (posted in the last {_config.AwolKickMinListedDays}d, " +
+                       $"not on the list long enough to be kicked yet): {skippedRecent}";
+
         if (failedSlow > 0)
             summary += $"\n• Failed: {failedSlow} (see bot logs for details)";
 
@@ -295,8 +332,10 @@ public class ClearAwolListCommandHandler
             summary += $"\n\n⚠️ Hit safety iteration cap. There may be more messages — run the command again to continue.";
 
         _logger.LogInformation(
-            "/clear-awol-list completed in #{Channel}: bulk={Bulk}, slow={Slow}, failed={Failed}, keptPinned={Pinned}, invoker={Invoker}",
-            channel.Name, bulkDeleted, slowDeleted, failedSlow, skippedPinned, cmd.User.Username);
+            "/clear-awol-list completed in #{Channel}: bulk={Bulk}, slow={Slow}, failed={Failed}, " +
+            "keptPinned={Pinned}, keptRecent={Recent}, invoker={Invoker}",
+            channel.Name, bulkDeleted, slowDeleted, failedSlow, skippedPinned, skippedRecent,
+            cmd.User.Username);
 
         await cmd.FollowupAsync(summary, ephemeral: true);
     }

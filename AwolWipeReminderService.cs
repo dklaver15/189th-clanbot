@@ -220,8 +220,9 @@ public sealed class AwolWipeReminderService : BackgroundService
             mentionPrefix +
             "**Monthly AWOL reminder**\n\n" +
             "Time to wipe the AWOLs and clear the list:\n" +
-            "• `/kick-awols` — remove the members still flagged AWOL\n" +
-            "• `/clear-awol-list` — clear the HQ AWOL list\n\n" +
+            $"• `/kick-awols` — remove the members who have been on the list " +
+            $"{_config.AwolKickMinListedDays}+ days\n" +
+            "• `/clear-awol-list` — clear the HQ AWOL list (recent listings stay)\n\n" +
             "_Automated monthly reminder from the 189th Clanguard bot._";
 
         // Whitelist exactly the configured user IDs so only they get pinged,

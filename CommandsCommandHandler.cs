@@ -729,9 +729,9 @@ public class CommandsCommandHandler
                 securityAuditLbl, MinRank("BG")),   // SyncWithHandlers: SecurityAuditCommandHandler.MinRankFloor
             new("webhook-audit", "List every webhook in the server, grouped by channel (BG+ only)",
                 securityAuditLbl, MinRank("BG")),   // SyncWithHandlers: WebhookAuditCommandHandler.MinRankFloor
-            new("clear-awol-list", $"Delete all messages in #{config.HqChannelName}",
+            new("clear-awol-list", $"Clear #{config.HqChannelName}, keeping listings from the last {config.AwolKickMinListedDays} days",
                 awolKickLbl, MinRank(config.AwolKickMinRank)),
-            new("kick-awols", "Kick all members currently flagged AWOL",
+            new("kick-awols", $"Kick members who have been on the AWOL list {config.AwolKickMinListedDays}+ days",
                 awolKickLbl, MinRank(config.AwolKickMinRank)),
 
             new("briefing-now", "Generate the weekly officer briefing immediately",

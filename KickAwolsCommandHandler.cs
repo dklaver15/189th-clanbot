@@ -26,6 +26,17 @@ namespace ClanGuardBot.Handlers;
 ///     skipped to prevent a tracking bug or rogue invocation from nuking
 ///     leadership. Same rank gate that controls who can RUN the command.
 ///
+///   • Listing-age gate — the AWOL role alone is not enough to get kicked.
+///     A member is only removed once their "AWOL Member — Ready for Review"
+///     embed has been sitting in the HQ channel for at least
+///     BotConfig.AwolKickMinListedDays (measured from
+///     AwolRecord.NotificationSentAt). Members flagged too recently — or never
+///     posted to the list at all — are skipped and reported separately, so a
+///     wipe run can never remove someone who has not had their review window.
+///     /clear-awol-list honors the same threshold from the other side and
+///     leaves those recent listings in the channel. Set the config value to 0
+///     to disable the gate.
+///
 ///   • Role hierarchy check — Discord won't let the bot kick anyone whose top
 ///     role sits at or above the bot's top role; we detect that up front so
 ///     we can write a "SkippedHierarchy" audit row instead of letting
@@ -240,12 +251,26 @@ public class KickAwolsCommandHandler
         var botTopRolePos = guild.CurrentUser.Roles.Max(r => r.Position);
 
         // ------------------------------------------------------------------
+        // Listing ages — how long each member has been on the AWOL list
+        // ------------------------------------------------------------------
+        // The kick gate is "posted to #awol-list at least N days ago", not
+        // "has the AWOL role". Load the posted-at timestamps up front (one
+        // query) so the loop below is a dictionary lookup per member.
+        var minListedDays = _config.AwolKickMinListedDays;
+        var listedCutoff  = DateTime.UtcNow.AddDays(-minListedDays);
+        var listedAt      = minListedDays > 0
+            ? await LoadListedAtAsync(guild.Id)
+            : new Dictionary<ulong, DateTime>();
+
+        // ------------------------------------------------------------------
         // Process each AWOL member
         // ------------------------------------------------------------------
         var kicked        = new List<string>();
         var skippedRes    = new List<string>();
         var skippedRank   = new List<string>();
         var skippedHier   = new List<string>();
+        var notListed     = new List<string>();
+        var listedRecent  = new List<string>();
         var userGone      = new List<string>();
         var failed        = new List<string>();
 
@@ -264,6 +289,13 @@ public class KickAwolsCommandHandler
         {
             var rolesSnapshot = string.Join(", ",
                 member.Roles.Where(r => !r.IsEveryone).Select(r => r.Name));
+
+            // When their AWOL embed was posted to the HQ list. Null = we have
+            // no record of them ever making it onto the list (flagged but still
+            // inside the grace period, role added by hand, or the notification
+            // was suppressed/given up on).
+            DateTime? memberListedAt =
+                listedAt.TryGetValue(member.Id, out var listedTs) ? listedTs : null;
 
             var audit = new AwolKickAuditRecord
             {
@@ -305,7 +337,33 @@ public class KickAwolsCommandHandler
                     "This shouldn't happen; investigate why they were marked AWOL.",
                     member.Username, _config.AwolKickMinRank);
             }
-            // ── Guard 3: Discord role hierarchy ───────────────────────────
+            // ── Guard 3: Must have been on the AWOL list long enough ──────
+            // The whole point of the list is the review window between "shows
+            // up in #awol-list" and "gets removed". Someone flagged two days
+            // before a wipe run has not had that window yet, so they stay.
+            // Both branches are normal, expected outcomes — not anomalies —
+            // so they log at Information.
+            else if (minListedDays > 0 && memberListedAt is null)
+            {
+                audit.Outcome = "SkippedNotListed";
+                pendingAudits.Add(audit);
+                notListed.Add(member.DisplayName);
+                _logger.LogInformation(
+                    "Skipped AWOL kick for {User} — never posted to the AWOL list " +
+                    "(still in the grace period, role added manually, or notification suppressed)",
+                    member.Username);
+            }
+            else if (minListedDays > 0 && memberListedAt > listedCutoff)
+            {
+                audit.Outcome = "SkippedListedRecently";
+                pendingAudits.Add(audit);
+                listedRecent.Add(member.DisplayName);
+                _logger.LogInformation(
+                    "Skipped AWOL kick for {User} — listed {ListedAt:yyyy-MM-dd HH:mm} UTC, " +
+                    "less than {Days}d ago",
+                    member.Username, memberListedAt, minListedDays);
+            }
+            // ── Guard 4: Discord role hierarchy ───────────────────────────
             // Bot must outrank target or KickAsync will throw. Skip up front
             // so we get a clean audit row instead of an exception.
             else if (member.Roles.Max(r => r.Position) >= botTopRolePos)
@@ -445,6 +503,8 @@ public class KickAwolsCommandHandler
 
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"### AWOL Kick Summary — {modeLabel}");
+        if (minListedDays > 0)
+            sb.AppendLine($"_Only members listed in `#{_config.HqChannelName}` for **{minListedDays}+ days** are eligible._");
         sb.AppendLine();
         sb.AppendLine($"**{verb}: {kicked.Count}**");
         if (kicked.Count > 0)
@@ -470,6 +530,22 @@ public class KickAwolsCommandHandler
             sb.AppendLine($"**Skipped — role hierarchy: {skippedHier.Count}**");
             sb.AppendLine(TruncateList(skippedHier));
             sb.AppendLine("_(Bot's top role must be above the member's top role to kick them.)_");
+        }
+
+        if (listedRecent.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine($"**Skipped — on the list less than {minListedDays}d: {listedRecent.Count}**");
+            sb.AppendLine(TruncateList(listedRecent));
+            sb.AppendLine("_(Their listing stays in the channel; they become kickable once it ages past the threshold.)_");
+        }
+
+        if (notListed.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine($"**Skipped — never posted to the list: {notListed.Count}**");
+            sb.AppendLine(TruncateList(notListed));
+            sb.AppendLine("_(Flagged AWOL but still in the grace period, role added by hand, or the notification never posted.)_");
         }
 
         if (userGone.Count > 0)
@@ -525,7 +601,8 @@ public class KickAwolsCommandHandler
         await PostHqSummaryAsync(
             guild, cmd.User, dryRun,
             kicked.Count, skippedRes.Count, skippedRank.Count,
-            skippedHier.Count, userGone.Count, failed.Count,
+            skippedHier.Count, listedRecent.Count, notListed.Count,
+            userGone.Count, failed.Count,
             totalAuditsWritten);
     }
 
@@ -580,6 +657,57 @@ public class KickAwolsCommandHandler
     }
 
     /// <summary>
+    /// Loads, per member, when their AWOL embed was posted to the HQ list —
+    /// the clock the listing-age gate runs on.
+    ///
+    /// Only records that actually made it to the channel count: NotificationSentAt
+    /// is also stamped when a pending record is resolved WITHOUT posting (user
+    /// left, role removed, stale-suppressed, given up), and treating those as
+    /// listings would let someone be kicked over a listing that was never
+    /// visible to anyone. NotificationChannelId is set only on the successful
+    /// post path, so it is the reliable "this was really on the list" marker.
+    ///
+    /// A member with several records (repeat offender) is judged by their most
+    /// recent listing. Members with no qualifying record simply don't appear in
+    /// the dictionary and are skipped by the caller as "never listed".
+    ///
+    /// Returns an empty map on failure — combined with the caller's guard that
+    /// means everyone is treated as "not listed" and nobody gets kicked, which
+    /// is the safe direction for a DB hiccup.
+    /// </summary>
+    private async Task<Dictionary<ulong, DateTime>> LoadListedAtAsync(ulong guildId)
+    {
+        try
+        {
+            using var scope = _services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+            var rows = await db.AwolRecords
+                .Where(r => r.GuildId == guildId
+                         && r.NotificationSentAt != null
+                         && r.NotificationChannelId != null)
+                .Select(r => new { r.UserId, r.NotificationSentAt })
+                .ToListAsync();
+
+            return rows
+                .GroupBy(r => r.UserId)
+                .ToDictionary(g => g.Key, g => g.Max(r => r.NotificationSentAt!.Value));
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to load AWOL listing timestamps for guild {GuildId}. " +
+                "Treating every member as 'not listed' — no one will be kicked this run.",
+                guildId);
+            return new Dictionary<ulong, DateTime>();
+        }
+    }
+
+    /// <summary>
     /// Attempts to persist the given audit rows. Returns the number of rows
     /// successfully written, or 0 on failure. Does NOT throw — a transient
     /// DB issue here should not abort the kick loop. The rows stay in the
@@ -626,7 +754,8 @@ public class KickAwolsCommandHandler
         IUser invoker,
         bool dryRun,
         int kicked, int skippedReserve, int skippedRank,
-        int skippedHier, int userGone, int failedCount,
+        int skippedHier, int listedRecently, int notListed,
+        int userGone, int failedCount,
         int auditsWritten)
     {
         try
@@ -668,6 +797,8 @@ public class KickAwolsCommandHandler
                 $"`reserve: {skippedReserve}` · " +
                 $"`protected rank: {skippedRank}` · " +
                 $"`hierarchy: {skippedHier}` · " +
+                $"`listed <{_config.AwolKickMinListedDays}d: {listedRecently}` · " +
+                $"`not listed: {notListed}` · " +
                 $"`already left: {userGone}` · " +
                 $"`failed: {failedCount}` · " +
                 $"`audits: {auditsWritten}`";

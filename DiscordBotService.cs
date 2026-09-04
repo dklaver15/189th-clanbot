@@ -743,14 +743,16 @@ public class DiscordBotService : IHostedService
                             .WithMaxValue(30))
                     .Build(),
 
-                // /kick-awols — bulk-kick all members holding the AWOL role.
-                // Multiple safety guards: Reserve role, min rank, role hierarchy.
+                // /kick-awols — bulk-kick members who have been sitting on the
+                // AWOL list for at least AwolKickMinListedDays. Multiple safety
+                // guards: Reserve role, min rank, listing age, role hierarchy.
                 // Per-member audit rows written to AwolKickAuditRecords.
                 // Defaults to neither confirm nor dry-run; one of the two
                 // booleans must be passed explicitly.
                 new SlashCommandBuilder()
                     .WithName("kick-awols")
-                    .WithDescription($"Kick all members currently flagged AWOL ({_config.AwolKickMinRank}+ only)")
+                    .WithDescription(
+                        $"Kick members on the AWOL list {_config.AwolKickMinListedDays}+ days ({_config.AwolKickMinRank}+ only)")
                     .AddOption("confirm", ApplicationCommandOptionType.Boolean,
                         "Set to true to actually kick members", isRequired: false)
                     .AddOption("dry-run", ApplicationCommandOptionType.Boolean,
@@ -758,11 +760,13 @@ public class DiscordBotService : IHostedService
                     .Build(),
 
                 // /clear-awol-list — wipe the HQ channel so the reviewing
-                // officer doesn't have to scroll through stale embeds.
-                // Destructive: requires confirm:true.
+                // officer doesn't have to scroll through stale embeds. Pinned
+                // messages and listings younger than AwolKickMinListedDays are
+                // kept. Destructive: requires confirm:true.
                 new SlashCommandBuilder()
                     .WithName("clear-awol-list")
-                    .WithDescription($"Delete all messages in #{_config.HqChannelName} ({_config.AwolKickMinRank}+ only)")
+                    .WithDescription(
+                        $"Clear #{_config.HqChannelName}, keeping the last {_config.AwolKickMinListedDays}d ({_config.AwolKickMinRank}+ only)")
                     .AddOption("confirm", ApplicationCommandOptionType.Boolean,
                         "Set to true to confirm deletion", isRequired: false)
                     .Build(),
