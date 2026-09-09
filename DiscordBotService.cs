@@ -67,6 +67,7 @@ public class DiscordBotService : IHostedService
     private readonly XpCommandHandler _xpCommandHandler;
     private readonly PalworldCommandHandler _palworldCommandHandler;
     private readonly SatisfactoryCommandHandler _satisfactoryCommandHandler;
+    private readonly ValheimCommandHandler _valheimCommandHandler;
     private readonly PromoteCommandHandler _promoteHandler;
     private readonly DemoteCommandHandler _demoteHandler;
     private readonly SetNickCommandHandler _setNickHandler;
@@ -160,6 +161,7 @@ public class DiscordBotService : IHostedService
         XpCommandHandler xpCommandHandler,
         PalworldCommandHandler palworldCommandHandler,
         SatisfactoryCommandHandler satisfactoryCommandHandler,
+        ValheimCommandHandler valheimCommandHandler,
         PromoteCommandHandler promoteHandler,
         DemoteCommandHandler demoteHandler,
         SetNickCommandHandler setNickHandler,
@@ -245,6 +247,7 @@ public class DiscordBotService : IHostedService
         _xpCommandHandler            = xpCommandHandler;
         _palworldCommandHandler      = palworldCommandHandler;
         _satisfactoryCommandHandler  = satisfactoryCommandHandler;
+        _valheimCommandHandler       = valheimCommandHandler;
         _promoteHandler              = promoteHandler;
         _demoteHandler               = demoteHandler;
         _setNickHandler              = setNickHandler;
@@ -350,6 +353,7 @@ public class DiscordBotService : IHostedService
         _xpCommandHandler.Register(_client);
         _palworldCommandHandler.Register(_client);
         _satisfactoryCommandHandler.Register(_client);
+        _valheimCommandHandler.Register(_client);
         _promoteHandler.Register(_client);
         _demoteHandler.Register(_client);
         _setNickHandler.Register(_client);
@@ -637,6 +641,16 @@ public class DiscordBotService : IHostedService
                 SatisfactoryCommandHandler.BuildTrainsCommand(),
                 SatisfactoryCommandHandler.BuildMapCommand(),
                 SatisfactoryCommandHandler.BuildLinkCommand(),
+
+                // /valheim-* — the clan's Valheim server on Shockbyte, provisioned
+                // through Discord's Game Servers. Read-only and unauthenticated: it
+                // speaks the Steam A2S query protocol, because vanilla Valheim ships
+                // no REST API and no RCON. That protocol reports a player COUNT and
+                // never a name, so there is no -playtime/-leaderboard/-link here as
+                // there is for Palworld and Satisfactory, and no admin command at all.
+                // Runtime-gated by BotConfig.ValheimEnabled. Handled by
+                // ValheimCommandHandler.
+                ValheimCommandHandler.BuildStatusCommand(),
 
                 new SlashCommandBuilder()
                     .WithName("promote")

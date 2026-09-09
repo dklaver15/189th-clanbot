@@ -659,6 +659,8 @@ public class CommandsCommandHandler
                 "Everyone", everyone),
             new("satisfactory-link", "Link your Discord account to your Satisfactory in-game name",
                 "Everyone", everyone),
+            new("valheim-status", "Live status of the clan's Valheim server — who's on, world, version, join address",
+                "Everyone", everyone),
             new("patrol", "Toggle your visibility on Patrol Watch embeds (off/on/info)",
                 "Everyone", everyone),
             new("promo-eligibility", "Check a member's auto-promotion eligibility",

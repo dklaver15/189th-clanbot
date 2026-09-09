@@ -2434,6 +2434,105 @@ public class BotConfig
     /// </summary>
     public int SatisfactoryMapFocusRadiusMetres { get; set; } = 250;
 
+    // ─── Valheim server (Shockbyte, via Discord Game Servers) ────────
+    /// <summary>
+    /// Master switch for the Valheim integration (/valheim-status, the up/down +
+    /// player-count feed, and player-count history sampling).
+    ///
+    /// <para>Additionally requires <see cref="ValheimHost"/>; see
+    /// <see cref="Services.ValheimQueryService.IsConfigured"/>. Unlike Palworld and
+    /// Satisfactory there is no credential to set — the Steam A2S query protocol is
+    /// unauthenticated, which is exactly why this integration works on a host whose
+    /// panel the clan may not have access to.</para>
+    /// </summary>
+    public bool ValheimEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Hostname or IP of the Valheim server — no scheme, no port. The Shockbyte
+    /// allocation shown on Discord's game server card, e.g. "135.148.252.143".
+    ///
+    /// <para>Not a secret: it's the address the whole clan types in to join, and it
+    /// is printed in the status embed. Safe to commit, unlike the Palworld and
+    /// Satisfactory credentials.</para>
+    /// </summary>
+    public string ValheimHost { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The GAME port — what players actually connect to, and what the Discord card
+    /// shows (22533 for the clan's server). 0 falls back to Valheim's default 2456.
+    ///
+    /// <para>This is not the port queried; see <see cref="ValheimQueryPort"/>.</para>
+    /// </summary>
+    public int ValheimGamePort { get; set; } = 0;
+
+    /// <summary>
+    /// Port A2S queries are sent to. 0 (the default) derives it as
+    /// <see cref="ValheimGamePort"/> + 1, which is how Valheim binds: the server
+    /// opens the game port for play and the next one up for Steam queries.
+    ///
+    /// <para>Only set this when the host allocates the two independently — some
+    /// panels hand out a non-contiguous block. If /valheim-status times out while
+    /// people are demonstrably in game, a wrong query port is the first suspect.</para>
+    /// </summary>
+    public int ValheimQueryPort { get; set; } = 0;
+
+    /// <summary>
+    /// How often <see cref="Services.ValheimStatusService"/> queries the server, in
+    /// seconds. Default 60, clamped 15–3600. Polling isn't a design choice: A2S is
+    /// request/response with no push of any kind.
+    /// </summary>
+    public int ValheimPollIntervalSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// Whether the player-count change lines are posted to
+    /// <see cref="ValheimFeedChannelId"/>. Scoped to ONLY that chatter — the
+    /// online/offline embed is separately switchable via
+    /// <see cref="ValheimServerStatusAnnounceEnabled"/>, and history sampling runs
+    /// regardless. Default false so enabling the feature doesn't start posting.
+    /// </summary>
+    public bool ValheimFeedEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Channel for the Valheim status feed. 0 disables both the count lines and the
+    /// up/down embed no matter what the flags say.
+    /// </summary>
+    public ulong ValheimFeedChannelId { get; set; } = 0;
+
+    /// <summary>
+    /// Whether a server up/down transition posts its own embed. Shares the feed
+    /// channel with the count lines but is independently switchable — the count
+    /// chatter is noisy, an outage notice usually isn't.
+    /// SyncWithHandlers: ValheimStatusService.PostStatusEmbedAsync.
+    /// </summary>
+    public bool ValheimServerStatusAnnounceEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Whether each reachable poll records a <see cref="Models.ValheimMetricSample"/>.
+    /// This is the only source of Valheim player-count history; with it off, there
+    /// is no record of when the server is busy.
+    /// </summary>
+    public bool ValheimMetricsSamplingEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Days of Valheim samples to keep. 0 disables pruning entirely. Default 30,
+    /// matching the Palworld and Satisfactory windows.
+    /// </summary>
+    public int ValheimMetricsRetentionDays { get; set; } = 30;
+
+    /// <summary>
+    /// Display name of the host's control panel, used in "the server is down"
+    /// messages. A2S is read-only, so the bot can never restart the server itself
+    /// and every failure message has to send a human somewhere real.
+    /// SyncWithHandlers: ValheimCommandHandler.OfflineHint.
+    /// </summary>
+    public string ValheimHostPanelName { get; set; } = "the Shockbyte game panel";
+
+    /// <summary>
+    /// URL of that panel, turning the name into a link. Discord-provisioned
+    /// Shockbyte servers use the Discord-linked panel rather than the ordinary
+    /// Shockbyte client area.
+    /// </summary>
+    public string ValheimHostPanelUrl { get; set; } = "https://discord.shockbyte.com/";
     // ─── SQLite Backup Settings ──────────────────────────────────────
     /// <summary>
     /// Master switch for SqliteBackupService. When false, the service exits

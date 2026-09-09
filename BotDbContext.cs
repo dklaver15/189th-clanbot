@@ -64,6 +64,11 @@ public class BotDbContext : DbContext
     public DbSet<SatisfactoryMetricSample>  SatisfactoryMetricSamples  => Set<SatisfactoryMetricSample>();
     public DbSet<SatisfactoryCircuitSample> SatisfactoryCircuitSamples => Set<SatisfactoryCircuitSample>();
     public DbSet<SatisfactoryTrainSample>   SatisfactoryTrainSamples   => Set<SatisfactoryTrainSample>();
+    // ── Valheim server (Steam A2S query protocol) ──
+    // No session or link tables: A2S reports a player COUNT and never a name,
+    // so there is nothing to key a session or a Discord link on. See
+    // ValheimQueryService for why that's a protocol limit, not an omission.
+    public DbSet<ValheimMetricSample>  ValheimMetricSamples  => Set<ValheimMetricSample>();
     // ── Sleeper fantasy football ──
     public DbSet<SleeperLink>          SleeperLinks          => Set<SleeperLink>();
     public DbSet<SleeperWeekPost>      SleeperWeekPosts      => Set<SleeperWeekPost>();
@@ -736,6 +741,15 @@ public class BotDbContext : DbContext
         // asks the same time-window question and none of them filters by
         // anything else first.
         modelBuilder.Entity<SatisfactoryTrainSample>(e =>
+        {
+            e.HasIndex(s => s.SampledUtc);
+        });
+
+        // ── Valheim: A2S samples ──────────────────────────────────────
+        // One index on SampledUtc, same reasoning as the aggregate Satisfactory
+        // tables: every reader is a time-window question ("busiest hours last
+        // week") and the retention prune deletes purely by age.
+        modelBuilder.Entity<ValheimMetricSample>(e =>
         {
             e.HasIndex(s => s.SampledUtc);
         });

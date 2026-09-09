@@ -727,6 +727,24 @@ try
     // 2026 and it was removed. If the new host exposes a panel API, an equivalent
     // client would be registered here and injected into the two services above.)
 
+    // ── Valheim (Shockbyte, via Discord Game Servers) ────────────────
+    // ValheimQueryService speaks the Steam A2S query protocol over UDP — the only
+    // thing an unmodded Valheim server answers, since the game ships neither a REST
+    // API nor RCON. No HttpClient and no credential: A2S is unauthenticated, which
+    // is what lets this work without Shockbyte panel access.
+    //
+    // ValheimCommandHandler owns /valheim-status (Register() called from
+    // DiscordBotService). ValheimStatusService polls for the up/down + player-count
+    // feed and records ValheimMetricSample rows for player-count history.
+    //
+    // There is deliberately no presence/playtime/link surface and no admin command:
+    // A2S returns a player COUNT and never a name, and has no write side at all.
+    // Both would need DiscordConnector installed server-side. All gated by
+    // BotConfig.Valheim* — idle until ValheimEnabled + a host are set.
+    builder.Services.AddSingleton<ValheimQueryService>();
+    builder.Services.AddSingleton<ValheimCommandHandler>();
+    builder.Services.AddHostedService<ValheimStatusService>();
+
     // ── Hosted Services ──────────────────────────────────────────────
     builder.Services.AddHostedService<DiscordBotService>();
     builder.Services.AddHostedService<HistoryBackfillService>();
