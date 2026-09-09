@@ -148,9 +148,9 @@ public sealed class PollClosingService
                     $"{label} · {max} {(max == 1 ? "vote" : "votes")} ({pct}%)");
             }
 
-            // Full breakdown, highest first, each row led by a bar scaled to the
-            // front-runner (see PollEmbedBuilder.Bar for why it isn't scaled by
-            // percentage). Bar first, not last: it's fixed width, so putting it at
+            // Full breakdown, highest first, each row led by a bar showing that
+            // option's share of the total vote, so the bar and the percentage beside
+            // it agree. Bar first, not last: it's fixed width, so putting it at
             // the start of the line is what makes every bar line up under the one
             // above regardless of how long the labels are. Counts only, never
             // identities, so this stays safe for anonymous polls.
@@ -158,8 +158,6 @@ public sealed class PollClosingService
                 .OrderByDescending(o => tally.CountsByOptionId.GetValueOrDefault(o.Id))
                 .ThenBy(o => o.Position)
                 .ToList();
-
-            var lead = ranked.Count == 0 ? 0 : tally.CountsByOptionId.GetValueOrDefault(ranked[0].Id);
 
             // Discord rejects an embed field whose value exceeds 1024 characters,
             // and a rejected field kills the whole announcement. Ten options with
@@ -175,7 +173,7 @@ public sealed class PollClosingService
             {
                 var c = tally.CountsByOptionId.GetValueOrDefault(o.Id);
                 var p = tally.TotalVotes == 0 ? 0 : (int)Math.Round(c * 100.0 / tally.TotalVotes);
-                var line = $"`{PollEmbedBuilder.Bar(c, lead)}` {Emoji(o)}{Trim(o.Label, 56)} · **{c}** ({p}%)\n";
+                var line = $"`{PollEmbedBuilder.Bar(c, tally.TotalVotes)}` {Emoji(o)}{Trim(o.Label, 56)} · **{c}** ({p}%)\n";
 
                 if (body.Length + line.Length > FieldLimit - TailReserve) break;
 

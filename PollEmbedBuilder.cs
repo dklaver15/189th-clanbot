@@ -62,7 +62,7 @@ public static class PollEmbedBuilder
             var head = string.IsNullOrWhiteSpace(opt.Emoji) ? "" : opt.Emoji + " ";
             var label = Trim(opt.Label, 80);
             sb.Append(leader ? "👑 " : "").Append(head).Append("**").Append(label).Append("**\n");
-            sb.Append('`').Append(Bar(count, maxCount)).Append("` ")
+            sb.Append('`').Append(Bar(count, totalVotes)).Append("` ")
               .Append(count).Append(count == 1 ? " vote" : " votes")
               .Append(" · ").Append(pct).Append("%\n\n");
         }
@@ -131,14 +131,12 @@ public static class PollEmbedBuilder
     }
 
     /// <summary>
-    /// A text meter, scaled RELATIVE TO THE LEADING OPTION (<paramref name="max"/>)
-    /// rather than to each option's share of the total vote. On a multiselect poll
-    /// the front-runner routinely holds well under half of all votes, so scaling by
-    /// percentage leaves the winner stubby and draws a 1-vote option as a completely
-    /// empty bar. The shape stops carrying information exactly when you want to read
-    /// it. Scaling to the leader keeps the comparison legible at any turnout, and the
-    /// percentage printed beside the bar still reports the true share, so nothing is
-    /// overstated.
+    /// A text meter scaled to the option's SHARE OF THE TOTAL VOTE: 75% of the
+    /// votes fills 75% of the bar. The bar and the percentage printed beside it
+    /// then say the same thing, so a glance at the shape and a read of the number
+    /// never disagree. Note the consequence on a multiselect poll, where a member
+    /// can back several options: shares are still taken against total votes cast,
+    /// so even a runaway front-runner can sit well under half a bar.
     ///
     /// Uses U+2588 / U+2591, full-cell block glyphs that every font Discord falls
     /// back to renders at the same width, so the bar stays rectangular. Glyphs that
@@ -148,11 +146,11 @@ public static class PollEmbedBuilder
     /// Any non-zero count gets at least one filled cell: "one person voted for this"
     /// must never render identically to "nobody did".
     /// </summary>
-    public static string Bar(int count, int max, int width = BarWidth)
+    public static string Bar(int count, int total, int width = BarWidth)
     {
-        if (count <= 0 || max <= 0) return new string('░', width);
+        if (count <= 0 || total <= 0) return new string('░', width);
 
-        var filled = (int)Math.Round((double)count / max * width);
+        var filled = (int)Math.Round((double)count / total * width);
         filled = Math.Clamp(filled, 1, width);
         return new string('█', filled) + new string('░', width - filled);
     }
