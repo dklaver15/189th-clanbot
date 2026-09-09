@@ -306,30 +306,71 @@ public sealed class EventTimeParser
                     return FinishEnd(startUtc, startUtc.AddSeconds(seconds));
                 }
 
-        // 2) Otherwise treat it as an end time-of-day / datetime.
+        // 2) Otherwise treat it as an end time-of-day / datetime. Collect every
+        //    candidate before picking one: "until Friday 9pm" resolves to BOTH
+        //    the last Friday and the next one, and only a future end is usable.
+        var candidates = new List<DateTime>();
+
         foreach (var result in results)
             foreach (var v in EnumerateValues(result))
             {
                 if (!v.TryGetValue("type", out var type)) continue;
 
-                DateTime endLocal;
-                if (type == "datetime" && TryParseValue(v, "value", out var edt))
-                    endLocal = edt;
-                else if (type == "time" && TryParseTimeOfDay(v, "value", out var tod))
+                switch (type)
                 {
-                    endLocal = startLocal.Date + tod;
-                    if (endLocal <= startLocal) endLocal = endLocal.AddDays(1); // "9pm" after a 10pm start → next day
+                    case "datetime" when TryParseValue(v, "value", out var edt):
+                        candidates.Add(edt);
+                        break;
+
+                    case "time" when TryParseTimeOfDay(v, "value", out var tod):
+                        candidates.Add(RollPastStart(startLocal, tod));
+                        break;
+
+                    // "until 9pm" / "til midnight" / "runs until 9pm". The word
+                    // "until" makes the recognizer report a RANGE modified with
+                    // Mod=before, which carries only an "end" key and no "value"
+                    // — so the two cases above never match it and the whole
+                    // answer fell through to "I couldn't read that". That is the
+                    // exact phrasing this step's own prompt suggests, so it has
+                    // to work. timerange carries a bare time-of-day; the
+                    // datetime variant ("until 11pm tomorrow") carries a full
+                    // instant and is already absolute.
+                    case "timerange" when TryParseTimeOfDay(v, "end", out var endTod):
+                        candidates.Add(RollPastStart(startLocal, endTod));
+                        break;
+
+                    case "datetimerange" when TryParseValue(v, "end", out var endDt):
+                        candidates.Add(endDt);
+                        break;
                 }
-                else
-                    continue;
-
-                if (!TryLocalToUtc(endLocal, tz, out var endUtc, out var err))
-                    return EndParseResult.Fail(err ?? "That end time is invalid; pick another.");
-
-                return FinishEnd(startUtc, endUtc);
             }
 
+        // Soonest candidate that actually lands after the start.
+        foreach (var endLocal in candidates.Where(c => c > startLocal).OrderBy(c => c))
+        {
+            if (!TryLocalToUtc(endLocal, tz, out var endUtc, out var err))
+                return EndParseResult.Fail(err ?? "That end time is invalid; pick another.");
+
+            return FinishEnd(startUtc, endUtc);
+        }
+
+        // We understood a time, it just isn't after the start — say so, rather
+        // than claiming the input was unreadable and re-prompting identically.
+        if (candidates.Count > 0)
+            return EndParseResult.Fail("The end needs to be after the start.");
+
         return EndParseResult.Fail("I couldn't read a duration or end time. Try \"2 hours\" or \"until 9pm\".");
+    }
+
+    /// <summary>
+    /// Pins a bare time-of-day to the start's local day, rolling to the next day
+    /// when it would otherwise land at or before the start ("9pm" after a 10pm
+    /// start means tomorrow's 9pm).
+    /// </summary>
+    private static DateTime RollPastStart(DateTime startLocal, TimeSpan timeOfDay)
+    {
+        var end = startLocal.Date + timeOfDay;
+        return end <= startLocal ? end.AddDays(1) : end;
     }
 
     private static EndParseResult FinishEnd(DateTime startUtc, DateTime endUtc)
