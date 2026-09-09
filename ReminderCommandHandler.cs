@@ -206,7 +206,7 @@ public sealed class ReminderCommandHandler
 
         foreach (var r in upcoming.Take(25))
         {
-            var repeat = r.Frequency is null ? "" : $" • 🔁 {r.Frequency}";
+            var repeat = r.Frequency is null ? "" : $" • 🔁 {ClanReminderFrequency.Label(r.Frequency.Value)}";
             eb.AddField(
                 Truncate(r.Title, 240),
                 $"{EventTimeParser.Stamp(r.NextFireUtc, 'F')} ({EventTimeParser.Stamp(r.NextFireUtc, 'R')})\n" +

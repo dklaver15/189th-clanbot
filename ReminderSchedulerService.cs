@@ -275,6 +275,11 @@ public sealed class ReminderSchedulerService : BackgroundService
 
     private static DateTime Advance(DateTime localAnchor, ClanEventFrequency freq, int n) => freq switch
     {
+        // Advancing the LOCAL wall-clock anchor (not the UTC instant) keeps the
+        // four daily slots pinned to the same wall-clock times across a DST
+        // shift; the cost is that one real interval on the changeover day is 5
+        // or 7 hours instead of 6, which is the right trade for an announcement.
+        ClanEventFrequency.SixHourly => localAnchor.AddHours(6 * n),
         ClanEventFrequency.Daily    => localAnchor.AddDays(n),
         ClanEventFrequency.Weekly   => localAnchor.AddDays(7 * n),
         ClanEventFrequency.Biweekly => localAnchor.AddDays(14 * n),

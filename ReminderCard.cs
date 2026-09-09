@@ -67,7 +67,7 @@ public static class ReminderCard
         var bound = r.MaxOccurrences is int n ? $", {n} times"
                   : r.UntilUtc is DateTime u ? $", until {EventTimeParser.Stamp(u, 'd')}"
                   : ", ongoing";
-        return $"{r.Frequency}{bound}";
+        return $"{ClanReminderFrequency.Label(r.Frequency.Value)}{bound}";
     }
 
     private static string DescribePings(ClanReminder r)

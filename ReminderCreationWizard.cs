@@ -547,10 +547,17 @@ public sealed class ReminderCreationWizard
             var r  = _time.ParseStart(text, tz);
             if (!r.Success)
             {
-                await s.Dm.SendMessageAsync(embed: Form("🔁 Until when?", "Tell me an **end date** (`August 1`), a **number of times** (`8`), or `none` for open-ended."));
+                await s.Dm.SendMessageAsync(embed: Form("🔁 Until when?", "Tell me an **end date** (`August 1` — posts through the end of that day), a **number of times** (`8`), or `none` for open-ended."));
                 return;
             }
-            s.Draft.UntilUtc = r.StartUtc;
+
+            // "until August 1" means through the END of August 1, not its
+            // midnight. The parser resolves a bare date to 00:00 local, which
+            // as a bound would drop that whole day — invisible for a Weekly
+            // reminder, but it silently costs a SixHourly one its last four
+            // posts. Stretch a date-only answer to the last second of that
+            // local day; an answer that named a time is taken literally.
+            s.Draft.UntilUtc = r.HasTimeOfDay ? r.StartUtc : EndOfLocalDayUtc(r.StartUtc, tz);
             s.Draft.MaxOccurrences = null;
         }
 
@@ -630,6 +637,7 @@ public sealed class ReminderCreationWizard
 
         ClanEventFrequency? freq = arg switch
         {
+            "6h"       => ClanEventFrequency.SixHourly,
             "daily"    => ClanEventFrequency.Daily,
             "weekly"   => ClanEventFrequency.Weekly,
             "biweekly" => ClanEventFrequency.Biweekly,
@@ -641,8 +649,8 @@ public sealed class ReminderCreationWizard
 
         s.Draft.Frequency = freq;
         s.Step = ReminderWizardStep.RecurrenceUntil;
-        await ClearButtons(c, $"Repeats: **{freq}**.");
-        await s.Dm.SendMessageAsync(embed: Form("🔁 Until when?", "Give an **end date** (`August 1`), a **number of times** (`8`), or `none` for open-ended."));
+        await ClearButtons(c, $"Repeats: **{ClanReminderFrequency.Label(freq.Value)}**.");
+        await s.Dm.SendMessageAsync(embed: Form("🔁 Until when?", "Give an **end date** (`August 1` — posts through the end of that day), a **number of times** (`8`), or `none` for open-ended."));
     }
 
     private async Task OnConfirmAsync(ReminderCreationSession s, SocketMessageComponent c)
@@ -824,12 +832,14 @@ public sealed class ReminderCreationWizard
     private async Task PromptRecurrenceAsync(ReminderCreationSession s)
     {
         s.Step = ReminderWizardStep.Recurrence;
+        // Six buttons: an action row holds at most five, so Monthly wraps to row 1.
         var builder = new ComponentBuilder()
-            .WithButton("Does not repeat", $"{Prefix}rec:none",     ButtonStyle.Secondary)
-            .WithButton("Daily",           $"{Prefix}rec:daily",    ButtonStyle.Secondary)
-            .WithButton("Weekly",          $"{Prefix}rec:weekly",   ButtonStyle.Secondary)
-            .WithButton("Biweekly",        $"{Prefix}rec:biweekly", ButtonStyle.Secondary)
-            .WithButton("Monthly",         $"{Prefix}rec:monthly",  ButtonStyle.Secondary);
+            .WithButton("Does not repeat", $"{Prefix}rec:none",     ButtonStyle.Secondary, row: 0)
+            .WithButton("Every 6 hours",   $"{Prefix}rec:6h",       ButtonStyle.Secondary, row: 0)
+            .WithButton("Daily",           $"{Prefix}rec:daily",    ButtonStyle.Secondary, row: 0)
+            .WithButton("Weekly",          $"{Prefix}rec:weekly",   ButtonStyle.Secondary, row: 0)
+            .WithButton("Biweekly",        $"{Prefix}rec:biweekly", ButtonStyle.Secondary, row: 0)
+            .WithButton("Monthly",         $"{Prefix}rec:monthly",  ButtonStyle.Secondary, row: 1);
 
         await s.Dm.SendMessageAsync(embed: Form("🔁 Does this reminder repeat?",
             "Pick an option. A repeating reminder re-posts at the same local time each cycle."), components: builder.Build());
@@ -902,13 +912,26 @@ public sealed class ReminderCreationWizard
         return parts.Count == 0 ? "No ping" : string.Join(" ", parts);
     }
 
+    /// <summary>
+    /// Last second (UTC) of the local day <paramref name="instantUtc"/> falls in.
+    /// Used to turn a date-only recurrence bound into "through that day".
+    /// </summary>
+    private static DateTime EndOfLocalDayUtc(DateTime instantUtc, TimeZoneInfo tz)
+    {
+        var local   = TimeZoneInfo.ConvertTimeFromUtc(instantUtc, tz);
+        var endLocal = DateTime.SpecifyKind(local.Date.AddDays(1).AddSeconds(-1), DateTimeKind.Unspecified);
+        return tz.IsInvalidTime(endLocal)
+            ? instantUtc.AddDays(1).AddSeconds(-1)
+            : TimeZoneInfo.ConvertTimeToUtc(endLocal, tz);
+    }
+
     private static string DescribeRecurrence(ReminderDraft d)
     {
         if (d.Frequency is null) return "Does not repeat";
         var bound = d.MaxOccurrences is int n ? $", {n} times"
                   : d.UntilUtc is DateTime u ? $", until {EventTimeParser.Stamp(u, 'd')}"
                   : ", ongoing";
-        return $"{d.Frequency}{bound}";
+        return $"{ClanReminderFrequency.Label(d.Frequency.Value)}{bound}";
     }
 
     private static bool IsSkip(string text) =>

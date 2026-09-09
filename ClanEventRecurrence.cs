@@ -62,6 +62,7 @@ public static class ClanEventRecurrence
 
     private static DateTime Advance(DateTime localAnchor, ClanEventFrequency freq, int n) => freq switch
     {
+        ClanEventFrequency.SixHourly => localAnchor.AddHours(6 * n),
         ClanEventFrequency.Daily    => localAnchor.AddDays(n),
         ClanEventFrequency.Weekly   => localAnchor.AddDays(7 * n),
         ClanEventFrequency.Biweekly => localAnchor.AddDays(14 * n),

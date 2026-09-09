@@ -109,4 +109,14 @@ public enum ClanEventFrequency
     /// Stored as an int, so adding this value needs no migration.
     /// </summary>
     Custom = 5,
+
+    /// <summary>
+    /// Every six hours (four posts a day, at the anchor's wall-clock time and
+    /// +6/+12/+18 from it). Offered by the <c>/reminder</c> wizard only — it
+    /// suits a short, high-frequency nag ("give us your season feedback")
+    /// that a Daily reminder can't cover. Events never offer it; their wizard
+    /// maps its own strings, so this value can't leak into an event series.
+    /// Stored as an int, so adding this value needs no migration.
+    /// </summary>
+    SixHourly = 6,
 }

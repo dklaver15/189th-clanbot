@@ -135,6 +135,26 @@ public class ClanReminder
     public DateTime? LastFiredAt { get; set; }
 }
 
+/// <summary>
+/// Presentation helper for a reminder's cadence. The raw enum name is not
+/// user-facing text — <see cref="ClanEventFrequency.SixHourly"/> would render
+/// as "SixHourly" in the confirm preview, the status card and <c>/reminder
+/// list</c> if each of those kept interpolating the enum directly.
+/// </summary>
+public static class ClanReminderFrequency
+{
+    /// <summary>Human label for a cadence, e.g. "Every 6 hours".</summary>
+    public static string Label(ClanEventFrequency freq) => freq switch
+    {
+        ClanEventFrequency.SixHourly => "Every 6 hours",
+        ClanEventFrequency.Daily     => "Daily",
+        ClanEventFrequency.Weekly    => "Weekly",
+        ClanEventFrequency.Biweekly  => "Biweekly",
+        ClanEventFrequency.Monthly   => "Monthly",
+        _                            => freq.ToString(),
+    };
+}
+
 public enum ClanReminderStatus
 {
     Scheduled = 1,
