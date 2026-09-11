@@ -2538,6 +2538,51 @@ public class BotConfig
     /// Shockbyte client area.
     /// </summary>
     public string ValheimHostPanelUrl { get; set; } = "https://discord.shockbyte.com/";
+
+    /// <summary>
+    /// Master switch for ingesting DiscordConnector's webhook posts into sessions,
+    /// deaths and the link table. Separate from <see cref="ValheimEnabled"/> so the
+    /// A2S status poller and the event ingest can be run independently — which
+    /// matters here, because A2S is silent on a crossplay server while the mod
+    /// works fine.
+    ///
+    /// <para>Additionally requires <see cref="ValheimRawChannelId"/>.</para>
+    /// </summary>
+    public bool ValheimIngestEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Channel the DiscordConnector webhook posts into — the ingest channel, read by
+    /// <see cref="Handlers.ValheimEventIngestHandler"/>. 0 disables ingest.
+    ///
+    /// <para>This is NOT <see cref="ValheimFeedChannelId"/>, and pointing both at the
+    /// same channel would defeat the purpose: the mod's raw <c>DCX1|…</c> lines are
+    /// plumbing, and the readable feed is what the bot writes. The bot needs View
+    /// Channel + Read Message History here; it never posts to it.</para>
+    /// </summary>
+    public ulong ValheimRawChannelId { get; set; } = 0;
+
+    /// <summary>
+    /// When non-zero, only accept ingest messages from this exact webhook id.
+    ///
+    /// <para>Defence in depth. The handler already requires webhook authorship,
+    /// which ordinary members cannot forge — this narrows it further so a DIFFERENT
+    /// integration posting in the same shared channel can't be mistaken for the game
+    /// server. Worth setting once the webhook's id is known (it is the author id on
+    /// any message it has posted); 0 accepts any webhook in the channel.</para>
+    /// </summary>
+    public ulong ValheimRawWebhookId { get; set; } = 0;
+
+    /// <summary>
+    /// Role permitted to link someone ELSE's Discord account to a character with
+    /// <c>/valheim-link</c>. Self-linking needs no role. 0 means only server
+    /// Administrators can do it.
+    ///
+    /// <para>Gated because a link decides whose playtime is whose: without this,
+    /// anyone could bind a teammate's character to their own account and inherit
+    /// their hours on the leaderboard.</para>
+    /// SyncWithHandlers: ValheimCommandHandler.HasAdminRole.
+    /// </summary>
+    public ulong ValheimAdminRoleId { get; set; } = 0;
     // ─── SQLite Backup Settings ──────────────────────────────────────
     /// <summary>
     /// Master switch for SqliteBackupService. When false, the service exits

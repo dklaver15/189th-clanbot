@@ -381,6 +381,20 @@ public sealed class ValheimStatusService : BackgroundService
     }
 
     /// <summary>
+    /// "2h 14m" / "47m". Shared with the ingest handler and the playtime commands so
+    /// every Valheim duration in Discord reads the same way.
+    /// </summary>
+    public static string Humanize(TimeSpan d)
+    {
+        if (d.TotalMinutes < 1) return "under a minute";
+        var days = (int)d.TotalDays;
+        var hours = d.Hours;
+        var minutes = d.Minutes;
+        if (days > 0) return $"{days}d {hours}h";
+        return hours > 0 ? $"{hours}h {minutes}m" : $"{minutes}m";
+    }
+
+    /// <summary>
     /// The world and server names come off the wire from a host we don't control,
     /// and land in a Discord message. Neutralize markdown so they can't forge
     /// formatting or a mass-ping.

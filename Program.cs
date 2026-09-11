@@ -745,6 +745,14 @@ try
     builder.Services.AddSingleton<ValheimCommandHandler>();
     builder.Services.AddHostedService<ValheimStatusService>();
 
+    // ValheimEventIngestHandler turns DiscordConnector's webhook posts into session,
+    // death and link rows. Registered separately from the A2S poller above and gated
+    // by its own BotConfig.ValheimIngestEnabled, because the two data sources are
+    // independent: A2S is silent on this crossplay server while the mod works, and
+    // either could be the one that's available. Register() is called from
+    // DiscordBotService (it subscribes to MessageReceived, not slash commands).
+    builder.Services.AddSingleton<ValheimEventIngestHandler>();
+
     // ── Hosted Services ──────────────────────────────────────────────
     builder.Services.AddHostedService<DiscordBotService>();
     builder.Services.AddHostedService<HistoryBackfillService>();

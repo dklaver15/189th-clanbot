@@ -68,6 +68,7 @@ public class DiscordBotService : IHostedService
     private readonly PalworldCommandHandler _palworldCommandHandler;
     private readonly SatisfactoryCommandHandler _satisfactoryCommandHandler;
     private readonly ValheimCommandHandler _valheimCommandHandler;
+    private readonly ValheimEventIngestHandler _valheimIngestHandler;
     private readonly PromoteCommandHandler _promoteHandler;
     private readonly DemoteCommandHandler _demoteHandler;
     private readonly SetNickCommandHandler _setNickHandler;
@@ -162,6 +163,7 @@ public class DiscordBotService : IHostedService
         PalworldCommandHandler palworldCommandHandler,
         SatisfactoryCommandHandler satisfactoryCommandHandler,
         ValheimCommandHandler valheimCommandHandler,
+        ValheimEventIngestHandler valheimIngestHandler,
         PromoteCommandHandler promoteHandler,
         DemoteCommandHandler demoteHandler,
         SetNickCommandHandler setNickHandler,
@@ -248,6 +250,7 @@ public class DiscordBotService : IHostedService
         _palworldCommandHandler      = palworldCommandHandler;
         _satisfactoryCommandHandler  = satisfactoryCommandHandler;
         _valheimCommandHandler       = valheimCommandHandler;
+        _valheimIngestHandler        = valheimIngestHandler;
         _promoteHandler              = promoteHandler;
         _demoteHandler               = demoteHandler;
         _setNickHandler              = setNickHandler;
@@ -354,6 +357,7 @@ public class DiscordBotService : IHostedService
         _palworldCommandHandler.Register(_client);
         _satisfactoryCommandHandler.Register(_client);
         _valheimCommandHandler.Register(_client);
+        _valheimIngestHandler.Register(_client);
         _promoteHandler.Register(_client);
         _demoteHandler.Register(_client);
         _setNickHandler.Register(_client);
@@ -651,6 +655,9 @@ public class DiscordBotService : IHostedService
                 // Runtime-gated by BotConfig.ValheimEnabled. Handled by
                 // ValheimCommandHandler.
                 ValheimCommandHandler.BuildStatusCommand(),
+                ValheimCommandHandler.BuildPlaytimeCommand(),
+                ValheimCommandHandler.BuildLeaderboardCommand(),
+                ValheimCommandHandler.BuildLinkCommand(),
 
                 new SlashCommandBuilder()
                     .WithName("promote")

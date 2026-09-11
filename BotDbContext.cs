@@ -69,6 +69,9 @@ public class BotDbContext : DbContext
     // so there is nothing to key a session or a Discord link on. See
     // ValheimQueryService for why that's a protocol limit, not an omission.
     public DbSet<ValheimMetricSample>  ValheimMetricSamples  => Set<ValheimMetricSample>();
+    public DbSet<ValheimSession>       ValheimSessions       => Set<ValheimSession>();
+    public DbSet<ValheimLink>          ValheimLinks          => Set<ValheimLink>();
+    public DbSet<ValheimDeath>         ValheimDeaths         => Set<ValheimDeath>();
     // ── Sleeper fantasy football ──
     public DbSet<SleeperLink>          SleeperLinks          => Set<SleeperLink>();
     public DbSet<SleeperWeekPost>      SleeperWeekPosts      => Set<SleeperWeekPost>();
@@ -752,6 +755,40 @@ public class BotDbContext : DbContext
         modelBuilder.Entity<ValheimMetricSample>(e =>
         {
             e.HasIndex(s => s.SampledUtc);
+        });
+
+        // ── Valheim sessions ──────────────────────────────────────────
+        // Same access shapes as the Palworld sessions: the ingest handler looks up
+        // OPEN rows constantly (every join, leave and death), and the playtime and
+        // leaderboard queries sum closed rows per identity.
+        //
+        // Two indexes because there are two identity columns and which one is in
+        // play depends on whether the mod supplies %PLAYER_ID% — a name-keyed
+        // deployment would get no benefit from the id index at all.
+        modelBuilder.Entity<ValheimSession>(e =>
+        {
+            e.HasIndex(s => new { s.ValheimPlayerId, s.StartedUtc });
+            e.HasIndex(s => new { s.PlayerName, s.StartedUtc });
+            e.HasIndex(s => s.EndedUtc);
+        });
+
+        // ── Valheim ↔ Discord links ───────────────────────────────────
+        // Unique in BOTH directions, same as the Palworld and Satisfactory link
+        // tables: one Discord account per Valheim identity and vice versa, so
+        // re-linking overwrites rather than accumulating rival claims.
+        modelBuilder.Entity<ValheimLink>(e =>
+        {
+            e.HasIndex(l => new { l.GuildId, l.DiscordUserId }).IsUnique();
+            e.HasIndex(l => new { l.GuildId, l.ValheimPlayerId }).IsUnique();
+        });
+
+        // ── Valheim deaths ────────────────────────────────────────────
+        // Per-player totals and "deaths this week" are the only two questions asked,
+        // so one composite index covers both.
+        modelBuilder.Entity<ValheimDeath>(e =>
+        {
+            e.HasIndex(d => new { d.ValheimPlayerId, d.DiedUtc });
+            e.HasIndex(d => d.DiedUtc);
         });
 
         // ── Palworld health samples ───────────────────────────────────
