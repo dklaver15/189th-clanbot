@@ -72,6 +72,7 @@ public class BotDbContext : DbContext
     public DbSet<ValheimSession>       ValheimSessions       => Set<ValheimSession>();
     public DbSet<ValheimLink>          ValheimLinks          => Set<ValheimLink>();
     public DbSet<ValheimDeath>         ValheimDeaths         => Set<ValheimDeath>();
+    public DbSet<ValheimServerEvent>   ValheimServerEvents   => Set<ValheimServerEvent>();
     // ── Sleeper fantasy football ──
     public DbSet<SleeperLink>          SleeperLinks          => Set<SleeperLink>();
     public DbSet<SleeperWeekPost>      SleeperWeekPosts      => Set<SleeperWeekPost>();
@@ -789,6 +790,14 @@ public class BotDbContext : DbContext
         {
             e.HasIndex(d => new { d.ValheimPlayerId, d.DiedUtc });
             e.HasIndex(d => d.DiedUtc);
+        });
+
+        // ── Valheim server lifecycle ──────────────────────────────────
+        // Only ever read as "the most recent row", so one descending-friendly index
+        // on the timestamp is the whole access pattern.
+        modelBuilder.Entity<ValheimServerEvent>(e =>
+        {
+            e.HasIndex(v => v.OccurredUtc);
         });
 
         // ── Palworld health samples ───────────────────────────────────

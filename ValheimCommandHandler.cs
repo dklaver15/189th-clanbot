@@ -13,18 +13,25 @@ namespace ClanGuardBot.Handlers;
 /// <summary>
 /// Owns the Valheim slash commands against the clan's Shockbyte-hosted server.
 ///
-///   • /valheim-status — live server state (players, world, version, join address)  (everyone)
+///   • /valheim-status      — who's on right now, and whether the server is up   (everyone)
+///   • /valheim-playtime    — one player's total hours, sessions and deaths      (everyone)
+///   • /valheim-leaderboard — most playtime, public                              (everyone)
+///   • /valheim-link        — bind a Discord account to a character              (everyone; others = officer)
 ///
-/// ── Why this surface is so much smaller than Palworld's or Satisfactory's ──
-/// Everything here reads <see cref="ValheimQueryService"/>, i.e. the Steam A2S
-/// query protocol, because vanilla Valheim has no REST API and no RCON. A2S
-/// returns a player COUNT and never a name, so the -playtime, -leaderboard and
-/// -link commands that exist for the other two servers have no data to stand on
-/// and are deliberately absent rather than stubbed. It is also read-only in the
-/// strongest sense: A2S has no write side at all, so there is no /valheim-admin.
+/// ── Two data sources, and which one wins ──
+/// <see cref="ValheimQueryService"/> is the Steam A2S query protocol — no mod
+/// required, but it reports a bare player COUNT and never a name, and on a
+/// CROSSPLAY server it reports nothing at all (crossplay registers with PlayFab
+/// instead of Steam, so the query port is open but unanswered).
 ///
-/// Closing that gap needs DiscordConnector installed server-side, which is a
-/// separate integration and needs Shockbyte panel/FTP access.
+/// The DiscordConnector ingest (<see cref="ValheimEventIngestHandler"/>) is the
+/// real source: join/leave/death events carrying a stable platform id, which is
+/// what makes sessions, playtime, the leaderboard and the link table possible at
+/// all. <see cref="HandleStatusAsync"/> prefers it and falls back to A2S only when
+/// the ingest isn't configured.
+///
+/// There is still no /valheim-admin: neither source has a write side. Vanilla
+/// Valheim has no RCON, and the mod is one-way.
 ///
 /// ── Gateway safety ──
 /// The status query is a UDP round-trip with a 5s timeout, and Discord.NET runs
@@ -149,16 +156,133 @@ public class ValheimCommandHandler
 
     // ─── /valheim-status ─────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Live server status.
+    ///
+    /// <para>Reads the DiscordConnector ingest when it's configured, and only falls
+    /// back to the A2S query otherwise. That ordering is deliberate: A2S was the
+    /// original source here and is now the WORSE one wherever the mod is running.
+    /// It reports a bare player count and nothing else, and on a crossplay server it
+    /// reports nothing at all — crossplay registers with PlayFab rather than Steam,
+    /// so the Steam query port is allocated and open but never answers. The ingest
+    /// gives names, per-player session durations, and an authoritative up/down with a
+    /// timestamp.</para>
+    /// </summary>
     private async Task HandleStatusAsync(SocketSlashCommand command)
     {
         await command.DeferAsync(ephemeral: true);
-        if (!await EnsureEnabledAsync(command)) return;
 
+        if (IngestConfigured)
+        {
+            await RespondFromSessionsAsync(command);
+            return;
+        }
+
+        if (!await EnsureEnabledAsync(command)) return;
+        await RespondFromQueryAsync(command);
+    }
+
+    private bool IngestConfigured =>
+        _config.ValheimEnabled && _config.ValheimIngestEnabled && _config.ValheimRawChannelId != 0;
+
+    private async Task RespondFromSessionsAsync(SocketSlashCommand command)
+    {
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+        var lastEvent = await db.ValheimServerEvents
+            .OrderByDescending(e => e.OccurredUtc)
+            .FirstOrDefaultAsync();
+
+        var open = await db.ValheimSessions
+            .Where(s => s.EndedUtc == null)
+            .OrderBy(s => s.StartedUtc)
+            .ToListAsync();
+
+        var embed = new EmbedBuilder()
+            .WithTitle("🛡️ Valheim server")
+            .WithCurrentTimestamp();
+
+        // Anyone mid-session is proof the server is up, and outranks a stale
+        // lifecycle row — if the bot missed a server_start, live players still
+        // settle the question.
+        var online = open.Count > 0 || lastEvent?.Online == true;
+
+        // No lifecycle event AND nobody on: the bot has simply never observed this
+        // server. That is genuinely different from "offline" — it is the normal state
+        // between deploying the integration and the game server's next restart — and
+        // reporting it as offline would be indistinguishable from a real outage.
+        var known = lastEvent is not null || open.Count > 0;
+
+        if (!known)
+        {
+            embed.WithColor(Color.LightGrey)
+                 .AddField("Status", "❓ Unknown — no server events recorded yet", false);
+        }
+        else
+        {
+            embed.WithColor(online ? Color.Green : Color.Red);
+
+            var since = lastEvent is null ? null : $" <t:{ToUnix(lastEvent.OccurredUtc)}:R>";
+            embed.AddField("Status", online ? $"🟢 Online{since}" : $"🔴 Offline{since}", false);
+        }
+
+        // "—" rather than 0 while unknown: we have no basis for the number, and
+        // printing a figure we haven't observed is worse than admitting the gap.
+        embed.AddField("Players", known ? (online ? $"{open.Count}" : "0") : "—", true);
+        embed.AddField("Join", $"`{_query.JoinAddress}`", true);
+
+        if (open.Count > 0)
+        {
+            var links = await LinksForAsync(db, command.GuildId, open);
+            var now = DateTime.UtcNow;
+
+            var lines = open.Select(s =>
+            {
+                var who = links.TryGetValue(KeyOf(s), out var discordId)
+                    ? $"**{ValheimStatusService.Escape(s.PlayerName)}** (<@{discordId}>)"
+                    : $"**{ValheimStatusService.Escape(s.PlayerName)}**";
+
+                // Measured from StartedUtc against the wall clock rather than via
+                // Duration, which clamps to LastSeenUtc — correct for crediting
+                // playtime, but it would under-report someone who is on right now and
+                // simply hasn't generated an event since joining.
+                var elapsed = now - s.StartedUtc;
+                return $"• {who} — {ValheimStatusService.Humanize(elapsed)}";
+            });
+
+            embed.AddField("Who's on", string.Join("\n", lines), false);
+        }
+
+        await command.FollowupAsync(embed: embed.Build(), ephemeral: true,
+            allowedMentions: AllowedMentions.None);
+    }
+
+    /// <summary>Discord links for the identities in these sessions, keyed as sessions are.</summary>
+    private static async Task<Dictionary<string, ulong>> LinksForAsync(
+        BotDbContext db, ulong? guildId, List<ValheimSession> sessions)
+    {
+        if (guildId is not ulong gid) return new Dictionary<string, ulong>(StringComparer.Ordinal);
+
+        var ids = sessions.Select(KeyOf).Distinct(StringComparer.Ordinal).ToList();
+
+        return (await db.ValheimLinks
+                .Where(l => l.GuildId == gid && ids.Contains(l.ValheimPlayerId))
+                .Select(l => new { l.ValheimPlayerId, l.DiscordUserId })
+                .ToListAsync())
+            .GroupBy(l => l.ValheimPlayerId, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.First().DiscordUserId, StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// The original A2S path, kept for a server where the query port actually
+    /// answers — i.e. one not using crossplay, or a future host where it works.
+    /// Only reached when the ingest isn't configured.
+    /// </summary>
+    private async Task RespondFromQueryAsync(SocketSlashCommand command)
+    {
         var info = await _query.QueryAsync();
 
-        // A null read is "didn't answer", which for UDP covers more ground than
-        // "offline": the server could be up with its query port firewalled. Say
-        // what we actually know instead of asserting it's down.
         if (info is null)
         {
             await command.FollowupAsync(
@@ -186,9 +310,6 @@ public class ValheimCommandHandler
         embed.AddField("Query ping", $"{(int)info.RoundTrip.TotalMilliseconds} ms", true);
         embed.AddField("Join", $"`{_query.JoinAddress}`", false);
 
-        // A2S structurally cannot name players, and someone WILL ask why the
-        // count is there without the names. Say it once, in the footer, rather
-        // than fielding it in chat every time.
         embed.WithFooter("Valheim's query protocol reports a player count only — names need a server-side mod.");
 
         await command.FollowupAsync(embed: embed.Build(), ephemeral: true);

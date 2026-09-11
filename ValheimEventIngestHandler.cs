@@ -162,6 +162,14 @@ public class ValheimEventIngestHandler
                 case ValheimEventKind.ServerStop:
                     await CloseAllOpenSessionsAsync(db, ev.Kind, now);
                     serverOnline = ev.Kind == ValheimEventKind.ServerStart;
+
+                    // Recorded so /valheim-status can answer "is it up, and since
+                    // when?" after a bot restart, when nothing is in memory.
+                    db.ValheimServerEvents.Add(new ValheimServerEvent
+                    {
+                        Online = serverOnline.Value,
+                        OccurredUtc = now,
+                    });
                     break;
             }
 
