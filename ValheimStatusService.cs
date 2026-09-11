@@ -38,8 +38,11 @@ namespace ClanGuardBot.Services;
 ///
 /// ── Gating ──
 /// Idle unless <see cref="BotConfig.ValheimEnabled"/> is true and a host is set.
-/// The feed is separately gated by <see cref="BotConfig.ValheimFeedEnabled"/> plus
-/// a channel id, so history sampling can run with the chat feed off.
+/// Three independent switches beyond that, so each kind of noise can be turned off
+/// on its own: <see cref="BotConfig.ValheimFeedEnabled"/> (per-player chatter),
+/// <see cref="BotConfig.ValheimServerStatusAnnounceEnabled"/> (up/down embeds), and
+/// <see cref="BotConfig.ValheimMetricsSamplingEnabled"/> (history). All three read
+/// the same poll, and history in particular runs with both feeds silent.
 /// </summary>
 public sealed class ValheimStatusService : BackgroundService
 {
@@ -279,10 +282,22 @@ public sealed class ValheimStatusService : BackgroundService
         await SendAsync(channel, e => e.Text = message, ct, "feed message");
     }
 
+    /// <summary>
+    /// Posts the green/red status embed.
+    ///
+    /// <para>Gated by <see cref="BotConfig.ValheimServerStatusAnnounceEnabled"/> and a
+    /// channel id, but deliberately NOT by
+    /// <see cref="BotConfig.ValheimFeedEnabled"/> — which is a considered divergence
+    /// from <see cref="SatisfactoryPresenceService"/>, where the feed flag gates both.
+    /// An outage notice and per-player chatter are wanted at completely different
+    /// rates: "tell me when the server dies, don't tell me every time someone logs
+    /// in" is the common preference, and under the shared gate it was not
+    /// expressible at all.</para>
+    /// </summary>
     private async Task PostStatusEmbedAsync(ServerAvailability state, CancellationToken ct)
     {
         if (!_config.ValheimServerStatusAnnounceEnabled) return;
-        if (!_config.ValheimFeedEnabled || _config.ValheimFeedChannelId == 0) return;
+        if (_config.ValheimFeedChannelId == 0) return;
         var channel = await ResolveFeedChannelAsync(ct);
         if (channel is null) return;
 

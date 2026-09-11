@@ -2484,11 +2484,16 @@ public class BotConfig
     public int ValheimPollIntervalSeconds { get; set; } = 60;
 
     /// <summary>
-    /// Whether the player-count change lines are posted to
-    /// <see cref="ValheimFeedChannelId"/>. Scoped to ONLY that chatter — the
-    /// online/offline embed is separately switchable via
-    /// <see cref="ValheimServerStatusAnnounceEnabled"/>, and history sampling runs
-    /// regardless. Default false so enabling the feature doesn't start posting.
+    /// Whether per-player chatter (join/leave lines) is posted to
+    /// <see cref="ValheimFeedChannelId"/>. Scoped to ONLY that chatter: the
+    /// online/offline embed has its own switch
+    /// (<see cref="ValheimServerStatusAnnounceEnabled"/>) and does NOT require this
+    /// one, and history sampling runs regardless of both.
+    ///
+    /// <para>So "warn me when the server goes down, but don't announce every
+    /// arrival" is this false + that true — the combination a shared gate would
+    /// make impossible. Default false so enabling the feature doesn't start
+    /// posting.</para>
     /// </summary>
     public bool ValheimFeedEnabled { get; set; } = false;
 
