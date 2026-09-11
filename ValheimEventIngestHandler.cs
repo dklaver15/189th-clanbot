@@ -54,6 +54,7 @@ public class ValheimEventIngestHandler
 
     private readonly IServiceProvider _services;
     private readonly DiscordSocketClient _client;
+    private readonly ValheimQueryService _query;
     private readonly ILogger<ValheimEventIngestHandler> _logger;
     private readonly BotConfig _config;
 
@@ -67,11 +68,13 @@ public class ValheimEventIngestHandler
     public ValheimEventIngestHandler(
         IServiceProvider services,
         DiscordSocketClient client,
+        ValheimQueryService query,
         ILogger<ValheimEventIngestHandler> logger,
         IOptions<BotConfig> config)
     {
         _services = services;
         _client = client;
+        _query = query;
         _logger = logger;
         _config = config.Value;
     }
@@ -126,14 +129,20 @@ public class ValheimEventIngestHandler
                 "Check the Player Join/Leave/Death message templates in the mod's messages config.");
         }
 
+        string? feed = null;
+
+        // Set by the server lifecycle events only; null means "not a transition",
+        // which is every player event.
+        bool? serverOnline = null;
+
+        // Declared outside the lock so the Discord posts below can happen after it is
+        // released — see the note at the end of this method.
         await Gate.WaitAsync();
         try
         {
             using var scope = _services.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
             var now = DateTime.UtcNow;
-
-            string? feed = null;
 
             switch (ev.Kind)
             {
@@ -152,20 +161,26 @@ public class ValheimEventIngestHandler
                 case ValheimEventKind.ServerStart:
                 case ValheimEventKind.ServerStop:
                     await CloseAllOpenSessionsAsync(db, ev.Kind);
+                    serverOnline = ev.Kind == ValheimEventKind.ServerStart;
                     break;
             }
 
             await db.SaveChangesAsync();
-
-            // Discord I/O happens AFTER the commit, never inside it: a failed post
-            // must not cost a session row, and holding the gate across a REST call
-            // would serialize the whole ingest behind Discord's latency.
-            if (feed is not null) await PostFeedAsync(feed);
         }
         finally
         {
             Gate.Release();
         }
+
+        // Discord I/O happens after the commit AND outside the lock. Both halves
+        // matter: committing first means a failed post never costs a session row,
+        // and releasing first means a slow or rate-limited REST call doesn't stall
+        // every other event behind it. That is not hypothetical — a server shutdown
+        // with a full lobby produces a burst of events at once, and serializing the
+        // database work behind eight Discord round-trips is how a burst turns into a
+        // backlog.
+        if (feed is not null) await PostFeedAsync(feed);
+        if (serverOnline is bool online) await PostStatusEmbedAsync(online);
     }
 
     // ─── Event handling ──────────────────────────────────────────────────────
@@ -313,19 +328,57 @@ public class ValheimEventIngestHandler
     private static string CountSuffix(ValheimEvent ev) =>
         ev.OnlineCount is int n ? $" — {n} online" : "";
 
+    /// <summary>
+    /// Posts the green/red server status embed on a lifecycle event.
+    ///
+    /// <para>Gated by <see cref="BotConfig.ValheimServerStatusAnnounceEnabled"/> and a
+    /// channel, but NOT by <see cref="BotConfig.ValheimFeedEnabled"/> — an outage
+    /// notice and per-player chatter are wanted at completely different rates, and
+    /// the common preference is exactly this pair: feed off, outages on.</para>
+    ///
+    /// <para>Marked authoritative because the server process itself reported the
+    /// transition, unlike <see cref="ValheimStatusService"/>'s inference from silence.
+    /// That service defers to this one whenever ingest is configured, so only one of
+    /// them ever speaks.</para>
+    /// </summary>
+    private async Task PostStatusEmbedAsync(bool online)
+    {
+        if (!_config.ValheimServerStatusAnnounceEnabled) return;
+        if (_config.ValheimFeedChannelId == 0) return;
+
+        var embed = ValheimStatusService.BuildStatusEmbed(online, _query.JoinAddress, authoritative: true);
+
+        try
+        {
+            var channel = await ResolveFeedChannelAsync();
+            if (channel is null) return;
+            await channel.SendMessageAsync(embed: embed, allowedMentions: AllowedMentions.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Valheim: failed to post server status embed");
+        }
+    }
+
+    private async Task<IMessageChannel?> ResolveFeedChannelAsync()
+    {
+        var channel = _client.GetChannel(_config.ValheimFeedChannelId) as IMessageChannel
+                      ?? await _client.Rest.GetChannelAsync(_config.ValheimFeedChannelId) as IMessageChannel;
+
+        if (channel is null)
+            _logger.LogWarning("Valheim: could not resolve feed channel {ChannelId}", _config.ValheimFeedChannelId);
+
+        return channel;
+    }
+
     private async Task PostFeedAsync(string message)
     {
         if (!_config.ValheimFeedEnabled || _config.ValheimFeedChannelId == 0) return;
 
         try
         {
-            var channel = _client.GetChannel(_config.ValheimFeedChannelId) as IMessageChannel
-                          ?? await _client.Rest.GetChannelAsync(_config.ValheimFeedChannelId) as IMessageChannel;
-            if (channel is null)
-            {
-                _logger.LogWarning("Valheim: could not resolve feed channel {ChannelId}", _config.ValheimFeedChannelId);
-                return;
-            }
+            var channel = await ResolveFeedChannelAsync();
+            if (channel is null) return;
 
             await channel.SendMessageAsync(message, allowedMentions: AllowedMentions.None);
         }

@@ -298,27 +298,58 @@ public sealed class ValheimStatusService : BackgroundService
     {
         if (!_config.ValheimServerStatusAnnounceEnabled) return;
         if (_config.ValheimFeedChannelId == 0) return;
+
+        // When the DiscordConnector ingest is running, IT owns the up/down
+        // announcement and this poller stays quiet. The mod's server_start /
+        // server_stop events are strictly better evidence: they come from the server
+        // process itself, so they're instant and can distinguish a clean shutdown
+        // from a crash — whereas this poller can only infer "stopped answering" after
+        // five silent polls, and on a crossplay server A2S never answers at all.
+        // Without this guard, a host where BOTH work would announce twice.
+        if (_config.ValheimIngestEnabled && _config.ValheimRawChannelId != 0) return;
+
         var channel = await ResolveFeedChannelAsync(ct);
         if (channel is null) return;
 
+        var embed = BuildStatusEmbed(state == ServerAvailability.Up, _query.JoinAddress, authoritative: false);
+        await SendAsync(channel, e => e.Embed = embed, ct, $"{state} announcement");
+    }
+
+    /// <summary>
+    /// The green/red server status embed, shared with
+    /// <see cref="Handlers.ValheimEventIngestHandler"/> so both sources of up/down
+    /// produce an identical-looking notice.
+    /// </summary>
+    /// <param name="online">True for the online embed, false for offline.</param>
+    /// <param name="joinAddress">Shown on the online embed so people can copy it.</param>
+    /// <param name="authoritative">
+    /// True when the server itself reported the transition (a DiscordConnector
+    /// server_start/server_stop event), false when it was inferred from silence by
+    /// the A2S poller. Only changes the offline wording: the mod knows the server
+    /// shut down, whereas the poller genuinely cannot tell a crash from a restart
+    /// from a firewalled port, and shouldn't imply otherwise.
+    /// </param>
+    public static Embed BuildStatusEmbed(bool online, string joinAddress, bool authoritative)
+    {
         var embed = new EmbedBuilder().WithCurrentTimestamp();
 
-        if (state == ServerAvailability.Up)
+        if (online)
         {
             embed.WithColor(Color.Green)
                  .WithTitle("🟢 Valheim server is online")
-                 .WithDescription($"The clan's Valheim server is up — `{_query.JoinAddress}`");
+                 .WithDescription($"The clan's Valheim server is up — `{joinAddress}`");
         }
         else
         {
             embed.WithColor(Color.Red)
                  .WithTitle("🔴 Valheim server went offline")
-                 .WithDescription(
-                     "The clan's Valheim server stopped answering. It may have crashed, been stopped, " +
-                     "or be mid-restart — the Steam query protocol can't tell those apart.");
+                 .WithDescription(authoritative
+                     ? "The clan's Valheim server has shut down."
+                     : "The clan's Valheim server stopped answering. It may have crashed, been stopped, "
+                       + "or be mid-restart — the Steam query protocol can't tell those apart.");
         }
 
-        await SendAsync(channel, e => e.Embed = embed.Build(), ct, $"{state} announcement");
+        return embed.Build();
     }
 
     /// <summary>One place for the send + timeout + swallow-and-log pattern.</summary>
