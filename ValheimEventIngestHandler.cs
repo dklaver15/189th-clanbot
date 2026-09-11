@@ -160,7 +160,7 @@ public class ValheimEventIngestHandler
 
                 case ValheimEventKind.ServerStart:
                 case ValheimEventKind.ServerStop:
-                    await CloseAllOpenSessionsAsync(db, ev.Kind);
+                    await CloseAllOpenSessionsAsync(db, ev.Kind, now);
                     serverOnline = ev.Kind == ValheimEventKind.ServerStart;
                     break;
             }
@@ -257,7 +257,7 @@ public class ValheimEventIngestHandler
     }
 
     /// <summary>
-    /// Closes every open session at its own LastSeenUtc.
+    /// Closes every open session on a server lifecycle event.
     ///
     /// <para>This is the reconciliation anchor that a polling integration doesn't
     /// need. The server starting or stopping is proof that nobody is still connected
@@ -265,19 +265,42 @@ public class ValheimEventIngestHandler
     /// is always followed by a start. Without this, one crash would leave sessions
     /// open forever and silently inflate the leaderboard.</para>
     ///
-    /// <para>Deliberately silent: the players didn't leave, the server did. A burst
-    /// of leave lines on every restart is exactly the noise this must not produce —
-    /// same reasoning as the Palworld and Satisfactory pollers.</para>
+    /// ── Where the session is closed depends on which event ──
+    /// <para>server_stop means the server is shutting down RIGHT NOW, so anyone still
+    /// open was connected until this moment: close at <paramref name="now"/>. That
+    /// matters more than it sounds. LastSeenUtc only advances on events, and a player
+    /// who joins and then plays quietly generates none — so closing at LastSeenUtc
+    /// would credit them from join to join, i.e. ZERO, for the whole stint. On a
+    /// server that restarts on a schedule, that silently erases most of everyone's
+    /// playtime.</para>
+    ///
+    /// <para>server_start is the opposite case: any session still open is a leftover
+    /// from a previous run that never sent server_stop (a crash, or the bot being
+    /// down). We have no idea when those players actually left, so close at
+    /// LastSeenUtc and credit only what was observed — never the downtime.</para>
+    ///
+    /// <para>Deliberately silent either way: the players didn't leave, the server
+    /// did. A burst of leave lines on every restart is exactly the noise this must
+    /// not produce — same reasoning as the Palworld and Satisfactory pollers.</para>
     /// </summary>
-    private async Task CloseAllOpenSessionsAsync(BotDbContext db, ValheimEventKind kind)
+    private async Task CloseAllOpenSessionsAsync(BotDbContext db, ValheimEventKind kind, DateTime now)
     {
         var open = await db.ValheimSessions.Where(s => s.EndedUtc == null).ToListAsync();
         if (open.Count == 0) return;
 
-        foreach (var s in open) s.EndedUtc = s.LastSeenUtc;
+        var stopping = kind == ValheimEventKind.ServerStop;
+
+        foreach (var s in open)
+        {
+            // Guard against a clock skew or a stale row making the session negative.
+            var end = stopping && now > s.LastSeenUtc ? now : s.LastSeenUtc;
+            s.EndedUtc = end;
+            s.LastSeenUtc = end;
+        }
 
         _logger.LogInformation(
-            "Valheim: {Kind} closed {Count} open session(s) at their last-seen times", kind, open.Count);
+            "Valheim: {Kind} closed {Count} open session(s) at {Where}",
+            kind, open.Count, stopping ? "the shutdown time" : "their last-seen times");
     }
 
     /// <summary>
