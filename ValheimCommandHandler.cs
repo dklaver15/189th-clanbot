@@ -223,8 +223,16 @@ public class ValheimCommandHandler
         {
             embed.WithColor(online ? Color.Green : Color.Red);
 
-            var since = lastEvent is null ? null : $" <t:{ToUnix(lastEvent.OccurredUtc)}:R>";
-            embed.AddField("Status", online ? $"🟢 Online{since}" : $"🔴 Offline{since}", false);
+            // Phrased as a DURATION ("up 2h 14m"), not a relative timestamp.
+            // "🟢 Online 6 hours ago" was reported as the status being six hours
+            // stale, when it actually meant the server had been up that long — the
+            // reading is a fair one, and no amount of correct data fixes a label that
+            // says the opposite of what it means.
+            var elapsed = lastEvent is null
+                ? null
+                : $" — {(online ? "up" : "down")} {ValheimStatusService.Humanize(DateTime.UtcNow - lastEvent.OccurredUtc)}";
+
+            embed.AddField("Status", online ? $"🟢 Online{elapsed}" : $"🔴 Offline{elapsed}", false);
         }
 
         // "—" rather than 0 while unknown: we have no basis for the number, and

@@ -65,6 +65,13 @@ public class ValheimEventIngestHandler
     /// </summary>
     private bool _warnedAboutMissingId;
 
+    /// <summary>
+    /// Consecutive events whose reported count disagreed with our open-session count.
+    /// Interpreted by <see cref="ValheimSessionReconciler.Decide"/>, which owns the
+    /// whole rule.
+    /// </summary>
+    private int _consecutiveOverCount;
+
     public ValheimEventIngestHandler(
         IServiceProvider services,
         DiscordSocketClient client,
@@ -174,6 +181,12 @@ public class ValheimEventIngestHandler
             }
 
             await db.SaveChangesAsync();
+
+            // AFTER the commit on purpose: a session Add()ed above is not yet visible
+            // to a LINQ query against the database, so reconciling before saving would
+            // compare the server's count against a set that is missing the player who
+            // just joined — and "fix" a leak that doesn't exist.
+            await ReconcileAgainstReportedCountAsync(db, ev, now);
         }
         finally
         {
@@ -309,6 +322,70 @@ public class ValheimEventIngestHandler
         _logger.LogInformation(
             "Valheim: {Kind} closed {Count} open session(s) at {Where}",
             kind, open.Count, stopping ? "the shutdown time" : "their last-seen times");
+    }
+
+    /// <summary>
+    /// Reconciles our open sessions against the player count the SERVER reports on
+    /// every event, closing sessions that have leaked.
+    ///
+    /// ── Why this exists ──
+    /// This integration is event-sourced with no poll behind it: A2S is silent on a
+    /// crossplay server, so unlike <see cref="PalworldPresenceService"/> there is no
+    /// tick that re-establishes ground truth. A single dropped leave event therefore
+    /// leaves a session open indefinitely, and it shows up as a player who logged off
+    /// hours ago still listed by /valheim-status with a growing duration.
+    ///
+    /// <para>The fix needs no new plumbing, because every message already carries
+    /// %NUM_PLAYERS% — the server's own count. Comparing it to how many sessions we
+    /// believe are open turns every single event into a reconciliation point, which
+    /// is exactly the heartbeat the design was missing.</para>
+    ///
+    /// ── Two rules, one certain and one heuristic ──
+    /// <para>Reported ZERO is exact: if the server says nobody is connected, every
+    /// open session is a ghost and all of them close. No guessing, and it covers the
+    /// common case — a server emptying out overnight sweeps up whatever leaked during
+    /// the day.</para>
+    ///
+    /// <para>Reported non-zero is a guess about WHICH sessions leaked, since the count
+    /// says how many are real but not who. The oldest LastSeenUtc are closed first, on
+    /// the reasoning that a ghost's clock froze when they left. That can be wrong — a
+    /// genuinely quiet player looks identical — so it is deliberately hedged with
+    /// <see cref="ValheimSessionReconciler"/>'s tolerance and persistence rules, and
+    /// the cost of a mistake is bounded: a live player wrongly closed simply gets a
+    /// fresh session on their next event, losing the tail of one stint rather than
+    /// corrupting anything.</para>
+    ///
+    /// <para>Silent, like the server-restart sweep: the player didn't leave now, we
+    /// lost track of them earlier. Logged, though — a recurring trim means events are
+    /// being dropped, which is worth knowing about.</para>
+    /// </summary>
+    private async Task ReconcileAgainstReportedCountAsync(BotDbContext db, ValheimEvent ev, DateTime now)
+    {
+        // Server lifecycle events already closed everything, and carry no count.
+        if (!ev.IsPlayerEvent) return;
+        if (ev.OnlineCount is not int reported) return;
+
+        var open = await db.ValheimSessions
+            .Where(s => s.EndedUtc == null)
+            .OrderBy(s => s.LastSeenUtc)
+            .ToListAsync();
+
+        var decision = ValheimSessionReconciler.Decide(open.Count, reported, _consecutiveOverCount);
+        _consecutiveOverCount = decision.Counter;
+
+        if (decision.Trim <= 0) return;
+
+        // Oldest LastSeenUtc first — a ghost's clock froze when they left, so the
+        // least recently seen rows are the likeliest to be dead.
+        var doomed = open.Take(decision.Trim).ToList();
+
+        foreach (var s in doomed) s.EndedUtc = s.LastSeenUtc;
+        await db.SaveChangesAsync();
+
+        _logger.LogWarning(
+            "Valheim: server reported {Reported} online but {Open} session(s) were open; closed {Closed} "
+            + "stale session(s) at their last-seen times. Recurring trims mean leave events are being dropped.",
+            reported, open.Count, doomed.Count);
     }
 
     /// <summary>
