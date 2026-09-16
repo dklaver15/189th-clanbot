@@ -1765,8 +1765,8 @@ public class BotConfig
 
     /// <summary>
     /// Optional banner image URL shown in the warning embed (host your own
-    /// graphic in a Discord channel and paste its CDN URL here, the same way
-    /// the PatrolWatch game thumbnails are hosted). Empty = no banner image.
+    /// graphic in a Discord channel and paste its CDN URL here). Empty = no
+    /// banner image.
     /// </summary>
     public string HoneypotImageUrl { get; set; } = "";
 

@@ -1,6 +1,5 @@
 using ClanGuardBot.Handlers;
 using ClanGuardBot.Models;
-using ClanGuardBot.PatrolWatch;
 using ClanGuardBot.RedditLeads;
 using ClanGuardBot.Services;
 using Discord;
@@ -94,8 +93,6 @@ public class DiscordBotService : IHostedService
     private readonly InviteCommandHandler _inviteCommandHandler;
     private readonly RedditLeadButtonHandler _redditLeadButtonHandler;
     private readonly RedditLeadsCommandHandler _redditLeadsCommandHandler;
-    private readonly PatrolWatchCommandHandler _patrolWatchCommandHandler;
-    private readonly PatrolNameCommandHandler _patrolNameCommandHandler;
     private readonly OfficerApplicationSetupCommandHandler _officerAppSetupHandler;
     private readonly OfficerApplicationModalHandler _officerAppModalHandler;
     private readonly OfficerApplicationReviewHandler _officerAppReviewHandler;
@@ -189,8 +186,6 @@ public class DiscordBotService : IHostedService
         InviteCommandHandler inviteCommandHandler,
         RedditLeadButtonHandler redditLeadButtonHandler,
         RedditLeadsCommandHandler redditLeadsCommandHandler,
-        PatrolWatchCommandHandler patrolWatchCommandHandler,
-        PatrolNameCommandHandler patrolNameCommandHandler,
         OfficerApplicationSetupCommandHandler officerAppSetupHandler,
         OfficerApplicationModalHandler officerAppModalHandler,
         OfficerApplicationReviewHandler officerAppReviewHandler,
@@ -276,8 +271,6 @@ public class DiscordBotService : IHostedService
         _inviteCommandHandler        = inviteCommandHandler;
         _redditLeadButtonHandler     = redditLeadButtonHandler;
         _redditLeadsCommandHandler   = redditLeadsCommandHandler;
-        _patrolWatchCommandHandler   = patrolWatchCommandHandler;
-        _patrolNameCommandHandler    = patrolNameCommandHandler;
         _officerAppSetupHandler      = officerAppSetupHandler;
         _officerAppModalHandler      = officerAppModalHandler;
         _officerAppReviewHandler     = officerAppReviewHandler;
@@ -383,8 +376,6 @@ public class DiscordBotService : IHostedService
         _inviteCommandHandler.Register(_client);
         _redditLeadButtonHandler.Register(_client);
         _redditLeadsCommandHandler.Register(_client);
-        _patrolWatchCommandHandler.Register(_client);
-        _patrolNameCommandHandler.Register(_client);
         _officerAppSetupHandler.Register(_client);
         _officerAppModalHandler.Register(_client);
         _officerAppReviewHandler.Register(_client);
@@ -936,23 +927,6 @@ public class DiscordBotService : IHostedService
                 // belongs at the same sensitivity class as /security-audit.
                 // NOTE: keep CommandsCommandHandler.BuildCatalog in sync.
                 WebhookAuditCommandHandler.BuildCommand(),
-
-                // /patrol — Patrol Watch opt-out / info surface. Three
-                // subcommands (off, on, info). Open to all members; rendered
-                // ephemerally. The opt-out toggle is consumed by
-                // PatrolWatchService.DoRecomputeAsync to filter the matched-
-                // member set before posting the embed in #lfg. NOTE: also keep
-                // CommandsCommandHandler.BuildCatalog in sync when changing
-                // /patrol.
-                PatrolWatchCommandHandler.BuildCommand(),
-
-                // /patrol-name — officer command (Manage Nicknames) to set/clear
-                // the canonical name shown for a member on Patrol Watch embeds,
-                // working around Discord.Net's Nickname→GlobalName cache fallback.
-                // Applies to every tracked game, not just Palworld. Handled by
-                // PatrolNameCommandHandler. NOTE: keep CommandsCommandHandler.BuildCatalog
-                // in sync when changing /patrol-name.
-                PatrolNameCommandHandler.BuildCommand(),
 
                 // /setup-officer-app — HQ-only command that posts (or re-posts
                 // with force:true) the persistent "Apply for Officer" button

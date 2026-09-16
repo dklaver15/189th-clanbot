@@ -26,7 +26,7 @@ namespace ClanGuardBot.Models;
 /// on that key and the index is the structural backstop.
 ///
 /// Lives in ClanGuardBot.Models alongside every other entity, following the
-/// same convention as PatrolWatchOptOut / KnownMember / SecurityAuditRecord.
+/// same convention as KnownMember / SecurityAuditRecord.
 /// </summary>
 public sealed class AccountAgeGateExemption
 {

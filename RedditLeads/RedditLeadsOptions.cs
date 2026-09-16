@@ -92,7 +92,7 @@ public sealed class RedditLeadsOptions
     /// Comma-separated list of subreddit names (no "r/" prefix) where the
     /// LFG keyword filter ALONE isn't strict enough — posts from these
     /// subs must additionally mention one of the games we play (per
-    /// PatrolWatch.MatchedGames[].RedditAliases) to be surfaced. Intended
+    /// <see cref="GameAliases"/>) to be surfaced. Intended
     /// for broad LFG aggregators like r/GamerPals, r/gamerlfg,
     /// r/LookingForGroup where the LFG signal is real but the game
     /// usually isn't ours.
@@ -105,6 +105,22 @@ public sealed class RedditLeadsOptions
     /// </summary>
     public string GameFilteredSubs { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Comma-separated Reddit-vernacular names for the games we play —
+    /// the vocabulary behind the <see cref="GameFilteredSubs"/> filter.
+    /// Acronyms welcome ("bf6", "hd2", "hll"): Reddit posters write those
+    /// where a game's official title never appears.
+    ///
+    /// Word-boundary regex applies, so short aliases like "hd2" won't
+    /// match "shd24"; multi-word entries match across flexible whitespace
+    /// ("hell  let  loose" -> match).
+    ///
+    /// Empty while GameFilteredSubs is set is a misconfiguration —
+    /// LeadMatcher warns and skips the filter rather than rejecting every
+    /// post on those subs.
+    /// </summary>
+    public string GameAliases { get; set; } = string.Empty;
+
     public List<string> GetSubredditsList() =>
         Subreddits
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
@@ -112,6 +128,11 @@ public sealed class RedditLeadsOptions
 
     public List<string> GetGameFilteredSubsList() =>
         GameFilteredSubs
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToList();
+
+    public List<string> GetGameAliasesList() =>
+        GameAliases
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .ToList();
 }

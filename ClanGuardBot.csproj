@@ -60,7 +60,6 @@
     <Content Include="Assets\189th_banner.gif" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
-    <Folder Include="PatrolWatch\" />
     <Folder Include="Recorder\src\" />
     <Folder Include="RedditLeads\" />
     <Folder Include="Tools\" />

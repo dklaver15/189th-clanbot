@@ -43,12 +43,8 @@ public static class RedditLeadsServiceCollectionExtensions
         });
 
         // LeadMatcher: singleton because its per-sub regex dictionary is
-        // built once at startup from RedditLeads + PatrolWatch config and
-        // is immutable thereafter. Reads PatrolWatch.MatchedGames for the
-        // game-alias vocabulary; IOptions<PatrolWatchOptions> resolves
-        // even if AddPatrolWatch hasn't been called (returns a default-
-        // constructed instance), so registration order in Program.cs
-        // doesn't matter.
+        // built once at startup from RedditLeads config (GameFilteredSubs
+        // + GameAliases) and is immutable thereafter.
         services.AddSingleton<LeadMatcher>();
 
         // The polling loop. No singleton+hosted pair needed — nothing else

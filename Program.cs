@@ -2,7 +2,6 @@ using ClanGuardBot.Briefing;
 using ClanGuardBot.Data;
 using ClanGuardBot.Handlers;
 using ClanGuardBot.Models;
-using ClanGuardBot.PatrolWatch;
 using ClanGuardBot.RedditLeads;
 using ClanGuardBot.Services;
 using Discord;
@@ -993,18 +992,6 @@ try
     // changing /leads, same as the rest of the slash-command surface.
     builder.Services.AddRedditLeads(builder.Configuration);
 
-    // ── Patrol Watch ─────────────────────────────────────────────────
-    // PatrolWatchService: hosted service that watches voice + presence to
-    // surface "squads on patrol" — 3+ members in the same VC playing a
-    // matched game (BF6 today; Arc Raiders etc. via config). Posts ONE
-    // rolling embed per active patrol to the LFG channel and edits in
-    // place as the roster changes. Requires the GuildPresences privileged
-    // intent (toggled in Discord Developer Portal AND added to GatewayIntents
-    // above). Disabled-by-default in appsettings; enable via PatrolWatch:Enabled.
-    // /patrol on/off/info handler registered alongside the other slash-command
-    // handlers in DiscordBotService.Register. NOTE: also keep
-    // CommandsCommandHandler.BuildCatalog in sync when changing /patrol.
-    builder.Services.AddPatrolWatch(builder.Configuration);
 
     var app = builder.Build();
 

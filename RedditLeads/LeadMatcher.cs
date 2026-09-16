@@ -1,5 +1,4 @@
 using System.Text.RegularExpressions;
-using ClanGuardBot.PatrolWatch;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -53,12 +52,11 @@ namespace ClanGuardBot.RedditLeads;
 /// Configuration lives in two places:
 /// • RedditLeads:GameFilteredSubs (comma-separated sub names) — which
 ///   subs the filter applies to.
-/// • PatrolWatch:MatchedGames[].RedditAliases — the vocabulary, owned
-///   by each game's config entry so adding a game is one block, not
-///   two. We pull from PatrolWatch's MatchedGames because that's the
-///   canonical "games we play" record; the Reddit-vernacular aliases
-///   live there as a separate field from the Discord-activity
-///   substrings because the vocabularies are different.
+/// • RedditLeads:GameAliases (comma-separated) — the vocabulary: the
+///   Reddit-vernacular names for the games we play. Kept separate from
+///   any Discord-facing game list because the vocabularies differ —
+///   posters write "bf6" / "hd2" / "hll" where rich presence never
+///   does.
 ///
 /// All filtered subs share the same flattened alias regex — there's
 /// no use case yet for different game lists on different subs (broad
@@ -141,8 +139,8 @@ public sealed class LeadMatcher
         // A bare topic mention ("redsec ranked is unbalanced") is
         // deliberately NOT a positive keyword: it would surface every
         // opinion thread on r/Battlefield as a lead. Game recognition is the
-        // aliases' job (PatrolWatch:MatchedGames[].RedditAliases now carries
-        // "redsec"), not tier 1's.
+        // aliases' job (RedditLeads:GameAliases now carries "redsec"),
+        // not tier 1's.
         "ranked duo",
         "ranked squad",
         "ranked team",
@@ -323,15 +321,13 @@ public sealed class LeadMatcher
 
     public LeadMatcher(
         IOptions<RedditLeadsOptions> redditOptions,
-        IOptions<PatrolWatchOptions> patrolOptions,
         ILogger<LeadMatcher> logger)
     {
         var filteredSubs = redditOptions.Value.GetGameFilteredSubsList();
 
-        // Flatten every game's RedditAliases into one keyword list. Distinct
-        // case-insensitive so duplicates across games don't bloat the regex.
-        var aliases = patrolOptions.Value.MatchedGames
-            .SelectMany(g => g.RedditAliases ?? new List<string>())
+        // Distinct case-insensitive so duplicate spellings in config don't
+        // bloat the regex.
+        var aliases = redditOptions.Value.GetGameAliasesList()
             .Where(a => !string.IsNullOrWhiteSpace(a))
             .Select(a => a.Trim())
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -354,7 +350,7 @@ public sealed class LeadMatcher
             // filter empty so the affected subs fall back to standard
             // tier-1/tier-2 behavior rather than going silent.
             logger.LogWarning(
-                "RedditLeads:GameFilteredSubs is set ({Subs}) but PatrolWatch:MatchedGames has no RedditAliases. " +
+                "RedditLeads:GameFilteredSubs is set ({Subs}) but RedditLeads:GameAliases is empty. " +
                 "Game filter will be skipped — these subs will pass on tier 1+2 alone.",
                 string.Join(", ", filteredSubs));
             _subGameFilters = new Dictionary<string, Regex>(StringComparer.OrdinalIgnoreCase);
