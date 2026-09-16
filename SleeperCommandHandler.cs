@@ -151,7 +151,7 @@ public sealed class SleeperCommandHandler
             return;
         }
 
-        var teams = await _api.GetTeamsAsync();
+        var teams = await _api.GetTeamsWithRecordsAsync();
         var state = await _api.GetNflStateAsync();
         var links = command.GuildId is ulong gid
             ? await _links.GetSleeperToDiscordAsync(gid)
@@ -192,7 +192,7 @@ public sealed class SleeperCommandHandler
         var requested = command.Data.Options.FirstOrDefault(o => o.Name == "week")?.Value as long?;
         var week = (int)(requested ?? state?.EffectiveWeek ?? 1);
 
-        var teams = await _api.GetTeamsAsync();
+        var teams = await _api.GetTeamsWithRecordsAsync();
         var sides = await _api.GetMatchupsAsync(week);
         var games = SleeperFormat.PairGames(sides, teams);
 

@@ -42,12 +42,14 @@ public sealed class SleeperApiService
     // TTLs, chosen against how fast each thing can actually change:
     //   league settings change once a season (a commissioner edit);
     //   rosters/users change on a waiver or a name edit, so minutes;
-    //   matchup points move play by play while games are live;
+    //   matchup points move play by play while games are live, but a week the NFL
+    //     clock has moved past only changes for a stat correction;
     //   the NFL clock rolls over once a week;
     //   the player directory is the one Sleeper explicitly asks be daily.
     private static readonly TimeSpan LeagueTtl  = TimeSpan.FromHours(6);
     private static readonly TimeSpan TeamsTtl   = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan MatchupTtl = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan FinalMatchupTtl = TimeSpan.FromHours(6);
     private static readonly TimeSpan StateTtl   = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan PlayersTtl = TimeSpan.FromHours(24);
 
@@ -177,6 +179,109 @@ public sealed class SleeperApiService
         return teams.OrderBy(t => t.RosterId).ToList();
     }
 
+    /// <summary>
+    /// The same teams as <see cref="GetTeamsAsync"/>, with the record and points
+    /// carried through every week that has actually finished.
+    ///
+    /// ── Why the roster record is not enough ──
+    /// Sleeper stores wins/losses/fpts on the roster, but it only writes them when
+    /// the league scores a leg, and that runs on Sleeper's own schedule rather than
+    /// with the NFL clock. The gap is small but it lands in exactly the wrong
+    /// place: /state/nfl flips to the new week, the posting service wakes up and
+    /// posts the recap and the next week's preview, and the rosters still read
+    /// 0-0 because the league has not been scored yet. That shipped, and week 2's
+    /// preview went up with every team on "0-0 · 0-0" the day after week 1 finished
+    /// (2026-09-15). The preview posts once, so it stayed wrong all week.
+    ///
+    /// So any week the NFL clock has moved past that the rosters have not accounted
+    /// for is rebuilt here from that week's matchup rows, which are final as soon as
+    /// the last game ends. When the rosters are already current this does nothing
+    /// and costs nothing.
+    /// </summary>
+    public async Task<IReadOnlyList<SleeperTeam>> GetTeamsWithRecordsAsync(CancellationToken ct = default)
+    {
+        var teams = await GetTeamsAsync(ct);
+        if (teams.Count == 0) return teams;
+
+        var state = await GetNflStateAsync(ct);
+        if (state is null || state.IsPreSeason) return teams;
+
+        // Only the regular season has a record to carry. The playoffs are a bracket
+        // and Sleeper keeps counting them separately, so the tally stops at the last
+        // regular-season week.
+        var lastFinished = state.EffectiveWeek - 1;
+        var league = await GetLeagueAsync(ct);
+        if (league is { PlayoffWeekStart: > 0 })
+            lastFinished = Math.Min(lastFinished, league.PlayoffWeekStart - 1);
+        if (lastFinished <= 0) return teams;
+
+        // How far the rosters have been scored. The busiest roster is the measure:
+        // a roster on a bye sits a week out, which is not the same as the league
+        // being behind.
+        var scoredThrough = teams.Max(t => t.GamesPlayed);
+        if (scoredThrough >= lastFinished) return teams;
+
+        var tally = teams.ToDictionary(t => t.RosterId, _ => new RecordTally());
+        var counted = 0;
+
+        for (var week = scoredThrough + 1; week <= lastFinished; week++)
+        {
+            var games = SleeperFormat.PairGames(await GetMatchupsAsync(week, ct), teams);
+
+            foreach (var g in games)
+            {
+                // A week with no points on either side was never played; counting it
+                // would hand the whole league a phantom tie.
+                if (!g.HasStarted) continue;
+                if (!tally.TryGetValue(g.HomeTeam.RosterId, out var home)) continue;
+                if (!tally.TryGetValue(g.AwayTeam.RosterId, out var away)) continue;
+
+                home.PointsFor += g.Home.Points;
+                home.PointsAgainst += g.Away.Points;
+                away.PointsFor += g.Away.Points;
+                away.PointsAgainst += g.Home.Points;
+
+                if (g.Home.Points > g.Away.Points) { home.Wins++; away.Losses++; }
+                else if (g.Away.Points > g.Home.Points) { away.Wins++; home.Losses++; }
+                else { home.Ties++; away.Ties++; }
+
+                counted++;
+            }
+        }
+
+        if (counted == 0) return teams;
+
+        _logger.LogInformation(
+            "Sleeper: rosters are scored through week {Scored} but week {Last} has finished; "
+            + "rebuilt {Games} games of record from the matchup rows",
+            scoredThrough, lastFinished, counted);
+
+        return teams
+            .Select(t =>
+            {
+                var add = tally[t.RosterId];
+                return t with
+                {
+                    Wins = t.Wins + add.Wins,
+                    Losses = t.Losses + add.Losses,
+                    Ties = t.Ties + add.Ties,
+                    PointsFor = t.PointsFor + add.PointsFor,
+                    PointsAgainst = t.PointsAgainst + add.PointsAgainst,
+                };
+            })
+            .ToList();
+    }
+
+    /// <summary>Running total for one roster while unscored weeks are folded in.</summary>
+    private sealed class RecordTally
+    {
+        public int Wins;
+        public int Losses;
+        public int Ties;
+        public double PointsFor;
+        public double PointsAgainst;
+    }
+
     private async Task<Dictionary<string, SleeperLeagueUser>?> FetchUsersAsync(string escapedLeagueId, CancellationToken ct)
     {
         using var doc = await GetJsonAsync($"{ApiBase}/league/{escapedLeagueId}/users", ct);
@@ -245,7 +350,14 @@ public sealed class SleeperApiService
             slot = found;
         }
 
-        return await slot.GetAsync(MatchupTtl, FailureRetryTtl, () => FetchMatchupsAsync(week, ct))
+        // A week the NFL clock has moved past is settled apart from stat corrections,
+        // so it is held for hours instead of the live week's two minutes. Records are
+        // rebuilt from these rows, which would otherwise re-fetch every finished week
+        // of the season on every cycle.
+        var state = await GetNflStateAsync(ct);
+        var ttl = state is not null && week < state.EffectiveWeek ? FinalMatchupTtl : MatchupTtl;
+
+        return await slot.GetAsync(ttl, FailureRetryTtl, () => FetchMatchupsAsync(week, ct))
                ?? Array.Empty<SleeperMatchupSide>();
     }
 

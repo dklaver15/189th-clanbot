@@ -16,8 +16,9 @@ namespace ClanGuardBot.Services;
 /// Posts the fantasy football week to <see cref="BotConfig.SleeperChannelId"/>.
 /// Three surfaces, each independently switchable:
 ///
-///   1. Preview. When a new NFL week opens, the week's games go up once, with
-///      records, before anybody kicks off.
+///   1. Preview. When a new NFL week opens, the week's games go up with records,
+///      before anybody kicks off, and are re-rendered if the records move before
+///      kickoff.
 ///   2. Live scoreboard. One message, edited in place while games are on, with
 ///      the closest game at the top. Edited only when a score actually moved, so
 ///      a quiet Wednesday costs nothing.
@@ -48,6 +49,14 @@ public sealed class SleeperMatchupService : BackgroundService
     private readonly IServiceProvider _services;
     private readonly BotConfig _config;
     private readonly ILogger<SleeperMatchupService> _logger;
+
+    /// <summary>
+    /// Week rows whose preview has been confirmed to match what the data now says,
+    /// so <see cref="RefreshPreviewAsync"/> stops fetching that message every cycle
+    /// for the rest of the week. In memory on purpose: the cost of losing it on a
+    /// restart is one extra fetch per live week.
+    /// </summary>
+    private readonly HashSet<int> _previewsVerified = new();
 
     public SleeperMatchupService(
         SleeperApiService api,
@@ -141,7 +150,7 @@ public sealed class SleeperMatchupService : BackgroundService
         var week = state.EffectiveWeek;
         if (week <= 0) return;
 
-        var teams = await _api.GetTeamsAsync(ct);
+        var teams = await _api.GetTeamsWithRecordsAsync(ct);
         if (teams.Count == 0) return;
 
         var links = await _links.GetSleeperToDiscordAsync(channel.Guild.Id);
@@ -157,8 +166,13 @@ public sealed class SleeperMatchupService : BackgroundService
 
         var row = await GetOrCreateWeekRowAsync(channel, state.Season, week, ct);
 
-        if (_config.SleeperMatchupPreviewEnabled && row.PreviewMessageId is null)
-            await PostPreviewAsync(channel, league, week, games, links, row, ct);
+        if (_config.SleeperMatchupPreviewEnabled)
+        {
+            if (row.PreviewMessageId is null)
+                await PostPreviewAsync(channel, league, week, games, links, row, ct);
+            else
+                await RefreshPreviewAsync(channel, league, week, games, links, row, ct);
+        }
 
         if (_config.SleeperLiveScoresEnabled && games.Any(g => g.HasStarted))
             await UpdateScoreboardAsync(channel, league, week, games, links, row, ct);
@@ -185,18 +199,89 @@ public sealed class SleeperMatchupService : BackgroundService
             return;
         }
 
-        var embed = SleeperFormat.BuildMatchupsEmbed(
-            league, week, games, links, _config.SleeperMentionLinkedMembers,
-            titlePrefix: "Matchups",
-            footerNote: $"{league.ScoringLabel} · {games.Count} games · scores post here once they start");
-
-        var msg = await channel.SendMessageAsync(embed: embed, allowedMentions: MentionPolicy());
+        var msg = await channel.SendMessageAsync(
+            embed: BuildPreviewEmbed(league, week, games, links),
+            allowedMentions: MentionPolicy());
 
         row.PreviewMessageId = msg.Id;
         row.UpdatedUtc = DateTime.UtcNow;
         await SaveRowAsync(row, ct);
 
         _logger.LogInformation("Sleeper: posted week {Week} preview ({Games} games)", week, games.Count);
+    }
+
+    private Embed BuildPreviewEmbed(
+        SleeperLeague league,
+        int week,
+        IReadOnlyList<SleeperGame> games,
+        IReadOnlyDictionary<string, ulong> links) =>
+        SleeperFormat.BuildMatchupsEmbed(
+            league, week, games, links, _config.SleeperMentionLinkedMembers,
+            titlePrefix: "Matchups",
+            footerNote: $"{league.ScoringLabel} · {games.Count} games · scores post here once they start");
+
+    /// <summary>
+    /// Re-renders a preview that is already up, if what it says has since changed.
+    ///
+    /// The preview goes up the moment the NFL clock opens a week, and it goes up
+    /// once. That is the one moment in the week when the league's records can still
+    /// be a leg behind, and a preview posted into that window stays wrong for four
+    /// days: week 2 2026 went up with all eighteen teams on "0-0 · 0-0" the day
+    /// after week 1 finished. Records are rebuilt from the matchup rows now
+    /// (SleeperApiService.GetTeamsWithRecordsAsync), so that particular cause is
+    /// gone; this is the net under it, and it is what repairs a preview that is
+    /// already sitting in the channel.
+    ///
+    /// Only before kickoff, because once there are scores the live scoreboard is
+    /// the surface people are reading. Once the message agrees with the data the
+    /// row is remembered and not fetched again, so a settled week costs nothing.
+    /// </summary>
+    private async Task RefreshPreviewAsync(
+        SocketTextChannel channel,
+        SleeperLeague league,
+        int week,
+        IReadOnlyList<SleeperGame> games,
+        IReadOnlyDictionary<string, ulong> links,
+        SleeperWeekPost row,
+        CancellationToken ct)
+    {
+        // 0 is MarkPreviewSkippedAsync's sentinel: there is no message to refresh.
+        if (row.PreviewMessageId is null or 0) return;
+        if (games.Any(g => g.HasStarted)) return;
+        if (_previewsVerified.Contains(row.Id)) return;
+
+        try
+        {
+            if (await channel.GetMessageAsync(row.PreviewMessageId.Value) is not IUserMessage existing)
+            {
+                // Deleted by hand. Nothing to repair, and re-posting a preview
+                // somebody removed on purpose would be worse than leaving it gone.
+                _previewsVerified.Add(row.Id);
+                return;
+            }
+
+            var embed = BuildPreviewEmbed(league, week, games, links);
+            if (string.Equals(existing.Embeds.FirstOrDefault()?.Description, embed.Description, StringComparison.Ordinal))
+            {
+                _previewsVerified.Add(row.Id);
+                return;
+            }
+
+            await existing.ModifyAsync(m =>
+            {
+                m.Embed = embed;
+                m.AllowedMentions = MentionPolicy();
+            });
+
+            row.UpdatedUtc = DateTime.UtcNow;
+            await SaveRowAsync(row, ct);
+
+            _logger.LogInformation("Sleeper: week {Week} preview was out of date, re-rendered", week);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Sleeper: could not refresh the week {Week} preview", week);
+        }
     }
 
     /// <summary>
