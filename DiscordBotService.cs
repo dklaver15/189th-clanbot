@@ -73,6 +73,7 @@ public class DiscordBotService : IHostedService
     private readonly SetNickCommandHandler _setNickHandler;
     private readonly BotFixChannelPermsCommandHandler _botFixChannelPermsHandler;
     private readonly SeedPromotionCreditCommandHandler _seedHandler;
+    private readonly FixRankDateCommandHandler _fixRankDateHandler;
     private readonly EventCreditCommandHandler _eventCreditHandler;
     private readonly AttendanceCommandHandler _attendanceHandler;
     private readonly SquadCommandHandler _squadHandler;
@@ -166,6 +167,7 @@ public class DiscordBotService : IHostedService
         SetNickCommandHandler setNickHandler,
         BotFixChannelPermsCommandHandler botFixChannelPermsHandler,
         SeedPromotionCreditCommandHandler seedHandler,
+        FixRankDateCommandHandler fixRankDateHandler,
         EventCreditCommandHandler eventCreditHandler,
         AttendanceCommandHandler attendanceHandler,
         SquadCommandHandler squadHandler,
@@ -251,6 +253,7 @@ public class DiscordBotService : IHostedService
         _setNickHandler              = setNickHandler;
         _botFixChannelPermsHandler   = botFixChannelPermsHandler;
         _seedHandler                 = seedHandler;
+        _fixRankDateHandler          = fixRankDateHandler;
         _eventCreditHandler          = eventCreditHandler;
         _attendanceHandler           = attendanceHandler;
         _squadHandler                = squadHandler;
@@ -356,6 +359,7 @@ public class DiscordBotService : IHostedService
         _setNickHandler.Register(_client);
         _botFixChannelPermsHandler.Register(_client);
         _seedHandler.Register(_client);
+        _fixRankDateHandler.Register(_client);
         _eventCreditHandler.Register(_client);
         _attendanceHandler.Register(_client);
         _squadHandler.Register(_client);
@@ -494,6 +498,13 @@ public class DiscordBotService : IHostedService
                     .AddOption("user", ApplicationCommandOptionType.User,
                         "The clan member to check", isRequired: true)
                     .Build(),
+
+                // /fix-rank-date — CPT+ repair for a member whose rank-assigned
+                // date was reset by their rank role being removed and re-added.
+                // Restores the real date from the RankChange log; dry-run unless
+                // apply:true. Handled by FixRankDateCommandHandler.
+                // NOTE: keep CommandsCommandHandler.BuildCatalog in sync.
+                FixRankDateCommandHandler.BuildCommand(),
 
                 // /late-check — how often a member showed up late to events they
                 // organized or hosted (MAJ+). Handled by LateCheckCommandHandler.

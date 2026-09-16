@@ -722,6 +722,8 @@ public class CommandsCommandHandler
                 eventCreditLbl, MinRank("CPT")),
             new("remove-event-credit", "Remove 1 manual event credit at member's current rank",
                 eventCreditLbl, MinRank("CPT")),
+            new("fix-rank-date", "Restore a rank-assigned date reset by a rank role being removed and re-added",
+                eventCreditLbl, MinRank("CPT")),   // SyncWithHandlers: FixRankDateCommandHandler.MinRankFloor
 
             new("attendance", "Show today's clan event attendance, grouped by event",
                 attendanceLbl, MinRank("MAJ")),

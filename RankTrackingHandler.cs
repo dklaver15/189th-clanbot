@@ -84,15 +84,6 @@ public class RankTrackingHandler
     /// </summary>
     private const int MaxRealtimeDemotionGap = 2;
 
-    /// <summary>
-    /// How far back TryResolveRestoredAssignmentAsync reads the rank-change log when
-    /// pairing a regained rank with the loss that preceded it. Each lost-and-restored
-    /// round trip costs two rows, so this covers a role that has flapped fifteen times
-    /// — far past anything seen in practice — while keeping the lookup a single
-    /// bounded index seek on (GuildId, UserId, ChangedAt).
-    /// </summary>
-    private const int MaxRestoreChainRows = 32;
-
     // Single FIFO queue for all role-change processing. See OnGuildMemberUpdated
     // for why the work leaves the gateway task, and why it is one global queue
     // rather than one per member.
@@ -449,50 +440,15 @@ public class RankTrackingHandler
 
     /// <summary>
     /// Returns the timestamp the member originally received <paramref name="afterRank"/>,
-    /// when the rank they are regaining right now is one they just lost outside the
-    /// bot. Returns null when this is a genuinely new assignment, in which case the
-    /// caller dates the row <c>now</c> as before.
+    /// when the rank arriving now is one they just lost outside the bot. Returns null
+    /// when this is a genuinely new assignment, in which case the caller dates the row
+    /// <c>now</c> as before.
     ///
-    /// ── Why this is needed ──
-    /// A member who holds no rank role at all has their RankHistory row deleted by
-    /// the removal branch above — that is the only state the bot has for "unranked",
-    /// and nothing in the bot causes it, so it always means a human or a reaction
-    /// role took the role off. When the role is put back the member looks brand new:
-    /// a fresh row dated now. That restarts their time-in-rank AND zeroes their
-    /// activity, because every activity query (MessageEvents, VoiceActivityHelper,
-    /// EventAttendanceHelper) filters on <c>Timestamp &gt;= AssignedAt</c>. The
-    /// member sees /promo-eligibility report 0 messages and 0 voice hours for a rank
-    /// they have held for weeks.
-    ///
-    /// ── Where the real date comes from ──
-    /// <see cref="RankChange"/> is append-only and nothing deletes from it, so the
-    /// assignment that preceded the loss is still on record. We pair rows off
-    /// newest-first: a "Removed" row FOR THIS RANK, then the assignment that put it
-    /// there. A rank role that flapped several times leaves several such pairs, so
-    /// the walk continues through them to reach the assignment at the bottom of the
-    /// chain rather than stopping at an earlier restore.
-    ///
-    /// ── What deliberately does NOT match ──
-    /// Promotions and demotions pass through a rank-less moment too — PromotionService
-    /// and /demote strip the old rank role before adding the new one, so the row
-    /// deletion and re-creation happen there as well. But the removal row's FromRank
-    /// is the rank being left behind, not the one arriving, so the first comparison
-    /// fails and a promotion correctly starts its clock at now.
-    ///
-    /// ── Bounds ──
-    /// Only the most recent removal is time-boxed, against
-    /// BotConfig.RankRestoreWindowDays — the older pairs in a flap chain were already
-    /// inside the window when they were restored. A restored date earlier than the
-    /// member's current guild-join is rejected outright: RankChange rows survive a
-    /// leave (only RankHistory is pruned by MemberLifecycleHandler), and a returning
-    /// member must not inherit tenure from a previous stint. Same rule as the
-    /// leave/rejoin defense in PromotionService.GetRankInfoAsync.
-    ///
-    /// ── Not recovered ──
-    /// The seed fields (EventsAttendedAtRankBeforeBot, SeedAppliedAt) lived only on
-    /// the deleted row and are not in the rank-change log, so a member who had
-    /// spreadsheet event credit at this rank loses it and needs a fresh
-    /// /seed-promotion-credit run. The caller logs this on every restore.
+    /// Thin wrapper over <see cref="RankRestoreHelper.ResolveOriginalAssignmentAsync"/>,
+    /// which owns the pairing walk and documents what does and does not match. Shared
+    /// with /fix-rank-date so the manual repair and this automatic one can never
+    /// disagree about the right date. All this adds is the config window and the
+    /// logging for the cases the helper rejects.
     /// </summary>
     private async Task<DateTime?> TryResolveRestoredAssignmentAsync(
         BotDbContext db,
@@ -505,51 +461,32 @@ public class RankTrackingHandler
         var windowDays = _config.RankRestoreWindowDays;
         if (windowDays <= 0) return null;
 
-        var changes = await db.RankChanges
-            .AsNoTracking()
-            .Where(c => c.GuildId == guildId && c.UserId == userId)
-            .OrderByDescending(c => c.ChangedAt)
-            .ThenByDescending(c => c.Id)
-            .Take(MaxRestoreChainRows)
-            .ToListAsync();
+        var result = await RankRestoreHelper.ResolveOriginalAssignmentAsync(
+            db, guildId, userId, afterRank, now,
+            window: TimeSpan.FromDays(windowDays),
+            joinedAt: joinedAt);
 
-        var cutoff = now - TimeSpan.FromDays(windowDays);
-        DateTime? restored = null;
-
-        for (int i = 0; i + 1 < changes.Count; i += 2)
-        {
-            var removal = changes[i];
-
-            // Must be a removal of the very rank arriving now. Anything else —
-            // a promotion's removal of the previous rank, an assignment row —
-            // ends the chain.
-            if (removal.ToRank is not null ||
-                !string.Equals(removal.FromRank, afterRank, StringComparison.OrdinalIgnoreCase))
-                break;
-
-            // Time-box the loss we are actually undoing, not the whole chain.
-            if (restored is null && removal.ChangedAt < cutoff) break;
-
-            var assignment = changes[i + 1];
-            if (!string.Equals(assignment.ToRank, afterRank, StringComparison.OrdinalIgnoreCase))
-                break;
-
-            restored = assignment.ChangedAt;
-        }
-
-        if (restored is null) return null;
-
-        if (joinedAt.HasValue && restored.Value < joinedAt.Value)
+        if (result.RejectedByJoinDate)
         {
             _logger.LogInformation(
-                "Rank restore for {UserId} in guild {GuildId} resolved {Assigned:o}, which " +
-                "predates their current membership (joined {Joined:o}). Treating {Rank} as a " +
-                "fresh assignment.",
-                userId, guildId, restored.Value, joinedAt.Value, afterRank);
+                "Rank restore for {UserId} in guild {GuildId} found an assignment that predates " +
+                "their current membership (joined {Joined:o}). Treating {Rank} as a fresh " +
+                "assignment.",
+                userId, guildId, joinedAt, afterRank);
             return null;
         }
 
-        return restored;
+        if (result.RejectedByWindow)
+        {
+            _logger.LogInformation(
+                "Rank restore for {UserId} in guild {GuildId} found a {Rank} loss at {LostAt:o}, " +
+                "older than RankRestoreWindowDays ({Days}d). Starting a fresh clock. An officer " +
+                "can still repair it deliberately with /fix-rank-date.",
+                userId, guildId, afterRank, result.LostAt, windowDays);
+            return null;
+        }
+
+        return result.OriginalAssignedAt;
     }
 
     /// <summary>

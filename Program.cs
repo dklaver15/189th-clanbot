@@ -268,6 +268,17 @@ try
     // DiscordBotService alongside the other command handlers.
     builder.Services.AddSingleton<PromoEligibilityCommandHandler>();
 
+    // FixRankDateCommandHandler: /fix-rank-date — CPT+ repair for a member
+    // whose rank-assigned date was reset by their rank role coming off and
+    // going back on (which deletes and re-creates their RankHistory row, and
+    // with it their time-in-rank and every activity total at that rank). Reads
+    // the real date back out of the append-only RankChange log via
+    // RankRestoreHelper, dry-run unless apply:true. RankTrackingHandler now
+    // prevents this happening going forward; this is for members it already
+    // happened to. Register() is called from DiscordBotService alongside the
+    // other command handlers.
+    builder.Services.AddSingleton<FixRankDateCommandHandler>();
+
     // LateCheckCommandHandler: /late-check slash command, gated to MAJ+.
     // Reports how often a member showed up late to events they organized or
     // hosted, using the same Events-category voice-session window logic as
