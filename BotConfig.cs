@@ -485,6 +485,24 @@ public class BotConfig
     /// </summary>
     public int RankLossAlertCooldownMinutes { get; set; } = 60;
 
+    /// <summary>
+    /// Days within which a rank role coming back is treated as the undoing of
+    /// an accidental loss rather than a fresh assignment. When a member holds
+    /// no rank role at all, <c>RankTrackingHandler</c> deletes their
+    /// RankHistory row, and re-adding the role writes a new one dated now —
+    /// which silently restarts their promotion clock and hides every message
+    /// and voice minute they earned at that rank, because the activity queries
+    /// all filter on <c>Timestamp &gt;= AssignedAt</c>. Within this window the
+    /// original assignment timestamp is recovered from the append-only
+    /// <see cref="ClanGuardBot.Models.RankChange"/> log instead. Only an exact
+    /// same-rank round trip qualifies: a promotion or demotion also passes
+    /// through a rank-less moment (PromotionService strips the old role before
+    /// adding the new one), but the rank arriving there differs from the one
+    /// that left, so those correctly start a fresh clock. 0 disables the
+    /// restore and every regained rank starts over.
+    /// </summary>
+    public int RankRestoreWindowDays { get; set; } = 30;
+
     // ──────────────────────────────────────────────────────────────────────
     //  Rank reconcile
     // ──────────────────────────────────────────────────────────────────────
