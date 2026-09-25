@@ -2995,6 +2995,65 @@ public class BotConfig
     /// </summary>
     public ulong XpAdjustRoleId { get; set; } = 1408089365816541264;
 
+    // ─── Video repost + YouTube upload ───────────────────────────────
+    /// <summary>
+    /// Master switch for <see cref="Handlers.VideoRepostHandler"/>. When a member
+    /// posts a message carrying a video attachment in one of
+    /// <see cref="VideoRepostChannelIds"/>, the bot reposts the video (plus the
+    /// message text and who posted it) with an "Upload" button, then deletes the
+    /// original. Messages without a video are never touched. Default true.
+    /// </summary>
+    public bool VideoRepostEnabled { get; set; } = true;
+
+    /// <summary>Channels watched for video posts. Threads under them are not included.</summary>
+    public List<ulong> VideoRepostChannelIds { get; set; } =
+        new() { 1408199889879564539, 1549891740993982504 };
+
+    /// <summary>
+    /// Role allowed to press "Upload" and send a reposted video to the clan's
+    /// YouTube channel, plus Administrators. 0 fails CLOSED (Administrators only).
+    /// </summary>
+    public ulong VideoUploadRoleId { get; set; } = 1553078561072480326;
+
+    /// <summary>
+    /// OAuth client id/secret for the Google Cloud project with the YouTube Data
+    /// API v3 enabled. A service account CANNOT upload to a YouTube channel, so
+    /// this is a user OAuth client, not google-credentials.json. Supply via env
+    /// (BotConfig__YouTubeClientId / BotConfig__YouTubeClientSecret).
+    /// </summary>
+    public string YouTubeClientId { get; set; } = string.Empty;
+
+    /// <summary>See <see cref="YouTubeClientId"/>.</summary>
+    public string YouTubeClientSecret { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Long-lived refresh token minted by signing in as the account that owns
+    /// the clan's YouTube channel, with the youtube.upload scope. Treat as a
+    /// password: it can post to the channel. Supply via env
+    /// (BotConfig__YouTubeRefreshToken). While any of the three YouTube values
+    /// are blank, videos are still reposted with the button, but pressing it
+    /// says uploads aren't configured.
+    ///
+    /// If the OAuth consent screen is left in "Testing", Google expires this
+    /// token after 7 days; publish the consent screen to "In production".
+    /// </summary>
+    public string YouTubeRefreshToken { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Privacy of uploaded videos: "public", "unlisted" or "private". Default
+    /// "public". Note Google locks every upload to private, regardless of this
+    /// value, until the API project passes YouTube's compliance audit.
+    /// </summary>
+    public string YouTubePrivacyStatus { get; set; } = "public";
+
+    /// <summary>YouTube category id for uploads. Default "20" (Gaming).</summary>
+    public string YouTubeCategoryId { get; set; } = "20";
+
+    public bool IsYouTubeConfigured =>
+        !string.IsNullOrWhiteSpace(YouTubeClientId)
+        && !string.IsNullOrWhiteSpace(YouTubeClientSecret)
+        && !string.IsNullOrWhiteSpace(YouTubeRefreshToken);
+
     // ─── Helpers ─────────────────────────────────────────────────────
 
     /// <summary>

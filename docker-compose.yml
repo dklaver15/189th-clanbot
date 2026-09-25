@@ -60,6 +60,13 @@ services:
       # under FicsitRemoteMonitoring.Server.uWS.AuthenticationToken. Treat as a
       # secret: it grants machine on/off and power-switch control. Keep out of git.
       - BotConfig__FrmAuthToken=${FRM_AUTH_TOKEN}
+      # -- YouTube upload (VideoRepostHandler's "Upload" button) --
+      # A user OAuth client + refresh token for the Google account that owns the
+      # clan YouTube channel (a service account can't upload to YouTube). The
+      # refresh token can post to the channel: keep it out of git.
+      - BotConfig__YouTubeClientId=${YOUTUBE_CLIENT_ID}
+      - BotConfig__YouTubeClientSecret=${YOUTUBE_CLIENT_SECRET}
+      - BotConfig__YouTubeRefreshToken=${YOUTUBE_REFRESH_TOKEN}
       # -- Meeting recording (recorder sidecar) --
       - BotConfig__MeetingRecorderBaseUrl=http://recorder:8080
       - BotConfig__MeetingRecorderSharedSecret=${RECORDER_SHARED_SECRET}

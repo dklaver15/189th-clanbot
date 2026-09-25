@@ -540,6 +540,15 @@ try
     // NOTE: keep CommandsCommandHandler.BuildCatalog in sync.
     builder.Services.AddSingleton<SayCommandHandler>();
 
+    // VideoRepostHandler: in BotConfig.VideoRepostChannelIds, a member's post that
+    // carries a video is reposted with a "Posted by" line, the original text and an
+    // "Upload" button, and the original is deleted. The button (VideoUploadRoleId +
+    // Administrators) sends the clip to the clan YouTube channel through
+    // YouTubeUploadService, which signs in with BotConfig.YouTubeClientId/Secret/
+    // RefreshToken. Self-registers MessageReceived + ButtonExecuted + Ready.
+    builder.Services.AddSingleton<YouTubeUploadService>();
+    builder.Services.AddSingleton<VideoRepostHandler>();
+
     // /qotd — Question of the Day. Self-contained handler: gated SGT+, opens a
     // DM to collect the question, previews + confirms, then posts an embed (with
     // the 189th logo) to BotConfig.QotdChannelId. Self-registers slash + DM +

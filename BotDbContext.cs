@@ -76,6 +76,8 @@ public class BotDbContext : DbContext
     public DbSet<SleeperWeekPost>      SleeperWeekPosts      => Set<SleeperWeekPost>();
     // ── Post as the bot (/say) ──
     public DbSet<SayMessage>           SayMessages           => Set<SayMessage>();
+    // ── Video repost + YouTube upload ──
+    public DbSet<VideoSubmission>      VideoSubmissions      => Set<VideoSubmission>();
     // ── XP ladder ──
     public DbSet<XpSeason>             XpSeasons             => Set<XpSeason>();
     public DbSet<XpAward>              XpAwards              => Set<XpAward>();
@@ -657,6 +659,15 @@ public class BotDbContext : DbContext
         {
             e.HasIndex(m => m.MessageId).IsUnique();
             e.HasIndex(m => new { m.GuildId, m.PostedUtc });
+        });
+
+        // ── Video repost submissions ──────────────────────────────────
+        // Looked up by (repost message, attachment index) on every Upload
+        // click; unique so one video can only ever have one state row.
+        modelBuilder.Entity<VideoSubmission>(e =>
+        {
+            e.HasIndex(v => new { v.MessageId, v.AttachmentIndex }).IsUnique();
+            e.Property(v => v.Status).HasConversion<int>();
         });
 
         // ── Sleeper weekly posts ──────────────────────────────────────

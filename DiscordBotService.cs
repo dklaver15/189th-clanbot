@@ -99,6 +99,7 @@ public class DiscordBotService : IHostedService
     private readonly OfficerApplicationReviewHandler _officerAppReviewHandler;
     private readonly TicketPanelCommandHandler _ticketPanelHandler;
     private readonly TicketInteractionHandler _ticketInteractionHandler;
+    private readonly VideoRepostHandler _videoRepostHandler;
     private readonly ILogger<DiscordBotService> _logger;
     private readonly BotConfig _config;
 
@@ -193,6 +194,7 @@ public class DiscordBotService : IHostedService
         OfficerApplicationReviewHandler officerAppReviewHandler,
         TicketPanelCommandHandler ticketPanelHandler,
         TicketInteractionHandler ticketInteractionHandler,
+        VideoRepostHandler videoRepostHandler,
         ILogger<DiscordBotService> logger,
         IOptions<BotConfig> config)
     {
@@ -279,6 +281,7 @@ public class DiscordBotService : IHostedService
         _officerAppReviewHandler     = officerAppReviewHandler;
         _ticketPanelHandler          = ticketPanelHandler;
         _ticketInteractionHandler    = ticketInteractionHandler;
+        _videoRepostHandler          = videoRepostHandler;
         _logger                      = logger;
         _config                      = config.Value;
     }
@@ -385,6 +388,7 @@ public class DiscordBotService : IHostedService
         _officerAppReviewHandler.Register(_client);
         _ticketPanelHandler.Register(_client);
         _ticketInteractionHandler.Register(_client);
+        _videoRepostHandler.Register(_client);
 
         await _client.LoginAsync(TokenType.Bot, _config.Token);
         await _client.StartAsync();
