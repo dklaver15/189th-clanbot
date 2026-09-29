@@ -31,18 +31,33 @@ public class VideoSubmission
 
     public ulong ChannelId { get; set; }
 
-    /// <summary>The bot's repost carrying the video and the button.</summary>
+    /// <summary>
+    /// The bot's message carrying the Upload button: the repost, or for a
+    /// <see cref="KeptOriginal"/> video, the bot's reply under the original.
+    /// </summary>
     public ulong MessageId { get; set; }
 
     /// <summary>
-    /// Position of this video in the repost message's attachment list. Unique
-    /// with <see cref="MessageId"/>, and what the button's custom id carries.
+    /// Position of this video in the attachment list of the message that holds
+    /// the file: the repost normally, the member's original when
+    /// <see cref="KeptOriginal"/>. Unique with <see cref="MessageId"/>, and what
+    /// the button's custom id carries.
     /// </summary>
     public int AttachmentIndex { get; set; }
 
+    /// <summary>
+    /// True when the post was too large for the bot to re-upload to Discord.
+    /// The member's message is left in place, the bot replies to it with the
+    /// Upload button, and the video is fetched from the original at upload time.
+    /// </summary>
+    public bool KeptOriginal { get; set; }
+
     public string FileName { get; set; } = string.Empty;
 
-    /// <summary>The member's message that was deleted and replaced by the repost.</summary>
+    /// <summary>
+    /// The member's message: deleted and replaced by the repost, or left in
+    /// place (and replied to) when <see cref="KeptOriginal"/>.
+    /// </summary>
     public ulong OriginalMessageId { get; set; }
 
     public ulong PosterUserId { get; set; }

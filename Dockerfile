@@ -18,12 +18,15 @@ WORKDIR /app
 # to use. Without these, ScottPlot charts render empty axis labels (or fail
 # outright depending on the SkiaSharp build) because SkiaSharp can't locate
 # any typeface to draw with on a minimal aspnet:8.0 base image.
+# ffmpeg/ffprobe: VideoUpscaler scales clips up to 1440p before they're sent
+# to YouTube (see BotConfig.VideoUploadUpscaleEnabled).
 RUN apt-get update && apt-get install -y \
         sqlite3 \
         libfontconfig1 \
         libfreetype6 \
         fontconfig \
         fonts-dejavu-core \
+        ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Create directories for persistent data

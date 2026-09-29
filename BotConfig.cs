@@ -3049,6 +3049,46 @@ public class BotConfig
     /// <summary>YouTube category id for uploads. Default "20" (Gaming).</summary>
     public string YouTubeCategoryId { get; set; } = "20";
 
+    /// <summary>
+    /// Upscale clips whose shorter side is below
+    /// <see cref="VideoUploadUpscaleTargetSize"/> before sending them to YouTube.
+    /// YouTube encodes 1440p-and-up uploads with a higher-quality codec (VP9/AV1)
+    /// and noticeably more bitrate, and that carries down to viewers watching at
+    /// 1080p, so a 1080p clip uploaded as 1440p looks better on YouTube than the
+    /// same clip uploaded as-is. Costs CPU time on the droplet; any failure or
+    /// skip falls back to uploading the original file. Default true.
+    /// </summary>
+    public bool VideoUploadUpscaleEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Target for the clip's SHORTER side, so a landscape clip becomes 2560×1440
+    /// and a vertical phone clip 1440×2560. Clips already at or above it are
+    /// uploaded untouched. Default 1440.
+    /// </summary>
+    public int VideoUploadUpscaleTargetSize { get; set; } = 1440;
+
+    /// <summary>
+    /// Longest clip (minutes) that gets upscaled. The droplet has one shared
+    /// vCPU, and encode time grows with length, so longer videos are uploaded
+    /// as-is instead of tying the CPU up for an hour. Default 10.
+    /// </summary>
+    public int VideoUploadUpscaleMaxMinutes { get; set; } = 10;
+
+    /// <summary>
+    /// x264 quality for the upscaled file (lower = better, bigger). YouTube
+    /// re-encodes everything, so this only needs to be visually lossless. Default 17.
+    /// </summary>
+    public int VideoUploadUpscaleCrf { get; set; } = 17;
+
+    /// <summary>Give up on an upscale after this many minutes and upload the original. Default 45.</summary>
+    public int VideoUploadUpscaleTimeoutMinutes { get; set; } = 45;
+
+    /// <summary>ffmpeg / ffprobe executables. Installed in the Docker image; on PATH by default.</summary>
+    public string FfmpegPath { get; set; } = "ffmpeg";
+
+    /// <summary>See <see cref="FfmpegPath"/>.</summary>
+    public string FfprobePath { get; set; } = "ffprobe";
+
     public bool IsYouTubeConfigured =>
         !string.IsNullOrWhiteSpace(YouTubeClientId)
         && !string.IsNullOrWhiteSpace(YouTubeClientSecret)

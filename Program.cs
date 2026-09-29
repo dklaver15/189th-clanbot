@@ -547,6 +547,8 @@ try
     // YouTubeUploadService, which signs in with BotConfig.YouTubeClientId/Secret/
     // RefreshToken. Self-registers MessageReceived + ButtonExecuted + Ready.
     builder.Services.AddSingleton<YouTubeUploadService>();
+    // VideoUpscaler: ffmpeg upscale to 1440p before upload (BotConfig.VideoUploadUpscale*).
+    builder.Services.AddSingleton<VideoUpscaler>();
     builder.Services.AddSingleton<VideoRepostHandler>();
 
     // /qotd — Question of the Day. Self-contained handler: gated SGT+, opens a
