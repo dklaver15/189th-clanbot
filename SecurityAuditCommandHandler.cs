@@ -201,11 +201,13 @@ public sealed class SecurityAuditCommandHandler
         var totalInWindow = await query.CountAsync();
 
         // ── Render ────────────────────────────────────────────────────────
-        var embed = BuildEmbed(rows, totalInWindow, userFilter, featureFilter, days, limit);
-        await command.FollowupAsync(embed: embed.Build(), ephemeral: true);
+        // Discord's 6,000-character cap covers every embed in a message, so
+        // each embed goes out as its own follow-up.
+        foreach (var embed in BuildEmbeds(rows, totalInWindow, userFilter, featureFilter, days, limit))
+            await command.FollowupAsync(embed: embed, ephemeral: true);
     }
 
-    private static EmbedBuilder BuildEmbed(
+    private static List<Embed> BuildEmbeds(
         List<SecurityAuditRecord> rows,
         int totalInWindow,
         SocketUser? userFilter,
@@ -229,21 +231,29 @@ public sealed class SecurityAuditCommandHandler
         if (rows.Count == 0)
         {
             embed.AddField("No events", "Nothing matched. Either the window is empty or the filters are too tight.");
-            return embed;
+            return new List<Embed> { embed.Build() };
         }
 
-        // One field per row keeps each event individually readable and stays
-        // well under Discord's 25-field-per-embed and 1024-chars-per-field
-        // caps — even on a verbose Details string. The hard MaxLimit of 25
-        // is set against the 25-field embed ceiling.
+        // One field per row keeps each event individually readable. Rows spill
+        // into continuation embeds once one would pass the 6,000-character or
+        // 25-field cap.
+        var embeds = new List<Embed>();
         foreach (var r in rows)
         {
             var name  = BuildRowHeader(r);
             var value = BuildRowBody(r);
+            if (embed.Fields.Count > 0
+                && (embed.Fields.Count >= EmbedBuilder.MaxFieldCount
+                    || embed.Length + name.Length + value.Length > EmbedBuilder.MaxEmbedLength))
+            {
+                embeds.Add(embed.Build());
+                embed = new EmbedBuilder().WithColor(Color.Blue);
+            }
             embed.AddField(name, value, inline: false);
         }
+        embeds.Add(embed.Build());
 
-        return embed;
+        return embeds;
     }
 
     /// <summary>
@@ -289,7 +299,7 @@ public sealed class SecurityAuditCommandHandler
         }
 
         var body = sb.ToString().TrimEnd();
-        return string.IsNullOrEmpty(body) ? "—" : body;
+        return string.IsNullOrEmpty(body) ? "—" : Truncate(body, 1024);
     }
 
     private static string ActionIcon(string action) => action switch
@@ -299,6 +309,11 @@ public sealed class SecurityAuditCommandHandler
         "UserAlreadyLeft"      => "👋",
         "KickSkippedHierarchy" => "🛑",
         "KickFailed"           => "❌",
+        "Banned"               => "🔨",
+        "BannedByOfficer"      => "🔨",
+        "TimedOut"             => "⏳",
+        "Released"             => "✅",
+        "Unbanned"             => "♻️",
         _                      => "•",
     };
 

@@ -80,7 +80,10 @@ namespace ClanGuardBot.Handlers;
 /// trap). The ONLY human exemption is the server owner, who Discord does not
 /// permit a bot to ban. Everyone else — including HQ and Administrators — is
 /// actioned, because the whole point of the trap is to catch compromised
-/// officer/admin accounts. (The bot can still only ban members below it in
+/// officer/admin accounts. A trusted account that trips the spam trap is timed
+/// out rather than banned (a fast cross-post can be legitimate), and officers
+/// decide from the alert's Ban + purge / Release buttons. Every trap ban's
+/// alert carries an Unban button. (The bot can still only ban members below it in
 /// the role hierarchy, so its role must sit above all HQ roles; see
 /// EnforceAsync.) A hijacked owner is handled via the recovery runbook, not
 /// here.
@@ -135,6 +138,11 @@ public sealed class HoneypotHandler
     /// <summary>Re-action cooldown for the same account.</summary>
     private static readonly TimeSpan ActionCooldown = TimeSpan.FromSeconds(60);
 
+    private const string ButtonPrefix        = "honeypot:";
+    private const string BanButtonPrefix     = "honeypot:ban:";
+    private const string ReleaseButtonPrefix = "honeypot:release:";
+    private const string UnbanButtonPrefix   = "honeypot:unban:";
+
     public HoneypotHandler(
         IServiceProvider services,
         DiscordSocketClient client,
@@ -151,6 +159,7 @@ public sealed class HoneypotHandler
     {
         client.MessageReceived += OnMessageReceived;
         client.Ready           += OnReady;
+        client.ButtonExecuted  += OnButtonExecuted;
 
         // Sweep the rolling index every 60s. Cheap, and keeps memory bounded
         // even on a high-traffic server.
@@ -372,7 +381,10 @@ public sealed class HoneypotHandler
 
         if (string.Equals(mode, ModeEnforce, StringComparison.OrdinalIgnoreCase))
         {
-            await EnforceAsync(trigger, member, guild, ctx);
+            if (ctx.Feature == "SpamTrap" && member is not null && HasElevatedPermissions(member))
+                await TimeoutTrustedAsync(trigger, member, guild, ctx);
+            else
+                await EnforceAsync(trigger, member, guild, ctx);
         }
         else
         {
@@ -491,7 +503,196 @@ public sealed class HoneypotHandler
 
         await PostAlertAsync(guild, trigger.Author, member, ctx,
             enforced: true, banned: banned, purged: purged, error: banError,
-            postedContent: FormatPostedContent(trigger));
+            postedContent: FormatPostedContent(trigger),
+            components: banned ? UnbanButton(userId) : null);
+    }
+
+    /// <summary>
+    /// Spam trap on a trusted account: time it out instead of banning, purge
+    /// nothing, and leave the call to officers via the alert's buttons.
+    /// </summary>
+    private async Task TimeoutTrustedAsync(SocketUserMessage trigger, SocketGuildUser member, SocketGuild guild, TrapHit ctx)
+    {
+        var minutes = Math.Clamp(_config.SpamTrapOfficerTimeoutMinutes, 1, 28 * 24 * 60);
+        var botTop    = guild.CurrentUser.Roles.Max(r => r.Position);
+        var memberTop = member.Roles.Any() ? member.Roles.Max(r => r.Position) : 0;
+
+        string? error = null;
+        if (member.GuildPermissions.Administrator)
+            error = "administrators can't be timed out";
+        else if (memberTop >= botTop)
+            error = "bot role too low to time out";
+        else
+        {
+            try
+            {
+                await member.SetTimeOutAsync(TimeSpan.FromMinutes(minutes),
+                    new RequestOptions { AuditLogReason = ctx.Reason });
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                _logger.LogError(ex, "{Feature}: failed to time out {User} ({Id}).", ctx.Feature, member.Username, member.Id);
+            }
+        }
+
+        var outcome = error is null
+            ? $"Trusted account: timed out for {minutes} min, nothing purged. Ban if compromised, release if not."
+            : $"Trusted account: NOT timed out ({error}). Ban if compromised.";
+
+        await WriteAuditAsync(guild, trigger.Author, member, ctx,
+            action: error is null ? "TimedOut" : "TimeoutFailed", purged: 0, channelsTouched: 0, error: error,
+            postedContent: FormatPostedContentForAudit(trigger));
+
+        var buttons = new ComponentBuilder()
+            .WithButton("Ban + purge", BanButtonPrefix + member.Id, ButtonStyle.Danger);
+        if (error is null)
+            buttons.WithButton("Release", ReleaseButtonPrefix + member.Id, ButtonStyle.Secondary);
+
+        await PostAlertAsync(guild, trigger.Author, member, ctx,
+            enforced: true, banned: false, purged: 0, error: error,
+            postedContent: FormatPostedContent(trigger),
+            outcomeOverride: outcome, components: buttons.Build());
+    }
+
+    private static MessageComponent UnbanButton(ulong userId) =>
+        new ComponentBuilder()
+            .WithButton("Unban", UnbanButtonPrefix + userId, ButtonStyle.Secondary)
+            .Build();
+
+    /// <summary>
+    /// Officer+ check. SyncWithHandlers: SquadCommandHandler.HasElevatedPermissions.
+    /// </summary>
+    private bool HasElevatedPermissions(SocketGuildUser user)
+    {
+        if (user.GuildPermissions.ManageRoles || user.GuildPermissions.Administrator)
+            return true;
+        var officerRoles = _config.GetOfficerRolesList();
+        return user.Roles.Any(r => officerRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase));
+    }
+
+    // ── Alert buttons: Ban + purge / Release / Unban ───────────────────
+
+    private Task OnButtonExecuted(SocketMessageComponent component)
+    {
+        if (!component.Data.CustomId.StartsWith(ButtonPrefix, StringComparison.Ordinal))
+            return Task.CompletedTask;
+        _ = HandleButtonAsync(component);
+        return Task.CompletedTask;
+    }
+
+    private async Task HandleButtonAsync(SocketMessageComponent component)
+    {
+        try
+        {
+            var id = component.Data.CustomId;
+            string action;
+            ulong targetId;
+            if (TryParseTarget(id, BanButtonPrefix, out targetId)) action = "Ban";
+            else if (TryParseTarget(id, ReleaseButtonPrefix, out targetId)) action = "Release";
+            else if (TryParseTarget(id, UnbanButtonPrefix, out targetId)) action = "Unban";
+            else return;
+
+            if (component.User is not SocketGuildUser clicker || !HasElevatedPermissions(clicker))
+            {
+                await component.RespondAsync("⛔ Only officers can use these buttons.", ephemeral: true);
+                return;
+            }
+            if (clicker.Id == targetId)
+            {
+                await component.RespondAsync("⛔ You can't act on an alert about your own account.", ephemeral: true);
+                return;
+            }
+
+            await component.DeferAsync();
+
+            var guild  = clicker.Guild;
+            var reason = $"{action} from trap alert by {clicker.Username}";
+            string status;
+            MessageComponent after;
+            try
+            {
+                switch (action)
+                {
+                    case "Ban":
+                        _recentlyBanned[targetId] = DateTime.UtcNow;
+                        var (purged, _) = await PurgeRecentAsync(targetId);
+                        await guild.AddBanAsync(targetId, pruneDays: 0, reason: reason,
+                            options: new RequestOptions { AuditLogReason = reason });
+                        status = $"🔨 Banned by {clicker.Mention}; purged {purged} message(s).";
+                        after  = UnbanButton(targetId);
+                        break;
+
+                    case "Release":
+                        if (guild.GetUser(targetId) is not { } target)
+                        {
+                            await component.FollowupAsync("That member is no longer in the server.", ephemeral: true);
+                            return;
+                        }
+                        await target.RemoveTimeOutAsync(new RequestOptions { AuditLogReason = reason });
+                        status = $"✅ Timeout lifted by {clicker.Mention}.";
+                        after  = new ComponentBuilder().Build();
+                        break;
+
+                    default:
+                        await guild.RemoveBanAsync(targetId, new RequestOptions { AuditLogReason = reason });
+                        status = $"♻️ Unbanned by {clicker.Mention}. They need a new invite to rejoin.";
+                        after  = new ComponentBuilder().Build();
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Trap alert {Action} on {Target} by {User} failed.", action, targetId, clicker.Username);
+                await component.FollowupAsync($"❌ {action} failed: {ex.Message}", ephemeral: true);
+                return;
+            }
+
+            await component.ModifyOriginalResponseAsync(p =>
+            {
+                p.Content         = status;
+                p.Components      = after;
+                p.AllowedMentions = AllowedMentions.None;
+            });
+
+            var footer  = component.Message.Embeds.FirstOrDefault()?.Footer?.Text ?? string.Empty;
+            var feature = footer.Contains("Honeypot", StringComparison.Ordinal) ? "Honeypot" : "SpamTrap";
+            await WriteReviewAuditAsync(guild.Id, targetId, feature, action, clicker);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Trap alert button {Id} failed.", component.Data.CustomId);
+        }
+    }
+
+    private static bool TryParseTarget(string id, string prefix, out ulong userId)
+    {
+        userId = 0;
+        return id.StartsWith(prefix, StringComparison.Ordinal) && ulong.TryParse(id[prefix.Length..], out userId);
+    }
+
+    private async Task WriteReviewAuditAsync(ulong guildId, ulong targetId, string feature, string action, SocketGuildUser by)
+    {
+        try
+        {
+            using var scope = _services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+            db.SecurityAuditRecords.Add(new SecurityAuditRecord
+            {
+                GuildId     = guildId,
+                Feature     = feature,
+                Action      = action switch { "Ban" => "BannedByOfficer", "Release" => "Released", _ => "Unbanned" },
+                UserId      = targetId,
+                Username    = _client.GetUser(targetId)?.Username,
+                Details     = $"By {by.Username} ({by.Id}) from the alert button.",
+                OccurredAt  = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "{Feature}: failed to write review audit row ({Action}).", feature, action);
+        }
     }
 
     /// <summary>
@@ -630,7 +831,8 @@ public sealed class HoneypotHandler
 
     private async Task PostAlertAsync(
         SocketGuild guild, SocketUser author, SocketGuildUser? member, TrapHit ctx,
-        bool enforced, bool banned, int purged, string? error, string? postedContent = null)
+        bool enforced, bool banned, int purged, string? error, string? postedContent = null,
+        string? outcomeOverride = null, MessageComponent? components = null)
     {
         var alerts = ResolveSecurityAlertsChannel(guild);
         if (alerts is null)
@@ -641,13 +843,13 @@ public sealed class HoneypotHandler
             return;
         }
 
-        var outcome = !enforced
+        var outcome = outcomeOverride ?? (!enforced
             ? "Observed (AlertOnly) — no action taken"
             : banned
                 ? $"Banned + purged {purged} message(s)"
                 : error is not null && error.Contains("owner", StringComparison.OrdinalIgnoreCase)
                     ? "NOT actioned — server owner cannot be banned by a bot (possible compromise; see recovery runbook)"
-                    : $"Ban FAILED ({error ?? "see logs"})";
+                    : $"Ban FAILED ({error ?? "see logs"})");
 
         var ageDays = (DateTime.UtcNow - author.CreatedAt.UtcDateTime).TotalDays;
 
@@ -675,7 +877,7 @@ public sealed class HoneypotHandler
 
         // AllowedMentions.None so a payload full of @everyone / role pings that
         // we're quoting back can never re-ping the mod channel.
-        try { await alerts.SendMessageAsync(embed: embed, allowedMentions: AllowedMentions.None); }
+        try { await alerts.SendMessageAsync(embed: embed, allowedMentions: AllowedMentions.None, components: components); }
         catch (Exception ex)
         {
             _logger.LogError(ex, "{Feature}: failed to post alert to #{Channel}.", ctx.Feature, alerts.Name);

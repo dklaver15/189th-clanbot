@@ -1840,7 +1840,8 @@ public class BotConfig
     ///   "Enforce"    — ban the account and purge every message it posted
     ///                  server-wide in the last HoneypotPurgeWindowMinutes
     ///                  (the purge window is shared with the honeypot), then
-    ///                  write the audit row and alert.
+    ///                  write the audit row and alert. Trusted accounts are
+    ///                  timed out instead; see SpamTrapOfficerTimeoutMinutes.
     /// The server owner is never banned (Discord forbids a bot banning the
     /// owner); an owner that trips this trap is loudly alerted as a
     /// likely-compromised account instead — see the server-recovery runbook.
@@ -1864,6 +1865,14 @@ public class BotConfig
     /// Clamped to a minimum of 2 internally.
     /// </summary>
     public int SpamTrapChannelThreshold { get; set; } = 5;
+
+    /// <summary>
+    /// In Enforce mode, a trusted account (an officer role, Manage Roles or
+    /// Administrator) that trips the spam trap is timed out for this many
+    /// minutes instead of banned, and nothing is purged. The alert carries
+    /// Ban + purge and Release buttons. Capped at Discord's 28-day limit.
+    /// </summary>
+    public int SpamTrapOfficerTimeoutMinutes { get; set; } = 60;
 
     // ─── Ban Hammer: "days since last ban" counter ───────────────────
     /// <summary>

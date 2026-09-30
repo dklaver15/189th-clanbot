@@ -80,11 +80,12 @@ namespace ClanGuardBot.Handlers;
 ///   2. Map Unicode lookalike characters (Cyrillic а/е/о/р/с/у/х,
 ///      Greek α/ο/ν/ε, digits 0/1/3/4/5/7) to their Latin equivalents.
 ///   3. Strip Unicode diacritics (FormD + remove non-spacing marks).
-///   4. Drop everything that isn't a letter or digit.
-///   5. If the result starts with a known rank token from
-///      <see cref="BotConfig.RankRoles"/>, strip it. This lets
-///      "MAJ.Klaver" → "klaver" so an impersonator dropping the
-///      rank prefix is still caught.
+///   4. If the name starts with a known rank token from
+///      <see cref="BotConfig.RankRoles"/> followed by a separator,
+///      strip it. This lets "MAJ.Klaver" → "klaver" so an impersonator
+///      dropping the rank prefix is still caught, while "Colton" keeps
+///      its "col".
+///   5. Drop everything that isn't a letter or digit.
 /// After normalization we apply three match tests in order:
 ///   a) Exact equality                   → <c>Exact</c>
 ///   b) Levenshtein distance ≤ threshold → <c>NearTypo</c>
@@ -318,42 +319,48 @@ public sealed class NicknameImpersonationHandler
     {
         if (string.IsNullOrEmpty(s)) return string.Empty;
 
-        // 1. Lowercase first — confusable map keys are lowercase.
-        s = s.ToLowerInvariant();
+        s = Fold(s);
 
-        // 2. Map Unicode lookalikes (Cyrillic / Greek / digit) to Latin.
-        var sb = new StringBuilder(s.Length);
-        foreach (var ch in s) sb.Append(MapConfusable(ch));
-        s = sb.ToString();
-
-        // 3. Strip diacritics (café → cafe, naïve → naive).
-        s = StripDiacritics(s);
-
-        // 4. Drop everything except letters and digits — dots, spaces,
-        //    underscores, punctuation, emoji, all gone. After this step
-        //    "MAJ.Klaver" and "majklaver" are identical.
-        var alnum = new StringBuilder(s.Length);
-        foreach (var ch in s)
-            if (char.IsLetterOrDigit(ch))
-                alnum.Append(ch);
-        s = alnum.ToString();
-
-        // 5. Strip rank prefix (longest first so "1stLT" wins over "lt").
-        //    Rank tokens come from the same RankRoles list the rest of
-        //    the bot uses, so adding/removing ranks elsewhere keeps this
-        //    in sync automatically.
+        // Strip a rank prefix only when a separator follows it, so "MAJ.Klaver"
+        // and "MAJ Klaver" become "klaver" but "Colton" keeps its "col". Longest
+        // first so "1stLT" wins over "LT"; rank tokens are folded the same way,
+        // so "1SG" still matches after 1 → l.
+        var start = 0;
+        while (start < s.Length && !char.IsLetterOrDigit(s[start])) start++;
         foreach (var rank in rankRoles.OrderByDescending(r => r.Length))
         {
-            var rankNorm = rank.ToLowerInvariant();
-            var rankClean = new string(rankNorm.Where(char.IsLetterOrDigit).ToArray());
-            if (rankClean.Length > 0 && s.StartsWith(rankClean, StringComparison.Ordinal))
+            var rankKey = AlnumOnly(Fold(rank));
+            if (rankKey.Length == 0) continue;
+            var end = start + rankKey.Length;
+            if (end < s.Length
+                && string.CompareOrdinal(s, start, rankKey, 0, rankKey.Length) == 0
+                && !char.IsLetterOrDigit(s[end]))
             {
-                s = s.Substring(rankClean.Length);
+                s = s[end..];
                 break;
             }
         }
 
-        return s;
+        // "MAJ.Klaver" and "majklaver" compare the same from here.
+        return AlnumOnly(s);
+    }
+
+    /// <summary>Lowercases, maps lookalike characters to Latin, and strips diacritics.</summary>
+    private static string Fold(string s)
+    {
+        s = s.ToLowerInvariant();
+        var sb = new StringBuilder(s.Length);
+        foreach (var ch in s) sb.Append(MapConfusable(ch));
+        return StripDiacritics(sb.ToString());
+    }
+
+    private static string AlnumOnly(string s)
+    {
+        var sb = new StringBuilder(s.Length);
+        foreach (var ch in s)
+            if (char.IsLetterOrDigit(ch))
+                sb.Append(ch);
+        return sb.ToString();
     }
 
     /// <summary>
@@ -369,6 +376,8 @@ public sealed class NicknameImpersonationHandler
         'а' => 'a', 'е' => 'e', 'о' => 'o', 'р' => 'p',
         'с' => 'c', 'у' => 'y', 'х' => 'x', 'к' => 'k',
         'і' => 'i', 'ѕ' => 's', 'ј' => 'j', 'ь' => 'b',
+        // Cyrillic whose capitals mirror Latin (М, Т, Н, В); input is lowercased first
+        'м' => 'm', 'т' => 't', 'н' => 'h', 'в' => 'b',
         // Greek lowercase
         'α' => 'a', 'ο' => 'o', 'ν' => 'v',
         'ε' => 'e', 'ρ' => 'p', 'τ' => 't',
