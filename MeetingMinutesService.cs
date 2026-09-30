@@ -185,12 +185,16 @@ public class MeetingMinutesService : BackgroundService
                 }
 
                 // Transcribe (skip if a prior attempt already produced the text).
+                IReadOnlyList<string> failedSpeakers;
                 if (string.IsNullOrWhiteSpace(rec.TranscriptText))
                 {
                     var result = await _transcriber.TranscribeAsync(rec.AudioDirPath, ct);
+                    failedSpeakers = result.FailedSpeakers;
                     if (string.IsNullOrWhiteSpace(result.Transcript))
                     {
-                        rec.ErrorMessage = "Transcript was empty (no speech captured).";
+                        rec.ErrorMessage = failedSpeakers.Count > 0
+                            ? $"Transcript was empty; audio from {string.Join(", ", failedSpeakers)} could not be transcribed."
+                            : "Transcript was empty (no speech captured).";
                         _logger.LogWarning("'{Title}' (#{Id}) produced an empty transcript, failing.",
                             rec.MeetingTitle, rec.Id);
                         Transition(rec, MeetingRecordingState.Failed, now);
@@ -209,9 +213,21 @@ public class MeetingMinutesService : BackgroundService
                     // Real progress: whatever was failing has stopped failing.
                     _backoff.TryRemove(rec.Id, out _);
                 }
+                else
+                {
+                    failedSpeakers = _transcriber.TryReadCachedTranscript(rec.AudioDirPath)?.FailedSpeakers ?? [];
+                }
 
-                var (minutes, actionItemsJson) = await GenerateMinutesAsync(rec, ct);
-                rec.MinutesText = minutes;
+                if (failedSpeakers.Count > 0)
+                    _logger.LogWarning(
+                        "Minutes for '{Title}' (#{Id}) will be missing audio from: {Speakers}.",
+                        rec.MeetingTitle, rec.Id, string.Join(", ", failedSpeakers));
+
+                var (minutes, actionItemsJson) = await GenerateMinutesAsync(rec, failedSpeakers, ct);
+                rec.MinutesText = failedSpeakers.Count > 0
+                    ? $"> ⚠️ Audio from {string.Join(", ", failedSpeakers.Select(n => $"**{n}**"))} could not be " +
+                      "transcribed, so their contributions are missing from these minutes.\n\n" + minutes
+                    : minutes;
                 rec.ActionItemsJson = actionItemsJson;
                 rec.ErrorMessage = null;
                 Transition(rec, MeetingRecordingState.Summarized, now);
@@ -315,41 +331,47 @@ public class MeetingMinutesService : BackgroundService
     // condensed to notes, then the notes are reduced into the final minutes — so
     // the transcript can never overflow the model's context window.
     private async Task<(string Minutes, string? ActionItemsJson)> GenerateMinutesAsync(
-        MeetingRecording rec, CancellationToken ct)
+        MeetingRecording rec, IReadOnlyList<string> failedSpeakers, CancellationToken ct)
     {
         var roster = BuildRoster(rec.GuildId);
         var meetingDate = rec.MeetingStartUtc.ToString("yyyy-MM-dd");
         var transcript = rec.TranscriptText ?? string.Empty;
+        var missingNote = failedSpeakers.Count > 0
+            ? $"NOTE: audio from {string.Join(", ", failedSpeakers)} could not be transcribed, so anything they said " +
+              "is absent. Do not guess at their contributions."
+            : null;
 
         var singleShotMax = Math.Max(20_000, _config.MeetingMinutesMaxSingleShotChars);
         if (transcript.Length <= singleShotMax)
-            return await GenerateSingleShotAsync(roster, rec.MeetingTitle, meetingDate, transcript, ct);
+            return await GenerateSingleShotAsync(roster, rec.MeetingTitle, meetingDate, transcript, missingNote, ct);
 
         _logger.LogInformation(
             "Transcript for '{Title}' (#{Id}) is {Chars} chars (> {Max}) — using chunked map-reduce.",
             rec.MeetingTitle, rec.Id, transcript.Length, singleShotMax);
-        return await GenerateChunkedAsync(roster, rec.MeetingTitle, meetingDate, transcript, ct);
+        return await GenerateChunkedAsync(roster, rec.MeetingTitle, meetingDate, transcript, missingNote, ct);
     }
 
     private async Task<(string Minutes, string? ActionItemsJson)> GenerateSingleShotAsync(
-        string roster, string title, string meetingDate, string transcript, CancellationToken ct)
+        string roster, string title, string meetingDate, string transcript, string? missingNote, CancellationToken ct)
     {
         var user = new StringBuilder()
             .AppendLine("ROSTER:")
             .AppendLine(roster)
             .AppendLine()
             .AppendLine($"MEETING: {title} ({meetingDate})")
-            .AppendLine()
+            .AppendLine();
+        if (missingNote is not null)
+            user.AppendLine(missingNote).AppendLine();
+        user
             .AppendLine("TRANSCRIPT:")
-            .AppendLine(transcript)
-            .ToString();
+            .AppendLine(transcript);
 
-        var ai = await _ai.GenerateAsync(MinutesSystemPrompt, user, maxTokens: 4000, ct);
+        var ai = await _ai.GenerateAsync(MinutesSystemPrompt, user.ToString(), maxTokens: 4000, ct);
         return SplitMinutesAndActions(ai.Text);
     }
 
     private async Task<(string Minutes, string? ActionItemsJson)> GenerateChunkedAsync(
-        string roster, string title, string meetingDate, string transcript, CancellationToken ct)
+        string roster, string title, string meetingDate, string transcript, string? missingNote, CancellationToken ct)
     {
         var chunkChars = Math.Max(20_000, _config.MeetingMinutesChunkChars);
         var chunks = ChunkTranscript(transcript, chunkChars);
@@ -420,12 +442,14 @@ public class MeetingMinutesService : BackgroundService
             .AppendLine(roster)
             .AppendLine()
             .AppendLine($"MEETING: {title} ({meetingDate})")
-            .AppendLine()
+            .AppendLine();
+        if (missingNote is not null)
+            reduceUser.AppendLine(missingNote).AppendLine();
+        reduceUser
             .AppendLine("NOTES (in order):")
-            .AppendLine(notes.ToString())
-            .ToString();
+            .AppendLine(notes.ToString());
 
-        var reduced = await _ai.GenerateAsync(reduceSystem, reduceUser, maxTokens: 4000, ct);
+        var reduced = await _ai.GenerateAsync(reduceSystem, reduceUser.ToString(), maxTokens: 4000, ct);
         return SplitMinutesAndActions(reduced.Text);
     }
 

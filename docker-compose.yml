@@ -101,6 +101,10 @@ services:
     # a recording. 256m is generous for that.
     mem_limit: 256m
     memswap_limit: 256m
+    # On SIGTERM the recorder finalizes an in-progress meeting (flushes tracks,
+    # writes manifest.json), which can take ~20s. Docker's default 10s would
+    # SIGKILL it partway through.
+    stop_grace_period: 45s
     environment:
       - RECORDER_BOT_TOKEN=${RECORDER_BOT_TOKEN}
       - RECORDER_SHARED_SECRET=${RECORDER_SHARED_SECRET}

@@ -34,15 +34,24 @@ namespace ClanGuardBot.Services;
 /// The recorder owns the real stop — it auto-stops once the VC has been empty for
 /// a grace period (so long meetings are captured in full), bounded by a hard cap.
 /// The scheduler advances Recording → Transcribing as soon as the recorder reports
-/// the meeting finalized; a far-out backstop (start + StopBackstop) is the only
-/// fallback for when the recorder can't be reached or restarted and lost state.
+/// the meeting finalized, or as soon as the recorder reports it is no longer
+/// recording that meeting (it restarted, e.g. during a deploy). A backstop
+/// (recording start + StopBackstop) covers a recorder that stays unreachable.
+///
+/// ── Resuming a meeting that was cut off ────────────────────────────────────
+/// When a recording ends because the recorder disconnected, shut down, or lost
+/// it, the meeting is usually still going. The scheduler then skips its start
+/// cooldown for ResumeWindow and starts a new recording titled "… (continued)"
+/// if people are still in the VC, so only the restart gap is lost.
 ///
 /// ── Never lose captured audio ──────────────────────────────────────────────
 /// If StopRecordingAsync returns null (e.g. the recorder restarted and lost its
 /// in-memory state), the scheduler reconciles against the shared audio volume: it
 /// looks for a meeting_{id}_* directory whose manifest.json has real
-/// tracks/segments and adopts it. A recording is only marked Failed when there is
-/// genuinely no audio on disk.
+/// tracks/segments and adopts it. If the recorder was killed before writing
+/// manifest.json, its periodic manifest.partial.json checkpoint is promoted
+/// instead. A recording is only marked Failed when there is genuinely no audio
+/// on disk.
 ///
 /// Restart-safe: all state lives in the MeetingRecordings table. On restart, a
 /// meeting still in progress stays in its Recording row (the presence guard stops
@@ -54,18 +63,29 @@ namespace ClanGuardBot.Services;
 public class MeetingRecordingScheduler : BackgroundService
 {
     /// <summary>
-    /// How long past the start the scheduler waits before issuing its backstop
-    /// stop. Large on purpose: the recorder owns the real (VC-empty) stop, so this
-    /// only fires if the recorder never reported in. Must be comfortably larger
-    /// than the recorder's own VC-empty grace.
-    /// </summary>
-    private static readonly TimeSpan StopBackstop = TimeSpan.FromHours(4);
-
-    /// <summary>
-    /// The "expected stop" hint we hand the recorder for its hard-cap math. The
-    /// recorder adds its own grace on top; this is a generous hint, not a deadline.
+    /// The longest a meeting may record. Sent to the recorder as its hard cap.
     /// </summary>
     private static readonly TimeSpan ExpectedMeetingDuration = TimeSpan.FromHours(3);
+
+    /// <summary>
+    /// How long past the recording start the scheduler waits before issuing its
+    /// backstop stop. Slightly past the recorder's own hard cap, so the recorder
+    /// normally finalizes first and this only fires if it can't be reached.
+    /// </summary>
+    private static readonly TimeSpan StopBackstop = ExpectedMeetingDuration + TimeSpan.FromMinutes(15);
+
+    /// <summary>
+    /// After a recording is cut off (recorder disconnected, shut down, or lost
+    /// it), how long the scheduler will start a continuation recording without
+    /// waiting out <see cref="StartCooldown"/>.
+    /// </summary>
+    private static readonly TimeSpan ResumeWindow = TimeSpan.FromMinutes(15);
+
+    /// <summary>Recorder stop reasons that mean the meeting was cut off, not over.</summary>
+    private static readonly HashSet<string> CutOffReasons = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "disconnected", "shutdown",
+    };
 
     /// <summary>
     /// How long a row may sit Announced (notice posted, trying to start) before we
@@ -79,6 +99,8 @@ public class MeetingRecordingScheduler : BackgroundService
     /// recording the instant the first one finalizes.
     /// </summary>
     private static readonly TimeSpan StartCooldown = TimeSpan.FromMinutes(5);
+
+    private const string ContinuedSuffix = " (continued)";
 
     private readonly IServiceProvider _services;
     private readonly DiscordSocketClient _client;
@@ -97,6 +119,10 @@ public class MeetingRecordingScheduler : BackgroundService
     // Remembers the recording-notice message posted per recording, so it can be
     // deleted when recording stops. In-memory by design (cosmetic edge case).
     private readonly ConcurrentDictionary<int, (ulong ChannelId, ulong MessageId)> _noticeMessages = new();
+
+    // Set when a recording is cut off mid-meeting; lets the next start skip the
+    // cooldown and carry the title forward. Only touched from the poll loop.
+    private (string Title, DateTime UntilUtc)? _resume;
 
     public MeetingRecordingScheduler(
         IServiceProvider services,
@@ -242,18 +268,31 @@ public class MeetingRecordingScheduler : BackgroundService
         if (hasActive)
             return;
 
-        // Cooldown: don't immediately re-record a meeting that just finalized.
-        var cooldownCutoff = now - StartCooldown;
-        var recentlyStopped = await db.MeetingRecordings.AnyAsync(
-            m => m.GuildId == guildId
-              && m.RecordingStoppedUtc != null
-              && m.RecordingStoppedUtc > cooldownCutoff,
-            ct);
-        if (recentlyStopped)
-            return;
+        var resume = _resume is { } r && now <= r.UntilUtc ? r : ((string Title, DateTime UntilUtc)?)null;
+
+        // Cooldown: don't immediately re-record a meeting that just finalized —
+        // unless it was cut off, in which case the meeting is still going.
+        if (resume is null)
+        {
+            var cooldownCutoff = now - StartCooldown;
+            var recentlyStopped = await db.MeetingRecordings.AnyAsync(
+                m => m.GuildId == guildId
+                  && m.RecordingStoppedUtc != null
+                  && m.RecordingStoppedUtc > cooldownCutoff,
+                ct);
+            if (recentlyStopped)
+                return;
+        }
 
         var (title, discordMessageId, calendarEventId, meetingStart) =
             await ResolveTitleAsync(db, guildId, vc, now, ct);
+        if (resume is { } cont)
+        {
+            title = cont.Title.EndsWith(ContinuedSuffix, StringComparison.Ordinal)
+                ? cont.Title
+                : cont.Title + ContinuedSuffix;
+            _resume = null;
+        }
 
         var rec = new MeetingRecording
         {
@@ -329,6 +368,10 @@ public class MeetingRecordingScheduler : BackgroundService
                      || m.State == MeetingRecordingState.Recording)
             .ToListAsync(ct);
 
+        // One status read per tick, taken after any start this tick, so a row that
+        // just started is already the recorder's current meeting.
+        var status = await _recorder.GetStatusAsync(ct);
+
         foreach (var rec in active)
         {
             if (rec.State == MeetingRecordingState.Announced)
@@ -340,6 +383,9 @@ public class MeetingRecordingScheduler : BackgroundService
                         "Recording '{Title}' (#{Id}) — VC emptied before recording started; cancelling.",
                         rec.MeetingTitle, rec.Id);
                     await DeleteAnnouncementAsync(rec, ct);
+                    // A start that timed out on our side may still have joined.
+                    if (await TryAdoptFromRecorderAsync(rec, now, ct, "cancelled-while-starting"))
+                        continue;
                     Transition(rec, MeetingRecordingState.Cancelled, now);
                     continue;
                 }
@@ -347,10 +393,12 @@ public class MeetingRecordingScheduler : BackgroundService
                 // Gave up trying to reach the recorder.
                 if (now - rec.StateUpdatedUtc >= StartWindow)
                 {
+                    await DeleteAnnouncementAsync(rec, ct);
+                    if (await TryAdoptFromRecorderAsync(rec, now, ct, "start-window-closed"))
+                        continue;
                     rec.ErrorMessage = "Recorder could not be started within the start window.";
                     _logger.LogWarning("Recording '{Title}' (#{Id}) never started, Failed.",
                         rec.MeetingTitle, rec.Id);
-                    await DeleteAnnouncementAsync(rec, ct);
                     Transition(rec, MeetingRecordingState.Failed, now);
                     await MeetingFailureNotice.PostAsync(_client, _config, _logger, rec, "Announced", ct);
                     continue;
@@ -362,17 +410,107 @@ public class MeetingRecordingScheduler : BackgroundService
             }
 
             // Recording: the recorder auto-stops when the VC empties and remembers
-            // the result. Advance as soon as it reports finalized; the far-out
-            // backstop covers a recorder that can't be reached or lost its state.
+            // the result. Advance as soon as it reports finalized, or as soon as it
+            // reports it isn't recording this meeting at all (it restarted and lost
+            // it). The backstop covers a recorder that can't be reached.
             if (rec.State == MeetingRecordingState.Recording)
             {
-                var backstopAt = rec.MeetingEndUtc + StopBackstop;
-                if (await _recorder.IsFinalizedAsync(rec.Id, ct))
-                    await FinalizeRecordingAsync(rec, now, ct, reason: "recorder-finalized");
+                var backstopAt = (rec.RecordingStartedUtc ?? rec.MeetingEndUtc) + StopBackstop;
+                if (status is not null && status.Finalized.TryGetValue(rec.Id, out var reason))
+                {
+                    var cutOff = reason is not null && CutOffReasons.Contains(reason);
+                    await FinalizeRecordingAsync(rec, now, ct, $"recorder-finalized:{reason ?? "unknown"}", resume: cutOff);
+                }
+                else if (status is { Ready: true } && status.RecordingId != rec.Id)
+                {
+                    _logger.LogWarning(
+                        "Recorder is ready but not recording '{Title}' (#{Id}) (recording {Current}); " +
+                        "it most likely restarted mid-meeting. Recovering the audio captured so far.",
+                        rec.MeetingTitle, rec.Id, status.RecordingId?.ToString() ?? "nothing");
+                    await FinalizeRecordingAsync(rec, now, ct, "recorder-lost", resume: true);
+                }
                 else if (now >= backstopAt)
+                {
                     await FinalizeRecordingAsync(rec, now, ct, reason: "backstop");
+                }
             }
         }
+
+        await StopOrphanedRecordingAsync(db, status, active, now, ct);
+    }
+
+    /// <summary>
+    /// The recorder is capturing a meeting the scheduler no longer considers
+    /// active (e.g. the row was failed or cancelled while a start was still
+    /// joining). Stop it so it doesn't block the next meeting, and hand any audio
+    /// it captured back to its row so it still gets minutes.
+    /// </summary>
+    private async Task StopOrphanedRecordingAsync(
+        BotDbContext db, MeetingRecorderStatus? status, List<MeetingRecording> active, DateTime now, CancellationToken ct)
+    {
+        if (status?.RecordingId is not { } orphanId) return;
+        if (active.Any(m => m.Id == orphanId
+                         && m.State is MeetingRecordingState.Announced or MeetingRecordingState.Recording))
+            return;
+
+        _logger.LogWarning("Recorder is capturing #{Id}, which is not an active recording; stopping it.", orphanId);
+        string? dir = null;
+        try
+        {
+            dir = await _recorder.StopRecordingAsync(orphanId, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not stop orphaned recording #{Id}.", orphanId);
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(dir)) return;
+
+        var row = await db.MeetingRecordings.FirstOrDefaultAsync(m => m.Id == orphanId, ct);
+        if (row is { AudioDirPath: null, State: MeetingRecordingState.Failed or MeetingRecordingState.Cancelled })
+        {
+            AdoptAudio(row, dir, now, "orphan");
+        }
+        else
+        {
+            _logger.LogWarning("Orphaned recording #{Id} left audio at {Dir} with no row to adopt it.", orphanId, dir);
+        }
+    }
+
+    /// <summary>
+    /// For a row that is being cancelled or failed while still Announced: our
+    /// start call may have timed out after the recorder actually joined. Stop
+    /// that recording and, if it captured audio, carry the row on to Transcribing.
+    /// Returns true when the row was adopted.
+    /// </summary>
+    private async Task<bool> TryAdoptFromRecorderAsync(MeetingRecording rec, DateTime now, CancellationToken ct, string reason)
+    {
+        string? dir;
+        try
+        {
+            dir = await _recorder.StopRecordingAsync(rec.Id, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Best-effort recorder stop for #{Id} failed.", rec.Id);
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(dir)) return false;
+        rec.RecordingStartedUtc ??= rec.JoinAtUtc;
+        AdoptAudio(rec, dir, now, reason);
+        return true;
+    }
+
+    private void AdoptAudio(MeetingRecording rec, string dir, DateTime now, string reason)
+    {
+        rec.RecordingStoppedUtc = now;
+        rec.AudioDirPath = dir;
+        rec.ErrorMessage = null;
+        Transition(rec, MeetingRecordingState.Transcribing, now);
+        _logger.LogInformation("Adopted audio for '{Title}' (#{Id}, {Reason}); audio dir: {Dir}.",
+            rec.MeetingTitle, rec.Id, reason, dir);
     }
 
     /// <summary>
@@ -407,8 +545,16 @@ public class MeetingRecordingScheduler : BackgroundService
     /// recording with audio on disk is NEVER wrongly failed. Only when no audio
     /// exists anywhere is the row failed.
     /// </summary>
-    private async Task FinalizeRecordingAsync(MeetingRecording rec, DateTime now, CancellationToken ct, string reason)
+    private async Task FinalizeRecordingAsync(
+        MeetingRecording rec, DateTime now, CancellationToken ct, string reason, bool resume = false)
     {
+        if (resume)
+        {
+            _resume = (rec.MeetingTitle, now + ResumeWindow);
+            // Run the next tick right away so the continuation starts promptly.
+            _wake.TrySetResult();
+        }
+
         string? dir = null;
         try
         {
@@ -436,13 +582,8 @@ public class MeetingRecordingScheduler : BackgroundService
             return;
         }
 
-        rec.RecordingStoppedUtc = now;
-        rec.AudioDirPath = dir;
-        rec.ErrorMessage = null;
         await DeleteAnnouncementAsync(rec, ct);
-        Transition(rec, MeetingRecordingState.Transcribing, now);
-        _logger.LogInformation("Stopped recording '{Title}' (#{Id}, {Reason}); audio dir: {Dir}.",
-            rec.MeetingTitle, rec.Id, reason, dir);
+        AdoptAudio(rec, dir, now, reason);
     }
 
     /// <summary>
@@ -469,7 +610,17 @@ public class MeetingRecordingScheduler : BackgroundService
             foreach (var dir in candidates)
             {
                 var manifestPath = Path.Combine(dir, "manifest.json");
-                if (!File.Exists(manifestPath)) continue;
+                var promoted = false;
+                if (!File.Exists(manifestPath))
+                {
+                    // The recorder was killed before its final manifest; fall back to
+                    // its latest checkpoint (marked partial, so the transcriber won't
+                    // trust its utterance timing).
+                    var partialPath = Path.Combine(dir, "manifest.partial.json");
+                    if (!File.Exists(partialPath)) continue;
+                    manifestPath = partialPath;
+                    promoted = true;
+                }
 
                 try
                 {
@@ -485,6 +636,13 @@ public class MeetingRecordingScheduler : BackgroundService
 
                     if (hasTracks || hasSegments)
                     {
+                        if (promoted)
+                        {
+                            File.Copy(manifestPath, Path.Combine(dir, "manifest.json"), overwrite: false);
+                            _logger.LogWarning(
+                                "Recording #{Id} had no final manifest; promoted its checkpoint in {Dir}.",
+                                meetingRecordingId, dir);
+                        }
                         _logger.LogInformation(
                             "Reconciled recording #{Id} from disk: {Dir} (tracks={Tracks}, segments={Segs}).",
                             meetingRecordingId, dir,

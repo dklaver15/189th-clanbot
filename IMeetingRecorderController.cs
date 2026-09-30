@@ -39,14 +39,14 @@ public interface IMeetingRecorderController
     Task<string?> StopRecordingAsync(int meetingRecordingId, CancellationToken ct);
 
     /// <summary>
-    /// Has the recorder already finalized this meeting (it auto-stops when the VC
-    /// empties or the hard cap is hit, writing audio + manifest and remembering
-    /// the result)? Lets the scheduler advance Recording → Transcribing promptly
-    /// rather than waiting for the far-out safety backstop. Returns false when the
-    /// answer is unknown (recorder unreachable, restarted, etc.) so the backstop
-    /// still covers those cases.
+    /// What the recorder is doing right now: whether it is ready, which meeting it
+    /// is recording (or joining), and which meetings it has already finalized and
+    /// why. Lets the scheduler advance Recording → Transcribing as soon as the
+    /// recorder finishes, and notice immediately when a restart made the recorder
+    /// lose a meeting, rather than waiting for the backstop. Returns null when the
+    /// recorder can't be reached, so callers treat that as "unknown".
     /// </summary>
-    Task<bool> IsFinalizedAsync(int meetingRecordingId, CancellationToken ct);
+    Task<MeetingRecorderStatus?> GetStatusAsync(CancellationToken ct);
 }
 
 /// <summary>Everything the recorder needs to start a capture.</summary>
@@ -56,6 +56,16 @@ public sealed record MeetingRecorderStartContext(
     ulong VoiceChannelId,
     string MeetingTitle,
     DateTime ExpectedStopUtc);
+
+/// <summary>
+/// Snapshot of the recorder's /health. <see cref="Finalized"/> maps each recently
+/// finalized meeting id to the recorder's stop reason (e.g. "vc-empty",
+/// "disconnected", "shutdown").
+/// </summary>
+public sealed record MeetingRecorderStatus(
+    bool Ready,
+    int? RecordingId,
+    IReadOnlyDictionary<int, string?> Finalized);
 
 /// <summary>
 /// Placeholder recorder used until the @discordjs/voice sidecar is built. Logs
@@ -83,8 +93,8 @@ public sealed class LoggingMeetingRecorderController(
         return Task.FromResult<string?>(null);
     }
 
-    // No sidecar, so nothing is ever finalized — the scheduler falls back to its
-    // backstop, which is correct since there's no real recording to advance.
-    public Task<bool> IsFinalizedAsync(int meetingRecordingId, CancellationToken ct) =>
-        Task.FromResult(false);
+    // No sidecar, so there is no status to report — the scheduler falls back to
+    // its backstop, which is correct since there's no real recording to advance.
+    public Task<MeetingRecorderStatus?> GetStatusAsync(CancellationToken ct) =>
+        Task.FromResult<MeetingRecorderStatus?>(null);
 }

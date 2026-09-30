@@ -17,10 +17,20 @@ namespace ClanGuardBot.Services;
 public interface IMeetingTranscriber
 {
     Task<MeetingTranscript> TranscribeAsync(string audioDir, CancellationToken ct);
+
+    /// <summary>
+    /// The transcript a previous run already wrote to <paramref name="audioDir"/>,
+    /// or null if there is none. Never runs Whisper.
+    /// </summary>
+    MeetingTranscript? TryReadCachedTranscript(string audioDir);
 }
 
-/// <summary>Result of transcribing a meeting.</summary>
-public sealed record MeetingTranscript(string Transcript, int SegmentCount, int SpeakerCount);
+/// <summary>
+/// Result of transcribing a meeting. <see cref="FailedSpeakers"/> names speakers
+/// whose audio could not be transcribed, so their contributions are missing.
+/// </summary>
+public sealed record MeetingTranscript(
+    string Transcript, int SegmentCount, int SpeakerCount, IReadOnlyList<string> FailedSpeakers);
 
 /// <summary>
 /// Calls the transcriber sidecar's /transcribe endpoint. Uses a long timeout —
@@ -89,11 +99,20 @@ public sealed class HttpMeetingTranscriber : IMeetingTranscriber
         var result = await resp.Content.ReadFromJsonAsync<TranscribeResponse>(Json, ct)
             ?? throw new InvalidOperationException("Empty response from transcriber.");
 
+        var failed = (result.FailedTracks ?? [])
+            .Select(f => string.IsNullOrWhiteSpace(f.DisplayName) ? "Unknown" : f.DisplayName!)
+            .ToList();
+
         _logger.LogInformation(
             "Transcribed {Segments} segment(s) across {Speakers} speaker(s) from {Dir}.",
             result.SegmentCount, result.SpeakerCount, audioDir);
+        if (failed.Count > 0)
+            _logger.LogWarning(
+                "Transcriber could not transcribe {Count} speaker track(s) in {Dir}: {Speakers}. Errors: {Errors}",
+                failed.Count, audioDir, string.Join(", ", failed),
+                string.Join(" | ", (result.FailedTracks ?? []).Select(f => $"{f.DisplayName}: {f.Error}")));
 
-        return new MeetingTranscript(result.Transcript ?? string.Empty, result.SegmentCount, result.SpeakerCount);
+        return new MeetingTranscript(result.Transcript ?? string.Empty, result.SegmentCount, result.SpeakerCount, failed);
     }
 
     /// <summary>
@@ -102,7 +121,7 @@ public sealed class HttpMeetingTranscriber : IMeetingTranscriber
     /// usable cached transcript (so the caller transcribes normally). The bot and
     /// sidecar share this volume at the same path, so the dir is readable here.
     /// </summary>
-    private MeetingTranscript? TryReadCachedTranscript(string audioDir)
+    public MeetingTranscript? TryReadCachedTranscript(string audioDir)
     {
         try
         {
@@ -127,7 +146,14 @@ public sealed class HttpMeetingTranscriber : IMeetingTranscriber
                         speakers.Add(name);
             }
 
-            return new MeetingTranscript(transcript, segmentCount, speakers.Count);
+            var failed = new List<string>();
+            if (root.TryGetProperty("failedTracks", out var failedEl) && failedEl.ValueKind == JsonValueKind.Array)
+                foreach (var f in failedEl.EnumerateArray())
+                    failed.Add(f.TryGetProperty("displayName", out var fn) && fn.GetString() is { Length: > 0 } n
+                        ? n
+                        : "Unknown");
+
+            return new MeetingTranscript(transcript, segmentCount, speakers.Count, failed);
         }
         catch (Exception ex)
         {
@@ -137,5 +163,8 @@ public sealed class HttpMeetingTranscriber : IMeetingTranscriber
         }
     }
 
-    private sealed record TranscribeResponse(string? Transcript, int SegmentCount, int SpeakerCount);
+    private sealed record TranscribeResponse(
+        string? Transcript, int SegmentCount, int SpeakerCount, List<FailedTrack>? FailedTracks);
+
+    private sealed record FailedTrack(string? DisplayName, string? Error);
 }

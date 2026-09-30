@@ -69,7 +69,7 @@ public static class MeetingFailureNotice
             var embed = new EmbedBuilder()
                 .WithTitle("Meeting minutes failed")
                 .WithDescription(
-                    $"**{Trunc(rec.MeetingTitle, 200)}** (recording #{rec.Id}) was captured but no minutes were posted.")
+                    $"**{Trunc(rec.MeetingTitle, 200)}** (recording #{rec.Id}) ended without minutes being posted.")
                 .AddField("Failed at", stage, inline: true)
                 .AddField("Recording", recorded, inline: true)
                 .AddField("Reason", Trunc(string.IsNullOrWhiteSpace(rec.ErrorMessage)

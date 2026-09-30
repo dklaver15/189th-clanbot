@@ -37,6 +37,8 @@ const FRAME_MS = 20;
 // silence" packet is 0xF8,0xFF,0xFE; decoders emit 20ms of silence for it.
 // We keep it tiny so silence padding costs almost nothing on disk.
 const OPUS_SILENCE_FRAME = Buffer.from([0xf8, 0xff, 0xfe]);
+// An Ogg page holds at most 255 lacing values; a 3-byte packet uses one.
+const SILENCE_PACKETS_PER_PAGE = 255;
 
 // ── Ogg CRC (RFC 3533): poly 0x04C11DB7, no reflection, init 0, xorout 0 ─────
 const CRC_TABLE = (() => {
@@ -188,15 +190,32 @@ export class OggOpusStream extends Transform {
    * continuous-track recorder to keep a speaker's track aligned to real meeting
    * time across the gaps when they aren't talking. Capped per call so a bug or
    * a very long idle period can't try to allocate a runaway number of frames.
+   * Returns the number of 20ms frames actually written.
    */
   writeSilence(ms) {
-    if (!Number.isFinite(ms) || ms <= 0) return;
+    if (!Number.isFinite(ms) || ms <= 0) return 0;
     let frames = Math.round(ms / FRAME_MS);
     // Safety cap: 6 hours of silence is far past any real meeting.
     const MAX_FRAMES = (6 * 60 * 60 * 1000) / FRAME_MS;
     if (frames > MAX_FRAMES) frames = MAX_FRAMES;
     if (!this._headerWritten) this._writeHeaders();
-    for (let i = 0; i < frames; i++) this._emitFrame(OPUS_SILENCE_FRAME);
+    // Pack up to 255 silence packets per page (one lacing byte each) instead of
+    // one page per frame: an hour-long gap becomes ~700 pages, not 180,000,
+    // so filling it doesn't stall the event loop that's receiving live audio.
+    let remaining = frames;
+    while (remaining > 0) {
+      const n = Math.min(remaining, SILENCE_PACKETS_PER_PAGE);
+      this._granule += n * SAMPLES_PER_FRAME;
+      this.push(buildPage({
+        headerType: 0x00,
+        granulePosition: this._granule,
+        serial: this._serial,
+        sequence: this._seq++,
+        packets: new Array(n).fill(OPUS_SILENCE_FRAME),
+      }));
+      remaining -= n;
+    }
+    return frames;
   }
 
   _transform(frame, _enc, cb) {
@@ -212,13 +231,15 @@ export class OggOpusStream extends Transform {
   _flush(cb) {
     try {
       if (!this._headerWritten) this._writeHeaders();
-      // EOS marker page (header type 0x04 = end of stream), empty packet.
+      // EOS marker page (header type 0x04 = end of stream) with no packets.
+      // Not an empty packet: FFmpeg rejects a zero-length Opus packet as invalid
+      // data, which aborted decoding of every track right at its end.
       this.push(buildPage({
         headerType: 0x04,
         granulePosition: this._granule,
         serial: this._serial,
         sequence: this._seq++,
-        packets: [Buffer.alloc(0)],
+        packets: [],
       }));
       cb();
     } catch (e) {

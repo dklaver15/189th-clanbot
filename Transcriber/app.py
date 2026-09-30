@@ -37,8 +37,11 @@ schemaVersion 1 (legacy / pre-rewrite recordings): one Ogg per UTTERANCE, with
 Control API (called by the C# bot's MeetingMinutesService over the compose
 network; never exposed to the host):
   GET  /health                 -> {ok, ready, model, busy}
-  POST /transcribe {audioDir}  -> {ok, segmentCount, speakerCount, transcript, segments}
-                                  also writes transcript.txt + transcript.json into audioDir
+  POST /transcribe {audioDir}  -> {ok, segmentCount, speakerCount, transcript, segments, failedTracks}
+                                  also writes transcript.txt + transcript.json into audioDir.
+                                  failedTracks lists speakers whose audio could not be
+                                  transcribed; if every track fails it returns 500 instead,
+                                  so the bot retries rather than posting empty minutes.
 """
 
 import os
@@ -287,9 +290,17 @@ def _iter_window_audio(path, windows):
         resampler = av.AudioResampler(format="flt", layout="mono", rate=SAMPLE_RATE)
 
         def chunks():
-            for frame in container.decode(stream):
-                for rs in _resampled(resampler, frame):
-                    yield rs.to_ndarray().reshape(-1)
+            try:
+                for frame in container.decode(stream):
+                    for rs in _resampled(resampler, frame):
+                        yield rs.to_ndarray().reshape(-1)
+            except av.error.InvalidDataError as e:
+                # Treat as end of stream, as faster-whisper's own decoder does.
+                # Tracks from older recorder builds end in an empty Opus packet
+                # FFmpeg rejects, and a track from a killed recorder is truncated;
+                # either way everything before this point is good audio.
+                log(f"  decode stopped at {pos / SAMPLE_RATE:.1f}s on invalid data "
+                    f"(end of a truncated or older track): {e!r}")
             for rs in _resampled(resampler, None):  # flush
                 yield rs.to_ndarray().reshape(-1)
 
@@ -363,17 +374,23 @@ def _transcribe_track(fpath, name, label, speech):
 def transcribe_tracks(audio_dir, manifest):
     """
     Transcribe each speaker's continuous track in bounded windows and tag every
-    resulting segment with that speaker. Returns a flat, speaker-tagged result
-    list (unsorted). A track that fails is logged and skipped: one unreadable or
-    oversized file must not cost us the whole meeting.
+    resulting segment with that speaker. Returns (results, speakers, failed):
+    a flat, speaker-tagged result list (unsorted), the speakers heard, and the
+    tracks that could not be transcribed. A failed track is retried once, then
+    reported rather than silently dropped, so the minutes can say who is missing.
     """
     tracks = manifest.get("tracks", [])
     participants = manifest.get("participants", {}) or {}
     total = len(tracks)
-    log(f"transcribing {total} speaker track(s) from {audio_dir}, {mem_note()}")
+    # A checkpoint manifest (recorder killed mid-meeting) can have audio past the
+    # last listed utterance, so its timing can't be used to skip windows.
+    partial = bool(manifest.get("partial"))
+    log(f"transcribing {total} speaker track(s) from {audio_dir}"
+        f"{' (partial manifest, timing ignored)' if partial else ''}, {mem_note()}")
 
     results = []
     speakers = set()
+    failed = []
     for idx, tr in enumerate(tracks, start=1):
         fname = tr.get("file", "")
         fpath = os.path.join(audio_dir, fname)
@@ -386,13 +403,21 @@ def transcribe_tracks(audio_dir, manifest):
         )
         label = f"[{idx}/{total}]"
         if not os.path.isfile(fpath):
-            log(f"  {label} missing track file, skipping: {fname}")
+            log(f"  {label} {name}: missing track file: {fname}")
+            failed.append({"displayName": name, "error": f"missing track file {fname}"})
             continue
 
-        try:
-            track_results = _transcribe_track(fpath, name, label, _speech_ranges(tr))
-        except Exception as e:
-            log(f"  {label} {name}: track FAILED, skipping it: {repr(e)}")
+        speech = [] if partial else _speech_ranges(tr)
+        track_results = None
+        for attempt in (1, 2):
+            try:
+                track_results = _transcribe_track(fpath, name, label, speech)
+                break
+            except Exception as e:
+                log(f"  {label} {name}: track FAILED (attempt {attempt}/2): {repr(e)}")
+                if attempt == 2:
+                    failed.append({"displayName": name, "error": repr(e)[:300]})
+        if track_results is None:
             continue
 
         if track_results:
@@ -400,7 +425,7 @@ def transcribe_tracks(audio_dir, manifest):
             results.extend(track_results)
         log(f"  {label} {name}: {len(track_results)} segment(s), {mem_note()}")
 
-    return results, speakers
+    return results, speakers, failed
 
 
 # ── schemaVersion 1: legacy per-utterance files ──────────────────────────────
@@ -438,7 +463,7 @@ def transcribe_segments(audio_dir, manifest):
         if idx % 250 == 0:
             log(f"  ...{idx}/{total} utterances transcribed")
 
-    return results, speakers
+    return results, speakers, []
 
 
 @app.post("/transcribe")
@@ -474,6 +499,7 @@ def transcribe():
                     speakerCount=len(speakers),
                     transcript=cached["transcript"],
                     segments=segs,
+                    failedTracks=cached.get("failedTracks", []) or [],
                     cached=True,
                 )
         except Exception as e:
@@ -490,9 +516,18 @@ def transcribe():
         # is present; fall back to legacy per-utterance otherwise.
         schema = manifest.get("schemaVersion", 1)
         if schema >= 2 or manifest.get("tracks"):
-            results, speakers = transcribe_tracks(audio_dir, manifest)
+            results, speakers, failed = transcribe_tracks(audio_dir, manifest)
+            track_count = len(manifest.get("tracks", []))
         else:
-            results, speakers = transcribe_segments(audio_dir, manifest)
+            results, speakers, failed = transcribe_segments(audio_dir, manifest)
+            track_count = 0
+
+        # Every track failed: that's a fault (decode error, memory), not a quiet
+        # meeting. Don't cache it, so the bot's retry actually re-runs Whisper.
+        if track_count and len(failed) == track_count:
+            detail = "; ".join(f"{f['displayName']}: {f['error']}" for f in failed)
+            log(f"all {track_count} track(s) failed: {detail}")
+            return jsonify(error=f"all {track_count} speaker track(s) failed to transcribe: {detail}"[:2000]), 500
 
         # Chronological merge by offset (seconds from recording start). Segments
         # with an unknown offset sort to the front deterministically.
@@ -503,16 +538,19 @@ def transcribe():
         atomic_write_text(os.path.join(audio_dir, "transcript.txt"), transcript)
         atomic_write_text(
             os.path.join(audio_dir, "transcript.json"),
-            json.dumps({"segments": results, "transcript": transcript}, ensure_ascii=False, indent=2),
+            json.dumps({"segments": results, "transcript": transcript, "failedTracks": failed},
+                       ensure_ascii=False, indent=2),
         )
 
-        log(f"done: {len(results)} non-empty segment(s), {len(speakers)} speaker(s), {mem_note()}")
+        log(f"done: {len(results)} non-empty segment(s), {len(speakers)} speaker(s), "
+            f"{len(failed)} failed track(s), {mem_note()}")
         return jsonify(
             ok=True,
             segmentCount=len(results),
             speakerCount=len(speakers),
             transcript=transcript,
             segments=results,
+            failedTracks=failed,
         )
     except Exception as e:
         log("transcribe error:", repr(e))

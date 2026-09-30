@@ -36,7 +36,7 @@ jobs:
           # 10m → "Run Command Timeout". The sidecars now use layer cache (see
           # the build steps below), so typical deploys are much shorter, but 30m
           # stays: a dependency change in the transcriber still triggers the full
-          # slow path, and the droplet is a single shared vCPU.
+          # slow path, and the droplet only has 2 shared vCPUs.
           command_timeout: 30m
           envs: GOOGLE_CREDENTIALS_BASE64,ANTHROPIC_API_KEY
           script: |
@@ -69,7 +69,13 @@ jobs:
             # --no-cache back across the board:
             #   docker compose build --no-cache transcriber
             docker compose build recorder transcriber
-            docker compose up -d --force-recreate
+            #
+            # Only the bot is force-recreated. The sidecars are recreated only
+            # when their image or config actually changed, so a routine push
+            # doesn't pull the recorder out of a meeting in progress or kill a
+            # running transcription.
+            docker compose up -d --no-deps recorder transcriber
+            docker compose up -d --no-deps --force-recreate clanguard
         env:
           GOOGLE_CREDENTIALS_BASE64: ${{ secrets.GOOGLE_CREDENTIALS_BASE64 }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
