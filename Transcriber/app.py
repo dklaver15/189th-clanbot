@@ -45,6 +45,7 @@ network; never exposed to the host):
 """
 
 import os
+import re
 import json
 import resource
 import threading
@@ -290,17 +291,35 @@ def _iter_window_audio(path, windows):
         resampler = av.AudioResampler(format="flt", layout="mono", rate=SAMPLE_RATE)
 
         def chunks():
+            bad_packets = 0
             try:
-                for frame in container.decode(stream):
-                    for rs in _resampled(resampler, frame):
-                        yield rs.to_ndarray().reshape(-1)
+                # Decode packet by packet rather than via container.decode(), which
+                # ends for good on the first error: one undecodable frame must not
+                # cost the rest of the speaker's meeting.
+                for packet in container.demux(stream):
+                    try:
+                        frames = packet.decode()
+                    except av.error.InvalidDataError:
+                        bad_packets += 1
+                        # Hold its place with silence so later audio stays aligned.
+                        if packet.duration and packet.time_base:
+                            n = int(round(float(packet.duration * packet.time_base) * SAMPLE_RATE))
+                            if n > 0:
+                                yield np.zeros(n, dtype=np.float32)
+                        continue
+                    for frame in frames:
+                        for rs in _resampled(resampler, frame):
+                            yield rs.to_ndarray().reshape(-1)
             except av.error.InvalidDataError as e:
-                # Treat as end of stream, as faster-whisper's own decoder does.
-                # Tracks from older recorder builds end in an empty Opus packet
-                # FFmpeg rejects, and a track from a killed recorder is truncated;
-                # either way everything before this point is good audio.
+                # A demux (container-level) error: treat as end of stream, as
+                # faster-whisper's own decoder does. Tracks from older recorder
+                # builds end in an empty Opus packet FFmpeg rejects, and a track
+                # from a killed recorder is truncated; either way everything
+                # before this point is good audio.
                 log(f"  decode stopped at {pos / SAMPLE_RATE:.1f}s on invalid data "
                     f"(end of a truncated or older track): {e!r}")
+            if bad_packets:
+                log(f"  skipped {bad_packets} undecodable packet(s), replaced with silence")
             for rs in _resampled(resampler, None):  # flush
                 yield rs.to_ndarray().reshape(-1)
 
@@ -374,17 +393,24 @@ def _transcribe_track(fpath, name, label, speech):
 def transcribe_tracks(audio_dir, manifest):
     """
     Transcribe each speaker's continuous track in bounded windows and tag every
-    resulting segment with that speaker. Returns (results, speakers, failed):
-    a flat, speaker-tagged result list (unsorted), the speakers heard, and the
-    tracks that could not be transcribed. A failed track is retried once, then
+    resulting segment with that speaker. Returns (results, speakers, failed,
+    total): a flat, speaker-tagged result list (unsorted), the speakers heard,
+    the tracks that could not be transcribed, and how many tracks were tried. A failed track is retried once, then
     reported rather than silently dropped, so the minutes can say who is missing.
     """
-    tracks = manifest.get("tracks", [])
+    tracks = list(manifest.get("tracks", []))
     participants = manifest.get("participants", {}) or {}
-    total = len(tracks)
     # A checkpoint manifest (recorder killed mid-meeting) can have audio past the
     # last listed utterance, so its timing can't be used to skip windows.
     partial = bool(manifest.get("partial"))
+    if partial:
+        # It can also predate a speaker's first words; pick up their track files.
+        listed = {t.get("file") for t in tracks}
+        for fname in sorted(os.listdir(audio_dir)):
+            m = re.fullmatch(r"speaker_user(\d+)\.ogg", fname)
+            if m and fname not in listed:
+                tracks.append({"userId": m.group(1), "file": fname, "segments": []})
+    total = len(tracks)
     log(f"transcribing {total} speaker track(s) from {audio_dir}"
         f"{' (partial manifest, timing ignored)' if partial else ''}, {mem_note()}")
 
@@ -425,7 +451,7 @@ def transcribe_tracks(audio_dir, manifest):
             results.extend(track_results)
         log(f"  {label} {name}: {len(track_results)} segment(s), {mem_note()}")
 
-    return results, speakers, failed
+    return results, speakers, failed, total
 
 
 # ── schemaVersion 1: legacy per-utterance files ──────────────────────────────
@@ -463,7 +489,7 @@ def transcribe_segments(audio_dir, manifest):
         if idx % 250 == 0:
             log(f"  ...{idx}/{total} utterances transcribed")
 
-    return results, speakers, []
+    return results, speakers, [], 0
 
 
 @app.post("/transcribe")
@@ -516,11 +542,9 @@ def transcribe():
         # is present; fall back to legacy per-utterance otherwise.
         schema = manifest.get("schemaVersion", 1)
         if schema >= 2 or manifest.get("tracks"):
-            results, speakers, failed = transcribe_tracks(audio_dir, manifest)
-            track_count = len(manifest.get("tracks", []))
+            results, speakers, failed, track_count = transcribe_tracks(audio_dir, manifest)
         else:
-            results, speakers, failed = transcribe_segments(audio_dir, manifest)
-            track_count = 0
+            results, speakers, failed, track_count = transcribe_segments(audio_dir, manifest)
 
         # Every track failed: that's a fault (decode error, memory), not a quiet
         # meeting. Don't cache it, so the bot's retry actually re-runs Whisper.

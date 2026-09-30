@@ -51,8 +51,10 @@ public interface IAiService
 /// by the API (which may be a snapshot like "claude-sonnet-4-6-20250529" even
 /// when the request asked for an alias like "claude-sonnet-4-6"), so callers
 /// that surface it to users get the actual model that produced the response.
+/// <see cref="StopReason"/> is the API's stop_reason ("end_turn", "max_tokens",
+/// "refusal", ...), so callers can reject a truncated completion.
 /// </summary>
-public sealed record AiResult(string Text, string Model, int InputTokens, int OutputTokens)
+public sealed record AiResult(string Text, string Model, int InputTokens, int OutputTokens, string? StopReason = null)
 {
     /// <summary>Estimated USD cost at Sonnet 4.6 list pricing ($3/$15 per MTok).</summary>
     public decimal EstimatedCostUsd =>
@@ -149,7 +151,7 @@ public sealed class ClaudeAiService(
         // the response field is required per the Messages API spec, so this is defensive.
         var modelUsed = string.IsNullOrEmpty(payload.Model) ? _options.Model : payload.Model;
 
-        var result = new AiResult(text, modelUsed, payload.Usage.InputTokens, payload.Usage.OutputTokens);
+        var result = new AiResult(text, modelUsed, payload.Usage.InputTokens, payload.Usage.OutputTokens, payload.StopReason);
 
         // Log stop_reason alongside usage. This is the single field that tells a
         // truncated answer ("max_tokens" — raise MaxOutputTokens) apart from one

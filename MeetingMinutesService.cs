@@ -42,6 +42,11 @@ public class MeetingMinutesService : BackgroundService
     /// <summary>Ceiling on the retry backoff, so a row is still retried periodically.</summary>
     private static readonly TimeSpan MaxBackoff = TimeSpan.FromMinutes(30);
 
+    // The model thinks by default, and max_tokens caps thinking plus the answer
+    // together, so these leave room for both. They are ceilings, not spend.
+    private const int MinutesMaxTokens = 16_000;
+    private const int ChunkNotesMaxTokens = 8_000;
+
     private readonly IServiceProvider _services;
     private readonly DiscordSocketClient _client;
     private readonly IMeetingTranscriber _transcriber;
@@ -137,6 +142,7 @@ public class MeetingMinutesService : BackgroundService
             .Where(m => m.State == MeetingRecordingState.Transcribing
                      || m.State == MeetingRecordingState.Summarized)
             .OrderBy(m => m.MeetingStartUtc)
+            .ThenBy(m => m.Id) // a "(continued)" part shares its event's start time
             .ToListAsync(ct);
 
         PruneBackoff(inFlight);
@@ -333,7 +339,7 @@ public class MeetingMinutesService : BackgroundService
     private async Task<(string Minutes, string? ActionItemsJson)> GenerateMinutesAsync(
         MeetingRecording rec, IReadOnlyList<string> failedSpeakers, CancellationToken ct)
     {
-        var roster = BuildRoster(rec.GuildId);
+        var roster = BuildRoster(rec.GuildId, rec.TranscriptText);
         var meetingDate = rec.MeetingStartUtc.ToString("yyyy-MM-dd");
         var transcript = rec.TranscriptText ?? string.Empty;
         var missingNote = failedSpeakers.Count > 0
@@ -366,7 +372,8 @@ public class MeetingMinutesService : BackgroundService
             .AppendLine("TRANSCRIPT:")
             .AppendLine(transcript);
 
-        var ai = await _ai.GenerateAsync(MinutesSystemPrompt, user.ToString(), maxTokens: 4000, ct);
+        var ai = await _ai.GenerateAsync(MinutesSystemPrompt, user.ToString(), maxTokens: MinutesMaxTokens, ct);
+        EnsureComplete(ai, "minutes");
         return SplitMinutesAndActions(ai.Text);
     }
 
@@ -413,7 +420,8 @@ public class MeetingMinutesService : BackgroundService
                 .AppendLine(chunks[i])
                 .ToString();
 
-            var ai = await _ai.GenerateAsync(mapSystem, mapUser, maxTokens: 2000, ct);
+            var ai = await _ai.GenerateAsync(mapSystem, mapUser, maxTokens: ChunkNotesMaxTokens, ct);
+            EnsureComplete(ai, $"notes for part {i + 1}");
             notes.AppendLine($"--- Notes from part {i + 1} of {chunks.Count} ---");
             notes.AppendLine(ai.Text.Trim());
             notes.AppendLine();
@@ -449,8 +457,23 @@ public class MeetingMinutesService : BackgroundService
             .AppendLine("NOTES (in order):")
             .AppendLine(notes.ToString());
 
-        var reduced = await _ai.GenerateAsync(reduceSystem, reduceUser.ToString(), maxTokens: 4000, ct);
+        var reduced = await _ai.GenerateAsync(reduceSystem, reduceUser.ToString(), maxTokens: MinutesMaxTokens, ct);
+        EnsureComplete(reduced, "minutes");
         return SplitMinutesAndActions(reduced.Text);
+    }
+
+    /// <summary>
+    /// Reject a completion that stopped early. A max_tokens stop means the text was
+    /// cut off (possibly mid-list, with the action-item JSON missing), and a refusal
+    /// means the model declined; posting either would look like finished minutes.
+    /// Throwing lets the pipeline back off, retry, and eventually report the failure.
+    /// </summary>
+    private static void EnsureComplete(AiResult ai, string what)
+    {
+        if (ai.StopReason is "max_tokens" or "refusal")
+            throw new InvalidOperationException(
+                $"Claude stopped with stop_reason={ai.StopReason} while writing the {what} " +
+                $"({ai.OutputTokens} output tokens), so the result is incomplete.");
     }
 
     /// <summary>
@@ -506,13 +529,19 @@ public class MeetingMinutesService : BackgroundService
         return (minutes, actionsJson);
     }
 
-    private string BuildRoster(ulong guildId)
+    private string BuildRoster(ulong guildId, string? transcript)
     {
         var guild = _client.GetGuild(guildId);
         if (guild is null) return "(roster unavailable)";
 
+        // Speakers first, so the cap below never drops someone who was in the meeting.
+        var speakers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (Match m in Regex.Matches(transcript ?? string.Empty, @"^\[[^\]]*\] ([^:\n]+):", RegexOptions.Multiline))
+            speakers.Add(m.Groups[1].Value.Trim());
+
         var names = guild.Users
             .Where(u => !u.IsBot)
+            .OrderByDescending(u => speakers.Contains(u.DisplayName))
             .Take(400)
             .Select(u => u.DisplayName == u.Username ? u.DisplayName : $"{u.DisplayName} (@{u.Username})");
 
@@ -568,6 +597,7 @@ public class MeetingMinutesService : BackgroundService
                       || m.State == MeetingRecordingState.Summarized
                       || m.State == MeetingRecordingState.Transcribing))
             .OrderByDescending(m => m.MeetingStartUtc)
+            .ThenByDescending(m => m.Id)
             .ToListAsync(ct);
 
         var pruned = false;

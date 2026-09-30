@@ -66,6 +66,10 @@ const AUDIO_ROOT = process.env.AUDIO_ROOT ?? '/app/data/recordings';
 // of silence from a speaker. The track stays open; only the per-utterance
 // subscription ends, which is how we get clean per-utterance start/end times.
 const SILENCE_MS = Number(process.env.RECORDER_SILENCE_MS ?? 800);
+// Discord stops sending packets during short pauses inside an utterance. A gap
+// between packets longer than this is filled with silence so the track keeps
+// pace with real time; shorter gaps are treated as network jitter.
+const INTRA_GAP_MS = Number(process.env.RECORDER_INTRA_GAP_MS ?? 200);
 // Stop once the VC has been empty (no non-bot members) for this long.
 const VC_EMPTY_GRACE_MS = Number(process.env.RECORDER_VC_EMPTY_GRACE_MS ?? 120_000);
 // Treat "empty" as "at most this many non-bot members" (1 = just a straggler).
@@ -191,9 +195,10 @@ function trackFor(state, userId, guild) {
   };
   state.tracks.set(userId, tr);
 
-  // Resolve the speaker name once, lazily.
+  // Resolve the speaker name once, lazily. Stop waits on these so the final
+  // manifest doesn't label someone by their raw user id.
   if (!state.participants[userId]) {
-    resolveSpeaker(guild, userId).then((s) => { state.participants[userId] = s; });
+    state.nameLookups.push(resolveSpeaker(guild, userId).then((s) => { state.participants[userId] = s; }));
   }
   return tr;
 }
@@ -226,11 +231,13 @@ function captureUtterance(state, userId, guild) {
 
   // The utterance in progress, visible to checkpoints and to stop (which closes
   // it out if the speaker is still talking, so that audio isn't dropped).
-  const open = { startUtc, startOffsetMs, frames: 0, finish: null };
+  const open = { startUtc, startOffsetMs, frames: 0, padMs: 0, finish: null };
   tr.open = open;
   const onData = (frame) => {
     if (tr.closed) return; // track already ended by stop; writing would error per frame
     try {
+      const lagMs = (Date.now() - state.startMs) - (tr.writtenUntilMs + open.frames * 20 + open.padMs);
+      if (lagMs > INTRA_GAP_MS) open.padMs += tr.ogg.writeSilence(lagMs) * 20;
       tr.ogg.write(frame);
       open.frames++;
     } catch (e) {
@@ -249,7 +256,7 @@ function captureUtterance(state, userId, guild) {
       if (tr.open === open) tr.open = null;
       const endUtc = new Date();
       // Each Discord frame is 20ms; advance our written-time marker.
-      tr.writtenUntilMs += open.frames * 20;
+      tr.writtenUntilMs += open.frames * 20 + open.padMs;
       if (open.frames > 0) {
         tr.firstUtteranceUtc ??= startUtc.toISOString();
         tr.lastUtteranceEndUtc = endUtc.toISOString();
@@ -323,7 +330,12 @@ async function doStartRecording({ meetingRecordingId, guildId, voiceChannelId, m
 
   const startUtc = new Date();
   const audioDir = path.join(AUDIO_ROOT, `meeting_${meetingRecordingId}_${startUtc.getTime()}`);
-  fs.mkdirSync(audioDir, { recursive: true });
+  try {
+    fs.mkdirSync(audioDir, { recursive: true });
+  } catch (e) {
+    try { connection.destroy(); } catch {} // don't sit in the VC with nowhere to write
+    throw e;
+  }
 
   // Compute the hard cap: the bot's expected stop plus HARD_CAP_GRACE_MS,
   // bounded by an absolute max.
@@ -343,6 +355,7 @@ async function doStartRecording({ meetingRecordingId, guildId, voiceChannelId, m
     audioDir,
     tracks: new Map(),       // userId -> track
     participants: {},
+    nameLookups: [],
     activeSubs: new Set(),
     pending: new Set(),
     startUtc: startUtc.toISOString(),
@@ -545,6 +558,7 @@ async function stopRecording(meetingRecordingId, reason = 'requested') {
       }));
     }
     await Promise.race([Promise.allSettled(closes), delay(10_000)]);
+    await Promise.race([Promise.allSettled(state.nameLookups), delay(5_000)]);
 
     const manifest = buildManifest(state, false);
     const speakerCount = manifest.tracks.length;

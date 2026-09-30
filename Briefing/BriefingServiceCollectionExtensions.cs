@@ -33,11 +33,10 @@ public static class BriefingServiceCollectionExtensions
             client.BaseAddress = new Uri(opts.BaseUrl);
             client.DefaultRequestHeaders.Add("x-api-key", opts.ApiKey);
             client.DefaultRequestHeaders.Add("anthropic-version", opts.ApiVersion);
-            // 180s, not 60s: meeting-minutes generation asks for up to 4000 output
-            // tokens (≈60s by itself), and the chunked path makes several calls in
-            // sequence. 60s could time out a long single completion and fail the
-            // minutes run. The weekly briefing (smaller output) is unaffected.
-            client.Timeout = TimeSpan.FromSeconds(180);
+            // 10 minutes: meeting minutes allow up to 16,000 output tokens (thinking
+            // plus text share that budget), and a long completion can run for
+            // several minutes. This is only a ceiling; normal calls finish far sooner.
+            client.Timeout = TimeSpan.FromMinutes(10);
         });
         // Optional: add Microsoft.Extensions.Http.Resilience and call .AddStandardResilienceHandler()
         // on the builder above for retries/circuit breaker. Not required at clan scale.
