@@ -68,7 +68,7 @@ public sealed class PollCommandHandler
                 .WithName("description")
                 .WithDescription("Optional context posted above the poll (details, rules, timing, etc.)")
                 .WithType(ApplicationCommandOptionType.String)
-                .WithMaxLength(PollPublisher.MaxMessageLength)
+                .WithMaxLength(PollPublisher.MaxDescriptionLength)
                 .WithRequired(false))
             .AddOption("option1", ApplicationCommandOptionType.String, "First choice (optional leading emoji, e.g. 🔥 Build a base)", isRequired: false)
             .AddOption("option2", ApplicationCommandOptionType.String, "Second choice", isRequired: false);

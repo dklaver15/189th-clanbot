@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using ClanGuardBot.Data;
 using ClanGuardBot.Models;
 using Discord;
@@ -39,6 +40,9 @@ public sealed class PollPublisher
     public const int MaxOptions = 10;
     public const int MaxQuestionLength = 300;  // Discord native poll question cap
     public const int MaxMessageLength = 2000;  // Discord message-content cap (holds the overflow description)
+    // Room kept free in that message for the native poll's "Poll created by @user" line.
+    public const int AttributionReserve = 64;
+    public const int MaxDescriptionLength = MaxMessageLength - AttributionReserve;
     public const int MaxOptionLength = 55;     // Discord native poll answer cap (applied to both modes)
     public const int MinDurationHours = 1;
     public const int MaxDurationHours = 768;  // Discord native poll cap (32 days)
@@ -114,8 +118,15 @@ public sealed class PollPublisher
         // The poll question itself is capped at Discord's 300 chars; any longer
         // context the creator wants lives in the optional Description field, which
         // rides as ordinary message text above the poll (Discord renders content
-        // over the poll object). Null/blank description → just the poll, nothing above.
-        var description = string.IsNullOrWhiteSpace(d.Description) ? null : Trim(d.Description, MaxMessageLength);
+        // over the poll object).
+        //
+        // A native poll shows as posted by the bot, so the message always opens
+        // with a small-print line crediting the member who ran /poll. It's a real
+        // mention (clickable, and it follows name changes) that never pings.
+        var attribution = $"-# 📊 Poll created by {MentionUtils.MentionUser(d.CreatorId)}";
+        var content = string.IsNullOrWhiteSpace(d.Description)
+            ? attribution
+            : $"{attribution}\n{Trim(d.Description, MaxDescriptionLength)}";
 
         var pollProps = new PollProperties
         {
@@ -132,12 +143,30 @@ public sealed class PollPublisher
             LayoutType       = PollLayout.Default,
         };
 
-        var posted = await channel.SendMessageAsync(text: description, poll: pollProps);
+        var posted = await channel.SendMessageAsync(
+            text: content, poll: pollProps, allowedMentions: DescriptionMentions(d.Description));
 
         var poll = await PersistAsync(d, channel, posted.Id, now, closesAt);
         _logger.LogInformation("Posted native poll {PollId} '{Q}' (msg {MsgId}), closes {Close:o}",
             poll.Id, poll.Question, posted.Id, closesAt);
         return poll;
+    }
+
+    /// <summary>
+    /// Mentions allowed to ping in a native poll's message: whatever the
+    /// description mentions (roles, @everyone/@here, and the users it names), as
+    /// before the credit line existed, but not the creator named by that line.
+    /// Discord rejects listing user ids alongside the blanket "users" type, so the
+    /// description's users are listed individually.
+    /// </summary>
+    private static AllowedMentions DescriptionMentions(string? description)
+    {
+        var userIds = Regex.Matches(description ?? string.Empty, @"<@!?(\d+)>")
+            .Select(m => ulong.TryParse(m.Groups[1].Value, out var id) ? id : 0UL)
+            .Where(id => id != 0)
+            .Distinct()
+            .ToList();
+        return new AllowedMentions(AllowedMentionTypes.Roles | AllowedMentionTypes.Everyone) { UserIds = userIds };
     }
 
     // ─── Anonymous (custom embed + buttons) ────────────────────────────────
@@ -168,7 +197,7 @@ public sealed class PollPublisher
         // 2) Post the embed (no buttons yet) to obtain a real message id. Any
         //    optional description rides as message text above the embed; later
         //    vote/close re-renders only touch the embed + components, so it stays.
-        var description = string.IsNullOrWhiteSpace(d.Description) ? null : Trim(d.Description, MaxMessageLength);
+        var description = string.IsNullOrWhiteSpace(d.Description) ? null : Trim(d.Description, MaxDescriptionLength);
         IUserMessage posted;
         if (banner is { } b)
         {
