@@ -289,7 +289,7 @@ public static class EventImage
         }
 
         var n = Math.Max(1, image.Height * 2);
-        return Color.FromRgb((byte)(r / n), (byte)(g / n), (byte)(b / n));
+        return Color.FromPixel(new Rgb24((byte)(r / n), (byte)(g / n), (byte)(b / n)));
     }
 
     public static bool IsAllowedExtension(string? fileName)
