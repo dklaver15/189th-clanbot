@@ -543,7 +543,22 @@ public class AutoPromotionService : BackgroundService
                 continue;
             }
 
-            var result = await _promotion.PromoteAsync(member, tier.ToRank);
+            // One member's Discord failure mustn't end the run: everyone after
+            // them would be skipped, and so would the announcement for the
+            // promotions already applied.
+            PromotionService.PromotionResult result;
+            try
+            {
+                result = await _promotion.PromoteAsync(member, tier.ToRank);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "Auto-promo FAILED for {User} → {Rank}; continuing with the rest of the run",
+                    member.Username, tier.ToRank);
+                continue;
+            }
+
             if (!result.Success)
             {
                 _logger.LogWarning(

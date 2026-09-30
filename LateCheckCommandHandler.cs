@@ -167,7 +167,7 @@ public class LateCheckCommandHandler
         if (result.TotalOwnEvents == 0)
         {
             await command.FollowupAsync(
-                $"**{displayName}** hasn't organized or hosted any (non-cancelled) events that have happened yet.",
+                $"**{displayName}** hasn't organized or hosted any (non-cancelled) events in the last {_config.GetActivityRetentionDays()} days.",
                 ephemeral: true);
             return;
         }
@@ -181,7 +181,8 @@ public class LateCheckCommandHandler
             .WithTitle("⏰ Late-to-own-events report")
             .WithColor(result.TimesLate > 0 || result.NoShows > 0 ? Color.Orange : Color.Green)
             .WithDescription(
-                $"Across **{result.TotalOwnEvents}** event(s) they organized or hosted, " +
+                $"Across **{result.TotalOwnEvents}** event(s) they organized or hosted in the last " +
+                $"**{_config.GetActivityRetentionDays()} days** (the voice history the bot keeps), " +
                 $"showing up later than **{grace} min** after start counts as late.")
             .AddField("🔴 Late", $"{result.TimesLate}{pct}", true)
             .AddField("🟢 On time", result.OnTime.ToString(), true)
@@ -233,15 +234,19 @@ public class LateCheckCommandHandler
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
-        // Every own (organized or hosted) event that has already started. We
+        // Every own (organized or hosted) event that has already started, within
+        // the voice history the bot keeps; an older event has no voice data and
+        // would read as a no-show. We
         // deliberately do NOT filter out Cancelled rows here: the duplicate-
         // series churn stamps real, attended events as Cancelled, so dropping
         // them silently hid genuine misses (an officer who skipped their own
         // event). Cancelled slots are instead kept and annotated below.
+        var oldest = now.AddDays(-_config.GetActivityRetentionDays());
         var rows = await db.ClanEvents
             .Where(e => e.GuildId == guildId
                      && (e.OrganizerId == userId || e.HostId == userId)
-                     && e.StartUtc <= now)
+                     && e.StartUtc <= now
+                     && e.StartUtc >= oldest)
             .ToListAsync();
 
         if (rows.Count == 0)

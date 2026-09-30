@@ -111,7 +111,10 @@ public class MemberDeparture
     /// <summary>True if they held the Reserve role (changes how we read an AWOL non-kick).</summary>
     public bool HadReserve { get; set; }
 
-    /// <summary>Lifetime message count at departure — distinguishes ghost churn from engaged churn.</summary>
+    /// <summary>
+    /// Message count at departure over the retained history (ActivityRetentionDays),
+    /// not truly lifetime — distinguishes ghost churn from engaged churn.
+    /// </summary>
     public int MessagesLifetime { get; set; }
 
     /// <summary>Lifetime bot-tracked events attended at departure.</summary>

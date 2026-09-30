@@ -1,5 +1,6 @@
 using ClanGuardBot.Data;
 using ClanGuardBot.Models;
+using ClanGuardBot.Services;
 using Discord.WebSocket;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -88,6 +89,9 @@ public class ActivityTrackingHandler
         }
     }
 
+    private static SocketVoiceChannel? CountedChannel(SocketVoiceChannel? channel, ulong? afkChannelId) =>
+        channel is not null && channel.Id != afkChannelId ? channel : null;
+
     private async Task OnVoiceStateUpdated(
         SocketUser user,
         SocketVoiceState beforeState,
@@ -103,8 +107,14 @@ public class ActivityTrackingHandler
         var userId = user.Id;
         var username = user.ToString() ?? user.Username;
 
-        var wasInVoice = beforeState.VoiceChannel is not null;
-        var isInVoice = afterState.VoiceChannel is not null;
+        // Time in the guild's AFK channel isn't activity: moving there counts as
+        // leaving voice, and moving back out as joining.
+        var afkChannelId = guild.AFKChannel?.Id;
+        var beforeChannel = CountedChannel(beforeState.VoiceChannel, afkChannelId);
+        var afterChannel  = CountedChannel(afterState.VoiceChannel, afkChannelId);
+
+        var wasInVoice = beforeChannel is not null;
+        var isInVoice  = afterChannel is not null;
 
         try
         {
@@ -128,65 +138,41 @@ public class ActivityTrackingHandler
             {
                 activity.Username = username;
             }
-            
-            if (!wasInVoice && isInVoice)
+
+            var switched = wasInVoice && isInVoice && beforeChannel!.Id != afterChannel!.Id;
+            var now = DateTime.UtcNow;
+
+            if (wasInVoice != isInVoice || switched)
             {
-                // User joined voice — start a new session
-                activity.VoiceJoinedAt = DateTime.UtcNow;
+                // Close every open session, not just the newest: one left open by
+                // a missed leave would otherwise keep counting alongside the new one.
+                var openSessions = await db.VoiceSessions
+                    .Where(v => v.GuildId == guildId && v.UserId == userId && v.LeftAt == null)
+                    .ToListAsync();
+                foreach (var open in openSessions)
+                    open.LeftAt = VoiceActivityHelper.ClampLeftAt(open.JoinedAt, _config.MaxSingleSessionHours, now);
+            }
+
+            if (isInVoice && (!wasInVoice || switched))
+            {
+                activity.VoiceJoinedAt = now;
                 db.VoiceSessions.Add(new VoiceSession
                 {
                     GuildId = guildId,
                     UserId = userId,
-                    JoinedAt = DateTime.UtcNow,
+                    JoinedAt = now,
                     LeftAt = null,
-                    ChannelId = afterState.VoiceChannel?.Id,
-                    ChannelName = afterState.VoiceChannel?.Name,
-                    CategoryId = afterState.VoiceChannel?.CategoryId
+                    ChannelId = afterChannel!.Id,
+                    ChannelName = afterChannel.Name,
+                    CategoryId = afterChannel.CategoryId
                 });
-                _logger.LogDebug("User {Username} joined voice in guild {GuildId}", username, guildId);
+                _logger.LogDebug("User {Username} {Action} voice in guild {GuildId}",
+                    username, switched ? "switched" : "joined", guildId);
             }
             else if (wasInVoice && !isInVoice)
             {
-                // User left voice — close the open session
                 activity.VoiceJoinedAt = null;
-                var openSession = await db.VoiceSessions
-                    .Where(v => v.GuildId == guildId && v.UserId == userId && v.LeftAt == null)
-                    .OrderByDescending(v => v.JoinedAt)
-                    .FirstOrDefaultAsync();
-
-                if (openSession is not null)
-                {
-                    openSession.LeftAt = DateTime.UtcNow;
-                    _logger.LogDebug("User {Username} left voice after {Duration}s in guild {GuildId}",
-                        username, (DateTime.UtcNow - openSession.JoinedAt).TotalSeconds, guildId);
-                }
-            }
-            else if (wasInVoice && isInVoice
-                     && beforeState.VoiceChannel?.Id != afterState.VoiceChannel?.Id)
-            {
-                // User switched channels — close old session, open new one
-                var openSession = await db.VoiceSessions
-                    .Where(v => v.GuildId == guildId && v.UserId == userId && v.LeftAt == null)
-                    .OrderByDescending(v => v.JoinedAt)
-                    .FirstOrDefaultAsync();
-
-                if (openSession is not null)
-                {
-                    openSession.LeftAt = DateTime.UtcNow;
-                }
-
-                activity.VoiceJoinedAt = DateTime.UtcNow;
-                db.VoiceSessions.Add(new VoiceSession
-                {
-                    GuildId = guildId,
-                    UserId = userId,
-                    JoinedAt = DateTime.UtcNow,
-                    LeftAt = null,
-                    ChannelId = afterState.VoiceChannel?.Id,
-                    ChannelName = afterState.VoiceChannel?.Name,
-                    CategoryId = afterState.VoiceChannel?.CategoryId
-                });
-                _logger.LogDebug("User {Username} switched voice channels in guild {GuildId}", username, guildId);
+                _logger.LogDebug("User {Username} left voice in guild {GuildId}", username, guildId);
             }
 
             await db.SaveChangesAsync();

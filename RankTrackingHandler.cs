@@ -558,32 +558,21 @@ public class RankTrackingHandler
             return; // don't resolve records if we can't even remove the role
         }
 
-        // Resolve any pending AwolRecords so they don't surface notifications
-        // for someone who is no longer functionally AWOL.
+        // Resolve pending AwolRecords and delete any posted #awol-list embed, so
+        // the member isn't listed while exempt and an old listing can't make
+        // them kickable the moment they're flagged again after the exemption.
         try
         {
             using var scope = _services.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
-            var pendingRecords = await db.AwolRecords
-                .Where(r => r.GuildId == after.Guild.Id
-                         && r.UserId == after.Id
-                         && !r.NotificationSent)
-                .ToListAsync();
+            var closed = await CloseAwolRecordsAsync(db, after, DateTime.UtcNow);
+            await db.SaveChangesAsync();
 
-            if (pendingRecords.Count > 0)
-            {
-                foreach (var record in pendingRecords)
-                {
-                    record.NotificationSent = true;
-                    record.NotificationSentAt = DateTime.UtcNow;
-                }
-                await db.SaveChangesAsync();
-
+            if (closed > 0)
                 _logger.LogInformation(
-                    "Resolved {Count} pending AwolRecord(s) for {Username} after exempt-role transition",
-                    pendingRecords.Count, after.Username);
-            }
+                    "Resolved {Count} AwolRecord(s) for {Username} after exempt-role transition",
+                    closed, after.Username);
         }
         catch (Exception ex)
         {
@@ -655,14 +644,29 @@ public class RankTrackingHandler
         activity.WindowResetAt = now;
 
         // ── Resolve outstanding AWOL records and delete posted HQ embeds ──
-        // Catch both pending (NotificationSent false, no message id) and posted
-        // (message id stored) records, so removing the role also clears the
-        // member from #awol-list. Mirrors AwolCheckService.CloseAwolRecordsAnd
-        // DeleteEmbedsAsync; kept here because the sweep's window-reset guard
-        // makes the member skip the branches that would otherwise call it.
+        // Kept here because the sweep's window-reset guard makes the member skip
+        // the branches that would otherwise clear them.
+        var closed = await CloseAwolRecordsAsync(db, after, now);
+
+        await db.SaveChangesAsync();
+
+        _logger.LogInformation(
+            "AWOL role removed from {Username} ({UserId}) in {Guild} — reset activity window to {ResetAt:yyyy-MM-dd HH:mm} UTC " +
+            "and resolved {Records} AWOL record(s). Member will not be re-flagged until a full activity window elapses.",
+            after.Username, after.Id, after.Guild.Name, now, closed);
+    }
+
+    /// <summary>
+    /// Resolves a member's open AwolRecords: pending ones (NotificationSent
+    /// false) and posted ones (message id stored), deleting the posted
+    /// #awol-list embed. Mirrors AwolCheckService.CloseAwolRecordsAndDeleteEmbedsAsync.
+    /// The caller saves. Returns the number of records resolved.
+    /// </summary>
+    private async Task<int> CloseAwolRecordsAsync(BotDbContext db, SocketGuildUser member, DateTime now)
+    {
         var openRecords = await db.AwolRecords
-            .Where(r => r.GuildId == after.Guild.Id
-                     && r.UserId == after.Id
+            .Where(r => r.GuildId == member.Guild.Id
+                     && r.UserId == member.Id
                      && (!r.NotificationSent || r.NotificationMessageId != null))
             .ToListAsync();
 
@@ -673,7 +677,7 @@ public class RankTrackingHandler
             {
                 try
                 {
-                    var notifChannel = after.Guild.GetTextChannel(record.NotificationChannelId.Value);
+                    var notifChannel = member.Guild.GetTextChannel(record.NotificationChannelId.Value);
                     if (notifChannel is not null)
                         await notifChannel.DeleteMessageAsync(record.NotificationMessageId.Value);
                 }
@@ -685,8 +689,8 @@ public class RankTrackingHandler
                 catch (Exception ex)
                 {
                     _logger.LogWarning(ex,
-                        "Failed to delete AWOL embed for {Username} ({UserId}) on AWOL role removal (message {MessageId})",
-                        after.Username, after.Id, record.NotificationMessageId.Value);
+                        "Failed to delete AWOL embed for {Username} ({UserId}) (message {MessageId})",
+                        member.Username, member.Id, record.NotificationMessageId.Value);
                 }
 
                 record.NotificationChannelId = null;
@@ -697,12 +701,7 @@ public class RankTrackingHandler
             record.NotificationSentAt = now;
         }
 
-        await db.SaveChangesAsync();
-
-        _logger.LogInformation(
-            "AWOL role removed from {Username} ({UserId}) in {Guild} — reset activity window to {ResetAt:yyyy-MM-dd HH:mm} UTC " +
-            "and resolved {Records} AWOL record(s). Member will not be re-flagged until a full activity window elapses.",
-            after.Username, after.Id, after.Guild.Name, now, openRecords.Count);
+        return openRecords.Count;
     }
 
     /// <summary>

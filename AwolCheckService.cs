@@ -54,7 +54,8 @@ namespace ClanGuardBot.Services;
 /// up indefinitely.
 ///
 /// If the underlying issue is fixed and the user is still AWOL, the next
-/// cycle's Step 2 will see no pending record and create a fresh one.
+/// cycle's Step 2 sees they hold the role with no pending or posted notice
+/// and creates a fresh record, which goes through the grace period again.
 /// Given-up records are NOT deleted; they're simply marked NotificationSent=true
 /// with a synthetic NotificationSentAt timestamp, so audit history is
 /// preserved.
@@ -154,12 +155,12 @@ public class AwolCheckService : BackgroundService
             }
         }
 
-        // Prune events older than the longest window + a buffer
+        // Prune activity older than the retention window
         try
         {
             using var scope = _services.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-            var pruneDate = DateTime.UtcNow.AddDays(-(_config.WindowDays + 7));
+            var pruneDate = DateTime.UtcNow.AddDays(-_config.GetActivityRetentionDays());
 
             var oldMessages = await db.MessageEvents
                 .Where(m => m.Timestamp < pruneDate)
@@ -425,6 +426,31 @@ public class AwolCheckService : BackgroundService
                     // config so it can be turned off without a redeploy.
                     if (justAssigned && _config.AwolDmOnAssign)
                         await TrySendAwolDmAsync(member);
+                }
+                else
+                {
+                    // Already AWOL. If there's no pending record and no open
+                    // #awol-list post (e.g. the notice was suppressed as stale
+                    // after downtime), queue a fresh one. Otherwise the member
+                    // keeps the role but never reaches #awol-list or /kick-awols.
+                    var hasOpenRecord = await db.AwolRecords
+                        .AnyAsync(r => r.GuildId == guild.Id
+                                    && r.UserId == member.Id
+                                    && (!r.NotificationSent || r.NotificationMessageId != null), ct);
+                    if (!hasOpenRecord)
+                    {
+                        db.AwolRecords.Add(new AwolRecord
+                        {
+                            GuildId = guild.Id,
+                            UserId = member.Id,
+                            Username = member.ToString() ?? member.Username,
+                            AssignedAt = DateTime.UtcNow,
+                            NotificationSent = false
+                        });
+                        _logger.LogInformation(
+                            "Re-queued AWOL notice for {Username} ({UserId}) in {Guild}: holds the AWOL role but had no pending or posted notice",
+                            member.Username, member.Id, guild.Name);
+                    }
                 }
             }
         }

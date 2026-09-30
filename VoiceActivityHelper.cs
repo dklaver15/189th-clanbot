@@ -77,4 +77,16 @@ public static class VoiceActivityHelper
 
         return totalSeconds;
     }
+
+    /// <summary>
+    /// LeftAt for closing a session whose real leave time is unknown (a missed
+    /// leave event): JoinedAt + the per-session cap, or <paramref name="end"/>,
+    /// whichever is earlier. Credits at most the cap, never more.
+    /// </summary>
+    public static DateTime ClampLeftAt(DateTime joinedAt, double maxSingleSessionHours, DateTime end)
+    {
+        if (maxSingleSessionHours <= 0) return end;
+        var cappedEnd = joinedAt + TimeSpan.FromHours(maxSingleSessionHours);
+        return cappedEnd < end ? cappedEnd : end;
+    }
 }

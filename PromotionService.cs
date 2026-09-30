@@ -320,15 +320,19 @@ public class PromotionService
                      && !r.Name.Equals(rankInfo.NewRole, StringComparison.OrdinalIgnoreCase))
             .ToList();
 
+        // ── Add the new role, then remove the old ones ──────────────
+        // Adding first means a failure part-way leaves an extra rank role
+        // rather than none, and RankTrackingHandler (which keys off the
+        // highest rank) records one from→to promotion instead of a rank loss
+        // followed by a fresh assignment.
+        await member.AddRoleAsync(newRole);
+
         var removedRoles = new List<string>();
         foreach (var role in rolesToRemove)
         {
             await member.RemoveRoleAsync(role);
             removedRoles.Add(role.Name);
         }
-
-        // ── Add new role ────────────────────────────────────────────
-        await member.AddRoleAsync(newRole);
 
         // ── Update nickname ─────────────────────────────────────────
         var baseName = StripRankPrefix(member.DisplayName);

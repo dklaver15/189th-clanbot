@@ -42,6 +42,16 @@ public class BotConfig
     /// <summary>Rolling window in days for activity tracking.</summary>
     public int WindowDays { get; set; } = 28;
 
+    /// <summary>
+    /// Days of message and voice history kept before pruning. Covers the
+    /// 90-day /timeline chart, /late-check, and activity-at-rank totals.
+    /// Never less than WindowDays + 7. Default 120.
+    /// </summary>
+    public int ActivityRetentionDays { get; set; } = 120;
+
+    /// <summary>Effective retention: ActivityRetentionDays, floored at WindowDays + 7.</summary>
+    public int GetActivityRetentionDays() => Math.Max(ActivityRetentionDays, WindowDays + 7);
+
     /// <summary>Shorter rolling window in days for roles listed in ShortWindowRoles.</summary>
     public int ShortWindowDays { get; set; } = 14;
 
