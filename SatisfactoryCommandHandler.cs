@@ -1554,6 +1554,22 @@ public class SatisfactoryCommandHandler
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
+        // A name already linked to someone else can only be moved by a mod; being
+        // online under that name proves the name exists, not who owns it.
+        var ownerId = await db.SatisfactoryLinks
+            .Where(l => l.GuildId == guildId && l.SatisfactoryPlayerName == canonicalName && l.DiscordUserId != targetId)
+            .Select(l => (ulong?)l.DiscordUserId)
+            .FirstOrDefaultAsync();
+        if (ownerId is ulong owner && !HasAdminRole(caller))
+        {
+            await command.FollowupAsync(
+                $"❌ **{Escape(canonicalName)}** is already linked to <@{owner}>. If that's wrong, " +
+                "ask a Satisfactory Mod to relink it with the `user` option.",
+                ephemeral: true,
+                allowedMentions: AllowedMentions.None);
+            return;
+        }
+
         // Re-linking overwrites in BOTH directions: one Discord account per
         // in-game name and vice versa. Clearing the other side stops two members
         // both claiming the same player.

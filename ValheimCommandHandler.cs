@@ -554,6 +554,23 @@ public class ValheimCommandHandler
             return;
         }
 
+        // Seeing a character in the session history proves it exists, not who owns
+        // it, so a character already linked to someone else can only be moved by an
+        // officer.
+        var ownerId = await db.ValheimLinks
+            .Where(l => l.GuildId == guildId && l.ValheimPlayerId == match.ValheimPlayerId && l.DiscordUserId != targetId)
+            .Select(l => (ulong?)l.DiscordUserId)
+            .FirstOrDefaultAsync();
+        if (ownerId is ulong owner && !HasAdminRole(caller))
+        {
+            await command.FollowupAsync(
+                $"❌ **{ValheimStatusService.Escape(match.PlayerName)}** is already linked to <@{owner}>. " +
+                "If that's wrong, ask an officer to relink it with the `user` option.",
+                ephemeral: true,
+                allowedMentions: AllowedMentions.None);
+            return;
+        }
+
         // Re-linking overwrites in BOTH directions, so two members can't both claim
         // one character and one member can't hold two.
         var existing = await db.ValheimLinks
@@ -573,6 +590,9 @@ public class ValheimCommandHandler
         });
 
         await db.SaveChangesAsync();
+
+        _logger.LogInformation("Valheim link: Discord {Target} → {PlayerName} ({PlayerId}) by {Caller}",
+            targetId, match.PlayerName, match.ValheimPlayerId, caller.Id);
 
         await command.FollowupAsync(
             $"✅ Linked <@{targetId}> to **{ValheimStatusService.Escape(match.PlayerName)}**.",

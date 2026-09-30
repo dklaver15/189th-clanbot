@@ -302,6 +302,21 @@ public sealed class SleeperCommandHandler
             return;
         }
 
+        // League membership proves the account exists, not who owns it, so an
+        // account already linked to someone else can only be moved by a mod.
+        var ownerId = await db.SleeperLinks
+            .Where(l => l.GuildId == guildId && l.SleeperUserId == user.UserId && l.DiscordUserId != targetId)
+            .Select(l => (ulong?)l.DiscordUserId)
+            .FirstOrDefaultAsync();
+        if (ownerId is ulong owner && !HasAdminRole(caller))
+        {
+            await command.FollowupAsync(
+                $"**{SleeperFormat.Escape(user.DisplayName)}** is already linked to <@{owner}>. If that's wrong, " +
+                "ask a Fantasy Mod to relink it with the `user` option.",
+                ephemeral: true, allowedMentions: AllowedMentions.None);
+            return;
+        }
+
         // Re-linking overwrites in BOTH directions: one Discord account per Sleeper
         // account and vice versa. Clearing the other side stops two members both
         // claiming the same team.
