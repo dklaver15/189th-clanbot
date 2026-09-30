@@ -2821,8 +2821,8 @@ public class BotConfig
 
     /// <summary>
     /// Messages that earn XP per member per clan-local day (EventDefaultTimeZone).
-    /// Default 10, so the chat
-    /// ceiling is 20 XP/day. A full week of maxed chat is worth ~28% of one op.
+    /// Default 10, so the chat ceiling is 20 XP/day. A full week of maxed chat is
+    /// worth ~28% of one op.
     /// </summary>
     public int XpMessageDailyCap { get; set; } = 10;
 
