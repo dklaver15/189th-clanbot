@@ -47,6 +47,13 @@ public interface IMeetingRecorderController
     /// recorder can't be reached, so callers treat that as "unknown".
     /// </summary>
     Task<MeetingRecorderStatus?> GetStatusAsync(CancellationToken ct);
+
+    /// <summary>
+    /// A member opted out mid-recording: stop capturing them and delete what was
+    /// already captured for this meeting. Throws when the recorder isn't
+    /// recording that meeting or can't be reached.
+    /// </summary>
+    Task ExcludeUserAsync(int meetingRecordingId, ulong userId, CancellationToken ct);
 }
 
 /// <summary>Everything the recorder needs to start a capture.</summary>
@@ -55,7 +62,8 @@ public sealed record MeetingRecorderStartContext(
     ulong GuildId,
     ulong VoiceChannelId,
     string MeetingTitle,
-    DateTime ExpectedStopUtc);
+    DateTime ExpectedStopUtc,
+    IReadOnlyCollection<ulong>? ExcludedUserIds = null);
 
 /// <summary>
 /// Snapshot of the recorder's /health. <see cref="Finalized"/> maps each recently
@@ -97,4 +105,12 @@ public sealed class LoggingMeetingRecorderController(
     // its backstop, which is correct since there's no real recording to advance.
     public Task<MeetingRecorderStatus?> GetStatusAsync(CancellationToken ct) =>
         Task.FromResult<MeetingRecorderStatus?>(null);
+
+    public Task ExcludeUserAsync(int meetingRecordingId, ulong userId, CancellationToken ct)
+    {
+        logger.LogWarning(
+            "[recorder-placeholder] Would EXCLUDE user {UserId} from recording #{Id}. No sidecar wired.",
+            userId, meetingRecordingId);
+        return Task.CompletedTask;
+    }
 }

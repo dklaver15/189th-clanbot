@@ -882,24 +882,27 @@ public class BotConfig
     public bool MeetingRecordingEnabled { get; set; } = false;
 
     /// <summary>
-    /// OPTIONAL. Recording is now triggered purely by voice-channel presence
-    /// (see <see cref="MeetingRecordingMinPresenceToStart"/>) — a calendar event
-    /// is no longer required to record. This pattern is only used to *name* a
-    /// presence-triggered recording: when a clan-source Apollo event happens to
-    /// overlap the moment recording starts, its title is borrowed for the minutes.
-    /// If set, a concurrent event whose Title matches (case-insensitively) is
-    /// preferred; if empty, any concurrent clan event is used, and if there is no
-    /// concurrent event at all the recording is named after the voice channel and
-    /// date. Never gates the feature.
+    /// Case-insensitive regex for the titles of clan events that count as
+    /// meetings. With <see cref="MeetingRecordingRequireScheduledEvent"/> on,
+    /// recording only auto-starts while a matching event is running (empty = any
+    /// clan event). The matching event's title also names the recording.
     /// </summary>
     public string MeetingTitlePattern { get; set; } = "monthly meeting";
 
     /// <summary>
-    /// How many non-bot members must be in the meeting voice channel before the
-    /// recorder joins and starts capturing. Default 2, so one person sitting
-    /// alone in the channel is never recorded — recording begins once a real
-    /// conversation (two or more people) forms. Set to 1 to record the instant
-    /// anyone joins.
+    /// When true (default), recording only auto-starts while a clan event whose
+    /// title matches <see cref="MeetingTitlePattern"/> is running, so casual chat
+    /// in the meeting voice channel is never recorded. False restores recording
+    /// on presence alone.
+    /// </summary>
+    public bool MeetingRecordingRequireScheduledEvent { get; set; } = true;
+
+    /// <summary>
+    /// How many non-bot members must be in the meeting voice channel (during a
+    /// scheduled meeting, see <see cref="MeetingRecordingRequireScheduledEvent"/>)
+    /// before the recorder joins and starts capturing. Default 2, so one person
+    /// sitting alone in the channel is never recorded. Set to 1 to record the
+    /// instant anyone joins.
     /// </summary>
     public int MeetingRecordingMinPresenceToStart { get; set; } = 2;
 
@@ -1021,6 +1024,13 @@ public class BotConfig
     /// failure by default. Set 0 to restore the old delete-immediately behaviour.
     /// </summary>
     public int MeetingFailedAudioRetentionDays { get; set; } = 7;
+
+    /// <summary>
+    /// Days a finished meeting's transcript is kept in the database before it is
+    /// cleared. The minutes and action items are kept. 0 keeps transcripts
+    /// forever. Default 30; the recording notice states this value.
+    /// </summary>
+    public int MeetingTranscriptRetentionDays { get; set; } = 30;
 
     /// <summary>
     /// Channel ID for meeting-pipeline failure notices. 0 falls back to

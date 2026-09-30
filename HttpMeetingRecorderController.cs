@@ -62,6 +62,7 @@ public sealed class HttpMeetingRecorderController : IMeetingRecorderController
             voiceChannelId = ctx.VoiceChannelId.ToString(),
             meetingTitle = ctx.MeetingTitle,
             expectedStopUtc = ctx.ExpectedStopUtc.ToUniversalTime().ToString("o"),
+            excludedUserIds = (ctx.ExcludedUserIds ?? []).Select(id => id.ToString()).ToArray(),
         };
 
         using var resp = await client.PostAsJsonAsync("record", body, Json, ct);
@@ -123,6 +124,22 @@ public sealed class HttpMeetingRecorderController : IMeetingRecorderController
             _logger.LogDebug(ex, "Recorder /health check failed; will rely on the backstop.");
             return null;
         }
+    }
+
+    public async Task ExcludeUserAsync(int meetingRecordingId, ulong userId, CancellationToken ct)
+    {
+        var client = CreateClient(DefaultTimeout);
+        var body = new { meetingRecordingId, userId = userId.ToString() };
+
+        using var resp = await client.PostAsJsonAsync("exclude", body, Json, ct);
+        if (!resp.IsSuccessStatusCode)
+        {
+            var detail = await SafeReadAsync(resp, ct);
+            throw new HttpRequestException(
+                $"Recorder /exclude returned {(int)resp.StatusCode}: {detail}");
+        }
+
+        _logger.LogInformation("Recorder excluded user {UserId} from #{Id}.", userId, meetingRecordingId);
     }
 
     private HttpClient CreateClient(TimeSpan timeout)

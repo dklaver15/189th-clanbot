@@ -17,18 +17,24 @@ namespace ClanGuardBot.Services;
 /// The scheduling "brain" for meeting recordings. Pure orchestration — it never
 /// touches voice itself; that's delegated to <see cref="IMeetingRecorderController"/>.
 ///
-/// ── Trigger: presence, not calendar (changed) ──────────────────────────────
-/// Recording is driven entirely by who is *in the meeting voice channel*, not by
-/// any calendar event or title. On each poll (and immediately when someone joins
-/// the VC) the scheduler checks the live occupancy of MeetingVoiceChannelId:
+/// ── Trigger: presence during a scheduled meeting ───────────────────────────
+/// On each poll (and immediately when someone joins the VC) the scheduler checks
+/// the live occupancy of MeetingVoiceChannelId:
 ///   • Once at least MeetingRecordingMinPresenceToStart non-bot members are
-///     present and nothing is already recording, it posts the consent notice,
-///     asks the recorder to join, and moves the row to Recording. No event needs
-///     to exist and the meeting can be titled anything.
-///   • A recording is *named* by borrowing the title of a clan-source Apollo
-///     event that happens to overlap the moment it starts (preferring one whose
-///     title matches the optional MeetingTitlePattern); if there is no concurrent
-///     event, it's named after the voice channel and the date.
+///     present, nothing is already recording, and (with
+///     MeetingRecordingRequireScheduledEvent) a clan event whose title matches
+///     MeetingTitlePattern is running, it posts the consent notice, asks the
+///     recorder to join, and moves the row to Recording. Casual chat in the
+///     channel outside a scheduled meeting is never recorded.
+///   • A recording is named after that event; with the requirement off and no
+///     concurrent event, it's named after the voice channel and the date.
+///
+/// ── Consent controls ───────────────────────────────────────────────────────
+/// The consent notice carries three buttons: "Don't record me" (persistent
+/// opt-out, applied to the live recording too, which drops that member's audio),
+/// "Record me again", and an officer-only "Stop recording". A stop, or the
+/// recorder being kicked from the channel, ends the recording without resuming
+/// and suppresses auto-start until the channel empties.
 ///
 /// ── Stop policy ────────────────────────────────────────────────────────────
 /// The recorder owns the real stop — it auto-stops once the VC has been empty for
@@ -102,6 +108,19 @@ public class MeetingRecordingScheduler : BackgroundService
 
     private const string ContinuedSuffix = " (continued)";
 
+    private const string OptOutButtonPrefix = "meetrec:optout:";
+    private const string OptInButtonId      = "meetrec:optin";
+    private const string StopButtonPrefix   = "meetrec:stop:";
+
+    /// <summary>Recorder stop reasons that mean people chose to end the recording.</summary>
+    private static readonly HashSet<string> NoRestartReasons = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "kicked",
+    };
+
+    private static readonly string OptOutPath =
+        Path.Combine(AppContext.BaseDirectory, "data", "meeting-recording-optouts.json");
+
     private readonly IServiceProvider _services;
     private readonly DiscordSocketClient _client;
     private readonly IMeetingRecorderController _recorder;
@@ -123,6 +142,18 @@ public class MeetingRecordingScheduler : BackgroundService
     // Set when a recording is cut off mid-meeting; lets the next start skip the
     // cooldown and carry the title forward. Only touched from the poll loop.
     private (string Title, DateTime UntilUtc)? _resume;
+
+    // Set when a recording was stopped on purpose (Stop button, recorder kicked);
+    // blocks auto-start until the meeting VC empties. In-memory: a bot restart
+    // mid-meeting clears it.
+    private volatile bool _suppressUntilEmpty;
+
+    // Recording id an officer asked to stop; the poll loop finalizes it.
+    private volatile int _stopRequestedId;
+
+    // Members who opted out of being recorded, persisted to OptOutPath.
+    private readonly HashSet<ulong> _optOuts = new();
+    private readonly object _optOutLock = new();
 
     public MeetingRecordingScheduler(
         IServiceProvider services,
@@ -154,9 +185,9 @@ public class MeetingRecordingScheduler : BackgroundService
             return;
         }
 
-        // The title pattern is optional now — used only to prefer a concurrent
-        // event when naming a recording. A bad pattern disables title-borrowing,
-        // never the feature itself.
+        // The title pattern picks which scheduled events count as meetings (and
+        // names the recording). With MeetingRecordingRequireScheduledEvent on, a
+        // bad pattern means nothing auto-starts.
         if (!string.IsNullOrWhiteSpace(_config.MeetingTitlePattern))
         {
             try
@@ -167,8 +198,8 @@ public class MeetingRecordingScheduler : BackgroundService
             catch (ArgumentException ex)
             {
                 _logger.LogWarning(ex,
-                    "MeetingTitlePattern '{Pattern}' is not a valid regex — recordings will be named by " +
-                    "channel + date rather than by a matching event title.",
+                    "MeetingTitlePattern '{Pattern}' is not a valid regex — no event will match it, so " +
+                    "recordings won't auto-start while MeetingRecordingRequireScheduledEvent is on.",
                     _config.MeetingTitlePattern);
             }
         }
@@ -177,7 +208,9 @@ public class MeetingRecordingScheduler : BackgroundService
             await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
         await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
 
+        LoadOptOuts();
         _client.UserVoiceStateUpdated += OnVoiceStateUpdated;
+        _client.ButtonExecuted += OnButtonAsync;
 
         var interval = TimeSpan.FromMinutes(Math.Max(1, _config.MeetingRecordingPollIntervalMinutes));
         _logger.LogInformation(
@@ -216,6 +249,7 @@ public class MeetingRecordingScheduler : BackgroundService
         finally
         {
             _client.UserVoiceStateUpdated -= OnVoiceStateUpdated;
+            _client.ButtonExecuted -= OnButtonAsync;
         }
     }
 
@@ -242,6 +276,9 @@ public class MeetingRecordingScheduler : BackgroundService
         var humanCount = vc?.ConnectedUsers.Count(u => !u.IsBot) ?? 0;
         var guildId = vc?.Guild.Id ?? 0;
 
+        if (humanCount == 0)
+            _suppressUntilEmpty = false;
+
         await MaybeStartFromPresenceAsync(db, vc, humanCount, guildId, now, ct);
         await DriveActiveRecordingsAsync(db, humanCount, now, ct);
 
@@ -257,6 +294,9 @@ public class MeetingRecordingScheduler : BackgroundService
 
         var threshold = Math.Max(1, _config.MeetingRecordingMinPresenceToStart);
         if (humanCount < threshold)
+            return;
+
+        if (_suppressUntilEmpty)
             return;
 
         // Never run two recordings for the same channel at once. A row that's
@@ -284,8 +324,18 @@ public class MeetingRecordingScheduler : BackgroundService
                 return;
         }
 
-        var (title, discordMessageId, calendarEventId, meetingStart) =
+        var (title, discordMessageId, calendarEventId, meetingStart, scheduled) =
             await ResolveTitleAsync(db, guildId, vc, now, ct);
+
+        // A continuation carries on a meeting that already qualified.
+        if (resume is null && _config.MeetingRecordingRequireScheduledEvent && !scheduled)
+        {
+            _logger.LogDebug(
+                "Meeting VC has {Count} members but no scheduled meeting matching '{Pattern}' is running; not recording.",
+                humanCount, _config.MeetingTitlePattern);
+            return;
+        }
+
         if (resume is { } cont)
         {
             title = cont.Title.EndsWith(ContinuedSuffix, StringComparison.Ordinal)
@@ -323,12 +373,13 @@ public class MeetingRecordingScheduler : BackgroundService
     }
 
     /// <summary>
-    /// Name a presence-triggered recording. If a clan-source Apollo event overlaps
-    /// now (within the lead-minutes buffer), borrow its title — preferring one that
-    /// matches the optional title pattern — and reference it for debugging. Failing
-    /// that, name the recording after the voice channel and the date.
+    /// Name a presence-triggered recording. If a clan event overlaps now (within
+    /// the lead-minutes buffer), borrow its title — preferring one that matches the
+    /// title pattern. Failing that, name the recording after the voice channel and
+    /// the date. <c>Scheduled</c> is true when a concurrent event matches the
+    /// pattern (any concurrent event when the pattern is empty).
     /// </summary>
-    private async Task<(string Title, ulong DiscordMessageId, int CalendarEventId, DateTime MeetingStart)>
+    private async Task<(string Title, ulong DiscordMessageId, int CalendarEventId, DateTime MeetingStart, bool Scheduled)>
         ResolveTitleAsync(BotDbContext db, ulong guildId, SocketVoiceChannel vc, DateTime now, CancellationToken ct)
     {
         var sources = _config.GetAttendanceCountingSourcesList();
@@ -344,20 +395,22 @@ public class MeetingRecordingScheduler : BackgroundService
             .OrderBy(e => e.StartUtc)
             .ToListAsync(ct);
 
-        CalendarEvent? evt = null;
+        CalendarEvent? matched = null;
         if (_titleRegex is not null)
-            evt = concurrent.FirstOrDefault(e => !string.IsNullOrEmpty(e.Title) && _titleRegex.IsMatch(e.Title));
-        evt ??= concurrent.FirstOrDefault(e => !string.IsNullOrEmpty(e.Title));
+            matched = concurrent.FirstOrDefault(e => !string.IsNullOrEmpty(e.Title) && _titleRegex.IsMatch(e.Title));
+        else if (string.IsNullOrWhiteSpace(_config.MeetingTitlePattern))
+            matched = concurrent.FirstOrDefault(e => !string.IsNullOrEmpty(e.Title));
 
+        var evt = matched ?? concurrent.FirstOrDefault(e => !string.IsNullOrEmpty(e.Title));
         if (evt is not null)
         {
             _logger.LogInformation(
                 "Naming recording after concurrent event '{Title}' (msg {Msg}).", evt.Title, evt.DiscordMessageId);
-            return (evt.Title, evt.DiscordMessageId, evt.Id, evt.StartUtc);
+            return (evt.Title, evt.DiscordMessageId, evt.Id, evt.StartUtc, matched is not null);
         }
 
         var channelName = string.IsNullOrWhiteSpace(vc.Name) ? "Meeting" : vc.Name;
-        return ($"{channelName} — {now:yyyy-MM-dd}", 0UL, 0, now);
+        return ($"{channelName} — {now:yyyy-MM-dd}", 0UL, 0, now, false);
     }
 
     // ── 2. Drive active rows: finish starting, then finalize when done ────────
@@ -377,11 +430,14 @@ public class MeetingRecordingScheduler : BackgroundService
             if (rec.State == MeetingRecordingState.Announced)
             {
                 // Everyone left before the recorder ever started — nothing captured.
-                if (humanCount == 0)
+                // An officer's stop before the start completes lands here too.
+                if (humanCount == 0 || rec.Id == _stopRequestedId)
                 {
+                    var stopped = rec.Id == _stopRequestedId;
+                    if (stopped) _stopRequestedId = 0;
                     _logger.LogInformation(
-                        "Recording '{Title}' (#{Id}) — VC emptied before recording started; cancelling.",
-                        rec.MeetingTitle, rec.Id);
+                        "Recording '{Title}' (#{Id}) — {Why} before recording started; cancelling.",
+                        rec.MeetingTitle, rec.Id, stopped ? "stopped by an officer" : "VC emptied");
                     await DeleteAnnouncementAsync(rec, ct);
                     // A start that timed out on our side may still have joined.
                     if (await TryAdoptFromRecorderAsync(rec, now, ct, "cancelled-while-starting"))
@@ -416,9 +472,20 @@ public class MeetingRecordingScheduler : BackgroundService
             if (rec.State == MeetingRecordingState.Recording)
             {
                 var backstopAt = (rec.RecordingStartedUtc ?? rec.MeetingEndUtc) + StopBackstop;
-                if (status is not null && status.Finalized.TryGetValue(rec.Id, out var reason))
+                if (rec.Id == _stopRequestedId)
+                {
+                    _stopRequestedId = 0;
+                    await FinalizeRecordingAsync(rec, now, ct, "stopped-by-officer");
+                }
+                else if (status is not null && status.Finalized.TryGetValue(rec.Id, out var reason))
                 {
                     var cutOff = reason is not null && CutOffReasons.Contains(reason);
+                    if (reason is not null && NoRestartReasons.Contains(reason))
+                    {
+                        _suppressUntilEmpty = true;
+                        _logger.LogInformation(
+                            "Recorder was removed from the meeting VC; not recording again until the channel empties.");
+                    }
                     await FinalizeRecordingAsync(rec, now, ct, $"recorder-finalized:{reason ?? "unknown"}", resume: cutOff);
                 }
                 else if (status is { Ready: true } && status.RecordingId != rec.Id)
@@ -524,7 +591,8 @@ public class MeetingRecordingScheduler : BackgroundService
         {
             var expectedStop = now + ExpectedMeetingDuration;
             await _recorder.StartRecordingAsync(new MeetingRecorderStartContext(
-                rec.Id, rec.GuildId, _config.MeetingVoiceChannelId, rec.MeetingTitle, expectedStop), ct);
+                rec.Id, rec.GuildId, _config.MeetingVoiceChannelId, rec.MeetingTitle, expectedStop,
+                SnapshotOptOuts()), ct);
             rec.RecordingStartedUtc = now;
             rec.ErrorMessage = null;
             Transition(rec, MeetingRecordingState.Recording, now);
@@ -679,15 +747,29 @@ public class MeetingRecordingScheduler : BackgroundService
             return;
         }
 
+        var minutesChannelId = _config.MeetingMinutesChannelId != 0 ? _config.MeetingMinutesChannelId : channelId;
+        var transcriptRetention = _config.MeetingTranscriptRetentionDays > 0
+            ? $"Transcripts are deleted after {_config.MeetingTranscriptRetentionDays} days"
+            : "Transcripts are kept";
         var notice =
-            $"🔴 **Recording notice** — this meeting is being recorded by ClanGuard to generate " +
-            $"minutes and action items. Only the last {_config.MeetingRecordingRetainCount} meetings' audio is " +
-            "kept; older recordings are deleted automatically. If you'd rather not be recorded, please leave " +
-            "the voice channel — staying in the channel indicates your consent to being recorded.";
+            "🔴 **Recording notice** — this meeting is being recorded by ClanGuard. The audio is transcribed on " +
+            "the clan's server, and the transcript (with speakers' display names) is sent to Anthropic's Claude AI " +
+            $"to write minutes and action items, which are posted in <#{minutesChannelId}>. Only the last " +
+            $"{_config.MeetingRecordingRetainCount} meetings' audio is kept. {transcriptRetention}; the minutes " +
+            "stay.\n\nPress **Don't record me** to keep your voice out of this and future recordings (your audio " +
+            "from this meeting so far is deleted), or leave the voice channel. Staying in the channel without " +
+            "opting out indicates your consent to being recorded.";
+
+        var buttons = new ComponentBuilder()
+            .WithButton("Don't record me", OptOutButtonPrefix + rec.Id, ButtonStyle.Secondary, new Emoji("🔇"))
+            .WithButton("Record me again", OptInButtonId, ButtonStyle.Secondary, new Emoji("🎙️"))
+            .WithButton("Stop recording", StopButtonPrefix + rec.Id, ButtonStyle.Danger, new Emoji("⏹️"))
+            .Build();
 
         try
         {
-            var sent = await channel.SendMessageAsync(notice, options: new RequestOptions { CancelToken = ct });
+            var sent = await channel.SendMessageAsync(notice, components: buttons,
+                allowedMentions: AllowedMentions.None, options: new RequestOptions { CancelToken = ct });
             _noticeMessages[rec.Id] = (channelId, sent.Id);
             _logger.LogInformation("Posted recording notice for '{Title}' to channel {ChannelId}.",
                 rec.MeetingTitle, channelId);
@@ -717,6 +799,127 @@ public class MeetingRecordingScheduler : BackgroundService
                 "Could not delete recording notice for '{Title}' (#{Id}) — leaving it in place.",
                 rec.MeetingTitle, rec.Id);
         }
+    }
+
+    // ── Consent buttons ───────────────────────────────────────────────────────
+    private async Task OnButtonAsync(SocketMessageComponent component)
+    {
+        var id = component.Data.CustomId;
+        if (!id.StartsWith("meetrec:", StringComparison.Ordinal)) return;
+
+        try
+        {
+            if (id == OptInButtonId)
+            {
+                SetOptOut(component.User.Id, optedOut: false);
+                await component.RespondAsync(
+                    "🎙️ You'll be included in meeting recordings again, starting with the next one.",
+                    ephemeral: true);
+            }
+            else if (id.StartsWith(OptOutButtonPrefix, StringComparison.Ordinal)
+                     && int.TryParse(id[OptOutButtonPrefix.Length..], out var optOutRecId))
+            {
+                SetOptOut(component.User.Id, optedOut: true);
+                await component.DeferAsync(ephemeral: true);
+                var userId = component.User.Id;
+                // The recorder call can take seconds; keep it off the gateway task.
+                _ = Task.Run(async () =>
+                {
+                    string reply;
+                    try
+                    {
+                        await _recorder.ExcludeUserAsync(optOutRecId, userId, CancellationToken.None);
+                        reply = "🔇 Done — your audio from this meeting has been deleted and you won't be " +
+                                "recorded in future meetings. Press **Record me again** on a recording notice to undo.";
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Could not exclude user {UserId} from recording #{Id}.", userId, optOutRecId);
+                        reply = "🔇 You won't be recorded in future meetings. I couldn't reach the recorder for this " +
+                                "meeting, so please let an officer know or leave the voice channel.";
+                    }
+                    try { await component.FollowupAsync(reply, ephemeral: true); }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Could not send opt-out confirmation."); }
+                });
+            }
+            else if (id.StartsWith(StopButtonPrefix, StringComparison.Ordinal)
+                     && int.TryParse(id[StopButtonPrefix.Length..], out var stopRecId))
+            {
+                if (component.User is not SocketGuildUser user || !CanStopRecording(user))
+                {
+                    await component.RespondAsync("⛔ Only officers can stop the recording.", ephemeral: true);
+                    return;
+                }
+
+                _suppressUntilEmpty = true;
+                _stopRequestedId = stopRecId;
+                _wake.TrySetResult();
+                _logger.LogInformation("Recording #{Id} stop requested by {User} ({UserId}).",
+                    stopRecId, user.Username, user.Id);
+                await component.RespondAsync(
+                    "⏹️ Stopping the recording. It won't restart until everyone has left the voice channel.",
+                    ephemeral: true);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error handling meeting recording button {CustomId}", id);
+        }
+    }
+
+    private bool CanStopRecording(SocketGuildUser user)
+    {
+        if (user.GuildPermissions.Administrator || user.GuildPermissions.ManageRoles)
+            return true;
+        var officerRoles = _config.GetOfficerRolesList();
+        return user.Roles.Any(r => officerRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase));
+    }
+
+    // ── Opt-out store ─────────────────────────────────────────────────────────
+    private void LoadOptOuts()
+    {
+        try
+        {
+            if (!File.Exists(OptOutPath)) return;
+            var ids = JsonSerializer.Deserialize<List<ulong>>(File.ReadAllText(OptOutPath)) ?? [];
+            lock (_optOutLock)
+            {
+                _optOuts.Clear();
+                _optOuts.UnionWith(ids);
+            }
+            _logger.LogInformation("Loaded {Count} meeting recording opt-out(s).", ids.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Could not read meeting recording opt-outs from {Path}.", OptOutPath);
+        }
+    }
+
+    private void SetOptOut(ulong userId, bool optedOut)
+    {
+        lock (_optOutLock)
+        {
+            var changed = optedOut ? _optOuts.Add(userId) : _optOuts.Remove(userId);
+            if (!changed) return;
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(OptOutPath)!);
+                var tmp = OptOutPath + ".tmp";
+                File.WriteAllText(tmp, JsonSerializer.Serialize(_optOuts.ToList()));
+                File.Move(tmp, OptOutPath, overwrite: true);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Could not save meeting recording opt-outs to {Path}.", OptOutPath);
+            }
+        }
+        _logger.LogInformation("Meeting recording opt-{Direction} for user {UserId}.",
+            optedOut ? "out" : "in", userId);
+    }
+
+    private IReadOnlyCollection<ulong> SnapshotOptOuts()
+    {
+        lock (_optOutLock) return _optOuts.ToList();
     }
 
     private void Transition(MeetingRecording rec, MeetingRecordingState to, DateTime now)

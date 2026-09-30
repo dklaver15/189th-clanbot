@@ -45,12 +45,13 @@
 // beat the bot's and the meeting was wrongly marked Failed despite full audio
 // on disk.
 
-import { Client, GatewayIntentBits, Events } from 'discord.js';
+import { Client, GatewayIntentBits, Events, Status } from 'discord.js';
 import {
   joinVoiceChannel,
   EndBehaviorType,
   entersState,
   VoiceConnectionStatus,
+  VoiceConnectionDisconnectReason,
 } from '@discordjs/voice';
 import { OggOpusStream } from './ogg-opus.mjs';
 import express from 'express';
@@ -206,6 +207,7 @@ function trackFor(state, userId, guild) {
 // Capture one utterance into the speaker's continuous track.
 function captureUtterance(state, userId, guild) {
   if (state.stopping) return;
+  if (state.excluded.has(userId)) return; // opted out of recording
   if (state.activeSubs.has(userId)) return; // already subscribed for this speaker
   state.activeSubs.add(userId);
 
@@ -305,7 +307,7 @@ async function startRecording(opts) {
   }
 }
 
-async function doStartRecording({ meetingRecordingId, guildId, voiceChannelId, meetingTitle, expectedStopUtc }) {
+async function doStartRecording({ meetingRecordingId, guildId, voiceChannelId, meetingTitle, expectedStopUtc, excludedUserIds }) {
   if (!client.isReady()) throw new Error('Discord client not ready yet.');
 
   const guild = await client.guilds.fetch(String(guildId));
@@ -356,6 +358,7 @@ async function doStartRecording({ meetingRecordingId, guildId, voiceChannelId, m
     tracks: new Map(),       // userId -> track
     participants: {},
     nameLookups: [],
+    excluded: new Set((excludedUserIds ?? []).map(String)), // members who opted out
     activeSubs: new Set(),
     pending: new Set(),
     startUtc: startUtc.toISOString(),
@@ -381,15 +384,19 @@ async function doStartRecording({ meetingRecordingId, guildId, voiceChannelId, m
   });
 
   // If we lose the connection and can't recover quickly, finalize what we have.
-  connection.on(VoiceConnectionStatus.Disconnected, async () => {
+  // 'kicked' tells the bot not to rejoin; 'disconnected' lets it resume.
+  connection.on(VoiceConnectionStatus.Disconnected, async (_oldState, newState) => {
     try {
       await Promise.race([
         entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
         entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
       ]);
     } catch {
-      log('voice connection lost and did not recover — finalizing recording.');
-      stopRecording(meetingRecordingId, 'disconnected').catch((e) =>
+      const kicked = wasRemovedFromVc(guild, state, newState);
+      log(kicked
+        ? 'removed from the voice channel — finalizing recording.'
+        : 'voice connection lost and did not recover — finalizing recording.');
+      stopRecording(meetingRecordingId, kicked ? 'kicked' : 'disconnected').catch((e) =>
         log('finalize-on-disconnect error:', e.message));
     }
   });
@@ -449,6 +456,45 @@ async function doStartRecording({ meetingRecordingId, guildId, voiceChannelId, m
       `(hard cap ${new Date(hardCapMs).toISOString()})`);
 }
 
+// Close code 4014 covers a kick, a deleted channel, and a dropped main gateway
+// session. Only a kick or a deleted channel leaves the main gateway healthy with
+// the bot no longer in the recorded channel.
+function wasRemovedFromVc(guild, state, disconnectedState) {
+  if (disconnectedState?.reason !== VoiceConnectionDisconnectReason.WebSocketClose) return false;
+  if (disconnectedState.closeCode !== 4014) return false;
+  if (client.ws.status !== Status.Ready) return false;
+  return guild.members.me?.voice?.channelId !== state.voiceChannelId;
+}
+
+// A member opted out mid-recording: stop capturing them and delete what was
+// already captured. While stopping, the excluded set alone keeps them out of
+// the final manifest, and finalize deletes any track not in the manifest.
+async function excludeUser(state, userId) {
+  state.excluded.add(userId);
+  if (state.stopping) return;
+
+  state.receiver.subscriptions.get(userId)?.destroy();
+  const tr = state.tracks.get(userId);
+  if (tr) {
+    tr.open?.finish?.();
+    state.tracks.delete(userId);
+    tr.closed = true;
+    await new Promise((resolve) => {
+      tr.out.once('finish', resolve);
+      tr.out.once('error', resolve);
+      try { tr.ogg.end(); } catch { resolve(); }
+    });
+    try { fs.unlinkSync(tr.filePath); } catch {}
+  }
+
+  try {
+    writeJsonAtomic(path.join(state.audioDir, 'manifest.partial.json'), buildManifest(state, true));
+  } catch (e) {
+    log('checkpoint manifest write error:', e?.message ?? e);
+  }
+  log(`excluded user ${userId} from meeting #${state.meetingRecordingId}.`);
+}
+
 function writeJsonAtomic(filePath, obj) {
   const tmp = `${filePath}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
@@ -462,6 +508,7 @@ function buildManifest(state, partial) {
   const tracks = [];
   const nowIso = new Date().toISOString();
   for (const tr of state.tracks.values()) {
+    if (state.excluded.has(tr.userId)) continue;
     const segs = [...tr.segments];
     // Include an utterance still in progress at checkpoint time.
     if (tr.open?.frames > 0) {
@@ -507,7 +554,8 @@ function buildManifest(state, partial) {
     recordingStartedUtc: state.startUtc,
     recordingStoppedUtc: partial ? null : new Date().toISOString(),
     stopReason: partial ? null : state.stopReason,
-    participants: state.participants,
+    participants: Object.fromEntries(
+      Object.entries(state.participants).filter(([id]) => !state.excluded.has(id))),
     tracks,                      // one entry per speaker (continuous track)
     segments,                    // every utterance, chronological (for timing)
   };
@@ -638,6 +686,24 @@ app.post('/stop', auth, async (req, res) => {
     res.json({ audioDir });
   } catch (e) {
     log('stop error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/exclude', auth, async (req, res) => {
+  const meetingRecordingId = req.body?.meetingRecordingId;
+  const userId = req.body?.userId == null ? '' : String(req.body.userId);
+  if (!userId) return res.status(400).json({ error: 'userId is required.' });
+
+  const state = current;
+  if (!state || state.meetingRecordingId !== meetingRecordingId) {
+    return res.status(404).json({ error: `Not recording meeting #${meetingRecordingId}.` });
+  }
+  try {
+    await excludeUser(state, userId);
+    res.json({ ok: true });
+  } catch (e) {
+    log('exclude error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });

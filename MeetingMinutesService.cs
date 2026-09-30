@@ -667,6 +667,42 @@ public class MeetingMinutesService : BackgroundService
                 rec.MeetingTitle, rec.Id);
         }
 
+        // Clear transcripts past MeetingTranscriptRetentionDays, in the DB and in
+        // any audio dir still on disk. Minutes and action items are kept.
+        if (_config.MeetingTranscriptRetentionDays > 0)
+        {
+            var transcriptCutoff = now - TimeSpan.FromDays(_config.MeetingTranscriptRetentionDays);
+            var expired = await db.MeetingRecordings
+                .Where(m => m.MeetingStartUtc <= transcriptCutoff
+                         && (m.TranscriptText != null || m.TranscriptPath != null)
+                         && (m.State == MeetingRecordingState.Posted
+                          || m.State == MeetingRecordingState.Pruned
+                          || m.State == MeetingRecordingState.Failed
+                          || m.State == MeetingRecordingState.Cancelled))
+                .ToListAsync(ct);
+            foreach (var rec in expired)
+            {
+                if (!string.IsNullOrEmpty(rec.AudioDirPath))
+                {
+                    foreach (var file in new[] { "transcript.txt", "transcript.json" })
+                    {
+                        try { File.Delete(Path.Combine(rec.AudioDirPath, file)); }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "Could not delete {File} for '{Title}' (#{Id}).",
+                                file, rec.MeetingTitle, rec.Id);
+                        }
+                    }
+                }
+
+                rec.TranscriptText = null;
+                rec.TranscriptPath = null;
+                pruned = true;
+                _logger.LogInformation("Cleared transcript for '{Title}' (#{Id}) — older than {Days} days.",
+                    rec.MeetingTitle, rec.Id, _config.MeetingTranscriptRetentionDays);
+            }
+        }
+
         if (pruned) await db.SaveChangesAsync(ct);
     }
 
