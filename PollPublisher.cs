@@ -40,7 +40,7 @@ public sealed class PollPublisher
     public const int MaxOptions = 10;
     public const int MaxQuestionLength = 300;  // Discord native poll question cap
     public const int MaxMessageLength = 2000;  // Discord message-content cap (holds the overflow description)
-    // Room kept free in that message for the native poll's "Poll created by @user" line.
+    // Room kept free in that message for the "Poll created by @user" line.
     public const int AttributionReserve = 64;
     public const int MaxDescriptionLength = MaxMessageLength - AttributionReserve;
     public const int MaxOptionLength = 55;     // Discord native poll answer cap (applied to both modes)
@@ -119,14 +119,7 @@ public sealed class PollPublisher
         // context the creator wants lives in the optional Description field, which
         // rides as ordinary message text above the poll (Discord renders content
         // over the poll object).
-        //
-        // A native poll shows as posted by the bot, so the message always opens
-        // with a small-print line crediting the member who ran /poll. It's a real
-        // mention (clickable, and it follows name changes) that never pings.
-        var attribution = $"-# 📊 Poll created by {MentionUtils.MentionUser(d.CreatorId)}";
-        var content = string.IsNullOrWhiteSpace(d.Description)
-            ? attribution
-            : $"{attribution}\n{Trim(d.Description, MaxDescriptionLength)}";
+        var content = MessageText(d);
 
         var pollProps = new PollProperties
         {
@@ -153,7 +146,22 @@ public sealed class PollPublisher
     }
 
     /// <summary>
-    /// Mentions allowed to ping in a native poll's message: whatever the
+    /// The text posted above the poll. The bot is the message author, so it always
+    /// opens with a small-print line crediting the member who ran /poll (a real
+    /// mention: clickable, follows name changes, and never pings), followed by the
+    /// optional description. On anonymous polls only the votes are hidden, never
+    /// the poster, whose name is already in the embed footer.
+    /// </summary>
+    private static string MessageText(PollDraft d)
+    {
+        var attribution = $"-# 📊 Poll created by {MentionUtils.MentionUser(d.CreatorId)}";
+        return string.IsNullOrWhiteSpace(d.Description)
+            ? attribution
+            : $"{attribution}\n{Trim(d.Description, MaxDescriptionLength)}";
+    }
+
+    /// <summary>
+    /// Mentions allowed to ping in a poll's message: whatever the
     /// description mentions (roles, @everyone/@here, and the users it names), as
     /// before the credit line existed, but not the creator named by that line.
     /// Discord rejects listing user ids alongside the blanket "users" type, so the
@@ -194,19 +202,21 @@ public sealed class PollPublisher
         var embed = PollEmbedBuilder.BuildEmbed(
             preview, previewOptions, new Dictionary<int, int>(), totalVoters: 0, fileName);
 
-        // 2) Post the embed (no buttons yet) to obtain a real message id. Any
-        //    optional description rides as message text above the embed; later
-        //    vote/close re-renders only touch the embed + components, so it stays.
-        var description = string.IsNullOrWhiteSpace(d.Description) ? null : Trim(d.Description, MaxDescriptionLength);
+        // 2) Post the embed (no buttons yet) to obtain a real message id. The
+        //    creator credit and any description ride as message text above the
+        //    embed; later vote/close re-renders only touch the embed + components,
+        //    so it stays.
+        var content = MessageText(d);
+        var mentions = DescriptionMentions(d.Description);
         IUserMessage posted;
         if (banner is { } b)
         {
             using var fa = new FileAttachment(new MemoryStream(b.Bytes), b.FileName);
-            posted = await channel.SendFileAsync(fa, text: description, embed: embed);
+            posted = await channel.SendFileAsync(fa, text: content, embed: embed, allowedMentions: mentions);
         }
         else
         {
-            posted = await channel.SendMessageAsync(text: description, embed: embed);
+            posted = await channel.SendMessageAsync(text: content, embed: embed, allowedMentions: mentions);
         }
 
         // 3) Persist poll + options now that we have the message id.
