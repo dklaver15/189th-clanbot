@@ -1,3 +1,4 @@
+using System.Text;
 using ClanGuardBot.Data;
 using ClanGuardBot.Models;
 using Discord;
@@ -129,7 +130,7 @@ public sealed class EventReminderService : BackgroundService
         }
     }
 
-    private async Task<string> BuildMentionsAsync(
+    private async Task<List<string>> BuildMentionsAsync(
         BotDbContext db, ClanEvent ev, HashSet<EventRsvpStatus> statuses, CancellationToken ct)
     {
         // Always ping the organizer; add anyone whose RSVP matches the configured
@@ -145,10 +146,30 @@ public sealed class EventReminderService : BackgroundService
             foreach (var id in rsvpIds) ids.Add(id);
         }
 
-        return string.Join(" ", ids.Select(id => $"<@{id}>"));
+        return ChunkMentions(ids.Select(id => $"<@{id}>"));
     }
 
-    private async Task PostReminderAsync(ClanEvent ev, string mentions)
+    /// <summary>Packs mentions into space-joined chunks that fit Discord's 2,000-character limit.</summary>
+    private static List<string> ChunkMentions(IEnumerable<string> mentions)
+    {
+        const int maxLen = 2000;
+        var chunks = new List<string>();
+        var sb = new StringBuilder();
+        foreach (var m in mentions)
+        {
+            if (sb.Length > 0 && sb.Length + 1 + m.Length > maxLen)
+            {
+                chunks.Add(sb.ToString());
+                sb.Clear();
+            }
+            if (sb.Length > 0) sb.Append(' ');
+            sb.Append(m);
+        }
+        if (sb.Length > 0) chunks.Add(sb.ToString());
+        return chunks;
+    }
+
+    private async Task PostReminderAsync(ClanEvent ev, List<string> mentions)
     {
         var channelId = _config.EventReminderChannelId != 0
             ? _config.EventReminderChannelId
@@ -192,8 +213,9 @@ public sealed class EventReminderService : BackgroundService
 
         // Mentions must live in the message *content* to actually notify — pings
         // inside an embed don't fire. AllowedMentions limits this to users.
-        var content = string.IsNullOrWhiteSpace(mentions) ? null : mentions;
-        var allowed = new AllowedMentions { AllowedTypes = AllowedMentionTypes.Users };
+        // Mentions past the first chunk go out as replies to the reminder.
+        var content = mentions.Count > 0 ? mentions[0] : null;
+        var allowed = new AllowedMentions { AllowedTypes = AllowedMentionTypes.Users, MentionRepliedUser = false };
 
         // Send with a single retry. A transient Discord blip shouldn't cost a
         // member their reminder, but we cap at one retry so a permanent failure
@@ -218,12 +240,19 @@ public sealed class EventReminderService : BackgroundService
                 // tracked entity so this survives a restart.
                 ev.LastReminderMessageId = posted.Id;
 
+                foreach (var extra in mentions.Skip(1))
+                {
+                    try
+                    {
+                        await channel.SendMessageAsync(text: extra, allowedMentions: allowed,
+                            messageReference: new MessageReference(posted.Id));
+                    }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Failed to post overflow pings for '{Title}'", ev.Title); }
+                }
+
                 // New reminder is up — remove the previous one to declutter.
                 if (hadPrev)
-                {
-                    try { await channel.DeleteMessageAsync(prevMsgId); }
-                    catch (Exception ex) { _logger.LogDebug(ex, "Couldn't delete previous reminder {Msg} for '{Title}'", prevMsgId, ev.Title); }
-                }
+                    await DeletePreviousReminderAsync(channel, prevMsgId, ev.Title);
                 return; // delivered
             }
             catch (Exception ex) when (attempt == 1)
@@ -236,6 +265,25 @@ public sealed class EventReminderService : BackgroundService
                 _logger.LogWarning(ex, "Failed to post reminder for '{Title}' after retry", ev.Title);
             }
         }
+    }
+
+    /// <summary>Deletes the previous reminder and the overflow-ping replies posted under it.</summary>
+    private async Task DeletePreviousReminderAsync(IMessageChannel channel, ulong prevMsgId, string title)
+    {
+        try
+        {
+            var replies = (await channel.GetMessagesAsync(prevMsgId, Direction.After, 25).FlattenAsync())
+                .Where(m => m.Author.Id == _client.CurrentUser.Id
+                         && m.Reference?.MessageId.IsSpecified == true
+                         && m.Reference.MessageId.Value == prevMsgId)
+                .ToList();
+            foreach (var r in replies)
+                await channel.DeleteMessageAsync(r.Id);
+        }
+        catch (Exception ex) { _logger.LogDebug(ex, "Couldn't delete overflow pings for reminder {Msg} ('{Title}')", prevMsgId, title); }
+
+        try { await channel.DeleteMessageAsync(prevMsgId); }
+        catch (Exception ex) { _logger.LogDebug(ex, "Couldn't delete previous reminder {Msg} for '{Title}'", prevMsgId, title); }
     }
 
     /// <summary>

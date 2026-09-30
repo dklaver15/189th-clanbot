@@ -76,13 +76,24 @@ public class RankTrackingHandler
     /// the configured RankRoles list — a senior member's actual rank role
     /// isn't being recognized, so GetHighestRank "sees" only a stale junior
     /// rank role they happen to also hold and reports them as collapsing to
-    /// that rank. Real /demote operations are typically 1-2 ranks at a time;
-    /// this threshold gives that headroom while catching the suspicious
-    /// large-drop pattern. Drops larger than this are refused with a warning;
-    /// genuine large demotions can still be applied via direct DB update or
-    /// staged /demote calls.
+    /// that rank. Drops larger than this are refused with a warning unless
+    /// /demote registered the change through ExpectRankChange.
     /// </summary>
     private const int MaxRealtimeDemotionGap = 2;
+
+    /// <summary>
+    /// Rank changes a command is about to make, so a deliberate multi-rank
+    /// /demote isn't refused by the MaxRealtimeDemotionGap guard.
+    /// </summary>
+    private static readonly ConcurrentDictionary<(ulong GuildId, ulong UserId), (string Rank, DateTime Until)> _expectedRankChanges = new();
+
+    public static void ExpectRankChange(ulong guildId, ulong userId, string rank) =>
+        _expectedRankChanges[(guildId, userId)] = (rank, DateTime.UtcNow.AddMinutes(2));
+
+    private static bool IsExpectedRankChange(ulong guildId, ulong userId, string rank) =>
+        _expectedRankChanges.TryGetValue((guildId, userId), out var e)
+        && e.Until > DateTime.UtcNow
+        && e.Rank.Equals(rank, StringComparison.OrdinalIgnoreCase);
 
     // Single FIFO queue for all role-change processing. See OnGuildMemberUpdated
     // for why the work leaves the gateway task, and why it is one global queue
@@ -122,8 +133,8 @@ public class RankTrackingHandler
         // "after" is the live cache entry and Discord.NET mutates it in place, so
         // once the work below is queued rather than run inline, reading the member's
         // roles later would report whatever they are by then instead of what this
-        // event actually carried. That matters: /promote issues RemoveRoleAsync then
-        // AddRoleAsync, so one promotion arrives as two events, and each has to be
+        // event actually carried. That matters: /promote and /demote issue AddRoleAsync
+        // then RemoveRoleAsync, so one rank change arrives as two events, and each has to be
         // judged on its own state for the RankHistory bookkeeping to behave exactly
         // as it does today. The live "after" object is still used for the REST
         // calls, where current state is the right thing to act on.
@@ -337,15 +348,14 @@ public class RankTrackingHandler
                 // RankRoles list (e.g. a senior member's actual rank role isn't
                 // in the config, so GetHighestRank "sees" only their stale RCT
                 // role and reports them as dropping from senior rank to RCT).
-                // Refuse the update and log loudly. Real /demote operations of
-                // 1-2 ranks at a time still flow through normally; larger
-                // intentional demotions must be applied out-of-band.
+                // Refuse the update and log loudly, unless /demote registered it.
                 var oldIdx = rankRoles.FindIndex(r =>
                     r.Equals(rankRecord.RankName, StringComparison.OrdinalIgnoreCase));
                 var newIdx = rankRoles.FindIndex(r =>
                     r.Equals(afterRank, StringComparison.OrdinalIgnoreCase));
 
-                if (oldIdx >= 0 && newIdx >= 0 && (oldIdx - newIdx) > MaxRealtimeDemotionGap)
+                if (oldIdx >= 0 && newIdx >= 0 && (oldIdx - newIdx) > MaxRealtimeDemotionGap
+                    && !IsExpectedRankChange(guildId, userId, afterRank))
                 {
                     _logger.LogWarning(
                         "Refusing realtime rank update: {Username} appears to drop " +

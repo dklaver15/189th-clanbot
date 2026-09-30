@@ -264,6 +264,8 @@ public sealed class DiscordStatusMonitorService : BackgroundService
 
             if (!isFirstRun && channel is not null)
             {
+                // Saved before posting so a restart mid-burst can't repeat the ping.
+                await db.SaveChangesAsync(CancellationToken.None);
                 try
                 {
                     await PostUpdateAsync(channel, incident, update);
@@ -272,13 +274,13 @@ public sealed class DiscordStatusMonitorService : BackgroundService
                 {
                     _logger.LogError(ex,
                         "DiscordStatusMonitorService: failed to post update {UpdateId} " +
-                        "(incident {IncidentId}). Will not retry — dedupe row will be saved.",
+                        "(incident {IncidentId}). Will not retry — dedupe row is already saved.",
                         update.Id, incident.Id);
                 }
             }
         }
 
-        if (newRows > 0)
+        if (db.ChangeTracker.HasChanges())
             await db.SaveChangesAsync(ct);
 
         // ── Stamp BotState liveness ───────────────────────────────────

@@ -493,7 +493,7 @@ public class RankReconcileService : BackgroundService
     ///     what an un-toggled rules reaction leaves behind.
     ///
     /// ── Why it re-reads before reporting ──
-    /// /promote and /demote strip the old rank role, add the new one, then
+    /// /promote and /demote add the new rank role, strip the old one, then
     /// rename, so a member passes through both mismatch states for a moment
     /// during an ordinary promotion. Confirming after a short wait is what keeps
     /// every promotion from posting two false notices.

@@ -182,15 +182,18 @@ public class DemoteCommandHandler
                      && !r.Name.Equals(rankInfo.NewRole, StringComparison.OrdinalIgnoreCase))
             .ToList();
 
+        // ── Add the new (lower) role, then remove the old ones ─────
+        // Same order as PromotionService.PromoteAsync: a failure part-way leaves
+        // an extra rank role rather than none.
+        RankTrackingHandler.ExpectRankChange(guild.Id, member.Id, rankInfo.NewRole);
+        await member.AddRoleAsync(newRole);
+
         var removedRoles = new List<string>();
         foreach (var role in rolesToRemove)
         {
             await member.RemoveRoleAsync(role);
             removedRoles.Add(role.Name);
         }
-
-        // ── Add new (lower) role ────────────────────────────────────
-        await member.AddRoleAsync(newRole);
 
         // ── Update nickname ─────────────────────────────────────────
         var currentName = member.DisplayName;
