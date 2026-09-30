@@ -408,8 +408,8 @@ public class HealthCommandHandler
         // SyncWithHandlers: SlashCommandHandler.HasElevatedPermissions
         if (user.GuildPermissions.ManageRoles || user.GuildPermissions.Administrator)
             return true;
-        var exemptRoles = _config.GetExemptRolesList();
-        return user.Roles.Any(r => exemptRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase));
+        var officerRoles = _config.GetOfficerRolesList();
+        return user.Roles.Any(r => officerRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase));
     }
 
     private static string ResolveDbPath()

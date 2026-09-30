@@ -47,7 +47,7 @@ namespace ClanGuardBot.Handlers;
 /// ── Permissions ──
 /// Officer-or-higher only, gated through HasElevatedPermissions which mirrors
 /// the same check in SlashCommandHandler (ManageRoles or Administrator, or
-/// any role in BotConfig.GetExemptRolesList()).
+/// any role in BotConfig.GetOfficerRolesList()).
 /// </summary>
 public class CleanupCalendarDupesCommandHandler
 {
@@ -626,7 +626,7 @@ public class CleanupCalendarDupesCommandHandler
     /// <summary>
     /// Mirrors SlashCommandHandler.HasElevatedPermissions — ManageRoles or
     /// Administrator guild permissions, or any role listed in
-    /// BotConfig.GetExemptRolesList(). Kept as a private copy rather than
+    /// BotConfig.GetOfficerRolesList(). Kept as a private copy rather than
     /// extracted to a shared helper so this handler stays self-contained
     /// and copy-and-pastable into future cleanup commands.
     /// </summary>
@@ -635,7 +635,7 @@ public class CleanupCalendarDupesCommandHandler
         if (user.GuildPermissions.ManageRoles || user.GuildPermissions.Administrator)
             return true;
 
-        var exemptRoles = _config.GetExemptRolesList();
-        return user.Roles.Any(r => exemptRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase));
+        var officerRoles = _config.GetOfficerRolesList();
+        return user.Roles.Any(r => officerRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase));
     }
 }

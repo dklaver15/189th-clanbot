@@ -149,7 +149,8 @@ public class BotConfig
     /// <summary>
     /// Comma-separated list of role names that are exempt from AWOL tracking.
     /// ReserveRoleName is appended automatically by GetExemptRolesList(), so it
-    /// does not need to be listed here.
+    /// does not need to be listed here. These roles also pass the Officer+
+    /// command gates (GetOfficerRolesList); Reserve does not.
     ///
     /// Kept deliberately short: this used to read "Admin,Moderator,Retired,Bot,
     /// Bot Whisperer", but RoleConfigValidator found on 2026-07-31 that four of
@@ -3153,6 +3154,17 @@ public class BotConfig
 
         return list;
     }
+
+    /// <summary>
+    /// Roles that pass the Officer+ command gates: ExemptRoles without
+    /// ReserveRoleName. Reserve is handed out automatically for approved leave,
+    /// so it must stay AWOL-exempt without granting officer commands.
+    /// </summary>
+    public List<string> GetOfficerRolesList() =>
+        ExemptRoles
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(r => !r.Equals(ReserveRoleName, StringComparison.OrdinalIgnoreCase))
+            .ToList();
 
     public List<string> GetShortWindowRolesList() =>
         ShortWindowRoles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();

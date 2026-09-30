@@ -68,8 +68,8 @@ namespace ClanGuardBot.Handlers;
 /// same reason.)
 ///
 /// ── Permissions ──
-/// Officer+ (ManageRoles or Administrator, plus members of any exempt
-/// role per BotConfig.ExemptRoles). Mirrors SlashCommandHandler's
+/// Officer+ (ManageRoles or Administrator, plus members of any officer
+/// role per BotConfig.GetOfficerRolesList()). Mirrors SlashCommandHandler's
 /// HasElevatedPermissions check verbatim — SyncWithHandlers:
 /// SlashCommandHandler.HasElevatedPermissions,
 /// CleanupCalendarDupesCommandHandler.HasElevatedPermissions,
@@ -546,7 +546,7 @@ public class SquadCommandHandler
     {
         if (user.GuildPermissions.ManageRoles || user.GuildPermissions.Administrator)
             return true;
-        var exemptRoles = _config.GetExemptRolesList();
-        return user.Roles.Any(r => exemptRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase));
+        var officerRoles = _config.GetOfficerRolesList();
+        return user.Roles.Any(r => officerRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase));
     }
 }

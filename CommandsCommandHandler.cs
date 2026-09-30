@@ -36,10 +36,10 @@ namespace ClanGuardBot.Handlers;
 ///
 /// Predicate flavors mirror exactly what's in the rest of the codebase:
 ///   • Everyone                  — no gate
-///   • Officer                   — ManageRoles | Administrator | exempt role
+///   • Officer                   — ManageRoles | Administrator | officer role (ExemptRoles minus Reserve)
 ///                                 (matches SlashCommandHandler.HasElevatedPermissions
 ///                                 and CleanupCalendarDupesCommandHandler.HasElevatedPermissions)
-///   • OfficerOrManageNicknames  — ManageNicknames | Administrator | exempt role
+///   • OfficerOrManageNicknames  — ManageNicknames | Administrator | officer role (ExemptRoles minus Reserve)
 ///                                 (matches SetNickCommandHandler.HasPermission)
 ///   • MinRank(rank)             — Administrator | role index ≥ minIndex in RankRoles
 ///                                 (matches every rank-gated handler)
@@ -526,8 +526,8 @@ public class CommandsCommandHandler
         {
             if (user.GuildPermissions.ManageRoles || user.GuildPermissions.Administrator)
                 return true;
-            var exempt = cfg.GetExemptRolesList();
-            return user.Roles.Any(r => exempt.Contains(r.Name, StringComparer.OrdinalIgnoreCase));
+            var officerRoles = cfg.GetOfficerRolesList();
+            return user.Roles.Any(r => officerRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase));
         };
 
         // SyncWithHandlers: TicketPanelCommandHandler.InvokerHasPermission
@@ -565,8 +565,8 @@ public class CommandsCommandHandler
         {
             if (user.GuildPermissions.ManageNicknames || user.GuildPermissions.Administrator)
                 return true;
-            var exempt = cfg.GetExemptRolesList();
-            return user.Roles.Any(r => exempt.Contains(r.Name, StringComparer.OrdinalIgnoreCase));
+            var officerRoles = cfg.GetOfficerRolesList();
+            return user.Roles.Any(r => officerRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase));
         };
 
         // SyncWithHandlers: every rank-gated handler — PromoteCommandHandler.HasPromotePermission,
