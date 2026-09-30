@@ -117,7 +117,7 @@ public sealed class GamertagBackfillCommandHandler
             return;
         }
 
-        var proposed  = new Dictionary<int, ulong>();      // rowNumber → memberId
+        var proposed  = new List<(LegacyGamertagRow Row, ulong MemberId)>();
         var proposedL = new List<string>();
         var ambiguous = new List<string>();
         var unmatched = new List<string>();
@@ -138,7 +138,7 @@ public sealed class GamertagBackfillCommandHandler
             // A member who already has an ID row, or was just matched to another
             // legacy row, would end up with two rows; later saves and deletes only
             // ever act on the first.
-            if (matches.Count == 1 && (existingIds.Contains(matches[0].Id) || proposed.ContainsValue(matches[0].Id)))
+            if (matches.Count == 1 && (existingIds.Contains(matches[0].Id) || proposed.Any(p => p.MemberId == matches[0].Id)))
             {
                 ambiguous.Add($"Row {row.RowNumber}: `{display}` → <@{matches[0].Id}> already has a roster row");
                 continue;
@@ -146,7 +146,7 @@ public sealed class GamertagBackfillCommandHandler
 
             if (matches.Count == 1)
             {
-                proposed[row.RowNumber] = matches[0].Id;
+                proposed.Add((row, matches[0].Id));
                 proposedL.Add($"Row {row.RowNumber}: `{display}` → <@{matches[0].Id}>");
             }
             else if (matches.Count > 1)

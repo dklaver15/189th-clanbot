@@ -62,6 +62,13 @@ public class GoogleSheetsService
     private readonly BotConfig _config;
     private readonly ILogger<GoogleSheetsService> _logger;
 
+    /// <summary>
+    /// Serializes every gamertag-sheet operation that finds a row and then writes
+    /// to it by row number. Without it, a concurrent save, sort or delete could
+    /// shift the rows in between, and the write would land on another member's row.
+    /// </summary>
+    private readonly SemaphoreSlim _gamertagSheetLock = new(1, 1);
+
     public GoogleSheetsService(IOptions<BotConfig> config, ILogger<GoogleSheetsService> logger)
     {
         _config = config.Value;
@@ -76,6 +83,21 @@ public class GoogleSheetsService
     public async Task WriteGamertagsAsync(
         ulong discordId, string discordName, string ea, string steam, string psn,
         string xbox, string embark, string bungie, string youtube = "")
+    {
+        await _gamertagSheetLock.WaitAsync();
+        try
+        {
+            await WriteGamertagsCoreAsync(discordId, discordName, ea, steam, psn, xbox, embark, bungie, youtube);
+        }
+        finally
+        {
+            _gamertagSheetLock.Release();
+        }
+    }
+
+    private async Task WriteGamertagsCoreAsync(
+        ulong discordId, string discordName, string ea, string steam, string psn,
+        string xbox, string embark, string bungie, string youtube)
     {
         var credential = GoogleCredential
             .FromFile(_config.GoogleCredentialsPath)
@@ -173,6 +195,19 @@ public class GoogleSheetsService
     /// </summary>
     public async Task<bool> DeleteGamertagsAsync(ulong discordId)
     {
+        await _gamertagSheetLock.WaitAsync();
+        try
+        {
+            return await DeleteGamertagsCoreAsync(discordId);
+        }
+        finally
+        {
+            _gamertagSheetLock.Release();
+        }
+    }
+
+    private async Task<bool> DeleteGamertagsCoreAsync(ulong discordId)
+    {
         var credential = GoogleCredential
             .FromFile(_config.GoogleCredentialsPath)
             .CreateScoped(SheetsService.Scope.Spreadsheets);
@@ -262,6 +297,20 @@ public class GoogleSheetsService
     /// expected to also verify the member list is non-empty before calling.
     /// </summary>
     public async Task<GamertagReconcileResult> ReconcileGamertagsAsync(
+        IReadOnlySet<ulong> currentMemberIds, int maxDeletions)
+    {
+        await _gamertagSheetLock.WaitAsync();
+        try
+        {
+            return await ReconcileGamertagsCoreAsync(currentMemberIds, maxDeletions);
+        }
+        finally
+        {
+            _gamertagSheetLock.Release();
+        }
+    }
+
+    private async Task<GamertagReconcileResult> ReconcileGamertagsCoreAsync(
         IReadOnlySet<ulong> currentMemberIds, int maxDeletions)
     {
         var credential = GoogleCredential
@@ -405,50 +454,74 @@ public class GoogleSheetsService
     }
 
     /// <summary>
-    /// Writes Discord IDs into column A for the given rows (keyed by 1-based sheet
-    /// row number). ONLY column A is touched — every other cell (name, tags) is
-    /// left exactly as-is — so this is safe to run against rows of unknown layout.
-    /// Batched into one API call. Returns the number of cells written.
+    /// Writes Discord IDs into column A of the given legacy rows. ONLY column A is
+    /// touched — every other cell (name, tags) is left exactly as-is. The rows come
+    /// from an earlier read, so each is re-checked first and skipped if it no longer
+    /// holds the same legacy name (a save or sort in between shifted it). Batched
+    /// into one API call. Returns the number of cells written.
     /// </summary>
-    public async Task<int> BackfillGamertagIdsAsync(IReadOnlyDictionary<int, ulong> rowToId)
+    public async Task<int> BackfillGamertagIdsAsync(IReadOnlyList<(LegacyGamertagRow Row, ulong MemberId)> targets)
     {
-        if (rowToId.Count == 0) return 0;
+        if (targets.Count == 0) return 0;
 
-        var credential = GoogleCredential
-            .FromFile(_config.GoogleCredentialsPath)
-            .CreateScoped(SheetsService.Scope.Spreadsheets);
-
-        using var service = new SheetsService(new BaseClientService.Initializer
+        await _gamertagSheetLock.WaitAsync();
+        try
         {
-            HttpClientInitializer = credential,
-            ApplicationName = "ClanGuardBot"
-        });
+            var credential = GoogleCredential
+                .FromFile(_config.GoogleCredentialsPath)
+                .CreateScoped(SheetsService.Scope.Spreadsheets);
 
-        var sheetName = _config.GoogleSheetName;
-        var data = rowToId.Select(kv => new ValueRange
+            using var service = new SheetsService(new BaseClientService.Initializer
+            {
+                HttpClientInitializer = credential,
+                ApplicationName = "ClanGuardBot"
+            });
+
+            var sheetName = _config.GoogleSheetName;
+            var current = await service.Spreadsheets.Values
+                .Get(_config.GoogleSpreadsheetId, $"{sheetName}!A:B").ExecuteAsync();
+            var values = current.Values ?? new List<IList<object>>();
+
+            string Cell(int rowNumber, int col)
+            {
+                var i = rowNumber - 1;
+                if (i < 0 || i >= values.Count) return "";
+                var row = values[i];
+                return row.Count > col ? row[col]?.ToString() ?? "" : "";
+            }
+
+            var data = targets
+                .Where(t => Cell(t.Row.RowNumber, 0) == t.Row.ColA && Cell(t.Row.RowNumber, 1) == t.Row.ColB)
+                .Select(t => new ValueRange
+                {
+                    Range  = $"{sheetName}!A{t.Row.RowNumber}",
+                    Values = new List<IList<object>> { new List<object> { t.MemberId.ToString() } }
+                })
+                .ToList();
+
+            if (data.Count < targets.Count)
+                _logger.LogWarning("Gamertag backfill skipped {Count} row(s) that changed since they were read",
+                    targets.Count - data.Count);
+            if (data.Count == 0) return 0;
+
+            // RAW keeps the ID an exact string; as a number it would be rounded.
+            var body = new BatchUpdateValuesRequest
+            {
+                ValueInputOption = "RAW",
+                Data = data
+            };
+
+            await service.Spreadsheets.Values.BatchUpdate(body, _config.GoogleSpreadsheetId).ExecuteAsync();
+
+            _logger.LogInformation("Backfilled {Count} Discord ID(s) into the gamertag roster", data.Count);
+            return data.Count;
+        }
+        finally
         {
-            Range  = $"{sheetName}!A{kv.Key}",
-            Values = new List<IList<object>> { new List<object> { kv.Value.ToString() } }
-        }).ToList();
-
-        // RAW keeps the ID an exact string; as a number it would be rounded.
-        var body = new BatchUpdateValuesRequest
-        {
-            ValueInputOption = "RAW",
-            Data = data
-        };
-
-        await service.Spreadsheets.Values.BatchUpdate(body, _config.GoogleSpreadsheetId).ExecuteAsync();
-
-        _logger.LogInformation("Backfilled {Count} Discord ID(s) into the gamertag roster", rowToId.Count);
-        return rowToId.Count;
+            _gamertagSheetLock.Release();
+        }
     }
 
-    /// <summary>
-    /// True when <paramref name="row"/> is a legacy row (no Discord ID in column A,
-    /// and not the header) whose name in column B, or column A, equals
-    /// <paramref name="name"/>.
-    /// </summary>
     /// <summary>
     /// Member-controlled text for a USER_ENTERED write: a leading apostrophe makes
     /// Sheets store it as text, so a value starting with = + - or @ can't run as a
@@ -460,6 +533,11 @@ public class GoogleSheetsService
         return value[0] is '=' or '+' or '-' or '@' or '\t' or '\r' ? "'" + value : value;
     }
 
+    /// <summary>
+    /// True when <paramref name="row"/> is a legacy row (no Discord ID in column A,
+    /// and not the header) whose name in column B, or column A, equals
+    /// <paramref name="name"/>.
+    /// </summary>
     private static bool IsLegacyNameMatch(IList<object> row, string name)
     {
         var colA = row.Count > 0 ? row[0]?.ToString() ?? "" : "";
