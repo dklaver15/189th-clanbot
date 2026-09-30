@@ -18,8 +18,9 @@ namespace ClanGuardBot.Services;
 /// completes it (one-off) or advances it to its next occurrence (recurring).
 ///
 /// ── Restart-safe ──
-/// The next fire instant lives in the DB, so a <c>docker restart</c> never loses
-/// or double-fires a reminder. If the bot was down across a fire time, the
+/// The next fire instant lives in the DB and is advanced and saved before each
+/// post, so a <c>docker restart</c> or a failed save never double-fires a
+/// reminder (at worst one post is skipped). If the bot was down across a fire time, the
 /// reminder posts on the next tick after it comes back (a little late rather than
 /// never). For a recurring reminder that missed several occurrences while down,
 /// the recurrence advance skips the stale ones to the next FUTURE occurrence.
@@ -108,20 +109,21 @@ public sealed class ReminderSchedulerService : BackgroundService
         {
             if (ct.IsCancellationRequested) break;
 
-            // Best-effort post. Whether it succeeds or not, we advance the
-            // schedule so a permanently-unreachable channel can't spin the loop.
-            await TryPostAsync(reminder);
+            // Advance and save before posting, so a shutdown or failed save can't
+            // post it again next tick. The post is best-effort either way, so a
+            // permanently-unreachable channel can't spin the loop.
             reminder.LastFiredAt = DateTime.UtcNow;
-
             AdvanceOrComplete(reminder, DateTime.UtcNow);
+            await db.SaveChangesAsync(CancellationToken.None);
+
+            await TryPostAsync(reminder);
 
             // Keep the "scheduled" status card in sync: delete it once a one-off
             // is done (the real announcement replaces it), or refresh its
             // next-post time for a recurring reminder.
             await HandleCardAfterFireAsync(reminder);
+            await db.SaveChangesAsync(CancellationToken.None);
         }
-
-        await db.SaveChangesAsync(ct);
     }
 
     /// <summary>Posts one reminder to its channel. Swallows all failures (returns void).</summary>

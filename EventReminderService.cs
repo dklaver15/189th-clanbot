@@ -18,8 +18,9 @@ namespace ClanGuardBot.Services;
 /// Maybe, and Waitlisted), and still posts when no one else matches.
 ///
 /// ── Restart-safe ──
-/// Fired lead values are recorded on ClanEvent.RemindersSentCsv, so a
-/// `docker restart` never double-fires or loses a reminder. If the bot was down
+/// Fired lead values are recorded on ClanEvent.RemindersSentCsv and saved before
+/// posting, so a `docker restart` or a failed save never double-fires a reminder
+/// (at worst one post is skipped). If the bot was down
 /// across several lead times, only the most urgent (smallest) due lead fires;
 /// the larger, now-stale ones are marked sent without posting.
 /// </summary>
@@ -103,8 +104,6 @@ public sealed class EventReminderService : BackgroundService
 
         if (candidates.Count == 0) return;
 
-        var changed = false;
-
         foreach (var ev in candidates)
         {
             if (ct.IsCancellationRequested) break;
@@ -117,16 +116,17 @@ public sealed class EventReminderService : BackgroundService
             // (relevant only after downtime).
             var fire = due.Min();
             var mentions = await BuildMentionsAsync(db, ev, pingStatuses, ct);
-            await PostReminderAsync(ev, mentions);
-            await AnnounceInGameAsync(ev, fire, ct);
 
+            // Mark the leads sent and save before posting, so a shutdown or failed
+            // save can't post the reminder again next tick.
             foreach (var L in due) fired.Add(L);
             ev.RemindersSentCsv = string.Join(",", fired.OrderByDescending(x => x));
-            changed = true;
-        }
+            await db.SaveChangesAsync(CancellationToken.None);
 
-        if (changed)
-            await db.SaveChangesAsync(ct);
+            await PostReminderAsync(ev, mentions);
+            await db.SaveChangesAsync(CancellationToken.None); // LastReminderMessageId
+            await AnnounceInGameAsync(ev, fire, ct);
+        }
     }
 
     private async Task<string> BuildMentionsAsync(
@@ -215,7 +215,7 @@ public sealed class EventReminderService : BackgroundService
                 }
 
                 // Record the new reminder's id on the event; the caller saves the
-                // tracked entity (changed=true) so this survives a restart.
+                // tracked entity so this survives a restart.
                 ev.LastReminderMessageId = posted.Id;
 
                 // New reminder is up — remove the previous one to declutter.
