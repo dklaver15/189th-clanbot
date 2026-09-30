@@ -47,8 +47,8 @@ try
                        | GatewayIntents.MessageContent,
         AlwaysDownloadUsers = true,
         LogLevel            = LogSeverity.Info,
-        // Cache the most recent 500 messages per channel so that MessageUpdated
-        // fires reliably for Apollo event edits even after a short bot restart.
+        // Cache the most recent 500 messages per channel so MessageUpdated and
+        // MessageDeleted carry the original message for recent posts.
         MessageCacheSize    = 500
     };
 
@@ -286,10 +286,6 @@ try
     // DiscordBotService alongside the other command handlers.
     builder.Services.AddSingleton<LateCheckCommandHandler>();
 
-    // NOTE: RecruitCommandHandler was removed — recruits are now auto-logged by
-    // RankTrackingHandler when a member gains the RCT role. See TryLogRecruitAsync
-    // in RankTrackingHandler.cs.
-
     // PromotionService: shared core used by both /promote and AutoPromotionService.
     // Registered before the consumers that inject it.
     builder.Services.AddSingleton<PromotionService>();
@@ -445,28 +441,9 @@ try
         });
     builder.Services.AddHostedService<DiscordStatusMonitorService>();
 
-    // ApolloEventHandler: parses #events channel posts and syncs to Google Calendar.
-    builder.Services.AddSingleton<ApolloEventHandler>();
-
-    // Phase 1: lossless capture of every Apollo message (parallel to ApolloEventHandler).
-    builder.Services.AddSingleton<ApolloMessageCaptureHandler>();
-
-    // Phase 2: parser worker drains ApolloMessageLog into ApolloEvents staging table.
-    builder.Services.AddHostedService<ApolloMessageParserWorker>();
-
-    // Phase 3: drains CalendarOutbox to Google Calendar with retry + backoff.
-    // Runs unconditionally; the outbox is only populated when
-    // UseNewApolloPipeline=true, so it's a cheap no-op otherwise (one indexed
-    // SELECT every 10 seconds against an empty table).
+    // Drains CalendarOutbox to Google Calendar with retry + backoff. The event
+    // system enqueues a row for every calendar create, update and delete.
     builder.Services.AddHostedService<CalendarOutboxWorker>();
-
-    // Phase 4: one-shot startup reconciliation of CalendarEvents against the
-    // live #events channel — removes orphaned rows whose source Apollo message
-    // is gone, and (rebind-aware) re-binds events that were re-posted under a
-    // new ID while the bot was down (e.g. a /sort during downtime) instead of
-    // deleting them. Must be registered for offline-gap recovery to actually
-    // run; without this line it never executes.
-    builder.Services.AddHostedService<ApolloReconciliationService>();
 
     // /calendar: ephemeral day-grouped view of upcoming events from Google Calendar.
     builder.Services.AddSingleton<CalendarCommandHandler>();
@@ -487,7 +464,7 @@ try
     // CompEventCommandHandler: /comp-event slash command for CPT+ officers.
     builder.Services.AddSingleton<CompEventCommandHandler>();
 
-    // ── In-house events (Apollo replacement) ─────────────────────────────
+    // ── In-house events ─────────────────────────────
     //   • EventTimeParser — natural-language time → UTC (creator-tz aware).
     //   • IEventPublisher — seam to the persistence/posting layer. Currently a
     //     logging scaffold so the wizard can be exercised end-to-end; swap for
@@ -762,7 +739,6 @@ try
     // ── Hosted Services ──────────────────────────────────────────────
     builder.Services.AddHostedService<DiscordBotService>();
     builder.Services.AddHostedService<HistoryBackfillService>();
-    builder.Services.AddHostedService<ApolloBackfillService>();
     builder.Services.AddHostedService<AwolCheckService>();
 
     // AwolWipeReminderService: posts a monthly reminder in
@@ -787,9 +763,7 @@ try
 
     // EventAttendanceSnapshotService: timer-driven (default 5 min) + startup
     // catch-up pass. Writes EventAttendance rows shortly after each clan event
-    // ends. Calendar entries are preserved as historical record per the
-    // "Apollo cleanup is not cancellation" policy in
-    // ApolloEventHandler.HandleMessageDeletedAsync, so CalendarEvents
+    // ends. Calendar entries are kept as the historical record, so CalendarEvents
     // referenced here continue to exist for the lifetime of the EventAttendance
     // rows that point at them. Consumed by AutoPromotionService for SGT+
     // eligibility checks.
@@ -797,7 +771,7 @@ try
 
     // MeetingAttendanceSnapshotService: mirror of EventAttendanceSnapshotService
     // for meeting attendance. Snapshots time spent in BotConfig.MeetingVoiceChannelId
-    // (15-min threshold by default) against the same Apollo-derived CalendarEvents.
+    // (15-min threshold by default) against the same CalendarEvents.
     // Opt-in via config — when MeetingVoiceChannelId == 0, the service exits
     // immediately on startup. Writes MeetingAttendance rows; those rows are
     // folded into EventAttendanceHelper.CountEventsAttendedAsync so meetings
@@ -926,18 +900,6 @@ try
     // immediately so officers can run the briefing on demand without waiting
     // for the Sunday cron. Honours the same DryRun config flag as the scheduled run.
     builder.Services.AddSingleton<BriefingNowCommandHandler>();
-
-    // CleanupCalendarDupesCommandHandler: /cleanup-calendar-dupes slash command
-    // for officers (Officer+). Two-pass reconciliation that removes duplicate
-    // calendar entries created by past concurrent-write races between
-    // MessageReceived and MessageUpdated for the same Apollo post (the
-    // 2026-05-04 / 2026-05-05 incident). The per-message lock in
-    // ApolloEventHandler prevents new dupes; this command cleans up historical
-    // damage. dry_run defaults to true. Pass 1 handles in-DB dupes (deletes DB
-    // rows + corresponding GCal events). Pass 2 handles GCal orphans (events
-    // ApolloBackfill's older defensive cleanup left behind without removing
-    // their GCal counterpart).
-    builder.Services.AddSingleton<CleanupCalendarDupesCommandHandler>();
 
     // CommandsCommandHandler: /command-catalog self-service slash command. Returns
     // a rank-filtered table of every slash command the bot exposes. Open to

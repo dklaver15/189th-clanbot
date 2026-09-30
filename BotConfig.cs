@@ -271,52 +271,12 @@ public class BotConfig
     public string GoogleCalendarId { get; set; } = string.Empty;
 
     /// <summary>
-    /// Name of the text channel where Apollo posts its event embeds.
-    /// The bot will listen here for new posts, edits, and deletes to keep the calendar in sync.
+    /// Name of the #events text channel. Clan event posts go here unless
+    /// EventPostChannelId is set.
     /// </summary>
     public string EventsTextChannelName { get; set; } = "events";
 
     public ulong EventsTextChannelId { get; set; } = default;
-
-    /// <summary>
-    /// Username (or partial username) of the Apollo Discord bot.
-    /// Used to identify which messages in the events channel come from Apollo.
-    /// </summary>
-    public string ApolloBotName { get; set; } = "Apollo";
-
-    /// <summary>
-    /// Phase 3 cutover flag for the Apollo→GCal pipeline.
-    ///
-    /// When false (default): ApolloEventHandler runs as the live path, parsing
-    /// Apollo posts inline and pushing to GCal synchronously. ApolloMessageParserWorker
-    /// writes parsed events to the ApolloEvent staging table for observability.
-    ///
-    /// When true: ApolloEventHandler is not registered. ApolloMessageParserWorker
-    /// writes directly to CalendarEvent and enqueues CalendarOutbox rows.
-    /// CalendarOutboxWorker drains the queue to GCal with retry + backoff.
-    ///
-    /// Flip the flag in appsettings.json and restart to cut over. No code
-    /// redeploy needed for the cutover itself; rollback is the reverse.
-    /// </summary>
-    public bool UseNewApolloPipeline { get; set; } = false;
-
-    /// <summary>
-    /// Grace window, in seconds, that the Apollo pipeline waits after seeing an
-    /// event's message deleted before acting on it — to absorb Apollo's /sort,
-    /// which deletes every event message and immediately re-posts it under a
-    /// new ID (Discord can't reorder messages, so sorting = delete + repost).
-    ///
-    /// During this window, a re-post with a matching content hash re-binds the
-    /// existing CalendarEvent to the new message instead of cancel-then-recreate,
-    /// so Google Calendar is never touched by a sort. If no matching re-post
-    /// arrives within the window, the deletion is treated as genuine.
-    ///
-    /// Must comfortably exceed the parser worker's poll interval (15s) so a
-    /// delete and its re-post are never split across more cycles than the
-    /// window covers. Default 120s = 8 poll cycles of headroom. Values &lt;= 0
-    /// fall back to the default.
-    /// </summary>
-    public int ApolloSortRebindGraceSeconds { get; set; } = 120;
 
     /// <summary>
     /// Seconds to wait after a UserLeft before finalizing a departure as
@@ -350,7 +310,7 @@ public class BotConfig
     public string CompEventMinRank { get; set; } = "CPT";
 
     // ──────────────────────────────────────────────────────────────────────
-    //  In-house events (Apollo replacement)
+    //  In-house events
     // ──────────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -412,10 +372,7 @@ public class BotConfig
 
     /// <summary>
     /// Channel that ClanGuard-created event embeds are posted to. 0 falls back
-    /// to EventsTextChannelId. Kept separate from EventsTextChannelId on purpose:
-    /// that key is the channel the Apollo capture/backfill/reconciliation
-    /// pipeline watches, so the in-house event posts can target a different
-    /// channel without disturbing Apollo.
+    /// to EventsTextChannelId.
     /// </summary>
     public ulong EventPostChannelId { get; set; } = default;
 

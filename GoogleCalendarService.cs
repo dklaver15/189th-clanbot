@@ -10,7 +10,7 @@ namespace ClanGuardBot.Services;
 
 /// <summary>
 /// Wraps the Google Calendar v3 API for ClanGuard's two event sources:
-///   - "Clan"    — clan-wide events parsed from Apollo bot posts (teal/Peacock color)
+///   - "Clan"    — clan events created with /event (teal/Peacock color)
 ///   - "CompDiv" — competitive division events created via /comp-event command (red/Tomato color)
 ///
 /// The service account in google-credentials.json must have at least "Make changes to events"
@@ -190,48 +190,6 @@ public class GoogleCalendarService
         }).ToList();
     }
 
-    // ─── Source-tagged Listing ───────────────────────────────────────
-
-    /// <summary>
-    /// Lists all clan-tagged events in the configured calendar within
-    /// [fromUtc, toUtc]. Filters server-side via the
-    /// extendedProperties.private.source=Clan tag we set at create time
-    /// in CreateEventAsync, so CompDiv events and any non-bot calendar
-    /// entries on the same calendar are excluded automatically.
-    ///
-    /// Used by /cleanup-calendar-dupes to find Google Calendar events
-    /// that no longer have a matching CalendarEvent row in the bot's DB
-    /// (orphans created by past concurrent-write races where the dup DB
-    /// row got removed by ApolloBackfillService's defensive cleanup but
-    /// its GCal counterpart survived).
-    ///
-    /// Paginates via NextPageToken to be safe across windows that exceed
-    /// the API's per-page cap.
-    /// </summary>
-    public async Task<List<Event>> ListClanEventsAsync(DateTime fromUtc, DateTime toUtc)
-    {
-        var all = new List<Event>();
-        string? pageToken = null;
-
-        do
-        {
-            var request = _calendar.Events.List(_config.GoogleCalendarId);
-            request.TimeMinDateTimeOffset   = new DateTimeOffset(fromUtc, TimeSpan.Zero);
-            request.TimeMaxDateTimeOffset   = new DateTimeOffset(toUtc,   TimeSpan.Zero);
-            request.SingleEvents            = true;
-            request.OrderBy                 = EventsResource.ListRequest.OrderByEnum.StartTime;
-            request.PrivateExtendedProperty = new[] { "source=Clan" };
-            request.PageToken               = pageToken;
-
-            var response = await request.ExecuteAsync();
-            if (response.Items is not null) all.AddRange(response.Items);
-            pageToken = response.NextPageToken;
-        }
-        while (!string.IsNullOrEmpty(pageToken));
-
-        return all;
-    }
-
     /// <summary>
     /// Lists ALL events in the configured calendar within [fromUtc, toUtc]
     /// regardless of source tag. Includes Clan-tagged events, CompDiv-tagged
@@ -239,9 +197,7 @@ public class GoogleCalendarService
     /// (which won't carry an extendedProperty source tag at all).
     ///
     /// Used by /calendar to render a complete day-by-day view for clan
-    /// members. The /cleanup-calendar-dupes path keeps using
-    /// ListClanEventsAsync because it specifically needs to compare against
-    /// the bot's CalendarEvent rows, all of which are clan-sourced.
+    /// members.
     ///
     /// Paginates via NextPageToken to be safe across wide windows.
     /// </summary>

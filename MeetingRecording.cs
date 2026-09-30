@@ -4,23 +4,21 @@ namespace ClanGuardBot.Models;
 /// One row per recorded (or to-be-recorded) meeting occurrence.
 ///
 /// ── Why keyed on DiscordMessageId, not a fixed schedule ──
-/// The monthly meeting is an Apollo event. Apollo posts a *new message* for
-/// each occurrence, so DiscordMessageId is the natural stable key for "this
-/// specific meeting." Recurrence is therefore free — next month's meeting is
+/// Each meeting occurrence has its own event post in #events, so
+/// DiscordMessageId is the natural stable key for "this specific meeting." Recurrence is therefore free — next month's meeting is
 /// a different message → a new row — and the scheduler never has to reason
 /// about RRULEs or hardcoded days/times.
 ///
 /// ── Reschedule / rename handling ──
-/// CalendarEvent rows are updated in place when Apollo revises an event (see
-/// ApolloEvent / ApolloEventHandler). MeetingRecordingScheduler re-reads the
+/// CalendarEvent rows are updated in place when an event is edited.
+/// MeetingRecordingScheduler re-reads the
 /// matched CalendarEvent on every poll, so a moved StartUtc or a tweaked
 /// Title is picked up automatically and JoinAtUtc is recomputed — as long as
 /// the row is still in a pre-recording state (Scheduled/Announced). Once we're
 /// actually Recording we stop chasing the event time.
 ///
 /// ── Cancellation ──
-/// When an Apollo event is deleted, its live CalendarEvent row goes away. The
-/// scheduler treats "no CalendarEvent with this DiscordMessageId" as a
+/// If the meeting's CalendarEvent row goes away, the scheduler treats "no CalendarEvent with this DiscordMessageId" as a
 /// cancellation and parks the recording in Cancelled (terminal) — but only if
 /// it hasn't already started recording.
 ///
@@ -37,8 +35,8 @@ public class MeetingRecording
     public ulong GuildId { get; set; }
 
     /// <summary>
-    /// Apollo post message ID — the stable per-occurrence key. Survives event
-    /// revisions (Apollo edits the same message) and is what we de-dupe on so
+    /// Event post message ID — the stable per-occurrence key. Survives event
+    /// edits (the same message is updated) and is what we de-dupe on so
     /// a single meeting never spawns two recording rows.
     /// </summary>
     public ulong DiscordMessageId { get; set; }

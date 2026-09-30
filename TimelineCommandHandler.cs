@@ -52,7 +52,7 @@ namespace ClanGuardBot.Handlers;
 /// CalendarEventId=0 as a sentinel (see EventCreditCommandHandler).
 /// Those are excluded from the chronological list and from the
 /// "lifetime events" counter so the displayed counts reflect real
-/// Apollo events only. The "Events at &lt;rank&gt;" summary still includes
+/// events only. The "Events at &lt;rank&gt;" summary still includes
 /// them (via EventAttendanceHelper) because they legitimately count
 /// toward promotion math.
 ///

@@ -15,8 +15,7 @@ namespace ClanGuardBot.Services;
 ///   1. Any MemberDeparture still "Pending" and older than the grace window
 ///      is finalized to "Left" — no Kick/Ban audit entry showed up in time,
 ///      so the departure was voluntary. The deterministic settling step of
-///      the capture → reconcile → grace-finalize pipeline, same shape as the
-///      Apollo /sort rebind grace window.
+///      the capture → reconcile → grace-finalize pipeline.
 ///
 ///   2. Evicts stale breadcrumbs from DepartureCaptureHandler's in-memory
 ///      correlation cache (Kick/Ban audit entries that never matched a leave,

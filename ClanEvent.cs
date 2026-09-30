@@ -12,10 +12,9 @@ namespace ClanGuardBot.Models;
 ///
 /// ── Relationship to CalendarEvent ──
 /// ClanEvent is the authored source; CalendarEvent is the calendar/attendance
-/// projection it drives. This mirrors the existing ApolloEvent → CalendarEvent
-/// layering and deliberately keeps RSVP / recurrence / reminder / message-
-/// ownership concerns OFF the shared CalendarEvent hub (which is also written
-/// by Apollo and /comp-event).
+/// projection it drives, and deliberately keeps RSVP / recurrence / reminder /
+/// message-ownership concerns OFF the shared CalendarEvent hub (which is also written
+/// by /comp-event).
 ///
 /// ── Times ──
 /// StartUtc / EndUtc are UTC, matching every other ...Utc column. They are the

@@ -12,22 +12,18 @@ using Newtonsoft.Json;
 namespace ClanGuardBot.Services;
 
 /// <summary>
-/// Phase 3 of the Apollo sync rework: drains the CalendarOutbox table to
-/// Google Calendar with row-level exponential backoff.
+/// Drains the CalendarOutbox table to Google Calendar with row-level
+/// exponential backoff.
 ///
-/// ── Pipeline shape (with UseNewApolloPipeline=true) ──
-///   Apollo post → MessageReceived
-///       → ApolloMessageCaptureHandler writes ApolloMessageLog row
-///       → ApolloMessageParserWorker parses, upserts CalendarEvent, enqueues CalendarOutbox
+/// ── Pipeline shape ──
+///   /event create, edit or cancel → CalendarEvent row + CalendarOutbox row
 ///       → CalendarOutboxWorker (this class) drains CalendarOutbox → GCal
 ///       → on Create/Update success, runs overlap check + organizer DM
 ///
 /// ── Why an outbox ──
-/// Pre-Phase-3, ApolloEventHandler called GoogleCalendarService synchronously
-/// inside the gateway-event callback. Transient GCal failures (5xx, throttling,
-/// auth-token refresh blip) became silent drift — the DB row got written, the
-/// API call didn't, and the inconsistency only surfaced when /cleanup-calendar-dupes
-/// ran. With the outbox, a failed GCal call is just an incremented AttemptCount
+/// Calling GoogleCalendarService synchronously inside a gateway callback turned
+/// transient GCal failures (5xx, throttling, auth-token refresh blip) into
+/// silent drift — the DB row got written, the API call didn't. With the outbox, a failed GCal call is just an incremented AttemptCount
 /// and a deferred NextAttemptAt; it gets retried until it sticks.
 ///
 /// ── Idempotency ──
@@ -42,11 +38,6 @@ namespace ClanGuardBot.Services;
 ///   Attempt 3 fails → retry in 10 min
 ///   Attempt 4 fails → retry in 30 min
 ///   Attempt 5+ fails → retry every 1 hr, indefinitely (Phase 5 monitor alerts)
-///
-/// ── Feature flag ──
-/// When UseNewApolloPipeline=false, the worker still ticks but the outbox will
-/// be empty (parser worker only enqueues when the flag is on). Effectively a
-/// no-op cost of one indexed SELECT every 10 seconds.
 /// </summary>
 public class CalendarOutboxWorker : BackgroundService
 {
@@ -95,8 +86,8 @@ public class CalendarOutboxWorker : BackgroundService
         catch (OperationCanceledException) { return; }
 
         _logger.LogInformation(
-            "CalendarOutboxWorker started; polling every {Seconds}s (UseNewApolloPipeline={Flag})",
-            (int)PollInterval.TotalSeconds, _config.UseNewApolloPipeline);
+            "CalendarOutboxWorker started; polling every {Seconds}s",
+            (int)PollInterval.TotalSeconds);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -377,8 +368,7 @@ public class CalendarOutboxWorker : BackgroundService
     /// After a Create or Update lands in GCal, check for overlapping events
     /// and DM the organizer if there are conflicts.
     ///
-    /// This is the post-Phase-3 location for what ApolloEventHandler used to do
-    /// inline. Catching exceptions liberally because a missed DM is way less
+    /// Catching exceptions liberally because a missed DM is way less
     /// bad than failing the queue row over a Discord API hiccup.
     /// </summary>
     private async Task TrySendOverlapDmAsync(
@@ -396,33 +386,6 @@ public class CalendarOutboxWorker : BackgroundService
                     payload.StartUtc, payload.EndUtc))
                 .Where(e => e.Id != googleEventId)
                 .ToList();
-
-            if (overlaps.Count == 0) return;
-
-            // Drop "ghost" overlaps: events that were deleted in Discord and are
-            // sitting in their /sort rebind grace window (PendingCancelUntil),
-            // condemned to be removed from GCal by ResolveExpiredCancellationsAsync
-            // but not gone yet. GetOverlappingEventsAsync queries GCal live and
-            // can't see that they're already cancelled, so without this filter a
-            // delete-then-recreate inside the grace window fires a false-positive
-            // conflict DM against the very events being replaced.
-            var overlapIds = overlaps.Select(e => e.Id).ToList();
-            var now        = DateTime.UtcNow;
-            var condemnedIds = await db.CalendarEvents
-                .Where(c => c.PendingCancelUntil != null
-                         && c.PendingCancelUntil > now
-                         && c.DeleteOnCancelTimeout
-                         && overlapIds.Contains(c.CalendarEventId))
-                .Select(c => c.CalendarEventId)
-                .ToListAsync();
-
-            if (condemnedIds.Count > 0)
-            {
-                overlaps = overlaps.Where(e => !condemnedIds.Contains(e.Id)).ToList();
-                _logger.LogDebug(
-                    "Overlap check for '{Title}': ignored {Count} event(s) pending cancellation",
-                    payload.Title, condemnedIds.Count);
-            }
 
             if (overlaps.Count == 0) return;
 
@@ -507,8 +470,8 @@ public class CalendarOutboxPayload
     /// Display name of the event host (the person actually running it, which may
     /// differ from the creator). Rendered as a "Host:" line in the GCal event body.
     /// For Clan events this is the resolved host name (falling back to the creator
-    /// when no separate host is set); empty for sources without a host concept
-    /// (e.g. Apollo), which omits the line.
+    /// when no separate host is set); empty for sources without a host concept,
+    /// which omits the line.
     /// </summary>
     public string HostName { get; set; } = string.Empty;
 

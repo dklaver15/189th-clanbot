@@ -379,7 +379,7 @@ public class CommandsCommandHandler
     /// </summary>
     private static string BuildTableBody(List<CommandEntry> entries)
     {
-        const int nameWidth = 24;   // longest registered command is /cleanup-calendar-dupes (23 chars w/ slash)
+        const int nameWidth = 24;   // fits most names; /satisfactory-leaderboard (25 w/ slash) runs one over
         const int permWidth = 9;    // "Everyone" is 8; rank labels like "2ndLT+" fit in 6
         const int descWidth = 65;   // every current description fits unwrapped
 
@@ -687,8 +687,6 @@ public class CommandsCommandHandler
             new("banhammer", "Repost the Ban Hammer counter embed if it gets deleted",
                 "Officer+", officer),   // SyncWithHandlers: BanHammerHandler.HasElevatedPermissions
             new("clear-awol", "Clear a user's AWOL status",
-                "Officer+", officer),
-            new("cleanup-calendar-dupes", "Reconcile calendar/GCal duplicate entries",
                 "Officer+", officer),
             new("health", "Bot health diagnostic — uptime, DB stats, scheduled jobs, queues",
                 "Officer+", officer),   // SyncWithHandlers: HealthCommandHandler.HasElevatedPermissions

@@ -22,8 +22,7 @@ namespace ClanGuardBot.Handlers;
 /// audit-log entry (Kick / Ban) for the same user. UserLeft and
 /// AuditLogCreated are separate gateway events that arrive in EITHER order,
 /// so we correlate them with a short-lived in-memory cache plus a grace
-/// window (finalized by DepartureClassificationWorker). Same
-/// capture → reconcile → grace-finalize shape as the Apollo /sort rebind.
+/// window (finalized by DepartureClassificationWorker).
 ///
 /// Departures that happen while the bot is OFFLINE are not seen here (Discord
 /// doesn't replay UserLeft); MemberRosterReconciler recovers those.

@@ -107,8 +107,8 @@ public class MeetingAttendanceSnapshotService : BackgroundService
             await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
         }
 
-        // Same 30-second startup settle as the event side — lets Apollo
-        // backfill and voice-session cleanup finish before we start querying.
+        // Same 30-second startup settle as the event side — lets voice-session
+        // cleanup finish before we start querying.
         await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
 
         var countingSources = _config.GetAttendanceCountingSourcesList();

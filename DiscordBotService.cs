@@ -43,8 +43,6 @@ public class DiscordBotService : IHostedService
     private readonly GuestReminderHandler _guestReminderHandler;
     private readonly OnboardingReminderHandler _onboardingReminderHandler;
     private readonly BumpReminderHandler _bumpReminderHandler;
-    private readonly ApolloEventHandler _apolloEventHandler;
-    private readonly ApolloMessageCaptureHandler _apolloCaptureHandler;
     private readonly CompEventCommandHandler _compEventHandler;
     private readonly EventCommandHandler _eventCommandHandler;
     private readonly EventCreationWizard _eventWizard;
@@ -81,7 +79,6 @@ public class DiscordBotService : IHostedService
     private readonly PurgeUserCommandHandler _purgeUserHandler;
     private readonly AllowNewAccountCommandHandler _allowNewAccountHandler;
     private readonly BriefingNowCommandHandler _briefingNowHandler;
-    private readonly CleanupCalendarDupesCommandHandler _cleanupCalendarDupesHandler;
     private readonly CalendarCommandHandler _calendarHandler;
     private readonly CommandsCommandHandler _commandsHandler;
     private readonly HealthCommandHandler _healthHandler;
@@ -137,8 +134,6 @@ public class DiscordBotService : IHostedService
         GuestReminderHandler guestReminderHandler,
         OnboardingReminderHandler onboardingReminderHandler,
         BumpReminderHandler bumpReminderHandler,
-        ApolloEventHandler apolloEventHandler,
-        ApolloMessageCaptureHandler apolloCaptureHandler,
         CompEventCommandHandler compEventHandler,
         EventCommandHandler eventCommandHandler,
         EventCreationWizard eventWizard,
@@ -175,7 +170,6 @@ public class DiscordBotService : IHostedService
         PurgeUserCommandHandler purgeUserHandler,
         AllowNewAccountCommandHandler allowNewAccountHandler,
         BriefingNowCommandHandler briefingNowHandler,
-        CleanupCalendarDupesCommandHandler cleanupCalendarDupesHandler,
         CalendarCommandHandler calendarHandler,
         CommandsCommandHandler commandsHandler,
         HealthCommandHandler healthHandler,
@@ -223,8 +217,6 @@ public class DiscordBotService : IHostedService
         _guestReminderHandler        = guestReminderHandler;
         _onboardingReminderHandler   = onboardingReminderHandler;
         _bumpReminderHandler         = bumpReminderHandler;
-        _apolloEventHandler          = apolloEventHandler;
-        _apolloCaptureHandler        = apolloCaptureHandler;
         _compEventHandler            = compEventHandler;
         _eventCommandHandler         = eventCommandHandler;
         _eventWizard                 = eventWizard;
@@ -261,7 +253,6 @@ public class DiscordBotService : IHostedService
         _purgeUserHandler            = purgeUserHandler;
         _allowNewAccountHandler      = allowNewAccountHandler;
         _briefingNowHandler          = briefingNowHandler;
-        _cleanupCalendarDupesHandler = cleanupCalendarDupesHandler;
         _calendarHandler             = calendarHandler;
         _commandsHandler             = commandsHandler;
         _healthHandler               = healthHandler;
@@ -315,22 +306,6 @@ public class DiscordBotService : IHostedService
         _onboardingReminderHandler.Register(_client);
         _bumpReminderHandler.Register(_client);
 
-        // Phase 3 cutover: when UseNewApolloPipeline is true, the parser worker
-        // + CalendarOutboxWorker own the Apollo→GCal path. ApolloEventHandler
-        // stays instantiated for emergency rollback (flip the flag back to
-        // false and restart) but never wires up its gateway subscriptions.
-        if (!_config.UseNewApolloPipeline)
-        {
-            _apolloEventHandler.Register(_client);
-        }
-        else
-        {
-            _logger.LogInformation(
-                "UseNewApolloPipeline=true; ApolloEventHandler.Register skipped. " +
-                "ApolloMessageParserWorker + CalendarOutboxWorker own the Apollo→GCal path.");
-        }
-
-        _apolloCaptureHandler.Register(_client);
         _compEventHandler.Register(_client);
         _eventCommandHandler.Register(_client);
         _eventWizard.Register(_client);
@@ -367,7 +342,6 @@ public class DiscordBotService : IHostedService
         _purgeUserHandler.Register(_client);
         _allowNewAccountHandler.Register(_client);
         _briefingNowHandler.Register(_client);
-        _cleanupCalendarDupesHandler.Register(_client);
         _calendarHandler.Register(_client);
         _commandsHandler.Register(_client);
         _healthHandler.Register(_client);
@@ -516,15 +490,12 @@ public class DiscordBotService : IHostedService
                     .WithDescription("Manually trigger a roster export to Google Sheets (Officer+ only)")
                     .Build(),
 
-                // NOTE: /recruit was removed — new recruits are auto-logged by
-                // RankTrackingHandler when they gain the RCT role.
-
                 new SlashCommandBuilder()
                     .WithName("comp-event")
                     .WithDescription($"Create a competitive division event on the clan calendar ({_config.CompEventMinRank}+ only)")
                     .Build(),
 
-                // In-house event creation (Apollo replacement). /event opens a
+                // In-house event creation. /event opens a
                 // DM wizard (gated by EventCommandMinRank); /timezone sets the
                 // zone used to read each member's event-time input.
                 EventCommandHandler.BuildEventCommand(_config.EventCommandMinRank, _config.EventTemplateManageMinRank),
@@ -811,20 +782,10 @@ public class DiscordBotService : IHostedService
                         isRequired: false)
                     .Build(),
 
-                // /cleanup-calendar-dupes — reconcile CalendarEvents and the
-                // Google Calendar against each other, removing duplicates
-                // created by past concurrent-write races between
-                // MessageReceived and MessageUpdated for the same Apollo post
-                // (the 2026-05-04 / 2026-05-05 incident). dry_run defaults to
-                // true; pass dry_run:false to actually apply changes. Officer+
-                // gated. The slash-command shape lives on the handler so the
-                // option list stays next to the code that consumes it.
-                CleanupCalendarDupesCommandHandler.BuildCommand(),
-
                 // /calendar — ephemeral day-grouped view of upcoming events
                 // on the clan's Google Calendar. Open to all members; queries
                 // GCal directly so it reflects manual edits made via the
-                // calendar UI as well as bot-managed Apollo + CompDiv events.
+                // calendar UI as well as bot-managed clan and CompDiv events.
                 // Two render modes: list (default) and grid.
                 new SlashCommandBuilder()
                     .WithName("calendar")

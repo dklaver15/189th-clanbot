@@ -124,9 +124,7 @@ public class EventAttendanceSnapshotService : BackgroundService
             await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
         }
 
-        // Small buffer so other startup services (Apollo backfill, voice cleanup)
-        // settle first. The Apollo backfill in particular may be inserting
-        // CalendarEvent rows we'd want to snapshot.
+        // Small buffer so other startup services (voice cleanup) settle first.
         await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
 
         var countingSources = _config.GetAttendanceCountingSourcesList();

@@ -239,9 +239,10 @@ public class OnboardingReminder
 }
 
 /// <summary>
-/// Maps a calendar entry back to either a Discord message (Apollo clan events)
-/// or a bot-generated comp division event. Used to keep Google Calendar in sync
-/// when Apollo edits or deletes an event post, and to deduplicate on restart.
+/// Maps a calendar entry back to either a clan event's Discord message or a
+/// bot-generated comp division event. Keeps Google Calendar in sync when an
+/// event is edited or cancelled. Rows from before the in-house event system
+/// came from the Apollo bot's posts and are kept as history.
 /// </summary>
 public class CalendarEvent
 {
@@ -249,7 +250,7 @@ public class CalendarEvent
     public ulong GuildId { get; set; }
 
     /// <summary>
-    /// Discord message ID from the Apollo bot post.
+    /// Discord message ID of the event post.
     /// Set to 0 for comp division events which are not tied to a message.
     /// </summary>
     public ulong DiscordMessageId { get; set; }
@@ -261,7 +262,7 @@ public class CalendarEvent
     public DateTime StartUtc { get; set; }
     public DateTime EndUtc { get; set; }
 
-    /// <summary>"Clan" for Apollo-sourced events, "CompDiv" for /comp-event entries.</summary>
+    /// <summary>"Clan" for clan events, "CompDiv" for /comp-event entries.</summary>
     public string Source { get; set; } = "Clan";
 
     public DateTime CreatedAt { get; set; }
@@ -308,49 +309,6 @@ public class CalendarEvent
     /// service stamps its own.
     /// </summary>
     public DateTime? LastMeetingSnapshotAttemptUtc { get; set; }
-
-    /// <summary>
-    /// FNV-1a hash of the parsed event fields (Title|Start|End|Description|
-    /// OrganizerId), computed by ApolloContentHash.Compute. Stored so we can
-    /// recognize when a "new" Apollo message is actually the same logical event
-    /// re-posted under a fresh message ID — which is exactly what Apollo's
-    /// /sort does (it deletes every event message and re-posts it in order,
-    /// since Discord can't reorder existing messages).
-    ///
-    /// Used by ApolloMessageParserWorker's rebind path and by
-    /// ApolloReconciliationService to match an orphaned row against a live
-    /// re-posted message. Empty string for rows created before this column
-    /// existed; those simply won't match a rebind until their next edit
-    /// re-stamps the hash, which is a no-op regression (they fall through to
-    /// the pre-existing behaviour).
-    /// </summary>
-    public string ContentHash { get; set; } = string.Empty;
-
-    /// <summary>
-    /// Non-null while the source Apollo message has been observed deleted but
-    /// we're holding off on acting, in case the deletion is the first half of
-    /// a /sort (delete-then-repost). Set to "now + grace window" by the parser
-    /// worker's tombstone path. If a re-post with a matching ContentHash
-    /// arrives before this deadline, the row is re-bound to the new message and
-    /// this is cleared. If the deadline passes with no re-post, the expiry
-    /// sweep resolves it per DeleteOnCancelTimeout.
-    ///
-    /// Null in normal operation (no pending deletion).
-    /// </summary>
-    public DateTime? PendingCancelUntil { get; set; }
-
-    /// <summary>
-    /// Captured at tombstone time to record what should happen if
-    /// PendingCancelUntil elapses with no matching re-post:
-    ///   • true  → the event hadn't ended yet (EndUtc &gt; now at tombstone
-    ///             time): a real cancellation. The sweep queues the GCal delete
-    ///             and removes the row.
-    ///   • false → the event had already ended: routine channel cleanup. The
-    ///             sweep just clears PendingCancelUntil and preserves the row
-    ///             and its GCal entry as historical record.
-    /// Meaningless when PendingCancelUntil is null.
-    /// </summary>
-    public bool DeleteOnCancelTimeout { get; set; }
 }
 
 /// <summary>
@@ -358,9 +316,9 @@ public class CalendarEvent
 /// (guild, user, event) tuple with AttendedMinutes above the configured threshold.
 ///
 /// ── Why this table exists ──
-/// CalendarEvents rows get deleted when their source Apollo Discord message is
-/// removed from #events (either manually or by Apollo's own auto-cleanup). That
-/// made CalendarEvents unsuitable as the source of truth for past attendance:
+/// CalendarEvents rows could be deleted when their source post was removed from
+/// #events (in the Apollo era, by Apollo's own auto-cleanup). That made
+/// CalendarEvents unsuitable as the source of truth for past attendance:
 /// past events vanish, and with them the data any attendance query would need.
 /// This table snapshots attendance per event shortly after the event ends, so
 /// the historical record persists even after the originating CalendarEvent is
@@ -439,7 +397,7 @@ public class EventAttendance
 ///   1. Independent snapshot bookkeeping. The unique index on
 ///      (GuildId, UserId, CalendarEventId) on EventAttendance means a single
 ///      member could not have BOTH an event-VC qualifying session and a
-///      meeting-VC qualifying session for the same Apollo post without a
+///      meeting-VC qualifying session for the same event without a
 ///      collision. Separate tables let the two paths run independently.
 ///   2. Independent retry/give-up state. CalendarEvent.LastSnapshotAttemptUtc
 ///      and CalendarEvent.LastMeetingSnapshotAttemptUtc are mirrors of each
@@ -800,13 +758,11 @@ public enum CalendarOutboxOperation
 }
 
 /// <summary>
-/// Durable queue of pending Google Calendar operations driven by the Phase 3
-/// Apollo pipeline. Each row represents one CalendarEvent state change that
-/// needs to be reflected in GCal: a Create (event newly parsed from Apollo),
-/// an Update (Apollo edited the post), or a Delete (Apollo pulled the post
-/// before EndUtc).
+/// Durable queue of pending Google Calendar operations. Each row represents one
+/// CalendarEvent state change that needs to be reflected in GCal: a Create, an
+/// Update, or a Delete.
 ///
-/// Written by ApolloMessageParserWorker when UseNewApolloPipeline=true.
+/// Written by the event system (EventPublisher, EventManagementHandler).
 /// Drained by CalendarOutboxWorker on its own schedule with row-level
 /// exponential backoff via NextAttemptAt. Idempotent against duplicate
 /// processing because Create operations check CalendarEvent.CalendarEventId
@@ -814,11 +770,10 @@ public enum CalendarOutboxOperation
 /// into an update.
 ///
 /// ── Why an outbox ──
-/// Pre-Phase-3, ApolloEventHandler called GoogleCalendarService synchronously
-/// inside the gateway-event callback. Transient GCal failures (5xx, throttling,
-/// auth refresh blip) became silent drift — the CalendarEvent row was written
-/// but the API call wasn't, and the inconsistency only surfaced when
-/// /cleanup-calendar-dupes ran. The outbox decouples the DB write from the
+/// Calling GoogleCalendarService synchronously inside a gateway callback turned
+/// transient GCal failures (5xx, throttling, auth refresh blip) into silent
+/// drift — the CalendarEvent row was written but the API call wasn't. The
+/// outbox decouples the DB write from the
 /// external call so a failure is a deferred retry, not a lost operation.
 /// </summary>
 public class CalendarOutbox

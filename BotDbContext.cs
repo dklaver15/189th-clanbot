@@ -24,8 +24,6 @@ public class BotDbContext : DbContext
     public DbSet<MeetingAttendance>   MeetingAttendances  => Set<MeetingAttendance>();
     public DbSet<BotState>            BotStates           => Set<BotState>();
     public DbSet<BumpState>           BumpStates          => Set<BumpState>();
-    public DbSet<ApolloMessageLog>    ApolloMessageLogs   => Set<ApolloMessageLog>();
-    public DbSet<ApolloEvent>         ApolloEvents        => Set<ApolloEvent>();
     public DbSet<InviteSource>        InviteSources       => Set<InviteSource>();
     public DbSet<InviteJoin>          InviteJoins         => Set<InviteJoin>();
     public DbSet<RedditLead>          RedditLeads         => Set<RedditLead>();
@@ -210,18 +208,9 @@ public class BotDbContext : DbContext
 
         modelBuilder.Entity<CalendarEvent>(e =>
         {
-            // Filtered unique index on DiscordMessageId. Replaces the previous
-            // non-unique IX_CalendarEvents_DiscordMessageId. Prevents duplicate
-            // inserts for the same Apollo message (DiscordMessageId != 0) while
-            // allowing CompDiv events (DiscordMessageId = 0) to share that
-            // sentinel value freely.
-            //
-            // This is the backstop for the per-message lock in
-            // ApolloEventHandler — see _messageLocks comment there for the
-            // 2026-05-04 / 2026-05-05 race this fixes. The lock prevents the
-            // race in normal operation; this constraint is what keeps a future
-            // code path that bypasses the lock from ever silently reintroducing
-            // duplicate rows.
+            // Filtered unique index on DiscordMessageId: one calendar row per
+            // event message (DiscordMessageId != 0), while CompDiv events
+            // (DiscordMessageId = 0) share that sentinel value freely.
             e.HasIndex(c => c.DiscordMessageId)
                 .IsUnique()
                 .HasFilter("\"DiscordMessageId\" <> 0")
@@ -229,17 +218,6 @@ public class BotDbContext : DbContext
 
             // Look up all events for a guild by source (Clan vs CompDiv)
             e.HasIndex(c => new { c.GuildId, c.Source });
-
-            // Backs the parser worker's expiry sweep:
-            // "events whose rebind grace window has elapsed". Almost always
-            // empty, so this stays tiny and cheap to scan.
-            e.HasIndex(c => c.PendingCancelUntil)
-                .HasDatabaseName("IX_CalendarEvents_PendingCancelUntil");
-
-            // Backs the /sort rebind lookup (match a re-post to a pending-cancel
-            // event by content) and the reconciler's downtime rebind.
-            e.HasIndex(c => new { c.GuildId, c.ContentHash })
-                .HasDatabaseName("IX_CalendarEvents_GuildId_ContentHash");
         });
 
         modelBuilder.Entity<CalendarOutbox>(e =>
@@ -294,7 +272,7 @@ public class BotDbContext : DbContext
 
         // ── Meeting recordings ────────────────────────────────────────
         // One row per recorded meeting occurrence (keyed in practice by the
-        // Apollo DiscordMessageId). DiscordMessageId index backs the scheduler's
+        // event post's DiscordMessageId). DiscordMessageId index backs the scheduler's
         // per-occurrence upsert/de-dupe; State index backs the "find rows in
         // state X to drive" sweeps. No unique constraint — the scheduler
         // enforces single-active-row-per-message in code so it can distinguish
@@ -313,40 +291,6 @@ public class BotDbContext : DbContext
             // One row per guild — keyed by GuildId for upsert semantics in
             // BumpReminderHandler.HandleBumpSuccessAsync.
             e.HasIndex(b => b.GuildId).IsUnique();
-        });
-
-        // ── Phase 1: Apollo lossless capture ──────────────────────────
-        // Append-only log of every Apollo message Discord delivers. Written
-        // by ApolloMessageCaptureHandler. The unique index on
-        // (DiscordMessageId, RevisionNumber) is the structural backstop
-        // for the per-message lock in that handler — same belt-and-
-        // suspenders pattern as IX_CalendarEvents_DiscordMessageId_Unique
-        // above. The (ProcessedAt, CapturedAt) index drives the parser
-        // worker's "next batch of unprocessed rows" query.
-        modelBuilder.Entity<ApolloMessageLog>(e =>
-        {
-            e.ToTable("ApolloMessageLog");
-            e.Property(x => x.EventType).HasConversion<int>();
-
-            e.HasIndex(x => new { x.DiscordMessageId, x.RevisionNumber }).IsUnique();
-            e.HasIndex(x => new { x.ProcessedAt, x.CapturedAt });
-            e.HasIndex(x => x.CapturedAt);
-        });
-
-        // ── Phase 2: Apollo parsed event staging ──────────────────────
-        // Written by ApolloMessageParserWorker. Shadow of CalendarEvent
-        // for clan-sourced events during dual-run; Phase 3 cutover
-        // retires this table and has the worker write to CalendarEvent
-        // directly. Unique index on DiscordMessageId enforces the
-        // "one row per Apollo message, regardless of how many revisions
-        // arrived" upsert semantics.
-        modelBuilder.Entity<ApolloEvent>(e =>
-        {
-            e.ToTable("ApolloEvents");
-            e.Property(x => x.Status).HasConversion<int>();
-
-            e.HasIndex(x => x.DiscordMessageId).IsUnique();
-            e.HasIndex(x => new { x.GuildId, x.Status, x.ParsedStartUtc });
         });
 
         // ── Tracked invite links ──────────────────────────────────────
@@ -388,7 +332,7 @@ public class BotDbContext : DbContext
         // mutated by RedditLeadButtonHandler as officers work the lead.
         // The unique index on RedditPostId is the structural dedupe for
         // the polling loop — same belt-and-suspenders pattern as the
-        // ApolloMessageLog and CalendarEvent unique indexes. The polling
+        // CalendarEvent unique index. The polling
         // service does a bulk-existence query to filter listings before
         // hitting the DB; this constraint is the floor that keeps any
         // future code path that bypasses that query from silently
@@ -437,8 +381,8 @@ public class BotDbContext : DbContext
         // One row per /apply modal submission. Written when a member submits
         // the officer application modal (Phase 2); status flips on HQ review
         // (Phase 3). Status is stored as int because SQLite has no native
-        // enum type — same pattern as CalendarOutboxOperation, RedditLead.Status,
-        // and ApolloEvent.Status. The (GuildId, UserId, Status) index drives
+        // enum type — same pattern as CalendarOutboxOperation and
+        // RedditLead.Status. The (GuildId, UserId, Status) index drives
         // the Phase 2 duplicate-rejection check ("does a Pending row already
         // exist for this user?") without scanning the table.
         modelBuilder.Entity<OfficerApplication>(e =>

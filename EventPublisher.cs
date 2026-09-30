@@ -343,7 +343,6 @@ public sealed class EventPublisher : IEventPublisher
                 EndUtc           = endUtc,
                 Description      = description ?? string.Empty,
                 Source           = "Clan",      // AttendanceCountingSources="Clan" → counts for promotion
-                ContentHash      = string.Empty, // Clan events never go through /sort rebind
                 CreatedAt        = DateTime.UtcNow,
             };
             db.CalendarEvents.Add(calEvent);
