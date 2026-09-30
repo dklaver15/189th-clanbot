@@ -50,10 +50,10 @@ public enum XpSource
     /// <summary>Bonus for attending N clan events in a row without missing one.</summary>
     EventStreak = 4,
 
-    /// <summary>Time spent in clan voice channels outside of events/meetings. One row per UTC day.</summary>
+    /// <summary>Time spent in clan voice channels outside of events/meetings. One row per clan-local day (EventDefaultTimeZone).</summary>
     Voice = 5,
 
-    /// <summary>Chat messages, capped per day. One row per UTC day.</summary>
+    /// <summary>Chat messages, capped per day. One row per clan-local day (EventDefaultTimeZone).</summary>
     Message = 6,
 
     /// <summary>Manual grant or deduction by an officer via <c>/xp-adjust</c>.</summary>
@@ -158,8 +158,8 @@ public class XpSeason
 ///   Meeting      "meet:{calendarEventId}"
 ///   RsvpHonored  "rsvp:{calendarEventId}"
 ///   EventStreak  "streak3:{calendarEventId}" / "streak5:{calendarEventId}"
-///   Voice        "voice:{seasonId}:{yyyy-MM-dd}"  — one ROLLUP row per member per UTC day
-///   Message      "msg:{seasonId}:{yyyy-MM-dd}"    — one ROLLUP row per member per UTC day
+///   Voice        "voice:{seasonId}:{yyyy-MM-dd}"  — one ROLLUP row per member per clan-local day
+///   Message      "msg:{seasonId}:{yyyy-MM-dd}"    — one ROLLUP row per member per clan-local day
 ///                (season-scoped: without the id, a day straddling a season boundary
 ///                 is claimed by whichever season got there first and the new one
 ///                 never pays it)

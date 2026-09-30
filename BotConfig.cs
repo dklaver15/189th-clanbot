@@ -2789,7 +2789,8 @@ public class BotConfig
     public int XpVoicePer15Minutes { get; set; } = 10;
 
     /// <summary>
-    /// Maximum voice XP per member per UTC day. Default 60 (= 1.5h credited).
+    /// Maximum voice XP per member per clan-local day (EventDefaultTimeZone).
+    /// Default 60 (= 1.5h credited).
     /// This cap is what stops an idler from out-earning an attendee. 0 = uncapped
     /// (not recommended).
     /// </summary>
@@ -2819,7 +2820,8 @@ public class BotConfig
     public int XpPerMessage { get; set; } = 2;
 
     /// <summary>
-    /// Messages that earn XP per member per UTC day. Default 10, so the chat
+    /// Messages that earn XP per member per clan-local day (EventDefaultTimeZone).
+    /// Default 10, so the chat
     /// ceiling is 20 XP/day. A full week of maxed chat is worth ~28% of one op.
     /// </summary>
     public int XpMessageDailyCap { get; set; } = 10;

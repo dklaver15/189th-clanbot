@@ -86,6 +86,12 @@ public sealed class XpAccrualService : BackgroundService
     private readonly BotConfig _config;
     private readonly ILogger<XpAccrualService> _logger;
 
+    /// <summary>
+    /// The clan's time zone (EventDefaultTimeZone). Daily caps reset at its
+    /// midnight, not UTC's, which lands at 6–7 pm Central.
+    /// </summary>
+    private readonly TimeZoneInfo _dayZone;
+
     public XpAccrualService(
         IServiceProvider services,
         DiscordSocketClient client,
@@ -98,6 +104,18 @@ public sealed class XpAccrualService : BackgroundService
         _xp = xp;
         _config = config.Value;
         _logger = logger;
+
+        if (TimeZoneInfo.TryFindSystemTimeZoneById(_config.EventDefaultTimeZone, out var tz) && tz is not null)
+        {
+            _dayZone = tz;
+        }
+        else
+        {
+            _dayZone = TimeZoneInfo.Utc;
+            _logger.LogWarning(
+                "XP: EventDefaultTimeZone '{Tz}' is not a valid timezone id; daily caps will use UTC days.",
+                _config.EventDefaultTimeZone);
+        }
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -207,9 +225,10 @@ public sealed class XpAccrualService : BackgroundService
         var now = DateTime.UtcNow;
         var lookbackDays = Math.Max(1, _config.XpAccrualLookbackDays);
 
-        // Never look back past the season start — activity from a previous season
-        // belongs to that season's ledger and must not be re-paid into this one.
-        var windowStart = now.Date.AddDays(-(lookbackDays - 1));
+        // Starts at a local midnight so the oldest day in the window is rebuilt
+        // whole. Never look back past the season start — activity from a previous
+        // season belongs to that season's ledger and must not be re-paid into this one.
+        var windowStart = LocalMidnightUtc(LocalDay(now).AddDays(-(lookbackDays - 1)));
         if (windowStart < season.StartUtc) windowStart = season.StartUtc;
 
         var changed = new HashSet<ulong>();
@@ -457,7 +476,7 @@ public sealed class XpAccrualService : BackgroundService
     // ─── Voice ───────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Hanging out in voice, rolled up one row per member per UTC day so the daily
+    /// Hanging out in voice, rolled up one row per member per clan-local day so the daily
     /// cap is enforced by construction rather than by remembering what was already
     /// paid.
     ///
@@ -498,8 +517,8 @@ public sealed class XpAccrualService : BackgroundService
         var capSeconds = Math.Max(1.0, _config.MaxSingleSessionHours) * 3600.0;
         var minSeconds = Math.Max(0, _config.XpVoiceMinSessionMinutes) * 60.0;
 
-        // (user, UTC day) → credited seconds
-        var perDay = new Dictionary<(ulong UserId, DateTime Day), double>();
+        // (user, local day) → credited seconds
+        var perDay = new Dictionary<(ulong UserId, DateOnly Day), double>();
 
         foreach (var s in sessions)
         {
@@ -515,9 +534,10 @@ public sealed class XpAccrualService : BackgroundService
             if ((end - start).TotalSeconds > capSeconds) end = start.AddSeconds(capSeconds);
             if ((end - start).TotalSeconds < minSeconds) continue;
 
-            for (var day = start.Date; day <= end.Date; day = day.AddDays(1))
+            for (var day = LocalDay(start); day <= LocalDay(end); day = day.AddDays(1))
             {
-                var dayEnd = day.AddDays(1);
+                var dayBegin = LocalMidnightUtc(day);
+                var dayEnd = LocalMidnightUtc(day.AddDays(1));
                 if (dayEnd <= windowStart) continue;
 
                 // Clamp to windowStart itself, not windowStart.Date. On the day a
@@ -525,7 +545,7 @@ public sealed class XpAccrualService : BackgroundService
                 // midnight credited voice time from BEFORE the season existed, while
                 // AccrueMessagesAsync (which filters on the full timestamp) did not —
                 // so voice and chat disagreed about when the season started.
-                var dayStart = day > windowStart ? day : windowStart;
+                var dayStart = dayBegin > windowStart ? dayBegin : windowStart;
                 var from = start > dayStart ? start : dayStart;
                 var to = end < dayEnd ? end : dayEnd;
                 var seconds = (to - from).TotalSeconds;
@@ -548,7 +568,8 @@ public sealed class XpAccrualService : BackgroundService
 
             // Stamp the award at the END of the day (or now, for today) so season
             // attribution and the "reached it first" tiebreak stay sensible.
-            var earnedAt = day.AddDays(1) > now ? now : day.AddDays(1).AddSeconds(-1);
+            var dayEndUtc = LocalMidnightUtc(day.AddDays(1));
+            var earnedAt = dayEndUtc > now ? now : dayEndUtc.AddSeconds(-1);
 
             if (await _xp.AwardAsync(db, guild.Id, season.Id, userId, XpSource.Voice,
                     $"voice:{season.Id}:{day:yyyy-MM-dd}", amount,
@@ -577,7 +598,7 @@ public sealed class XpAccrualService : BackgroundService
     // ─── Chat ────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Chat XP, rolled up per member per UTC day and capped hard.
+    /// Chat XP, rolled up per member per clan-local day and capped hard.
     ///
     /// Deliberately near-worthless: at the default 2 XP × 10 messages the ceiling
     /// is 20 XP/day, so a full week of maxed-out chatting is worth about 28% of
@@ -600,7 +621,7 @@ public sealed class XpAccrualService : BackgroundService
         if (events.Count == 0) return;
 
         var perDay = events
-            .GroupBy(m => (m.UserId, Day: m.Timestamp.Date))
+            .GroupBy(m => (m.UserId, Day: LocalDay(m.Timestamp)))
             .Select(g => new { g.Key.UserId, g.Key.Day, Count = g.Count() });
 
         foreach (var d in perDay)
@@ -614,13 +635,33 @@ public sealed class XpAccrualService : BackgroundService
             var amount = counted * _config.XpPerMessage;
             if (amount <= 0) continue;
 
-            var earnedAt = d.Day.AddDays(1) > now ? now : d.Day.AddDays(1).AddSeconds(-1);
+            var dayEndUtc = LocalMidnightUtc(d.Day.AddDays(1));
+            var earnedAt = dayEndUtc > now ? now : dayEndUtc.AddSeconds(-1);
 
             if (await _xp.AwardAsync(db, guild.Id, season.Id, d.UserId, XpSource.Message,
                     $"msg:{season.Id}:{d.Day:yyyy-MM-dd}", amount,
                     $"{counted} message(s) counted", earnedAt, ct))
                 changed.Add(d.UserId);
         }
+    }
+
+    // ─── Clan-local days ─────────────────────────────────────────────────────
+
+    /// <summary>The clan-local date a UTC instant falls on.</summary>
+    private DateOnly LocalDay(DateTime utc) =>
+        DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), _dayZone));
+
+    /// <summary>
+    /// UTC instant of the local midnight that starts <paramref name="day"/>.
+    /// Mirrors SatisfactoryFactoryService.LocalMidnightToUtc: a skipped midnight
+    /// steps forward, and a repeated one resolves to standard time.
+    /// </summary>
+    private DateTime LocalMidnightUtc(DateOnly day)
+    {
+        var local = DateTime.SpecifyKind(day.ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified);
+        while (_dayZone.IsInvalidTime(local))
+            local = local.AddMinutes(15);
+        return TimeZoneInfo.ConvertTimeToUtc(local, _dayZone);
     }
 
     // ─── Announcements ───────────────────────────────────────────────────────
