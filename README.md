@@ -59,7 +59,7 @@ All settings are in `appsettings.json` and can be overridden via environment var
 | `/awol-status`       | Everyone | Check your own activity stats |
 | `/awol-check @user`  | Officers+ | Check another user's activity |
 | `/clear-awol @user`  | Officers+ | Clear a user's AWOL status (removes role and pending notifications) |
-| `/poll`              | Everyone | Create a poll — native Discord poll by default, or `anonymous:true` for a hidden-vote poll |
+| `/poll`              | SGT+ | Create a poll — native Discord poll by default, or `anonymous:true` for a hidden-vote poll |
 
 ### Polls
 

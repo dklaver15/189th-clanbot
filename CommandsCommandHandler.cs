@@ -715,6 +715,9 @@ public class CommandsCommandHandler
             new("jotd", "Post a Joke of the Day — set it up in DMs",
                 $"{config.JotdMinRank}+", MinRank(config.JotdMinRank)),   // SyncWithHandlers: JotdCommandHandler.HasPermission
 
+            new("poll", "Create a poll — native by default, or anonymous",
+                $"{config.PollMinRank}+", MinRank(config.PollMinRank)),   // SyncWithHandlers: PollCommandHandler.HasPermission
+
             new("xp-adjust", "Grant or deduct clan XP manually, with a reason",
                 "HQ", xpAdjust),   // SyncWithHandlers: XpCommandHandler.RequireAdjustRoleAsync
 

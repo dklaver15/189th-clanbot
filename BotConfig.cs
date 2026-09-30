@@ -617,6 +617,13 @@ public class BotConfig
     // ──────────────────────────────────────────────────────────────────────
 
     /// <summary>
+    /// Minimum rank required to create a poll via /poll. Must match a rank name
+    /// in RankRoles (case-insensitive). Default "SGT". Admins / users with Manage
+    /// Roles always pass regardless of rank.
+    /// </summary>
+    public string PollMinRank { get; set; } = "SGT";
+
+    /// <summary>
     /// Channel that gets the "new poll" announcement embed and the midpoint
     /// "still open" reminder for every poll, wherever the poll itself was posted.
     /// Polls usually live in a low-traffic #polls channel, so the clan only finds

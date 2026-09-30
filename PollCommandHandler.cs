@@ -9,7 +9,8 @@ using Microsoft.Extensions.Options;
 namespace ClanGuardBot.Handlers;
 
 /// <summary>
-/// The <c>/poll</c> slash command — open to all members. One command, two
+/// The <c>/poll</c> slash command — gated to <see cref="BotConfig.PollMinRank"/>
+/// and above (default SGT). One command, two
 /// renderers (the hybrid): a normal poll posts as a native Discord poll; an
 /// <c>anonymous:true</c> poll posts as our custom embed where individual votes
 /// are hidden. Validates input, optionally captures a banner image (upload, or a
@@ -129,6 +130,14 @@ public sealed class PollCommandHandler
             return;
         }
 
+        if (command.User is not SocketGuildUser guildUser || !HasPermission(guildUser))
+        {
+            await command.FollowupAsync(
+                $"❌ Creating a poll is restricted to **{_config.PollMinRank} and above**.",
+                ephemeral: true);
+            return;
+        }
+
         string? Opt(string name) => command.Data.Options.FirstOrDefault(o => o.Name == name)?.Value as string;
         bool Flag(string name) => command.Data.Options.FirstOrDefault(o => o.Name == name)?.Value as bool? ?? false;
 
@@ -211,6 +220,27 @@ public sealed class PollCommandHandler
         await command.FollowupAsync(
             $"✅ Poll posted in {MentionUtils.MentionChannel(channel.Id)}.\n{kindNote}{imgNote}{crossNote}",
             ephemeral: true);
+    }
+
+    // Same rule as the other rank gates: Administrator / Manage Roles bypass,
+    // otherwise any rank role at or above PollMinRank in RankRoles.
+    private bool HasPermission(SocketGuildUser user)
+    {
+        if (user.GuildPermissions.Administrator || user.GuildPermissions.ManageRoles)
+            return true;
+
+        var rankRoles = _config.GetRankRolesList();
+        var minIndex  = rankRoles.FindIndex(r => r.Equals(_config.PollMinRank, StringComparison.OrdinalIgnoreCase));
+        if (minIndex < 0)
+        {
+            _logger.LogWarning(
+                "PollMinRank '{MinRank}' not found in RankRoles — /poll will be admin-only",
+                _config.PollMinRank);
+            return false;
+        }
+
+        return user.Roles.Any(role =>
+            rankRoles.FindIndex(r => r.Equals(role.Name, StringComparison.OrdinalIgnoreCase)) >= minIndex);
     }
 
     /// <summary>
