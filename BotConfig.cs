@@ -3172,6 +3172,20 @@ public class BotConfig
     public List<string> GetRankRolesList() =>
         RankRoles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
 
+    /// <summary>Index of a rank in RankRoles (lowest first), or -1 if it isn't listed.</summary>
+    public int GetRankIndex(string rankName) =>
+        GetRankRolesList().FindIndex(r => r.Equals(rankName, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Index in RankRoles of the highest rank among the given role names, or -1 if none is a rank.</summary>
+    public int GetHighestRankIndex(IEnumerable<string> roleNames)
+    {
+        var ranks = GetRankRolesList();
+        return roleNames
+            .Select(n => ranks.FindIndex(r => r.Equals(n, StringComparison.OrdinalIgnoreCase)))
+            .DefaultIfEmpty(-1)
+            .Max();
+    }
+
     /// <summary>
     /// Parses XpVoiceExcludedChannelIds into channel IDs. Unparseable entries are
     /// skipped rather than throwing, so one typo can't stop voice XP accruing for

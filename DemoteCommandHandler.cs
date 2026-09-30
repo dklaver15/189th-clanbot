@@ -116,6 +116,39 @@ public class DemoteCommandHandler
             return;
         }
 
+        var targetIndex  = _config.GetRankIndex(rankInfo.NewRole);
+        var currentIndex = _config.GetHighestRankIndex(member.Roles.Select(r => r.Name));
+        if (targetIndex < 0)
+        {
+            await command.FollowupAsync($"❌ **{rankInfo.NewRole}** isn't in the RankRoles config.", ephemeral: true);
+            return;
+        }
+
+        // A demotion must move the member down. The role sweep below strips every
+        // other rank role, so "demoting" to a higher rank would promote them.
+        if (currentIndex <= targetIndex)
+        {
+            var currentRank = currentIndex >= 0 ? $"**{_config.GetRankRolesList()[currentIndex]}**" : "unranked";
+            await command.FollowupAsync(
+                $"❌ {member.Mention} is {currentRank}, which isn't above **{rankInfo.NewRole}**. "
+                + "Use `/promote` to raise a rank.",
+                ephemeral: true);
+            return;
+        }
+
+        // Seniority: the caller must outrank the member being demoted.
+        if (!caller.GuildPermissions.Administrator)
+        {
+            var callerIndex = _config.GetHighestRankIndex(caller.Roles.Select(r => r.Name));
+            if (callerIndex <= currentIndex)
+            {
+                await command.FollowupAsync(
+                    "❌ You can only demote members who rank below you.",
+                    ephemeral: true);
+                return;
+            }
+        }
+
         var guild = (command.Channel as SocketGuildChannel)?.Guild;
         if (guild is null) return;
 

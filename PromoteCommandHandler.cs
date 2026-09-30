@@ -100,6 +100,40 @@ public class PromoteCommandHandler
             return;
         }
 
+        var newRankName  = PromotionService.RankMap[rank].NewRole;
+        var targetIndex  = _config.GetRankIndex(newRankName);
+        var currentIndex = _config.GetHighestRankIndex(member.Roles.Select(r => r.Name));
+        if (targetIndex < 0)
+        {
+            await command.FollowupAsync($"❌ **{newRankName}** isn't in the RankRoles config.", ephemeral: true);
+            return;
+        }
+
+        // A promotion must move the member up. PromoteAsync strips every other
+        // rank role, so "promoting" to a lower rank would silently demote them.
+        if (targetIndex <= currentIndex)
+        {
+            var currentRankName = _config.GetRankRolesList()[currentIndex];
+            await command.FollowupAsync(
+                $"❌ {member.Mention} is **{currentRankName}**, which is already at or above **{newRankName}**. "
+                + "Use `/demote` to lower a rank.",
+                ephemeral: true);
+            return;
+        }
+
+        // Seniority: the caller must outrank both the member and the new rank.
+        if (!caller.GuildPermissions.Administrator)
+        {
+            var callerIndex = _config.GetHighestRankIndex(caller.Roles.Select(r => r.Name));
+            if (callerIndex <= currentIndex || callerIndex <= targetIndex)
+            {
+                await command.FollowupAsync(
+                    "❌ You can only promote members who rank below you, to a rank below your own.",
+                    ephemeral: true);
+                return;
+            }
+        }
+
         // ── Delegate to the shared service ──────────────────────────
         var result = await _promotion.PromoteAsync(member, rank);
 
