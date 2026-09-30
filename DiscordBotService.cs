@@ -841,7 +841,7 @@ public class DiscordBotService : IHostedService
                         .AddChoice("Grid (calendar style)", "grid"))
                     .Build(),
 
-                // /commands — self-service catalog of every slash command,
+                // /command-catalog — self-service catalog of every slash command,
                 // filtered to only those the caller can run at their current
                 // rank. Open to everyone; rendered ephemerally. Catalog of
                 // entries lives in CommandsCommandHandler.BuildCatalog and
@@ -870,7 +870,7 @@ public class DiscordBotService : IHostedService
                 // group itself is open. The slash-command shape lives on the
                 // handler so the subcommand list stays next to the code that
                 // consumes it. NOTE: also keep CommandsCommandHandler.BuildCatalog
-                // in sync when this changes — that's the /commands self-service
+                // in sync when this changes — that's the /command-catalog self-service
                 // catalog source of truth.
                 InviteCommandHandler.BuildCommand(),
 

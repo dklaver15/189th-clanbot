@@ -73,9 +73,8 @@ public class CommandsCommandHandler
     private const string ButtonIdPrefix = "cmdcat:";
 
     /// <summary>
-    /// How many catalog rows fit on one page. With 19 registered commands
-    /// (as of writing) this gives 3 pages (8 + 8 + 3) — a comfortable
-    /// scan length per page without making pagination feel like overkill.
+    /// How many catalog rows fit on one page — a comfortable scan length per
+    /// page without making pagination feel like overkill.
     /// </summary>
     private const int PageSize = 8;
 
@@ -558,6 +557,27 @@ public class CommandsCommandHandler
             return user.Roles.Any(r => officerRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase));
         };
 
+        // SyncWithHandlers: GamertagSetupCommandHandler.InvokerHasPermission,
+        //                   GamertagBackfillCommandHandler.InvokerHasPermission
+        Func<SocketGuildUser, BotConfig, bool> gamertagSetup = (user, cfg) =>
+        {
+            if (user.GuildPermissions.Administrator) return true;
+            if (cfg.GamertagSetupRoleId == 0) return false;
+            return user.Roles.Any(r => r.Id == cfg.GamertagSetupRoleId);
+        };
+
+        // SyncWithHandlers: OfficerApplicationSetupCommandHandler.InvokerHasPermission
+        Func<SocketGuildUser, BotConfig, bool> officerAppHq = (user, cfg) =>
+        {
+            if (user.GuildPermissions.Administrator) return true;
+            if (cfg.OfficerAppHqRoleId == 0) return false;
+            return user.Roles.Any(r => r.Id == cfg.OfficerAppHqRoleId);
+        };
+
+        // SyncWithHandlers: EventCommandHandler.HasEventPermission (ManageRoles also passes)
+        Func<SocketGuildUser, BotConfig, bool> eventCreate = (user, cfg) =>
+            user.GuildPermissions.ManageRoles || MinRank(cfg.EventCommandMinRank)(user, cfg);
+
         // SyncWithHandlers: every rank-gated handler — PromoteCommandHandler.HasPromotePermission,
         //                   DemoteCommandHandler, SetNickCommandHandler (no — that's officer),
         //                   SeedPromotionCreditCommandHandler, CompEventCommandHandler,
@@ -743,6 +763,34 @@ public class CommandsCommandHandler
 
             new("allow-new-account", "Let a new account bypass the age gate and unban them if needed",
                 "Admin", (user, _) => user.GuildPermissions.Administrator),   // SyncWithHandlers: AllowNewAccountCommandHandler
+
+            new("gamertags", "Register or update your gamertags (walks you through it in DMs)",
+                "Everyone", everyone),
+            new("timezone", "Set or view the timezone used for your event times",
+                "Everyone", everyone),
+            new("ufc-schedule", "Show upcoming UFC events",
+                "Everyone", everyone),
+            new("ufc-results", "Show results from the latest UFC event",
+                "Everyone", everyone),
+            // list/stats are open to everyone; create needs Create Invite, and
+            // assign/info/edit-notes/revoke need InviteManagementMinRank.
+            // SyncWithHandlers: InviteCommandHandler.HasInvitePermission
+            new("invite", $"Tracked invite links — list and stats for everyone; managing them is {config.InviteManagementMinRank}+",
+                "Everyone", everyone),
+
+            // Members can also edit or cancel their own events; view and template
+            // management have their own gates in the handlers.
+            new("event", "Create, edit, or cancel a clan event",
+                $"{config.EventCommandMinRank}+", eventCreate),
+
+            new("setup-gamertags", "Post (or re-post) the gamertags button",
+                "HQ", gamertagSetup),
+            new("gamertag-backfill-ids", "Fill missing Discord IDs on legacy gamertag rows (dry run unless apply:true)",
+                "HQ", gamertagSetup),
+            new("setup-officer-app", "Post (or re-post) the officer application button",
+                "HQ", officerAppHq),
+            new("bot-fix-channel-perms", "Grant the bot Manage Channel on every channel (dry run by default)",
+                "Admin", (user, _) => user.GuildPermissions.Administrator),   // SyncWithHandlers: BotFixChannelPermsCommandHandler
         };
     }
 }
