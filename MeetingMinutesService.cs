@@ -47,6 +47,9 @@ public class MeetingMinutesService : BackgroundService
     private const int MinutesMaxTokens = 16_000;
     private const int ChunkNotesMaxTokens = 8_000;
 
+    // Thinking depth for every minutes call (single-shot, chunk notes, and reduce).
+    private const string MinutesEffort = "medium";
+
     private readonly IServiceProvider _services;
     private readonly DiscordSocketClient _client;
     private readonly IMeetingTranscriber _transcriber;
@@ -372,7 +375,7 @@ public class MeetingMinutesService : BackgroundService
             .AppendLine("TRANSCRIPT:")
             .AppendLine(transcript);
 
-        var ai = await _ai.GenerateAsync(MinutesSystemPrompt, user.ToString(), maxTokens: MinutesMaxTokens, ct);
+        var ai = await _ai.GenerateAsync(MinutesSystemPrompt, user.ToString(), maxTokens: MinutesMaxTokens, ct, effort: MinutesEffort);
         EnsureComplete(ai, "minutes");
         return SplitMinutesAndActions(ai.Text);
     }
@@ -420,7 +423,7 @@ public class MeetingMinutesService : BackgroundService
                 .AppendLine(chunks[i])
                 .ToString();
 
-            var ai = await _ai.GenerateAsync(mapSystem, mapUser, maxTokens: ChunkNotesMaxTokens, ct);
+            var ai = await _ai.GenerateAsync(mapSystem, mapUser, maxTokens: ChunkNotesMaxTokens, ct, effort: MinutesEffort);
             EnsureComplete(ai, $"notes for part {i + 1}");
             notes.AppendLine($"--- Notes from part {i + 1} of {chunks.Count} ---");
             notes.AppendLine(ai.Text.Trim());
@@ -457,7 +460,7 @@ public class MeetingMinutesService : BackgroundService
             .AppendLine("NOTES (in order):")
             .AppendLine(notes.ToString());
 
-        var reduced = await _ai.GenerateAsync(reduceSystem, reduceUser.ToString(), maxTokens: MinutesMaxTokens, ct);
+        var reduced = await _ai.GenerateAsync(reduceSystem, reduceUser.ToString(), maxTokens: MinutesMaxTokens, ct, effort: MinutesEffort);
         EnsureComplete(reduced, "minutes");
         return SplitMinutesAndActions(reduced.Text);
     }
