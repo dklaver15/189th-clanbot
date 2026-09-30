@@ -154,7 +154,7 @@ public sealed class PollPublisher
     /// </summary>
     private static string MessageText(PollDraft d)
     {
-        var attribution = $"-# 📊 Poll created by {MentionUtils.MentionUser(d.CreatorId)}";
+        var attribution = PollEmbedBuilder.CreditLinePrefix + MentionUtils.MentionUser(d.CreatorId);
         return string.IsNullOrWhiteSpace(d.Description)
             ? attribution
             : $"{attribution}\n{Trim(d.Description, MaxDescriptionLength)}";
@@ -200,7 +200,7 @@ public sealed class PollPublisher
             .Select((o, i) => new PollOption { Id = -(i + 1), Position = i, Label = o.Label, Emoji = o.Emoji })
             .ToList();
         var embed = PollEmbedBuilder.BuildEmbed(
-            preview, previewOptions, new Dictionary<int, int>(), totalVoters: 0, fileName);
+            preview, previewOptions, new Dictionary<int, int>(), totalVoters: 0, fileName, creditInFooter: false);
 
         // 2) Post the embed (no buttons yet) to obtain a real message id. The
         //    creator credit and any description ride as message text above the
@@ -234,7 +234,7 @@ public sealed class PollPublisher
         try
         {
             var finalEmbed = PollEmbedBuilder.BuildEmbed(
-                poll, options, new Dictionary<int, int>(), totalVoters: 0, fileName);
+                poll, options, new Dictionary<int, int>(), totalVoters: 0, fileName, creditInFooter: false);
             await posted.ModifyAsync(m =>
             {
                 m.Embed      = finalEmbed;

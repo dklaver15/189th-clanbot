@@ -24,6 +24,9 @@ public static class PollEmbedBuilder
     public const string VotePrefix  = "poll:vote:";   // poll:vote:<pollId>:<optionId>
     public const string ClosePrefix = "poll:close:";  // poll:close:<pollId>
 
+    // Opens every poll message's text; the creator's mention follows it.
+    public const string CreditLinePrefix = "-# 📊 Poll created by ";
+
     private static readonly Color Blurple = new(0x5865F2);
 
     private const int BarWidth = 12;
@@ -34,14 +37,17 @@ public static class PollEmbedBuilder
     /// <summary>
     /// Builds the poll embed. <paramref name="countsByOptionId"/> maps PollOption.Id →
     /// number of votes; <paramref name="totalVoters"/> is the distinct member count
-    /// (for the multiselect case where votes &gt; voters).
+    /// (for the multiselect case where votes &gt; voters). <paramref name="creditInFooter"/>
+    /// names the creator in the footer, for polls posted before the message text
+    /// carried the credit line (see <see cref="HasCreditLine"/>).
     /// </summary>
     public static Embed BuildEmbed(
         Poll poll,
         IReadOnlyList<PollOption> options,
         IReadOnlyDictionary<int, int> countsByOptionId,
         int totalVoters,
-        string? imageFileName)
+        string? imageFileName,
+        bool creditInFooter)
     {
         var closed = poll.Status == PollStatus.Closed;
         var totalVotes = countsByOptionId.Values.Sum();
@@ -84,9 +90,10 @@ public static class PollEmbedBuilder
                 : $"⏳ Closes {EventTimeParser.Stamp(poll.ClosesAtUtc, 'F')} ({EventTimeParser.Stamp(poll.ClosesAtUtc, 'R')})"),
             inline: false);
 
-        var footer = new List<string> { $"Poll by {poll.CreatorName}" };
+        var footer = new List<string>();
+        if (creditInFooter) footer.Add($"Poll by {poll.CreatorName}");
         if (!closed) footer.Add("votes are hidden — only totals are shown");
-        eb.WithFooter(string.Join(" • ", footer));
+        if (footer.Count > 0) eb.WithFooter(string.Join(" • ", footer));
 
         if (!string.IsNullOrWhiteSpace(imageFileName))
             eb.WithImageUrl($"attachment://{imageFileName}");
@@ -121,6 +128,10 @@ public static class PollEmbedBuilder
 
         return cb.Build();
     }
+
+    /// <summary>Does this poll message's text already credit the creator?</summary>
+    public static bool HasCreditLine(string? messageContent) =>
+        messageContent?.Contains(CreditLinePrefix, StringComparison.Ordinal) == true;
 
     /// <summary>Unicode or custom (&lt;:name:id&gt;) emoji → IEmote, or null if unparseable/absent.</summary>
     public static IEmote? ParseEmote(string? raw)

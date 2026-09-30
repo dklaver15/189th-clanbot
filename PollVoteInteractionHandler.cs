@@ -146,7 +146,8 @@ public sealed class PollVoteInteractionHandler
             var tally = await PollTally.ComputeAsync(db, pollId);
             await component.UpdateAsync(m =>
             {
-                m.Embed      = PollEmbedBuilder.BuildEmbed(poll, options, tally.CountsByOptionId, tally.TotalVoters, PollImage.FileNameFor(poll));
+                m.Embed      = PollEmbedBuilder.BuildEmbed(poll, options, tally.CountsByOptionId, tally.TotalVoters, PollImage.FileNameFor(poll),
+                    creditInFooter: !PollEmbedBuilder.HasCreditLine(component.Message.Content));
                 m.Components = PollEmbedBuilder.BuildComponents(poll, options, locked: false);
             });
 

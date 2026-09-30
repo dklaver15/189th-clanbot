@@ -107,7 +107,8 @@ public sealed class PollClosingService
             if (await channel.GetMessageAsync(poll.MessageId) is not IUserMessage msg) return;
 
             var embed = PollEmbedBuilder.BuildEmbed(
-                poll, options, tally.CountsByOptionId, tally.TotalVoters, PollImage.FileNameFor(poll));
+                poll, options, tally.CountsByOptionId, tally.TotalVoters, PollImage.FileNameFor(poll),
+                creditInFooter: !PollEmbedBuilder.HasCreditLine(msg.Content));
             await msg.ModifyAsync(m =>
             {
                 m.Embed      = embed;
