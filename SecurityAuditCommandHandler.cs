@@ -314,6 +314,7 @@ public sealed class SecurityAuditCommandHandler
         "TimedOut"             => "⏳",
         "Released"             => "✅",
         "Unbanned"             => "♻️",
+        "ExemptionAdded"       => "🔓",
         _                      => "•",
     };
 

@@ -470,9 +470,15 @@ public sealed class AccountAgeGateHandler
                 embed.AddField("Note", exemption.Note, inline: false);
         }
 
+        var components = outcome == AccountAgeGateOutcome.Banned
+            ? new ComponentBuilder()
+                .WithButton("Allow in + unban", AllowNewAccountCommandHandler.AllowButtonPrefix + member.Id, ButtonStyle.Secondary)
+                .Build()
+            : null;
+
         try
         {
-            await channel.SendMessageAsync(embed: embed.Build());
+            await channel.SendMessageAsync(embed: embed.Build(), components: components);
         }
         catch (Exception ex)
         {

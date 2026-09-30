@@ -37,6 +37,11 @@ namespace ClanGuardBot.Handlers;
 /// selectable in the picker), so the admin copies their ID (Developer Mode →
 /// right-click → Copy User ID) and passes it here. Mirrors /purge-user.
 ///
+/// ── Alert button ──
+/// The age gate's "Banned" alert carries an "Allow in + unban" button
+/// (<see cref="AllowButtonPrefix"/>) that does the same thing for that user,
+/// also Administrator only.
+///
 /// ── One-time semantics ──
 /// The exemption is consumed (deleted) by the gate on first use, so it never
 /// leaves a standing hole. Re-running the command just re-adds it (upsert).
@@ -44,19 +49,23 @@ namespace ClanGuardBot.Handlers;
 public sealed class AllowNewAccountCommandHandler
 {
     public const string CommandName = "allow-new-account";
+    public const string AllowButtonPrefix = "agegate:allow:";
 
     private const string OptionUserId = "user_id";
     private const string OptionUser   = "user";
     private const string OptionNote   = "note";
 
     private readonly IServiceProvider _services;
+    private readonly DiscordSocketClient _client;
     private readonly ILogger<AllowNewAccountCommandHandler> _logger;
 
     public AllowNewAccountCommandHandler(
         IServiceProvider services,
+        DiscordSocketClient client,
         ILogger<AllowNewAccountCommandHandler> logger)
     {
         _services = services;
+        _client   = client;
         _logger   = logger;
     }
 
@@ -76,6 +85,7 @@ public sealed class AllowNewAccountCommandHandler
     public void Register(DiscordSocketClient client)
     {
         client.SlashCommandExecuted += OnSlashCommandExecuted;
+        client.ButtonExecuted       += OnButtonExecuted;
     }
 
     private async Task OnSlashCommandExecuted(SocketSlashCommand cmd)
@@ -152,6 +162,43 @@ public sealed class AllowNewAccountCommandHandler
             ? ((pickedUser as IGuildUser)?.DisplayName ?? pickedUser.GlobalName ?? pickedUser.Username)
             : $"User {targetId}";
 
+        var result = await AllowAsync(guild, targetId, targetName, invoker, note);
+        if (result is not { } r)
+        {
+            await cmd.FollowupAsync(
+                "❌ Couldn't save the exemption (database error — see bot logs). Nothing was changed.",
+                ephemeral: true);
+            return;
+        }
+        var (exemptionAlreadyExisted, banState, banError) = r;
+
+        // ── Report ───────────────────────────────────────────────────────
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"✅ **{targetName}** (`{targetId}`) is now cleared to bypass the account-age gate on their next join.");
+        if (exemptionAlreadyExisted)
+            sb.AppendLine("ℹ️ An exemption for them already existed — I refreshed it.");
+
+        sb.Append(banState switch
+        {
+            BanState.Lifted    => "🔓 Their existing ban has been **lifted**.\n",
+            BanState.NotBanned => "ℹ️ They weren't banned, so there was nothing to unban.\n",
+            _                  => $"⚠️ I couldn't lift their ban ({banError ?? "see bot logs"}). " +
+                                  "You may need to remove it manually in **Server Settings → Bans**.\n",
+        });
+
+        sb.AppendLine();
+        sb.AppendLine("**Next step:** send them a fresh invite link — when they rejoin, the gate will let them through and use up the exemption. It's a one-time pass, so if they don't rejoin it just sits harmlessly.");
+
+        await cmd.FollowupAsync(sb.ToString(), ephemeral: true);
+    }
+
+    /// <summary>
+    /// Upserts the one-time exemption, lifts any ban, and writes the audit row.
+    /// Null when the exemption couldn't be saved (nothing was changed).
+    /// </summary>
+    private async Task<(bool AlreadyExisted, BanState Ban, string? BanError)?> AllowAsync(
+        SocketGuild guild, ulong targetId, string targetName, SocketGuildUser invoker, string? note)
+    {
         // ── 1) Upsert the one-time exemption ─────────────────────────────
         bool exemptionAlreadyExisted;
         try
@@ -193,10 +240,7 @@ public sealed class AllowNewAccountCommandHandler
             _logger.LogError(ex,
                 "/{Command}: failed to write the exemption for {Target} in guild {Guild}.",
                 CommandName, targetId, guild.Id);
-            await cmd.FollowupAsync(
-                "❌ Couldn't save the exemption (database error — see bot logs). Nothing was changed.",
-                ephemeral: true);
-            return;
+            return null;
         }
 
         // ── 2) Lift any existing ban so they can actually rejoin ─────────
@@ -210,24 +254,60 @@ public sealed class AllowNewAccountCommandHandler
             "(exemptionAlreadyExisted={Existed}, ban={BanState}). Note: {Note}",
             CommandName, invoker.Username, targetName, targetId, exemptionAlreadyExisted, banState, note ?? "(none)");
 
-        // ── Report ───────────────────────────────────────────────────────
-        var sb = new System.Text.StringBuilder();
-        sb.AppendLine($"✅ **{targetName}** (`{targetId}`) is now cleared to bypass the account-age gate on their next join.");
-        if (exemptionAlreadyExisted)
-            sb.AppendLine("ℹ️ An exemption for them already existed — I refreshed it.");
+        return (exemptionAlreadyExisted, banState, banError);
+    }
 
-        sb.Append(banState switch
+    private Task OnButtonExecuted(SocketMessageComponent component)
+    {
+        if (!component.Data.CustomId.StartsWith(AllowButtonPrefix, StringComparison.Ordinal))
+            return Task.CompletedTask;
+        _ = HandleButtonAsync(component);
+        return Task.CompletedTask;
+    }
+
+    private async Task HandleButtonAsync(SocketMessageComponent component)
+    {
+        try
         {
-            BanState.Lifted    => "🔓 Their existing ban has been **lifted**.\n",
-            BanState.NotBanned => "ℹ️ They weren't banned, so there was nothing to unban.\n",
-            _                  => $"⚠️ I couldn't lift their ban ({banError ?? "see bot logs"}). " +
-                                  "You may need to remove it manually in **Server Settings → Bans**.\n",
-        });
+            if (!ulong.TryParse(component.Data.CustomId[AllowButtonPrefix.Length..], out var targetId)) return;
 
-        sb.AppendLine();
-        sb.AppendLine("**Next step:** send them a fresh invite link — when they rejoin, the gate will let them through and use up the exemption. It's a one-time pass, so if they don't rejoin it just sits harmlessly.");
+            if (component.User is not SocketGuildUser invoker || !invoker.GuildPermissions.Administrator)
+            {
+                await component.RespondAsync(
+                    "⛔ Only server **Administrators** can let a new account in.", ephemeral: true);
+                return;
+            }
 
-        await cmd.FollowupAsync(sb.ToString(), ephemeral: true);
+            await component.DeferAsync();
+
+            var targetName = _client.GetUser(targetId)?.Username ?? $"User {targetId}";
+            var result = await AllowAsync(invoker.Guild, targetId, targetName, invoker, "Allowed from the age-gate alert");
+            if (result is not { } r)
+            {
+                await component.FollowupAsync(
+                    "❌ Couldn't save the exemption (database error — see bot logs). Nothing was changed.",
+                    ephemeral: true);
+                return;
+            }
+
+            var status = r.Ban == BanState.Failed
+                ? $"⚠️ {invoker.Mention} cleared them through the gate, but I couldn't lift the ban " +
+                  $"({r.BanError ?? "see bot logs"}). Remove it in **Server Settings → Bans**, then send a fresh invite."
+                : $"🔓 Allowed in by {invoker.Mention}: ban lifted, and their next join skips the age gate once. " +
+                  "Send them a fresh invite.";
+
+            await component.ModifyOriginalResponseAsync(p =>
+            {
+                p.Content         = status;
+                p.AllowedMentions = AllowedMentions.None;
+                if (r.Ban != BanState.Failed)
+                    p.Components = new ComponentBuilder().Build();
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Age-gate allow button {Id} failed.", component.Data.CustomId);
+        }
     }
 
     /// <summary>
