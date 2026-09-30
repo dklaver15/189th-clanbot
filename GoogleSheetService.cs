@@ -95,6 +95,8 @@ public class GoogleSheetsService
         var getRequest = service.Spreadsheets.Values.Get(spreadsheetId, range);
         var getResponse = await ExecuteWithRetryAsync(getRequest.ExecuteAsync, "gamertag read");
 
+        // Written RAW: every cell is member-typed, so nothing may be parsed as a
+        // formula, and the ID must stay an exact string rather than a rounded number.
         var newRow = new List<object> { discordId.ToString(), discordName, ea, steam, psn, xbox, embark, bungie, youtube };
 
         if (getResponse.Values is not null)
@@ -109,7 +111,7 @@ public class GoogleSheetsService
                     var updateBody = new ValueRange { Values = new List<IList<object>> { newRow } };
                     var updateRequest = service.Spreadsheets.Values.Update(updateBody, spreadsheetId, updateRange);
                     updateRequest.ValueInputOption = SpreadsheetsResource.ValuesResource.UpdateRequest
-                        .ValueInputOptionEnum.USERENTERED;
+                        .ValueInputOptionEnum.RAW;
                     await ExecuteWithRetryAsync(updateRequest.ExecuteAsync, "gamertag update (by ID)");
 
                     _logger.LogInformation("Updated gamertags for {DiscordName} ({DiscordId}) in row {Row} (matched by ID)",
@@ -119,31 +121,28 @@ public class GoogleSheetsService
                 }
             }
 
-            // Second pass: fall back to matching by Discord Name in column B (legacy rows without ID)
-            // Also check column A for legacy rows where name was in column A before the ID column was added
+            // Second pass: fall back to matching by Discord Name in column B, or in
+            // column A for rows from before the ID column. Only legacy rows qualify:
+            // a row that already carries an ID belongs to that member, and display
+            // names aren't unique.
             for (int i = 0; i < getResponse.Values.Count; i++)
             {
                 var row = getResponse.Values[i];
-                var colA = row.Count > 0 ? row[0]?.ToString() ?? "" : "";
-                var colB = row.Count > 1 ? row[1]?.ToString() ?? "" : "";
+                if (!IsLegacyNameMatch(row, discordName)) continue;
 
-                if (string.Equals(colB, discordName, StringComparison.OrdinalIgnoreCase) ||
-                    (string.Equals(colA, discordName, StringComparison.OrdinalIgnoreCase) && !ulong.TryParse(colA, out _)))
-                {
-                    // Update the row and backfill the Discord ID
-                    var updateRange = $"{sheetName}!A{i + 1}:I{i + 1}";
-                    var updateBody = new ValueRange { Values = new List<IList<object>> { newRow } };
-                    var updateRequest = service.Spreadsheets.Values.Update(updateBody, spreadsheetId, updateRange);
-                    updateRequest.ValueInputOption = SpreadsheetsResource.ValuesResource.UpdateRequest
-                        .ValueInputOptionEnum.USERENTERED;
-                    await ExecuteWithRetryAsync(updateRequest.ExecuteAsync, "gamertag update (by name)");
+                // Update the row and backfill the Discord ID
+                var updateRange = $"{sheetName}!A{i + 1}:I{i + 1}";
+                var updateBody = new ValueRange { Values = new List<IList<object>> { newRow } };
+                var updateRequest = service.Spreadsheets.Values.Update(updateBody, spreadsheetId, updateRange);
+                updateRequest.ValueInputOption = SpreadsheetsResource.ValuesResource.UpdateRequest
+                    .ValueInputOptionEnum.RAW;
+                await ExecuteWithRetryAsync(updateRequest.ExecuteAsync, "gamertag update (by name)");
 
-                    _logger.LogInformation(
-                        "Updated gamertags for {DiscordName} ({DiscordId}) in row {Row} (matched by name, backfilled ID)",
-                        discordName, discordId, i + 1);
-                    await SortSheetBySecondColumnAsync(service, spreadsheetId, sheetName);
-                    return;
-                }
+                _logger.LogInformation(
+                    "Updated gamertags for {DiscordName} ({DiscordId}) in row {Row} (matched by name, backfilled ID)",
+                    discordName, discordId, i + 1);
+                await SortSheetBySecondColumnAsync(service, spreadsheetId, sheetName);
+                return;
             }
         }
 
@@ -151,7 +150,7 @@ public class GoogleSheetsService
         var appendBody = new ValueRange { Values = new List<IList<object>> { newRow } };
         var appendRequest = service.Spreadsheets.Values.Append(appendBody, spreadsheetId, range);
         appendRequest.ValueInputOption =
-            SpreadsheetsResource.ValuesResource.AppendRequest.ValueInputOptionEnum.USERENTERED;
+            SpreadsheetsResource.ValuesResource.AppendRequest.ValueInputOptionEnum.RAW;
         appendRequest.InsertDataOption =
             SpreadsheetsResource.ValuesResource.AppendRequest.InsertDataOptionEnum.INSERTROWS;
         await ExecuteWithRetryAsync(appendRequest.ExecuteAsync, "gamertag append");
@@ -362,10 +361,11 @@ public class GoogleSheetsService
     /// <summary>
     /// Returns every roster row whose column A is not a parseable Discord ID —
     /// i.e. legacy/manually-added rows that the ID-keyed reconciler can't manage.
-    /// Fully blank rows are skipped. Read-only; used by the /gamertag-backfill-ids
-    /// command to propose name → ID matches.
+    /// Fully blank rows are skipped. Also returns the IDs already on the sheet.
+    /// Read-only; used by the /gamertag-backfill-ids command to propose
+    /// name → ID matches.
     /// </summary>
-    public async Task<List<LegacyGamertagRow>> GetLegacyGamertagRowsAsync()
+    public async Task<(List<LegacyGamertagRow> Rows, HashSet<ulong> ExistingIds)> GetLegacyGamertagRowsAsync()
     {
         var credential = GoogleCredential
             .FromFile(_config.GoogleCredentialsPath)
@@ -381,7 +381,8 @@ public class GoogleSheetsService
         var resp = await service.Spreadsheets.Values.Get(_config.GoogleSpreadsheetId, range).ExecuteAsync();
 
         var result = new List<LegacyGamertagRow>();
-        if (resp.Values is null) return result;
+        var existingIds = new HashSet<ulong>();
+        if (resp.Values is null) return (result, existingIds);
 
         // Skip the header row (index 0).
         for (var i = 1; i < resp.Values.Count; i++)
@@ -390,13 +391,17 @@ public class GoogleSheetsService
             var colA = row.Count > 0 ? row[0]?.ToString() ?? "" : "";
             var colB = row.Count > 1 ? row[1]?.ToString() ?? "" : "";
 
-            if (ulong.TryParse(colA, out _)) continue;            // already has an ID
+            if (ulong.TryParse(colA, out var id))                 // already has an ID
+            {
+                existingIds.Add(id);
+                continue;
+            }
             if (string.IsNullOrWhiteSpace(colA) && string.IsNullOrWhiteSpace(colB)) continue; // blank row
 
             result.Add(new LegacyGamertagRow(i + 1, colA, colB)); // i+1 = 1-based sheet row
         }
 
-        return result;
+        return (result, existingIds);
     }
 
     /// <summary>
@@ -426,9 +431,10 @@ public class GoogleSheetsService
             Values = new List<IList<object>> { new List<object> { kv.Value.ToString() } }
         }).ToList();
 
+        // RAW keeps the ID an exact string; as a number it would be rounded.
         var body = new BatchUpdateValuesRequest
         {
-            ValueInputOption = "USER_ENTERED",
+            ValueInputOption = "RAW",
             Data = data
         };
 
@@ -436,6 +442,34 @@ public class GoogleSheetsService
 
         _logger.LogInformation("Backfilled {Count} Discord ID(s) into the gamertag roster", rowToId.Count);
         return rowToId.Count;
+    }
+
+    /// <summary>
+    /// True when <paramref name="row"/> is a legacy row (no Discord ID in column A,
+    /// and not the header) whose name in column B, or column A, equals
+    /// <paramref name="name"/>.
+    /// </summary>
+    /// <summary>
+    /// Member-controlled text for a USER_ENTERED write: a leading apostrophe makes
+    /// Sheets store it as text, so a value starting with = + - or @ can't run as a
+    /// formula. The apostrophe itself isn't shown.
+    /// </summary>
+    private static string SheetText(string? value)
+    {
+        if (string.IsNullOrEmpty(value)) return value ?? string.Empty;
+        return value[0] is '=' or '+' or '-' or '@' or '\t' or '\r' ? "'" + value : value;
+    }
+
+    private static bool IsLegacyNameMatch(IList<object> row, string name)
+    {
+        var colA = row.Count > 0 ? row[0]?.ToString() ?? "" : "";
+        var colB = row.Count > 1 ? row[1]?.ToString() ?? "" : "";
+
+        if (ulong.TryParse(colA, out _)) return false;
+        if (string.Equals(colA, "Discord ID", StringComparison.OrdinalIgnoreCase)) return false;
+
+        return string.Equals(colB, name, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(colA, name, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -473,19 +507,13 @@ public class GoogleSheetsService
             }
         }
 
-        // Second pass: fall back to matching by Discord Name (legacy rows without ID)
+        // Second pass: fall back to matching by Discord Name, on legacy rows only
         if (!string.IsNullOrWhiteSpace(fallbackName))
         {
             foreach (var row in getResponse.Values)
             {
-                var colA = row.Count > 0 ? row[0]?.ToString() ?? "" : "";
-                var colB = row.Count > 1 ? row[1]?.ToString() ?? "" : "";
-
-                if (string.Equals(colB, fallbackName, StringComparison.OrdinalIgnoreCase) ||
-                    (string.Equals(colA, fallbackName, StringComparison.OrdinalIgnoreCase) && !ulong.TryParse(colA, out _)))
-                {
+                if (IsLegacyNameMatch(row, fallbackName))
                     return RowToResult(row);
-                }
             }
         }
 
@@ -709,10 +737,10 @@ public class GoogleSheetsService
 
             allRows.Add(new List<object>
             {
-                row.DiscordName,
-                row.Username,
+                SheetText(row.DiscordName),
+                SheetText(row.Username),
                 row.Rank,
-                row.Roles,
+                SheetText(row.Roles),
                 row.JoinDate?.ToString("yyyy-MM-dd") ?? "Unknown",
                 row.Messages,
                 row.VoiceHours.ToString("F1"),

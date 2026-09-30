@@ -110,7 +110,7 @@ public sealed class GamertagBackfillCommandHandler
         await guild.DownloadUsersAsync();
         var members = guild.Users.Where(u => !u.IsBot).ToList();
 
-        var legacy = await _sheets.GetLegacyGamertagRowsAsync();
+        var (legacy, existingIds) = await _sheets.GetLegacyGamertagRowsAsync();
         if (legacy.Count == 0)
         {
             await command.FollowupAsync("✅ No legacy rows found — every roster row already has a Discord ID.", ephemeral: true);
@@ -134,6 +134,15 @@ public sealed class GamertagBackfillCommandHandler
                 .ToArray();
 
             var matches = members.Where(m => MatchesAnyName(m, candidates)).ToList();
+
+            // A member who already has an ID row, or was just matched to another
+            // legacy row, would end up with two rows; later saves and deletes only
+            // ever act on the first.
+            if (matches.Count == 1 && (existingIds.Contains(matches[0].Id) || proposed.ContainsValue(matches[0].Id)))
+            {
+                ambiguous.Add($"Row {row.RowNumber}: `{display}` → <@{matches[0].Id}> already has a roster row");
+                continue;
+            }
 
             if (matches.Count == 1)
             {
