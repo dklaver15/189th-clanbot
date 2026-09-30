@@ -1642,7 +1642,8 @@ public sealed class EventManagementHandler
                     "Tell me an **end date** (`August 1`), a **number of times** (`8`), or `none`."));
                 return;
             }
-            s.NewUntilUtc = r.StartUtc;
+            // "until August 1" includes August 1; a named time is taken literally.
+            s.NewUntilUtc = r.HasTimeOfDay ? r.StartUtc : EventTimeParser.EndOfLocalDayUtc(r.StartUtc, s.Tz);
             s.NewMaxOccurrences = null;
         }
         s.NewDatesUtc.Clear();          // leaving any prior Custom date list behind

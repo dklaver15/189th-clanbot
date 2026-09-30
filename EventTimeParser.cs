@@ -394,6 +394,19 @@ public sealed class EventTimeParser
     /// t=time, D=date, R=relative ("in 3 hours"). Each client renders it in the
     /// viewer's own timezone, which is how per-user localization happens.
     /// </summary>
+    /// <summary>
+    /// Last second (UTC) of the local day <paramref name="instantUtc"/> falls in.
+    /// Used to turn a date-only recurrence bound into "through that day".
+    /// </summary>
+    public static DateTime EndOfLocalDayUtc(DateTime instantUtc, TimeZoneInfo tz)
+    {
+        var local   = TimeZoneInfo.ConvertTimeFromUtc(instantUtc, tz);
+        var endLocal = DateTime.SpecifyKind(local.Date.AddDays(1).AddSeconds(-1), DateTimeKind.Unspecified);
+        return tz.IsInvalidTime(endLocal)
+            ? instantUtc.AddDays(1).AddSeconds(-1)
+            : TimeZoneInfo.ConvertTimeToUtc(endLocal, tz);
+    }
+
     public static string Stamp(DateTime utc, char style = 'F') => $"<t:{ToUnix(utc)}:{style}>";
 
     // ──────────────────────────────────────────────────────────────────────

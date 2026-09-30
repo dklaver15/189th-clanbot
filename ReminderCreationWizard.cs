@@ -557,7 +557,7 @@ public sealed class ReminderCreationWizard
             // reminder, but it silently costs a SixHourly one its last four
             // posts. Stretch a date-only answer to the last second of that
             // local day; an answer that named a time is taken literally.
-            s.Draft.UntilUtc = r.HasTimeOfDay ? r.StartUtc : EndOfLocalDayUtc(r.StartUtc, tz);
+            s.Draft.UntilUtc = r.HasTimeOfDay ? r.StartUtc : EventTimeParser.EndOfLocalDayUtc(r.StartUtc, tz);
             s.Draft.MaxOccurrences = null;
         }
 
@@ -910,19 +910,6 @@ public sealed class ReminderCreationWizard
         if (d.PingHere) parts.Add("@here");
         if (d.PingEveryone) parts.Add("@everyone");
         return parts.Count == 0 ? "No ping" : string.Join(" ", parts);
-    }
-
-    /// <summary>
-    /// Last second (UTC) of the local day <paramref name="instantUtc"/> falls in.
-    /// Used to turn a date-only recurrence bound into "through that day".
-    /// </summary>
-    private static DateTime EndOfLocalDayUtc(DateTime instantUtc, TimeZoneInfo tz)
-    {
-        var local   = TimeZoneInfo.ConvertTimeFromUtc(instantUtc, tz);
-        var endLocal = DateTime.SpecifyKind(local.Date.AddDays(1).AddSeconds(-1), DateTimeKind.Unspecified);
-        return tz.IsInvalidTime(endLocal)
-            ? instantUtc.AddDays(1).AddSeconds(-1)
-            : TimeZoneInfo.ConvertTimeToUtc(endLocal, tz);
     }
 
     private static string DescribeRecurrence(ReminderDraft d)

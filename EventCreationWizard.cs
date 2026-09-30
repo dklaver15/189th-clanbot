@@ -453,7 +453,8 @@ public sealed class EventCreationWizard
                 await s.Dm.SendMessageAsync(embed: Form("🔁 Until when?", "Tell me an **end date** (`August 1`), a **number of times** (`8`), or `none` for open-ended."));
                 return;
             }
-            s.Draft.UntilUtc = r.StartUtc;
+            // "until August 1" includes August 1; a named time is taken literally.
+            s.Draft.UntilUtc = r.HasTimeOfDay ? r.StartUtc : EventTimeParser.EndOfLocalDayUtc(r.StartUtc, tz);
             s.Draft.MaxOccurrences = null;
         }
 

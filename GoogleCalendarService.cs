@@ -143,7 +143,9 @@ public class GoogleCalendarService
     }
 
     /// <summary>
-    /// Deletes a calendar event by its Google Calendar event ID.
+    /// Deletes a calendar event by its Google Calendar event ID. An event that is
+    /// already gone counts as deleted; any other failure throws so the caller can
+    /// retry (the calendar outbox backs off and tries again).
     /// </summary>
     public async Task DeleteEventAsync(string calendarEventId)
     {
@@ -155,9 +157,10 @@ public class GoogleCalendarService
 
             _logger.LogInformation("Calendar event deleted: {EventId}", calendarEventId);
         }
-        catch (Exception ex)
+        catch (Google.GoogleApiException ex)
+            when (ex.HttpStatusCode is System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.Gone)
         {
-            _logger.LogError(ex, "Failed to delete calendar event {EventId}", calendarEventId);
+            _logger.LogInformation("Calendar event {EventId} was already deleted", calendarEventId);
         }
     }
 
