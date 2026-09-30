@@ -63,6 +63,7 @@ public sealed class XpSeasonSchedulerService : BackgroundService
     private readonly XpAccrualService _accrual;
     private readonly BotConfig _config;
     private readonly ILogger<XpSeasonSchedulerService> _logger;
+    private readonly TimeZoneInfo _reminderZone;
 
     public XpSeasonSchedulerService(
         IServiceProvider services,
@@ -80,6 +81,14 @@ public sealed class XpSeasonSchedulerService : BackgroundService
         _accrual = accrual;
         _config = config.Value;
         _logger = logger;
+        _reminderZone = ResolveReminderZone(_config.XpSeasonReminderTimeZone, logger);
+    }
+
+    private static TimeZoneInfo ResolveReminderZone(string id, ILogger logger)
+    {
+        if (TimeZoneInfo.TryFindSystemTimeZoneById(id, out var zone)) return zone;
+        logger.LogError("XP: season reminder time zone '{Zone}' not found; evening reminders will use UTC", id);
+        return TimeZoneInfo.Utc;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -108,6 +117,7 @@ public sealed class XpSeasonSchedulerService : BackgroundService
             {
                 try
                 {
+                    await SendDueReminderAsync(guild, stoppingToken);
                     await OpenDueSeasonAsync(guild, stoppingToken);
                     await CloseDueSeasonAsync(guild, stoppingToken);
                 }
@@ -124,6 +134,31 @@ public sealed class XpSeasonSchedulerService : BackgroundService
             try { await Task.Delay(TickInterval, stoppingToken); }
             catch (OperationCanceledException) { break; }
         }
+    }
+
+    /// <summary>
+    /// Posts the next @here "season starts soon" reminder for a Scheduled season
+    /// when one is due (one week, one day and six hours out; see XpSeasonReminders).
+    /// XpService records the reminder before it is posted, so a restart or a failed
+    /// post never repeats the ping.
+    /// </summary>
+    private async Task SendDueReminderAsync(SocketGuild guild, CancellationToken ct)
+    {
+        if (_config.XpSeasonReminderChannelId == 0) return;
+
+        (XpSeason Season, int Stage)? due;
+        using (var scope = _services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+            due = await _xp.ClaimDueReminderAsync(
+                db, guild.Id, _reminderZone, Math.Clamp(_config.XpSeasonReminderEveningHour, 0, 23), ct);
+        }
+
+        if (due is not { } d) return;
+
+        if (await _board.PostSeasonReminderAsync(guild, d.Season, d.Stage, ct))
+            _logger.LogInformation("XP: posted reminder {Stage} for Season {Number} in guild {Guild}",
+                d.Stage, d.Season.Number, guild.Id);
     }
 
     /// <summary>

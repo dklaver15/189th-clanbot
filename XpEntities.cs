@@ -128,6 +128,15 @@ public class XpSeason
     public XpSeasonStatus Status { get; set; } = XpSeasonStatus.Active;
 
     public DateTime CreatedAt { get; set; }
+
+    /// <summary>
+    /// How many of the pre-start reminders (one week, one day, six hours; see
+    /// XpSeasonReminders) have been dealt with for this Scheduled season, 0 to 3, in
+    /// order. "Dealt with" means sent, or skipped because its time had already
+    /// passed when the season was scheduled or a later reminder was already due.
+    /// Persisted so a restart never repeats an @here.
+    /// </summary>
+    public int PreStartRemindersSent { get; set; }
 }
 
 /// <summary>

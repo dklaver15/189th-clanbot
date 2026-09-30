@@ -2963,6 +2963,20 @@ public class BotConfig
     public int XpSeasonLengthDays { get; set; } = 30;
 
     /// <summary>
+    /// Channel for the @here reminders before a scheduled season opens: one week,
+    /// one day and six hours out (see XpSeasonReminders for exactly when). 0
+    /// disables them. Default: the main chat. The bot needs the "Mention @everyone,
+    /// @here and All Roles" permission there or the @here posts as plain text.
+    /// </summary>
+    public ulong XpSeasonReminderChannelId { get; set; } = 1421928902963494922;
+
+    /// <summary>Time zone the week-out and day-out reminders' "evening" is measured in.</summary>
+    public string XpSeasonReminderTimeZone { get; set; } = "America/Chicago";
+
+    /// <summary>Local hour (0-23) of the "evening" the week-out and day-out reminders land at. Default 19 (7 PM).</summary>
+    public int XpSeasonReminderEveningHour { get; set; } = 19;
+
+    /// <summary>
     /// Minimum rank to run the /xp-season subcommands. Default MAJ.
     /// Administrator or Manage Roles always passes.
     ///

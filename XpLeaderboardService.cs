@@ -972,6 +972,76 @@ public sealed class XpLeaderboardService : BackgroundService
     }
 
     /// <summary>
+    /// Posts one of the @here "season starts soon" reminders for a Scheduled
+    /// season to XpSeasonReminderChannelId. <paramref name="stage"/> is 0 (one week
+    /// out), 1 (one day out) or 2 (six hours out). The wording carries no hard-coded
+    /// countdown: the start is a Discord timestamp, so a reminder that went out
+    /// late after downtime still tells the truth.
+    ///
+    /// Unlike the season-start card this one pings @here: its whole job is to get
+    /// people ready before the season opens. Returns true only if it posted.
+    /// </summary>
+    public async Task<bool> PostSeasonReminderAsync(SocketGuild guild, XpSeason season, int stage, CancellationToken ct)
+    {
+        var channelId = _config.XpSeasonReminderChannelId;
+        if (channelId == 0) return false;
+        if (guild.GetChannel(channelId) is not SocketTextChannel channel)
+        {
+            _logger.LogWarning("XP: season reminder channel {Channel} not found in guild {Guild}", channelId, guild.Id);
+            return false;
+        }
+
+        if (!guild.CurrentUser.GetPermissions(channel).MentionEveryone)
+            _logger.LogWarning(
+                "XP: missing Mention @everyone permission in {Channel}; the Season {Number} reminder's @here will not ping",
+                channelId, season.Number);
+
+        var label = XpService.SeasonLabel(season);
+        var title = stage switch
+        {
+            0 => $"🗓️ {label} is coming",
+            1 => $"⏳ {label} is almost here",
+            _ => $"⏰ {label} starts soon",
+        };
+
+        var body = new StringBuilder();
+        body.Append($"**Starts <t:{Unix(season.StartUtc)}:F>**, <t:{Unix(season.StartUtc)}:R>.\n\n");
+        body.Append("Everyone starts at zero. Every event, meeting, voice session and message from then on counts.");
+
+        if (season.AutoEndUtc is { } close)
+            body.Append($"\n\nThe season closes <t:{Unix(close)}:F>.");
+        else if (season.EndUtc is { } target)
+            body.Append($"\n\nIt is planned to run until <t:{Unix(target)}:D>.");
+
+        var embed = new EmbedBuilder()
+            .WithTitle(title)
+            .WithColor(new Color(0xF1C40F))
+            .WithDescription(body.ToString())
+            .AddField("Where to look",
+                _config.XpBoardChannelId != 0
+                    ? $"The leaderboard is in <#{_config.XpBoardChannelId}>, updated automatically."
+                    : "Run `/xp-leaderboard` for the standings.")
+            .WithFooter("XP is recognition only. It does not affect promotions.")
+            .Build();
+
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(AnnounceTimeout);
+
+            await channel.SendMessageAsync(text: "@here", embed: embed,
+                allowedMentions: new AllowedMentions(AllowedMentionTypes.Everyone),
+                options: new RequestOptions { RetryMode = RetryMode.AlwaysFail, CancelToken = cts.Token });
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "XP: failed to post reminder {Stage} for Season {Number}", stage, season.Number);
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Posts the end-of-season results card.
     ///
     /// This is the permanent artefact of a season. The numbers behind it reset the

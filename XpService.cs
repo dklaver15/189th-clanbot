@@ -286,6 +286,52 @@ public sealed class XpService
     }
 
     /// <summary>
+    /// Works out whether a pre-start reminder is due for the Scheduled season and,
+    /// if so, records it as handled BEFORE returning it, so the caller posts at most
+    /// once: a failed post is logged rather than retried, because a duplicate @here
+    /// is worse than a missing reminder. Returns the season and reminder stage (0 =
+    /// one week, 1 = one day, 2 = six hours) to post, or null when there is nothing
+    /// to send.
+    ///
+    /// Only the most recent due reminder is ever sent. One whose time had already
+    /// passed when the season was scheduled is skipped (the officer scheduling it on
+    /// short notice announces it themselves), and one overtaken by a later reminder
+    /// while the bot was down is skipped in favor of the later one.
+    /// </summary>
+    public async Task<(XpSeason Season, int Stage)?> ClaimDueReminderAsync(
+        BotDbContext db, ulong guildId, TimeZoneInfo zone, int eveningHour, CancellationToken ct)
+    {
+        var season = await GetScheduledSeasonAsync(db, guildId, ct);
+        if (season is null) return null;
+
+        var now = DateTime.UtcNow;
+        if (now >= season.StartUtc) return null; // opening is due; the start card takes over
+
+        var times = XpSeasonReminders.TimesUtc(season.StartUtc, zone, eveningHour);
+        var due = times.Count(t => t <= now);
+        if (due <= season.PreStartRemindersSent) return null;
+
+        var skippedEarlier = due - 1 - season.PreStartRemindersSent;
+        var stage = due - 1;
+        season.PreStartRemindersSent = due;
+        await db.SaveChangesAsync(ct);
+
+        if (skippedEarlier > 0)
+            _logger.LogInformation("XP: skipped {Count} earlier reminder(s) for Season {Number}; a later one is already due",
+                skippedEarlier, season.Number);
+
+        if (times[stage] < season.CreatedAt)
+        {
+            _logger.LogInformation(
+                "XP: skipped reminder {Stage} for Season {Number}; its time ({Time}) passed before the season was scheduled",
+                stage, season.Number, times[stage].ToString("u"));
+            return null;
+        }
+
+        return (season, stage);
+    }
+
+    /// <summary>
     /// The season that has run past its scheduled close, if any. Only ever returns
     /// an Active season with a non-null <see cref="XpSeason.AutoEndUtc"/>, so a
     /// season with a display-only planned end is never touched.
