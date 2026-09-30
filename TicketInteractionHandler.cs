@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Text.RegularExpressions;
 using ClanGuardBot.Data;
 using ClanGuardBot.Models;
 using Discord;
@@ -26,8 +28,9 @@ namespace ClanGuardBot.Handlers;
 /// opener + the routed role's members added. Anonymous tickets (categories
 /// flagged anonymousAllowed): the opener is NOT added and the embed shows an
 /// anonymized handle; the report is delivered to staff without revealing who
-/// filed it. (Two-way anonymous relay is a later phase — the initial report
-/// captured in the modal is delivered in full now.)
+/// filed it. Follow-up is a DM relay: only DMs sent as a Discord reply to one
+/// of the bot's report DMs are relayed, so answers to other DM wizards
+/// (e.g. /gamertags) never land in the staff thread.
 ///
 /// ── Permissions ──
 /// Claim / priority / close controls require ticket staff: Administrator, the
@@ -59,6 +62,14 @@ public sealed class TicketInteractionHandler
 
     private const int MaxOpenTicketsPerOpener = 3;
     private const int MaxThreadMembersToAdd   = 50;
+
+    // Report number in the bot's own report DMs: the intro
+    // ("🕵️ **Anonymous report #12 received.**") and HQ relays ("🛡️ **HQ (report #12):** …").
+    private static readonly Regex RelayDmReportId =
+        new(@"^\S+ \*\*(?:Anonymous report|HQ \(report) #(\d+)", RegexOptions.Compiled);
+
+    private static readonly TimeSpan RelayHintInterval = TimeSpan.FromMinutes(30);
+    private readonly ConcurrentDictionary<ulong, DateTime> _relayHintSentUtc = new();
 
     private readonly IServiceProvider _services;
     private readonly DiscordSocketClient _client;
@@ -118,12 +129,19 @@ public sealed class TicketInteractionHandler
         return new ComponentBuilder().WithSelectMenu(menu).Build();
     }
 
-    /// <summary>The single "Delete Record" button attached to a transcript in
-    /// the log channel. Public so TicketService can attach it when posting.</summary>
-    public static MessageComponent BuildRecordButtons(int ticketId) =>
-        new ComponentBuilder()
-            .WithButton("Delete Record", $"ticket:{ActionRecDel}:{ticketId}", ButtonStyle.Danger, new Emoji("🗑️"))
-            .Build();
+    /// <summary>The buttons attached to a transcript in the log channel: "Delete
+    /// Record", plus "Unmask" on anonymous tickets since the transcript never
+    /// names the reporter. Public so TicketService can attach them when posting.</summary>
+    public static MessageComponent BuildRecordButtons(int ticketId, bool isAnonymous)
+    {
+        var builder = new ComponentBuilder()
+            .WithButton("Delete Record", $"ticket:{ActionRecDel}:{ticketId}", ButtonStyle.Danger, new Emoji("🗑️"));
+
+        if (isAnonymous)
+            builder.WithButton("Unmask", $"ticket:{ActionUnmask}:{ticketId}", ButtonStyle.Secondary, new Emoji("🕵️"));
+
+        return builder.Build();
+    }
 
     private static MessageComponent BuildControlButtons(int ticketId, bool isAnonymous, bool isTimeOff)
     {
@@ -432,13 +450,16 @@ public sealed class TicketInteractionHandler
             return;
         }
 
-        // Add the opener (identified only) + the routed role's members.
+        // Add the opener (identified only) + the routed role's members. An
+        // anonymous reporter who holds the routed role is skipped, or they'd
+        // show in their own report's member list.
         if (!ticket.IsAnonymous)
         {
             try { await thread.AddUserAsync(member); } catch (Exception ex)
             { _logger.LogWarning(ex, "Could not add opener to ticket thread #{Id}", ticket.Id); }
         }
-        await AddRoleMembersToThreadAsync(thread, guild, routedRoleId);
+        await AddRoleMembersToThreadAsync(thread, guild, routedRoleId,
+            excludeUserId: ticket.IsAnonymous ? member.Id : null);
 
         // Post the ticket embed with control buttons.
         var embed = _tickets.BuildTicketEmbed(ticket, category);
@@ -489,9 +510,14 @@ public sealed class TicketInteractionHandler
         });
         await db.SaveChangesAsync();
 
-        _logger.LogInformation(
-            "Ticket #{Id} ({Category}, anon={Anon}) opened by {User} → thread {ThreadId}",
-            ticket.Id, category.Key, ticket.IsAnonymous, member.Username, thread.Id);
+        if (ticket.IsAnonymous)
+            _logger.LogInformation(
+                "Ticket #{Id} ({Category}, anonymous as {Handle}) opened → thread {ThreadId}",
+                ticket.Id, category.Key, ticket.AnonHandle, thread.Id);
+        else
+            _logger.LogInformation(
+                "Ticket #{Id} ({Category}) opened by {User} → thread {ThreadId}",
+                ticket.Id, category.Key, member.Username, thread.Id);
 
         if (ticket.IsAnonymous)
         {
@@ -504,7 +530,7 @@ public sealed class TicketInteractionHandler
                 "✅ Your **anonymous** report has been submitted to HQ. Because it's anonymous "
                 + "you won't see the ticket thread — HQ will handle it without seeing who filed it.\n\n"
                 + (dmOk
-                    ? "💬 I've sent you a DM — **reply there** to add more and to talk with HQ. Your identity stays hidden."
+                    ? "💬 I've sent you a DM — use Discord's **Reply** on that message to add more and to talk with HQ. Your identity stays hidden."
                     : "⚠️ I couldn't DM you, so two-way follow-up is off. Enable DMs from server members if you want to keep the conversation going."),
                 ephemeral: true);
         }
@@ -522,9 +548,11 @@ public sealed class TicketInteractionHandler
             var dm = await reporter.CreateDMChannelAsync();
             await dm.SendMessageAsync(
                 $"🕵️ **Anonymous report #{ticket.Id} received.**\n"
-                + "You can **reply to this DM** to add details or answer HQ — I'll relay your messages "
-                + "into the report **without revealing who you are**. HQ's replies will show up here too.\n"
-                + "_Reply here anytime while the report is open._",
+                + "To add details or answer HQ, use Discord's **Reply** on this message (or on any HQ "
+                + "message I send you) — I'll relay it into the report **without revealing who you are**. "
+                + "HQ's replies will show up here too.\n"
+                + "_Only replies to my report messages are relayed. Anything else you DM me (like "
+                + "answers to other bot commands) is never forwarded to HQ._",
                 allowedMentions: AllowedMentions.None);
             return true;
         }
@@ -774,8 +802,15 @@ public sealed class TicketInteractionHandler
 
     private async Task HandleRecordDeleteCancelAsync(SocketMessageComponent component, int ticketId)
     {
-        // Restore the original Delete button.
-        await component.UpdateAsync(p => p.Components = BuildRecordButtons(ticketId));
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+        var isAnonymous = await db.SupportTickets
+            .Where(t => t.Id == ticketId)
+            .Select(t => t.IsAnonymous)
+            .FirstOrDefaultAsync();
+
+        // Restore the original record buttons.
+        await component.UpdateAsync(p => p.Components = BuildRecordButtons(ticketId, isAnonymous));
     }
 
     private async Task HandleRecordDeleteConfirmAsync(SocketMessageComponent component, int ticketId)
@@ -1046,12 +1081,12 @@ public sealed class TicketInteractionHandler
         try
         {
             if (message.Author.IsBot) return;
-            if (message is not SocketUserMessage) return;
+            if (message is not SocketUserMessage userMessage) return;
 
             // Reporter DM → relayed into their open anonymous ticket thread.
             if (message.Channel is IDMChannel)
             {
-                await HandleReporterDmAsync(message);
+                await HandleReporterDmAsync(userMessage);
                 return;
             }
 
@@ -1096,26 +1131,43 @@ public sealed class TicketInteractionHandler
     }
 
     /// <summary>
-    /// A DM from a member who has an open anonymous ticket → relayed into that
-    /// ticket's staff thread under their anon handle. If they have no open
-    /// anonymous ticket, the DM is ignored (other DM handlers may own it).
+    /// A DM sent as a Discord reply to one of the bot's report DMs (the intro or
+    /// an HQ relay) → relayed into that report's staff thread under the anon
+    /// handle. Any other DM is left alone: DM wizards (/gamertags, /event, …)
+    /// see the same messages, and relaying them would expose the reporter.
     /// </summary>
-    private async Task HandleReporterDmAsync(SocketMessage message)
+    private async Task HandleReporterDmAsync(SocketUserMessage message)
     {
         if (string.IsNullOrWhiteSpace(message.Content)) return;
 
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-        // Deterministic: newest open anonymous ticket wins if there's ever more
-        // than one (the create-guard normally prevents that, but never route a
-        // private report to an arbitrary/wrong thread).
+
+        var reportId = await GetRepliedReportIdAsync(message);
+        if (reportId is null)
+        {
+            await MaybeSendRelayHintAsync(message, db);
+            return;
+        }
+
         var ticket = await db.SupportTickets
-            .Where(t => t.OpenerUserId == message.Author.Id
-                     && t.IsAnonymous
-                     && t.Status != SupportTicketStatus.Closed)
-            .OrderByDescending(t => t.CreatedUtc)
-            .FirstOrDefaultAsync();
-        if (ticket is null) return; // not a relay DM
+            .FirstOrDefaultAsync(t => t.Id == reportId.Value
+                                   && t.OpenerUserId == message.Author.Id
+                                   && t.IsAnonymous);
+        if (ticket is null) return;
+
+        if (ticket.Status == SupportTicketStatus.Closed)
+        {
+            try
+            {
+                await message.Channel.SendMessageAsync(
+                    $"🔒 Report **#{ticket.Id}** is closed, so that message wasn't sent to HQ. "
+                    + "Open a new report from the ticket panel if you need to follow up.",
+                    allowedMentions: AllowedMentions.None);
+            }
+            catch { /* best-effort */ }
+            return;
+        }
 
         var guild = _client.GetGuild(ticket.GuildId);
         if (guild is null) return;
@@ -1158,6 +1210,55 @@ public sealed class TicketInteractionHandler
         catch { /* reaction is best-effort */ }
     }
 
+    /// <summary>
+    /// The report number of the bot DM this message replies to, or null when it
+    /// isn't a reply to one of the bot's report DMs.
+    /// </summary>
+    private async Task<int?> GetRepliedReportIdAsync(SocketUserMessage message)
+    {
+        IMessage? replied = message.ReferencedMessage;
+        if (replied is null && message.Reference?.MessageId.IsSpecified == true)
+        {
+            try { replied = await message.Channel.GetMessageAsync(message.Reference.MessageId.Value); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Could not fetch the DM a reporter replied to"); }
+        }
+
+        if (replied is null || replied.Author.Id != _client.CurrentUser.Id) return null;
+
+        var match = RelayDmReportId.Match(replied.Content ?? string.Empty);
+        return match.Success && int.TryParse(match.Groups[1].Value, out var id) ? id : null;
+    }
+
+    /// <summary>
+    /// Tells a reporter with an open anonymous report that a plain DM wasn't
+    /// relayed. Rate-limited per user, since the DM may belong to another wizard.
+    /// </summary>
+    private async Task MaybeSendRelayHintAsync(SocketUserMessage message, BotDbContext db)
+    {
+        var now = DateTime.UtcNow;
+        if (_relayHintSentUtc.TryGetValue(message.Author.Id, out var last) && now - last < RelayHintInterval)
+            return;
+
+        var openReportId = await db.SupportTickets
+            .Where(t => t.OpenerUserId == message.Author.Id
+                     && t.IsAnonymous
+                     && t.Status != SupportTicketStatus.Closed)
+            .OrderByDescending(t => t.CreatedUtc)
+            .Select(t => (int?)t.Id)
+            .FirstOrDefaultAsync();
+        if (openReportId is null) return;
+
+        _relayHintSentUtc[message.Author.Id] = now;
+        try
+        {
+            await message.Channel.SendMessageAsync(
+                $"💡 To send something to HQ for anonymous report **#{openReportId}**, use Discord's **Reply** "
+                + "on one of my report messages. Other DMs aren't forwarded.",
+                allowedMentions: AllowedMentions.None);
+        }
+        catch { /* best-effort */ }
+    }
+
     /// <summary>Relays a staff thread message out to the anonymous reporter's DM.</summary>
     private async Task RelayStaffToReporterAsync(SupportTicket ticket, string content)
     {
@@ -1169,7 +1270,8 @@ public sealed class TicketInteractionHandler
         {
             var dm = await reporter.CreateDMChannelAsync();
             await dm.SendMessageAsync(
-                $"🛡️ **HQ (report #{ticket.Id}):** {Truncate(content, 1800)}",
+                $"🛡️ **HQ (report #{ticket.Id}):** {Truncate(content, 1800)}\n"
+                + "_↩️ Use **Reply** on this message to answer._",
                 allowedMentions: AllowedMentions.None);
         }
         catch (Exception ex)
@@ -1180,7 +1282,8 @@ public sealed class TicketInteractionHandler
 
     // ─── Helpers ──────────────────────────────────────────────────────
 
-    private async Task AddRoleMembersToThreadAsync(SocketThreadChannel thread, SocketGuild guild, ulong roleId)
+    private async Task AddRoleMembersToThreadAsync(
+        SocketThreadChannel thread, SocketGuild guild, ulong roleId, ulong? excludeUserId = null)
     {
         if (roleId == 0) return;
         var role = guild.GetRole(roleId);
@@ -1190,6 +1293,7 @@ public sealed class TicketInteractionHandler
         foreach (var m in role.Members)
         {
             if (m.IsBot) continue; // don't drag DISBOARD et al. into ticket threads
+            if (m.Id == excludeUserId) continue;
             if (added >= MaxThreadMembersToAdd) break;
             try { await thread.AddUserAsync(m); added++; }
             catch (Exception ex) { _logger.LogDebug(ex, "Could not add {User} to ticket thread", m.Id); }

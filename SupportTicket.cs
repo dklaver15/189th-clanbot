@@ -21,8 +21,9 @@ namespace ClanGuardBot.Models;
 /// ── Anonymity ──
 /// IsAnonymous tickets store the real OpenerUserId (so the audit trail is
 /// intact and a designated role can unmask if ever necessary) but never
-/// surface it in the thread. AnonHandle is the short public label shown to
-/// staff (e.g. "Anonymous #a3f9").
+/// surface it in the thread, the close summary, the transcript or the logs;
+/// the audited Unmask button is the only way to reveal it. AnonHandle is the
+/// short public label shown to staff (e.g. "Anonymous #a3f9").
 ///
 /// ── Time-off ──
 /// The AWOL / time-off category carries optional leave-window fields. When an

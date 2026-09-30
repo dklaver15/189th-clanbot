@@ -219,7 +219,7 @@ public sealed class TicketService
             .WithTitle($"🎫 Ticket #{ticket.Id} closed — {ticket.CategoryLabel}")
             .WithColor(new Color(0x99, 0xAA, 0xB5))
             .AddField("Opener",
-                ticket.IsAnonymous ? $"🕵️ {ticket.AnonHandle} — <@{ticket.OpenerUserId}> *(unmasked, HQ-only)*"
+                ticket.IsAnonymous ? $"🕵️ {ticket.AnonHandle} *(anonymous — use Unmask to reveal)*"
                                    : $"<@{ticket.OpenerUserId}>", inline: true)
             .AddField("Priority", PriorityLabel(ticket.Priority), inline: true)
             .AddField("Closed by", ticket.ClosedByUsername ?? "—", inline: true)
@@ -233,7 +233,7 @@ public sealed class TicketService
             await logChannel.SendFileAsync(
                 stream, $"ticket-{ticket.Id}-transcript.txt",
                 embed: summary,
-                components: TicketInteractionHandler.BuildRecordButtons(ticket.Id),
+                components: TicketInteractionHandler.BuildRecordButtons(ticket.Id, ticket.IsAnonymous),
                 allowedMentions: AllowedMentions.None);
         }
         catch (Exception ex)
@@ -366,8 +366,9 @@ public sealed class TicketService
         sb.AppendLine($"189th Support Ticket #{ticket.Id} — {ticket.CategoryLabel}");
         sb.AppendLine(new string('=', 60));
         sb.AppendLine("Status:     Closed");
-        sb.AppendLine($"Opener:     {ticket.OpenerDisplayName} ({ticket.OpenerUserId})"
-                      + (ticket.IsAnonymous ? $"  [ANONYMOUS as {ticket.AnonHandle}]" : ""));
+        sb.AppendLine(ticket.IsAnonymous
+            ? $"Opener:     {ticket.AnonHandle} (anonymous)"
+            : $"Opener:     {ticket.OpenerDisplayName} ({ticket.OpenerUserId})");
         sb.AppendLine($"Priority:   {ticket.Priority}");
         sb.AppendLine($"Opened:     {ticket.CreatedUtc:yyyy-MM-dd HH:mm} UTC");
         sb.AppendLine($"Closed:     {ticket.ClosedUtc:yyyy-MM-dd HH:mm} UTC by {ticket.ClosedByUsername}");
