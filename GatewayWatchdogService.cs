@@ -88,8 +88,11 @@ public class GatewayWatchdogService : BackgroundService
         try
         {
             // Arm only after the first real connection so a slow startup never
-            // trips the watchdog before we've ever been online.
-            while (!_everConnected && !stoppingToken.IsCancellationRequested)
+            // trips the watchdog before we've ever been online. ExecuteAsync can
+            // start after Connected/Ready already fired, so also check the state.
+            while (!_everConnected
+                   && _client.ConnectionState != ConnectionState.Connected
+                   && !stoppingToken.IsCancellationRequested)
                 await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
 
             while (!stoppingToken.IsCancellationRequested)

@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk.Worker">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>ClanGuardBot</RootNamespace>
@@ -14,11 +14,11 @@
     <PackageReference Include="Google.Apis.Calendar.v3" Version="1.68.0.3573" />
     <PackageReference Include="Google.Apis.Drive.v3" Version="1.68.0.3502" />
     <PackageReference Include="Google.Apis.YouTube.v3" Version="1.76.0.4262" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="8.0.11" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.11" />
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
-    <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.7" />
-    <PackageReference Include="Serilog.Extensions.Hosting" Version="8.0.0" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.12" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.12" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.12" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.12" />
+    <PackageReference Include="Serilog.Extensions.Hosting" Version="10.0.0" />
     <PackageReference Include="Serilog.Sinks.Console" Version="6.0.0" />
     <PackageReference Include="Serilog.Sinks.File" Version="6.0.0" />
     <PackageReference Include="Microsoft.Recognizers.Text.DateTime" Version="1.8.13" />
@@ -39,8 +39,8 @@
       We do NOT need an explicit SkiaSharp.NativeAssets.Linux.NoDependencies
       reference: ScottPlot 5.1.58 already takes a transitive dependency on
       that package at >= 3.119.0, which ships the self-contained
-      libSkiaSharp.so binary needed for headless rendering on the Debian
-      aspnet:8.0 base image. The matching font / freetype system packages
+      libSkiaSharp.so binary needed for headless rendering on the Ubuntu
+      aspnet:10.0 base image. The matching font / freetype system packages
       are installed in the Dockerfile so SkiaSharp can locate a typeface.
     -->
     <PackageReference Include="SkiaSharp" Version="3.119.0" />

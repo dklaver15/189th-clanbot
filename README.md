@@ -120,10 +120,10 @@ docker compose up -d --build
 ### Option B: Bare Metal on a Droplet
 
 ```bash
-# Install .NET 8 runtime
+# Install .NET 10 runtime
 wget https://dot.net/v1/dotnet-install.sh
 chmod +x dotnet-install.sh
-./dotnet-install.sh --channel 8.0
+./dotnet-install.sh --channel 10.0
 
 # Build and publish
 dotnet publish -c Release -o /opt/clanguard

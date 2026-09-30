@@ -20,13 +20,44 @@ jobs:
 
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: 10.0.x
 
       - name: Build bot
         run: dotnet build ClanGuardBot.csproj -c Release
+
+      # EF Core 9+ refuses to apply migrations when the model has changes that
+      # no migration covers, which would stop the bot at startup.
+      - name: Check for model changes without a migration
+        run: |
+          dotnet tool install --global dotnet-ef --version 10.0.12
+          dotnet ef migrations has-pending-model-changes --no-build --configuration Release
 
       - name: Check recorder syntax
         run: node --check Recorder/src/index.mjs
 
       - name: Check transcriber syntax
         run: python3 -m py_compile Transcriber/app.py
+
+  # Builds the bot image and checks the tools the bot shells out to. Skipped
+  # when the deploy calls this workflow; the droplet builds the image itself.
+  docker:
+    if: github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build bot image
+        run: docker build -t clanguard-ci .
+
+      - name: Check image contents
+        run: |
+          docker run --rm --entrypoint sh clanguard-ci -c '
+            set -e
+            grep PRETTY_NAME /etc/os-release
+            echo "uid: $(id -u)"
+            dotnet --list-runtimes
+            sqlite3 --version
+            ffmpeg -hide_banner -encoders | grep libx264
+            ffprobe -version | head -1
+            fc-list | grep -i dejavu | head -1
+          '
