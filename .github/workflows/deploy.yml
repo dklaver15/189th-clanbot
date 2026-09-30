@@ -21,7 +21,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+
   deploy:
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - name: Deploy via SSH
@@ -40,6 +44,9 @@ jobs:
           command_timeout: 30m
           envs: GOOGLE_CREDENTIALS_BASE64,ANTHROPIC_API_KEY
           script: |
+            # Stop at the first failing command, so a failed build can't fall
+            # through to restarting the old image and reporting success.
+            set -e
             cd /opt/clanguard
             git remote set-url origin https://${{ secrets.GH_PAT }}@github.com/dklaver15/189th-clanbot.git
             git fetch origin main
@@ -76,6 +83,19 @@ jobs:
             # running transcription.
             docker compose up -d --no-deps recorder transcriber
             docker compose up -d --no-deps --force-recreate clanguard
+            #
+            # Fail the deploy (and skip patch notes) unless the new container
+            # actually connects to Discord.
+            for i in $(seq 1 60); do
+              if docker logs clanguard-bot 2>&1 | grep -q "Bot is connected as"; then
+                echo "Bot connected to Discord."
+                exit 0
+              fi
+              sleep 5
+            done
+            echo "Bot did not connect to Discord within 5 minutes. Last log lines:"
+            docker logs --tail 50 clanguard-bot 2>&1
+            exit 1
         env:
           GOOGLE_CREDENTIALS_BASE64: ${{ secrets.GOOGLE_CREDENTIALS_BASE64 }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
