@@ -243,6 +243,11 @@ public sealed class EventCreationWizard
             await s.Dm.SendMessageAsync(embed: Form("🕒 Need a time of day", "I got a date but no time — include a time too, like `June 14 at 7pm`."));
             return;
         }
+        if (r.StartUtc <= DateTime.UtcNow)
+        {
+            await s.Dm.SendMessageAsync(embed: Form("That's in the past", "Pick a future date & time."));
+            return;
+        }
 
         s.Draft.StartUtc = r.StartUtc;
 

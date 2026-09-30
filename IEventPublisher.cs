@@ -22,17 +22,19 @@ public interface IEventPublisher
     /// <summary>
     /// Materialize a rule-based series' occurrences within the rolling horizon
     /// (idempotent on (SeriesId, StartUtc), so already-created or already-cancelled
-    /// slots are left alone). Used by the recurrence scheduler's top-up and by the
-    /// edit flow after a frequency/end change. Carries the series banner onto each
-    /// new occurrence. No-op for Custom series (their dates aren't rule-generated).
+    /// slots are left alone, except slots a schedule edit dropped). Creates at most
+    /// EventRecurrenceMaxBackfill new occurrences per call. Used by the recurrence
+    /// scheduler's top-up and by the edit flow after a frequency/end change.
+    /// Carries the series banner onto each new occurrence. No-op for Custom series
+    /// (their dates aren't rule-generated). Returns the number created.
     /// </summary>
-    Task FillHorizonAsync(ClanEventSeries series);
+    Task<int> FillHorizonAsync(ClanEventSeries series);
 
     /// <summary>
     /// Materialize occurrences for an explicit set of start instants under a
     /// series (idempotent per start). Used for Custom (specific-dates) series and
     /// when reconciling an edited date list. Each inherits the series' duration,
-    /// banner, title, and cap.
+    /// banner, title, and cap. Returns the number created.
     /// </summary>
-    Task MaterializeDatesAsync(ClanEventSeries series, IEnumerable<DateTime> startsUtc);
+    Task<int> MaterializeDatesAsync(ClanEventSeries series, IEnumerable<DateTime> startsUtc);
 }

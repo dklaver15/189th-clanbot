@@ -236,9 +236,11 @@ public sealed class EventPublisher : IEventPublisher
     /// <summary>
     /// Idempotent creation of one occurrence. For series occurrences, skips if a
     /// ClanEvent already exists for (SeriesId, StartUtc) — the same guard the
-    /// scheduler relies on.
+    /// scheduler relies on — unless that row is a slot a schedule edit dropped
+    /// (see <see cref="IsDroppedSlotAsync"/>), which is cleared and re-created.
+    /// Returns true when an occurrence was created.
     /// </summary>
-    public async Task CreateOccurrenceAsync(
+    public async Task<bool> CreateOccurrenceAsync(
         ulong guildId, int? seriesId,
         string title, string description, ulong organizerId, string organizerName,
         DateTime startUtc, DateTime endUtc,
@@ -248,11 +250,23 @@ public sealed class EventPublisher : IEventPublisher
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
-        if (seriesId is int sid &&
-            await db.ClanEvents.AnyAsync(e => e.SeriesId == sid && e.StartUtc == startUtc))
+        if (seriesId is int sid)
         {
-            _logger.LogDebug("Occurrence for series {SeriesId} at {Start:o} already exists; skipping", sid, startUtc);
-            return;
+            var existing = await db.ClanEvents.FirstOrDefaultAsync(e => e.SeriesId == sid && e.StartUtc == startUtc);
+            if (existing is not null)
+            {
+                if (!await IsDroppedSlotAsync(db, existing))
+                {
+                    _logger.LogDebug("Occurrence for series {SeriesId} at {Start:o} already exists; skipping", sid, startUtc);
+                    return false;
+                }
+
+                db.ClanEvents.Remove(existing);
+                await db.SaveChangesAsync();
+                _logger.LogInformation(
+                    "Re-creating series {SeriesId} occurrence at {Start:o}, previously dropped by a schedule edit",
+                    sid, startUtc);
+            }
         }
 
         // Widen a square/portrait banner to 4:3 before it becomes the message
@@ -277,7 +291,7 @@ public sealed class EventPublisher : IEventPublisher
         {
             _logger.LogError("Event post channel {Channel} is not a reachable message channel; cannot post event '{Title}'",
                 postChannelId, title);
-            return;
+            return false;
         }
 
         // 1) For a one-off, post first to get a real, unique message id. Series
@@ -428,7 +442,18 @@ public sealed class EventPublisher : IEventPublisher
         _logger.LogInformation(
             "Materialized event '{Title}' {Start:o}–{End:o} UTC (ClanEvent {ClanId}, CalendarEvent {CalId}, posted={Posted}, GCal create queued)",
             title, startUtc, endUtc, clanEvent.Id, calEventId, postNow);
+        return true;
     }
+
+    /// <summary>
+    /// A cancelled occurrence that was never posted and has no RSVPs. Only a
+    /// schedule edit leaves one (people can only cancel a posted occurrence), so
+    /// the date may be created again if a later edit brings it back.
+    /// </summary>
+    private static async Task<bool> IsDroppedSlotAsync(BotDbContext db, ClanEvent ev) =>
+        ev.Status == ClanEventStatus.Cancelled
+        && ev.MessageId == 0
+        && !await db.EventRsvps.AnyAsync(r => r.ClanEventId == ev.Id);
 
     /// <summary>
     /// Posts the soonest upcoming, not-yet-posted occurrence of a series to
@@ -553,36 +578,62 @@ public sealed class EventPublisher : IEventPublisher
         return TimeZoneInfo.Utc;
     }
 
-    public async Task FillHorizonAsync(ClanEventSeries series)
+    public async Task<int> FillHorizonAsync(ClanEventSeries series)
     {
-        var horizonEnd  = DateTime.UtcNow.AddDays(_config.EventRecurrenceHorizonDays);
+        var fromUtc    = DateTime.UtcNow.AddMinutes(-1);
+        var horizonEnd = DateTime.UtcNow.AddDays(_config.EventRecurrenceHorizonDays);
+
+        // Dates that already have an occurrence (other than a dropped slot) don't
+        // count toward EventRecurrenceMaxBackfill, which caps NEW occurrences per
+        // pass. Counting them used to pin every series at its next 4 dates.
+        HashSet<DateTime> taken;
+        using (var scope = _services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+            taken = (await db.ClanEvents
+                .Where(e => e.SeriesId == series.Id && e.StartUtc > fromUtc
+                         && (e.Status != ClanEventStatus.Cancelled
+                          || e.MessageId != 0
+                          || db.EventRsvps.Any(r => r.ClanEventId == e.Id)))
+                .Select(e => e.StartUtc)
+                .ToListAsync()).ToHashSet();
+        }
+
         var occurrences = ClanEventRecurrence
-            .Occurrences(series, DateTime.UtcNow.AddMinutes(-1), horizonEnd, _config.EventRecurrenceMaxBackfill)
+            .Occurrences(series, fromUtc, horizonEnd, int.MaxValue)
+            .Where(o => !taken.Contains(o.StartUtc))
+            .Take(Math.Max(1, _config.EventRecurrenceMaxBackfill))
             .ToList();
 
+        var created = 0;
         foreach (var (startUtc, endUtc) in occurrences)
-            await CreateOccurrenceAsync(series.GuildId, series.Id,
-                series.Title, series.Description, series.OrganizerId, series.OrganizerName,
-                startUtc, endUtc,
-                attachImageBytes: series.ImageBytes, imageFileName: series.ImageFileName,
-                maxParticipants: series.MaxParticipants);
+            if (await CreateOccurrenceAsync(series.GuildId, series.Id,
+                    series.Title, series.Description, series.OrganizerId, series.OrganizerName,
+                    startUtc, endUtc,
+                    attachImageBytes: series.ImageBytes, imageFileName: series.ImageFileName,
+                    maxParticipants: series.MaxParticipants))
+                created++;
 
         // Show only the next occurrence in #events: post the soonest upcoming one
         // if it isn't already up (this is also what promotes the following
         // occurrence once the current passes and is archived).
         await PromoteNextAsync(series.Id);
+        return created;
     }
 
-    public async Task MaterializeDatesAsync(ClanEventSeries series, IEnumerable<DateTime> startsUtc)
+    public async Task<int> MaterializeDatesAsync(ClanEventSeries series, IEnumerable<DateTime> startsUtc)
     {
         var duration = TimeSpan.FromMinutes(series.DurationMinutes);
+        var created  = 0;
         foreach (var startUtc in startsUtc.Distinct().OrderBy(x => x))
-            await CreateOccurrenceAsync(series.GuildId, series.Id,
-                series.Title, series.Description, series.OrganizerId, series.OrganizerName,
-                startUtc, startUtc + duration,
-                attachImageBytes: series.ImageBytes, imageFileName: series.ImageFileName,
-                maxParticipants: series.MaxParticipants);
+            if (await CreateOccurrenceAsync(series.GuildId, series.Id,
+                    series.Title, series.Description, series.OrganizerId, series.OrganizerName,
+                    startUtc, startUtc + duration,
+                    attachImageBytes: series.ImageBytes, imageFileName: series.ImageFileName,
+                    maxParticipants: series.MaxParticipants))
+                created++;
 
         await PromoteNextAsync(series.Id);
+        return created;
     }
 }

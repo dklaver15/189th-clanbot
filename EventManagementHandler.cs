@@ -554,6 +554,11 @@ public sealed class EventManagementHandler
             await component.UpdateAsync(m => { m.Content = "You don't have permission to manage that event."; m.Components = Empty(); });
             return;
         }
+        if (isCancel && !ev.SeriesId.HasValue && HasStarted(ev))
+        {
+            await component.UpdateAsync(m => { m.Content = AlreadyStartedMessage(ev); m.Components = Empty(); });
+            return;
+        }
 
         // /event image applies to the one-off event or the whole series — no
         // this-occurrence/whole-series prompt (per-occurrence banners aren't a thing).
@@ -776,6 +781,12 @@ public sealed class EventManagementHandler
             return;
         }
 
+        if (kind == "cxl" && scope == "occ" && HasStarted(ev))
+        {
+            await component.UpdateAsync(m => { m.Content = AlreadyStartedMessage(ev); m.Components = Empty(); });
+            return;
+        }
+
         if (kind == "cxl")
         {
             // Ack first — a whole-series cancel re-renders every future
@@ -886,6 +897,12 @@ public sealed class EventManagementHandler
 
         if (isCancel)
         {
+            if (!ev.SeriesId.HasValue && HasStarted(ev))
+            {
+                await component.RespondAsync(AlreadyStartedMessage(ev), ephemeral: true);
+                return;
+            }
+
             if (ev.SeriesId.HasValue)
             {
                 var buttons = new ComponentBuilder()
@@ -1515,6 +1532,7 @@ public sealed class EventManagementHandler
         var r = _time.ParseStart(text, s.Tz);
         if (!r.Success)      { await s.Dm.SendMessageAsync(embed: EditForm("Let's try that again", r.Error)); return; }
         if (!r.HasTimeOfDay) { await s.Dm.SendMessageAsync(embed: EditForm("🕒 Need a time of day", "Include a time too, like `June 14 at 7pm`.")); return; }
+        if (r.StartUtc <= DateTime.UtcNow) { await s.Dm.SendMessageAsync(embed: EditForm("That's in the past", "Pick a future date & time.")); return; }
         var duration = s.EndUtc - s.StartUtc;
         if (duration <= TimeSpan.Zero) duration = TimeSpan.FromHours(1);
         s.StartUtc = r.StartUtc;
@@ -2220,16 +2238,20 @@ public sealed class EventManagementHandler
         series.Active         = true;
         await db.SaveChangesAsync(); // persist the new rule before computing/filling
 
-        var horizonEnd = now.AddDays(_config.EventRecurrenceHorizonDays);
-        var newSet = ClanEventRecurrence
-            .Occurrences(series, now.AddMinutes(-1), horizonEnd, _config.EventRecurrenceMaxBackfill)
-            .Select(o => o.StartUtc)
-            .ToHashSet();
-
         var futures = await db.ClanEvents
             .Where(e => e.SeriesId == series.Id && e.Status == ClanEventStatus.Scheduled && e.StartUtc > now)
             .ToListAsync();
-        var existing = futures.Select(f => f.StartUtc).ToHashSet();
+
+        // Every date the new rule produces up to the horizon, or up to the latest
+        // existing occurrence if that's further out, so a matching occurrence is
+        // never dropped just for sitting past a cap.
+        var horizonEnd = now.AddDays(_config.EventRecurrenceHorizonDays);
+        if (futures.Count > 0 && futures.Max(f => f.StartUtc) > horizonEnd)
+            horizonEnd = futures.Max(f => f.StartUtc);
+        var newSet = ClanEventRecurrence
+            .Occurrences(series, now.AddMinutes(-1), horizonEnd, int.MaxValue)
+            .Select(o => o.StartUtc)
+            .ToHashSet();
 
         var dropped = new List<ClanEvent>();
         foreach (var occ in futures)
@@ -2237,10 +2259,9 @@ public sealed class EventManagementHandler
         await db.SaveChangesAsync();
         foreach (var occ in dropped) await UpdatePostAsync(db, occ);
 
-        await publisher.FillHorizonAsync(series);
+        var added = await publisher.FillHorizonAsync(series);
 
         var kept  = futures.Count - dropped.Count;
-        var added = newSet.Count(d => !existing.Contains(d));
         return $"Now {DescribeScheduleFrom(series.Frequency, series.UntilUtc, series.MaxOccurrences, 0, s.Tz)} — " +
                $"kept {kept}, removed {dropped.Count}, added {added} upcoming occurrence{(added == 1 ? "" : "s")}.";
     }
@@ -2308,10 +2329,10 @@ public sealed class EventManagementHandler
         foreach (var occ in dropped) await UpdatePostAsync(db, occ);
 
         var toCreate = target.Where(d => !existing.Contains(d)).ToList();
-        if (toCreate.Count > 0) await publisher.MaterializeDatesAsync(series, toCreate);
+        var added = toCreate.Count > 0 ? await publisher.MaterializeDatesAsync(series, toCreate) : 0;
 
         var kept = futures.Count - dropped.Count;
-        return $"Updated specific dates — kept {kept}, removed {dropped.Count}, added {toCreate.Count}.";
+        return $"Updated specific dates — kept {kept}, removed {dropped.Count}, added {added}.";
     }
 
     private async Task SweepEditSessionsAsync()
@@ -2504,6 +2525,13 @@ public sealed class EventManagementHandler
 
     // ─── Cancel core ───────────────────────────────────────────────────────
 
+    // Cancelling an event that has started deletes its calendar row, which drops
+    // everyone's attendance credit before the snapshot runs.
+    private static bool HasStarted(ClanEvent ev) => ev.StartUtc <= DateTime.UtcNow;
+
+    private static string AlreadyStartedMessage(ClanEvent ev) =>
+        $"⛔ **{ev.Title}** has already started, so it can't be cancelled.";
+
     /// <summary>Cancels one occurrence or a whole series. Returns the number of occurrences cancelled.</summary>
     private async Task<int> DoCancelAsync(int clanEventId, bool wholeSeries, ulong? cancelledBy = null)
     {
@@ -2520,10 +2548,11 @@ public sealed class EventManagementHandler
             if (series is not null) series.Active = false; // stops the scheduler regenerating it
 
             var now = DateTime.UtcNow;
+            // Upcoming occurrences only: one already underway keeps its calendar
+            // row, and with it everyone's attendance credit.
             targets = await db.ClanEvents
                 .Where(e => e.SeriesId == seriesId && e.Status == ClanEventStatus.Scheduled && e.StartUtc > now)
                 .ToListAsync();
-            if (!targets.Any(t => t.Id == ev.Id)) targets.Add(ev);
         }
         else
         {
