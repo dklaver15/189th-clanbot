@@ -6,7 +6,10 @@ COPY ClanGuardBot.csproj .
 RUN dotnet restore
 
 COPY . .
-RUN dotnet publish -c Release -o /app
+# ImageSharp 4 checks for a Six Labors license key at build time. It arrives as
+# a build secret, so it never lands in an image layer.
+RUN --mount=type=secret,id=sixlabors_license \
+    dotnet publish -c Release -o /app -p:SixLaborsLicenseFile=/run/secrets/sixlabors_license
 
 # Runtime stage
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime

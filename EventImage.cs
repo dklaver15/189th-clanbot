@@ -3,6 +3,7 @@ using ClanGuardBot.Data;
 using ClanGuardBot.Models;
 using Microsoft.EntityFrameworkCore;
 using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats;
 using SixLabors.ImageSharp.Formats.Gif;
 using SixLabors.ImageSharp.Formats.Jpeg;
 using SixLabors.ImageSharp.Formats.Png;
@@ -90,13 +91,17 @@ public static class EventImage
     /// <summary>
     /// Decodes only the formats in <see cref="AllowedExtensions"/>. Decoding sniffs
     /// the bytes, not the name, so without this a TIFF renamed .png would still reach
-    /// the TIFF decoder, which has unpatched advisories in 2.x.
+    /// the TIFF decoder (and likewise BMP, ICO, EXR and the rest), which have had
+    /// most of ImageSharp's security advisories.
     /// </summary>
-    private static readonly Configuration DecodeConfig = new(
-        new PngConfigurationModule(),
-        new JpegConfigurationModule(),
-        new GifConfigurationModule(),
-        new WebpConfigurationModule());
+    private static readonly DecoderOptions DecodeOptions = new()
+    {
+        Configuration = new Configuration(
+            new PngConfigurationModule(),
+            new JpegConfigurationModule(),
+            new GifConfigurationModule(),
+            new WebpConfigurationModule()),
+    };
 
     /// <summary>
     /// Shrinks an image so its longest side is at most <see cref="MaxImageDimension"/>,
@@ -109,7 +114,7 @@ public static class EventImage
     {
         try
         {
-            using var image = Image.Load(DecodeConfig, bytes);
+            using var image = Image.Load(DecodeOptions, bytes);
 
             var longest = Math.Max(image.Width, image.Height);
             if (longest <= MaxImageDimension) return bytes;
@@ -191,7 +196,7 @@ public static class EventImage
 
         try
         {
-            using var image = Image.Load<Rgba32>(DecodeConfig, bytes);
+            using var image = Image.Load<Rgba32>(DecodeOptions, bytes);
 
             if (image.Width <= 0 || image.Height <= 0) return (bytes, name);
 

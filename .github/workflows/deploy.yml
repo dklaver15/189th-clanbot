@@ -23,6 +23,7 @@ concurrency:
 jobs:
   build:
     uses: ./.github/workflows/build.yml
+    secrets: inherit
 
   deploy:
     needs: build
@@ -42,7 +43,7 @@ jobs:
           # stays: a dependency change in the transcriber still triggers the full
           # slow path, and the droplet only has 2 shared vCPUs.
           command_timeout: 30m
-          envs: GOOGLE_CREDENTIALS_BASE64,ANTHROPIC_API_KEY
+          envs: GOOGLE_CREDENTIALS_BASE64,ANTHROPIC_API_KEY,SIXLABORS_LICENSE_KEY
           script: |
             # Stop at the first failing command, so a failed build can't fall
             # through to restarting the old image and reporting success.
@@ -52,6 +53,14 @@ jobs:
             git fetch origin main
             git reset --hard origin/main
             echo "$GOOGLE_CREDENTIALS_BASE64" | base64 --decode > google-credentials.json
+            # ImageSharp's build-time license key, passed to the image build as a
+            # secret (see docker-compose.yml).
+            if [ -z "$SIXLABORS_LICENSE_KEY" ]; then
+              echo "SIXLABORS_LICENSE_KEY secret is not set."
+              exit 1
+            fi
+            printf '%s' "$SIXLABORS_LICENSE_KEY" > sixlabors.lic
+            chmod 600 sixlabors.lic
             # --no-cache is deliberate on clanguard and ONLY on clanguard.
             #
             # We hit builds where the running bot did not reflect pushed code
@@ -99,3 +108,4 @@ jobs:
         env:
           GOOGLE_CREDENTIALS_BASE64: ${{ secrets.GOOGLE_CREDENTIALS_BASE64 }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SIXLABORS_LICENSE_KEY: ${{ secrets.SIXLABORS_LICENSE_KEY }}

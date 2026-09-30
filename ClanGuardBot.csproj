@@ -25,11 +25,12 @@
 
     <!--
       Downscales oversized event banner images before they're stored/attached
-      (EventImage.Downscale). The 2.1.x line is Apache-2.0; 3.x and later use
-      the Six Labors Split License. 2.1.11+ fixes the GIF decoder infinite loop
-      (GHSA-rxmq-m78w-7wmc), which member-uploaded /poll and event banners reach.
+      (EventImage.Downscale). Used under the Six Labors Split License (free
+      tier); 4.x fails a Release build without the license key, which CI and
+      the deploy supply from the SIXLABORS_LICENSE_KEY secret. 4.1.2 fixes the
+      September 2026 advisories.
     -->
-    <PackageReference Include="SixLabors.ImageSharp" Version="2.1.13" />
+    <PackageReference Include="SixLabors.ImageSharp" Version="4.1.2" />
 
     <!--
       Chart rendering for the /timeline command. ScottPlot 5 produces PNG

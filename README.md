@@ -205,6 +205,10 @@ ClanGuardBot/
 
 Uses SQLite — zero configuration needed. The DB file (`clanguard.db`) is created automatically on first run. When using Docker, it's persisted in a named volume.
 
+## Third-party licenses
+
+- **SixLabors.ImageSharp** is used under the Six Labors Split License, granted to the 189th under its Apache License 2.0 terms. A Release build needs the license key: CI and the deploy read it from the `SIXLABORS_LICENSE_KEY` repository secret. For a local Release build, set `SixLaborsLicenseKey` or put the key in a `sixlabors.lic` file in the repo root (git-ignored). Never commit the key.
+
 ## Notes
 
 - The bot needs to be running continuously to track voice time accurately. If the bot restarts, any in-progress voice sessions won't have their time counted for the period the bot was offline.

@@ -24,6 +24,9 @@ jobs:
 
       - name: Build bot
         run: dotnet build ClanGuardBot.csproj -c Release
+        env:
+          # ImageSharp 4 fails a Release build without a Six Labors license key.
+          SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
 
       # EF Core 9+ refuses to apply migrations when the model has changes that
       # no migration covers, which would stop the bot at startup.
@@ -47,7 +50,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build bot image
-        run: docker build -t clanguard-ci .
+        run: docker build --secret id=sixlabors_license,env=SIXLABORS_LICENSE_KEY -t clanguard-ci .
+        env:
+          SIXLABORS_LICENSE_KEY: ${{ secrets.SIXLABORS_LICENSE_KEY }}
 
       - name: Check image contents
         run: |

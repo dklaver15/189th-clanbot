@@ -1,6 +1,10 @@
 services:
   clanguard:
-    build: .
+    build:
+      context: .
+      # ImageSharp's build-time license key; the deploy writes sixlabors.lic.
+      secrets:
+        - sixlabors_license
     container_name: clanguard-bot
     restart: unless-stopped
     # -- Memory limits --
@@ -150,6 +154,10 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+secrets:
+  sixlabors_license:
+    file: ./sixlabors.lic
 
 volumes:
   bot-data:
