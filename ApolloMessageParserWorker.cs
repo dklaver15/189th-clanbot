@@ -11,20 +11,10 @@ using Newtonsoft.Json;
 namespace ClanGuardBot.Services;
 
 /// <summary>
-/// Drains ApolloMessageLog into downstream state. Behaviour depends on the
-/// UseNewApolloPipeline feature flag:
-///
-/// ── Flag OFF (Phase 2 behaviour) ──
-/// Writes parsed events to the ApolloEvent staging table. Acts as a parallel
-/// observability surface alongside the live ApolloEventHandler; the two tables
-/// can be diffed to validate parser equivalence before cutover.
-///
-/// ── Flag ON (Phase 3 behaviour) ──
-/// Bypasses the ApolloEvent table entirely. Upserts directly into CalendarEvent
-/// (the live published state) and enqueues a CalendarOutbox row to drive the
-/// asynchronous GCal push. The live ApolloEventHandler should be unregistered
-/// at startup when the flag is on, so this worker is the only writer to
-/// CalendarEvent for Apollo-sourced events.
+/// Drains ApolloMessageLog into downstream state: upserts CalendarEvent (the
+/// live published state) and enqueues a CalendarOutbox row to drive the
+/// asynchronous GCal push. It is the only writer to CalendarEvent for
+/// Apollo-sourced events.
 ///
 /// ── Why a separate worker, not synchronous in the capture handler ──
 /// Capture must never block on parsing or GCal. If a parse takes 200ms, or the
@@ -42,9 +32,8 @@ namespace ClanGuardBot.Services;
 /// ── Ordering and revision handling ──
 /// Rows are processed oldest-CapturedAt-first. A message may have multiple
 /// unprocessed revisions in the queue; the worker handles them in order. The
-/// downstream state (ApolloEvent or CalendarEvent) reflects the latest
-/// processed revision. A Deleted revision is handled specially per branch
-/// (see ProcessTombstone* below).
+/// downstream CalendarEvent reflects the latest processed revision. A Deleted
+/// revision is handled specially (see ProcessTombstoneAsync below).
 ///
 /// ── Polling interval ──
 /// 15 seconds. Apollo edits are infrequent at peak (a few per hour); shorter
@@ -81,8 +70,8 @@ public class ApolloMessageParserWorker : BackgroundService
         catch (OperationCanceledException) { return; }
 
         _logger.LogInformation(
-            "ApolloMessageParserWorker started; polling every {Seconds}s (UseNewApolloPipeline={Flag})",
-            (int)PollInterval.TotalSeconds, _config.UseNewApolloPipeline);
+            "ApolloMessageParserWorker started; polling every {Seconds}s",
+            (int)PollInterval.TotalSeconds);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -96,18 +85,14 @@ public class ApolloMessageParserWorker : BackgroundService
             }
 
             // Resolve any rebind grace windows that elapsed without a matching
-            // /sort re-post. New pipeline only — the old path never sets
-            // PendingCancelUntil, so this is a no-op (one indexed SELECT) then.
-            if (_config.UseNewApolloPipeline)
+            // /sort re-post.
+            try
             {
-                try
-                {
-                    await ResolveExpiredCancellationsAsync(stoppingToken);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "ApolloMessageParserWorker cancellation sweep failed; will retry on next tick");
-                }
+                await ResolveExpiredCancellationsAsync(stoppingToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "ApolloMessageParserWorker cancellation sweep failed; will retry on next tick");
             }
 
             try { await Task.Delay(PollInterval, stoppingToken); }
@@ -157,10 +142,7 @@ public class ApolloMessageParserWorker : BackgroundService
         // Tombstone path
         if (row.EventType == ApolloMessageEventType.Deleted)
         {
-            if (_config.UseNewApolloPipeline)
-                await ProcessTombstoneNewPathAsync(db, row);
-            else
-                await ProcessTombstoneOldPathAsync(db, row);
+            await ProcessTombstoneAsync(db, row);
 
             row.ProcessedAt = DateTime.UtcNow;
             row.ParseError  = null;
@@ -168,7 +150,7 @@ public class ApolloMessageParserWorker : BackgroundService
             return;
         }
 
-        // Created / Updated path: parse first, then route by flag.
+        // Created / Updated path: parse first, then upsert.
         if (row.PayloadJson is null)
         {
             // Should never happen — capture only writes null PayloadJson on
@@ -205,91 +187,17 @@ public class ApolloMessageParserWorker : BackgroundService
             return;
         }
 
-        if (_config.UseNewApolloPipeline)
-            await ProcessParsedNewPathAsync(db, row, parsed);
-        else
-            await ProcessParsedOldPathAsync(db, row, parsed);
+        await ProcessParsedAsync(db, row, parsed);
 
         row.ProcessedAt = DateTime.UtcNow;
         row.ParseError  = null;
         await db.SaveChangesAsync();
     }
 
-    // ─── Old path (UseNewApolloPipeline=false): writes to ApolloEvent ────────
-
-    private async Task ProcessTombstoneOldPathAsync(BotDbContext db, ApolloMessageLog row)
-    {
-        var existing = await db.ApolloEvents
-            .FirstOrDefaultAsync(e => e.DiscordMessageId == row.DiscordMessageId);
-
-        if (existing is not null && existing.Status != ApolloEventStatus.Cancelled)
-        {
-            existing.Status      = ApolloEventStatus.Cancelled;
-            existing.CancelledAt = DateTime.UtcNow;
-            existing.SourceLogId = row.Id;
-
-            _logger.LogInformation(
-                "ApolloEvent for message {MessageId} ('{Title}') marked Cancelled",
-                row.DiscordMessageId, existing.ParsedTitle);
-        }
-    }
-
-    private async Task ProcessParsedOldPathAsync(
-        BotDbContext db, ApolloMessageLog row, ApolloEmbedParser.ParsedApolloEvent parsed)
-    {
-        var contentHash = ComputeContentHash(parsed);
-
-        var existingEvent = await db.ApolloEvents
-            .FirstOrDefaultAsync(e => e.DiscordMessageId == row.DiscordMessageId);
-
-        if (existingEvent is null)
-        {
-            db.ApolloEvents.Add(new ApolloEvent
-            {
-                GuildId             = row.GuildId,
-                DiscordMessageId    = row.DiscordMessageId,
-                ParsedTitle         = parsed.Title,
-                ParsedStartUtc      = parsed.StartUtc,
-                ParsedEndUtc        = parsed.EndUtc,
-                ParsedDescription   = parsed.Description,
-                ParsedOrganizerId   = parsed.OrganizerId,
-                ParsedOrganizerName = parsed.OrganizerName,
-                Status              = ApolloEventStatus.Active,
-                ContentHash         = contentHash,
-                ParsedAt            = DateTime.UtcNow,
-                SourceLogId         = row.Id,
-            });
-
-            _logger.LogInformation(
-                "ApolloEvent created for message {MessageId}: '{Title}' {Start}–{End} UTC",
-                row.DiscordMessageId, parsed.Title, parsed.StartUtc, parsed.EndUtc);
-        }
-        else if (existingEvent.ContentHash != contentHash || existingEvent.Status != ApolloEventStatus.Active)
-        {
-            existingEvent.ParsedTitle         = parsed.Title;
-            existingEvent.ParsedStartUtc      = parsed.StartUtc;
-            existingEvent.ParsedEndUtc        = parsed.EndUtc;
-            existingEvent.ParsedDescription   = parsed.Description;
-            existingEvent.ParsedOrganizerId   = parsed.OrganizerId;
-            existingEvent.ParsedOrganizerName = parsed.OrganizerName;
-            existingEvent.Status              = ApolloEventStatus.Active;
-            existingEvent.CancelledAt         = null;
-            existingEvent.ContentHash         = contentHash;
-            existingEvent.ParsedAt            = DateTime.UtcNow;
-            existingEvent.SourceLogId         = row.Id;
-
-            _logger.LogInformation(
-                "ApolloEvent updated for message {MessageId}: '{Title}' {Start}–{End} UTC",
-                row.DiscordMessageId, parsed.Title, parsed.StartUtc, parsed.EndUtc);
-        }
-        // else: hash matched and Status was Active → no-op (Apollo re-rendered
-        // for an RSVP without changing event details).
-    }
-
-    // ─── New path (UseNewApolloPipeline=true): writes to CalendarEvent + outbox ─
+    // ─── Writes to CalendarEvent + outbox ─────────────────────────────────────
 
     /// <summary>
-    /// Tombstone in the new path.
+    /// Tombstone handling.
     ///
     /// ── Why this no longer cancels immediately ──
     /// Apollo's /sort deletes every event message and re-posts it under a new
@@ -302,14 +210,14 @@ public class ApolloMessageParserWorker : BackgroundService
     /// Instead, we DEFER: mark the row with a rebind grace window and record
     /// whether a genuine timeout should cancel (pre-event) or preserve
     /// (post-event). If a re-post with a matching content hash lands within the
-    /// window, ProcessParsedNewPathAsync re-binds this row to the new message
+    /// window, ProcessParsedAsync re-binds this row to the new message
     /// and clears the flag — GCal is never touched. If the window elapses with
     /// no re-post, ResolveExpiredCancellationsAsync applies the deferred action.
     ///
     /// The pre/post-EndUtc distinction is preserved exactly as before — it's
     /// just evaluated at timeout instead of immediately.
     /// </summary>
-    private async Task ProcessTombstoneNewPathAsync(BotDbContext db, ApolloMessageLog row)
+    private async Task ProcessTombstoneAsync(BotDbContext db, ApolloMessageLog row)
     {
         var calEvent = await db.CalendarEvents
             .FirstOrDefaultAsync(c => c.DiscordMessageId == row.DiscordMessageId);
@@ -339,7 +247,7 @@ public class ApolloMessageParserWorker : BackgroundService
     }
 
     /// <summary>
-    /// Parse + upsert + enqueue in the new path. Mirrors ApolloEventHandler's
+    /// Parse + upsert + enqueue. Mirrors ApolloEventHandler's
     /// CREATE/UPDATE branching:
     ///   • Existing CalendarEvent for this message → UPDATE path: write the new
     ///     fields, enqueue an Update outbox row (or Create if no GoogleEventId yet).
@@ -349,7 +257,7 @@ public class ApolloMessageParserWorker : BackgroundService
     /// All writes happen in one SaveChanges, so a partial state (CalendarEvent
     /// without a paired outbox row, or vice versa) is structurally impossible.
     /// </summary>
-    private async Task ProcessParsedNewPathAsync(
+    private async Task ProcessParsedAsync(
         BotDbContext db, ApolloMessageLog row, ApolloEmbedParser.ParsedApolloEvent parsed)
     {
         var existing = await db.CalendarEvents
