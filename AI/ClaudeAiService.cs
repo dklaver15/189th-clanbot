@@ -32,9 +32,11 @@ public interface IAiService
     /// cheaper/faster run pass "medium" or "low".
     /// </param>
     /// <param name="enableThinking">
-    /// When false, sends thinking:{type:"disabled"} — turns off adaptive thinking
-    /// (on by default on Sonnet 5) so no reasoning tokens are billed. Default true
-    /// keeps model-default behavior, so existing callers (e.g. meeting minutes)
+    /// When false, sends the model's lowest thinking setting so no reasoning
+    /// tokens are billed: thinking:{type:"between_tools"} on Sonnet 5.5 (which
+    /// rejects "disabled" and allows this only at effort high or below), and
+    /// thinking:{type:"disabled"} on other models. Default true keeps the
+    /// model's adaptive thinking, so existing callers (e.g. meeting minutes)
     /// are unaffected.
     /// </param>
     Task<AiResult> GenerateAsync(
@@ -56,15 +58,24 @@ public interface IAiService
 /// </summary>
 public sealed record AiResult(string Text, string Model, int InputTokens, int OutputTokens, string? StopReason = null)
 {
-    /// <summary>Estimated USD cost at Sonnet 4.6 list pricing ($3/$15 per MTok).</summary>
+    /// <summary>Estimated USD cost at Sonnet 5.5 list pricing ($2/$10 per MTok).</summary>
     public decimal EstimatedCostUsd =>
-        (InputTokens * 3m / 1_000_000m) + (OutputTokens * 15m / 1_000_000m);
+        (InputTokens * 2m / 1_000_000m) + (OutputTokens * 10m / 1_000_000m);
 }
 
 public sealed class ClaudeOptions
 {
     public required string ApiKey { get; set; }
-    public string Model { get; set; } = "claude-sonnet-5";
+    public string Model { get; set; } = "claude-sonnet-5-5";
+
+    /// <summary>
+    /// Server-side refusal fallback ("default" lets Anthropic pick the retry model
+    /// by refusal category), or null to send none. When a safety classifier
+    /// declines a request, the API re-runs it on the fallback model in the same
+    /// call instead of returning the refusal. Claude API only.
+    /// </summary>
+    public string? Fallbacks { get; set; }
+
     public string ApiVersion { get; set; } = "2023-06-01";
     public string BaseUrl { get; set; } = "https://api.anthropic.com/v1/";
 }
@@ -99,10 +110,18 @@ public sealed class ClaudeAiService(
             // Only emit these when they diverge from the API default, so a plain
             // call serializes exactly as before (WhenWritingNull drops the nulls).
             OutputConfig = effort is null ? null : new OutputConfig { Effort = effort },
-            Thinking = enableThinking ? null : new ThinkingConfig { Type = "disabled" }
+            Thinking = enableThinking ? null : new ThinkingConfig { Type = ThinkingOffType(_options.Model) },
+            Fallbacks = _options.Fallbacks
         };
 
-        using var response = await httpClient.PostAsJsonAsync("messages", request, JsonOptions, ct);
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "messages")
+        {
+            Content = JsonContent.Create(request, options: JsonOptions)
+        };
+        if (request.Fallbacks is not null)
+            httpRequest.Headers.Add("anthropic-beta", ServerSideFallbackBeta);
+
+        using var response = await httpClient.SendAsync(httpRequest, ct);
 
         if (!response.IsSuccessStatusCode)
         {
@@ -165,6 +184,14 @@ public sealed class ClaudeAiService(
         return result;
     }
 
+    // Header gating the scalar fallbacks: "default" form.
+    private const string ServerSideFallbackBeta = "server-side-fallback-2026-07-01";
+
+    // Sonnet 5.5 rejects thinking "disabled"; its lowest setting is "between_tools",
+    // which every other model rejects.
+    private static string ThinkingOffType(string model) =>
+        model.StartsWith("claude-sonnet-5-5", StringComparison.Ordinal) ? "between_tools" : "disabled";
+
     // --- DTOs (private — implementation detail) -----------------------------
 
     private sealed record MessagesRequest
@@ -177,8 +204,11 @@ public sealed class ClaudeAiService(
         /// <summary>Serializes to "output_config": {"effort": "..."} when set.</summary>
         public OutputConfig? OutputConfig { get; init; }
 
-        /// <summary>Serializes to "thinking": {"type": "disabled"} when set.</summary>
+        /// <summary>Serializes to "thinking": {"type": "..."} when set.</summary>
         public ThinkingConfig? Thinking { get; init; }
+
+        /// <summary>Serializes to "fallbacks": "default" when set.</summary>
+        public string? Fallbacks { get; init; }
     }
 
     private sealed record Message(string Role, string Content);

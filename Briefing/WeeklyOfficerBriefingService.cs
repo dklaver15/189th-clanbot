@@ -42,26 +42,25 @@ public sealed class WeeklyBriefingOptions
     /// Cap on output tokens. With <see cref="EnableThinking"/> = false the model
     /// emits no reasoning tokens, so this only needs to cover the ~600-word
     /// (~800-token) briefing text; 4000 is generous headroom. If thinking is ever
-    /// re-enabled, raise this well above the expected thinking budget — Sonnet 5's
-    /// adaptive thinking counts against this cap and starved the old 1500, which
-    /// produced truncated or empty (stop_reason=max_tokens) briefings.
+    /// re-enabled, raise this well above the expected thinking budget — adaptive
+    /// thinking counts against this cap and starved the old 1500, which produced
+    /// truncated or empty (stop_reason=max_tokens) briefings.
     /// </summary>
     public int MaxOutputTokens { get; set; } = 4000;
 
     /// <summary>
     /// Adaptive-thinking/token-spend effort passed to the model (low/medium/high/
-    /// xhigh/max), or null for the API default ("high"). Default "medium": on
-    /// Sonnet 5 this is roughly Sonnet 4.6 at high effort — a small step up from
-    /// the old model at controlled cost. See ClaudeOptions/effort docs.
+    /// xhigh/max), or null for the API default ("high"). Default "medium". Keep it
+    /// at "high" or below while <see cref="EnableThinking"/> is false: Sonnet 5.5's
+    /// thinking-off setting is rejected at xhigh/max.
     /// </summary>
     public string? Effort { get; set; } = "medium";
 
     /// <summary>
     /// Whether to let the model run adaptive thinking. Default false: the briefing
     /// is a data-summary task that doesn't need step-by-step reasoning, and
-    /// disabling thinking means no reasoning tokens are billed — keeping the cost
-    /// profile close to the old thinking-off Sonnet 4.6 while using the stronger
-    /// Sonnet 5 base model at <see cref="Effort"/> = medium.
+    /// disabling thinking means no reasoning tokens are billed. On Sonnet 5.5 this
+    /// sends thinking "between_tools", its lowest setting (see IAiService).
     /// </summary>
     public bool EnableThinking { get; set; }
 
