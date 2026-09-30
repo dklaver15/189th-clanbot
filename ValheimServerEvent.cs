@@ -10,8 +10,7 @@ namespace ClanGuardBot.Models;
 /// the game server next happened to restart. A row survives that.
 ///
 /// ── Why a log rather than a single mutable row ──
-/// Same argument <see cref="PalworldSession"/> makes for sessions over a counter:
-/// the history answers questions the current value can't. "Is the server
+/// The same argument as for sessions over a counter: the history answers questions the current value can't. "Is the server
 /// restarting more than it should?" is a real question here — the clan spent an
 /// evening chasing what turned out to be a moderator installing mods — and a
 /// transition log answers it without any new plumbing.

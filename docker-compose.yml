@@ -44,12 +44,6 @@ services:
       - BotConfig__BackupDriveFolderId=${CLANGUARD_BACKUP_DRIVE_FOLDER_ID}
       - BotConfig__BackupR2__AccountEndpoint=${CLANGUARD_R2_ACCOUNT_ENDPOINT}
       - BotConfig__BackupR2__Bucket=${CLANGUARD_R2_BUCKET}
-      # -- Palworld server (DatHost) --
-      # The server's Admin Password, i.e. the REST API credential -- NOT the
-      # joinable Server Password. It grants kick/ban/save/shutdown and DatHost
-      # exposes the REST port publicly with no IP allowlist, so it is the only
-      # thing protecting the server: keep it long, random, and out of git.
-      - BotConfig__PalworldAdminPassword=${PALWORLD_ADMIN_PASSWORD}
       # -- Satisfactory Dedicated Server --
       # A credential for the game's HTTPS API. Set ONE of these: the Admin Password
       # (exchanged for a token via PasswordLogin), or a pre-generated Application

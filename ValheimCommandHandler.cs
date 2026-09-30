@@ -514,8 +514,8 @@ public class ValheimCommandHandler
 
         // Verification is the session history rather than a live player list: the mod
         // reports a player id on every join, so by the time anyone links, the id is
-        // already on file. That's why this works offline, unlike /palworld-link and
-        // /satisfactory-link which both require the player to be in game.
+        // already on file. That's why this works offline, unlike /satisfactory-link,
+        // which requires the player to be in game.
         var match = await db.ValheimSessions
             .Where(s => s.PlayerName == name)
             .OrderByDescending(s => s.LastSeenUtc)

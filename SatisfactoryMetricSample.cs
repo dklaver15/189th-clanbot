@@ -20,9 +20,7 @@ namespace ClanGuardBot.Models;
 /// ── Volume ──
 /// Append-only, pruned on <see cref="BotConfig.SatisfactoryMetricsRetentionDays"/>.
 /// At the default 120s cadence that's ~720 rows/day, so a 30-day window is
-/// ~21,600 rows — trivial for SQLite, and the same shape as
-/// <see cref="PalworldMetricSample"/>, which has been running at twice this
-/// rate since July.
+/// ~21,600 rows — trivial for SQLite.
 ///
 /// ── Aggregate, not per-circuit ──
 /// One row per poll for the whole grid, not one per circuit. Circuits get

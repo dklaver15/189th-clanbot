@@ -6,9 +6,8 @@ namespace ClanGuardBot.Models;
 /// ── Why a row per death rather than a counter ──
 /// A counter answers "how many times has X died" and nothing else. Rows also answer
 /// "who died most this week", "was last night unusually bloody", and survive a
-/// recount if the ingest logic ever changes — the same argument
-/// <see cref="PalworldSession"/> makes for storing sessions instead of a minutes
-/// total. Deaths are low-volume (a busy Valheim night is tens, not thousands), so
+/// recount if the ingest logic ever changes — the same argument for storing
+/// sessions instead of a minutes total. Deaths are low-volume (a busy Valheim night is tens, not thousands), so
 /// the storage cost is irrelevant.
 ///
 /// ── No position ──

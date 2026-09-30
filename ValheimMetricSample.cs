@@ -12,15 +12,14 @@ namespace ClanGuardBot.Models;
 /// plan is ever the constraint. Those need history, and nothing else records it.
 ///
 /// ── Deliberately thin ──
-/// Only what A2S actually returns. There are no FPS or tick-rate columns like
-/// <see cref="PalworldMetricSample"/> has, because vanilla Valheim exposes no
+/// Only what A2S actually returns. There are no FPS or tick-rate columns, because vanilla Valheim exposes no
 /// performance counters over the query protocol — that would need a server-side
 /// mod. Recording a placeholder would imply a signal that does not exist.
 ///
 /// ── Volume ──
 /// Append-only, pruned on <see cref="BotConfig.ValheimMetricsRetentionDays"/>. At
 /// the default 60s cadence that is ~1,440 rows/day, so a 30-day window is ~43,000
-/// rows — the same order as the Palworld table, which SQLite has handled since July.
+/// rows, which SQLite handles easily.
 /// </summary>
 public class ValheimMetricSample
 {

@@ -302,7 +302,7 @@ public class ValheimEventIngestHandler
     ///
     /// <para>Deliberately silent either way: the players didn't leave, the server
     /// did. A burst of leave lines on every restart is exactly the noise this must
-    /// not produce — same reasoning as the Palworld and Satisfactory pollers.</para>
+    /// not produce — same reasoning as the Satisfactory poller.</para>
     /// </summary>
     private async Task CloseAllOpenSessionsAsync(BotDbContext db, ValheimEventKind kind, DateTime now)
     {
@@ -330,7 +330,7 @@ public class ValheimEventIngestHandler
     ///
     /// ── Why this exists ──
     /// This integration is event-sourced with no poll behind it: A2S is silent on a
-    /// crossplay server, so unlike <see cref="PalworldPresenceService"/> there is no
+    /// crossplay server, so unlike <see cref="SatisfactoryPresenceService"/> there is no
     /// tick that re-establishes ground truth. A single dropped leave event therefore
     /// leaves a session open indefinitely, and it shows up as a player who logged off
     /// hours ago still listed by /valheim-status with a growing duration.

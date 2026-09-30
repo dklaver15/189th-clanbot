@@ -34,7 +34,7 @@ namespace ClanGuardBot.Services;
 /// ── Quiet on boot ──
 /// Availability starts Unknown and the first determination is recorded silently, so
 /// restarting the bot never emits a phantom "online!" for a server that was already
-/// up. Same rule as the Palworld and Satisfactory pollers.
+/// up. Same rule as the Satisfactory poller.
 ///
 /// ── Gating ──
 /// Idle unless <see cref="BotConfig.ValheimEnabled"/> is true and a host is set.

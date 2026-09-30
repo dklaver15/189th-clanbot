@@ -5,15 +5,15 @@ namespace ClanGuardBot.Services;
 
 /// <summary>
 /// Rewrites Discord mention tokens (<c>&lt;#id&gt;</c>, <c>&lt;@id&gt;</c>,
-/// <c>&lt;@&amp;id&gt;</c>) into readable plain text — <c>#palworld</c>,
+/// <c>&lt;@&amp;id&gt;</c>) into readable plain text — <c>#general</c>,
 /// <c>@Dan</c>, <c>@Officer</c> — for places Discord does NOT render mentions.
 ///
 /// ── Why this exists ──
 /// A native Discord poll's question and answer text are plain strings: Discord
 /// renders no markdown and resolves no mentions inside them. So a question typed
-/// as "…remove the messages in &lt;#1526389577277771886&gt;?" posts verbatim,
+/// as "…remove the messages in &lt;#123456789012345678&gt;?" posts verbatim,
 /// showing members the raw snowflake instead of the channel. Resolving the token
-/// to "#palworld" up front gets the intended reading (just without the link,
+/// to "#general" up front gets the intended reading (just without the link,
 /// which a native poll structurally can't carry).
 ///
 /// Only applied to <b>native</b> polls. Anonymous polls render through an embed,

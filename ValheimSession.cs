@@ -4,9 +4,8 @@ namespace ClanGuardBot.Models;
 /// One play session on the clan's Valheim server: a contiguous stretch between a
 /// join event and the matching leave.
 ///
-/// ── Event-sourced, unlike its Palworld and Satisfactory counterparts ──
-/// <see cref="PalworldSession"/> and <see cref="SatisfactorySession"/> are both
-/// derived by POLLING the server and diffing snapshots, so every tick re-establishes
+/// ── Event-sourced, unlike its Satisfactory counterpart ──
+/// <see cref="SatisfactorySession"/> is derived by POLLING the server and diffing snapshots, so every tick re-establishes
 /// ground truth and a missed event self-heals within a minute. Valheim has no such
 /// poll available: the A2S query surface is silent on this host (crossplay servers
 /// register with PlayFab rather than Steam), so these rows are built purely from
@@ -45,7 +44,7 @@ public class ValheimSession
     /// <summary>
     /// Character name, snapshotted per session. Deliberately not normalized into a
     /// player table: names change, and a historical session should show the name in
-    /// use at the time — same reasoning as <see cref="PalworldSession.PlayerName"/>.
+    /// use at the time.
     /// </summary>
     public string PlayerName { get; set; } = string.Empty;
 

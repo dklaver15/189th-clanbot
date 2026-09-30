@@ -256,7 +256,7 @@ public sealed class PollPublisher
 
     /// <summary>
     /// Returns a copy of the draft with mention tokens in the question and option
-    /// labels rewritten to readable names (<c>&lt;#123&gt;</c> → <c>#palworld</c>).
+    /// labels rewritten to readable names (<c>&lt;#123&gt;</c> → <c>#general</c>).
     /// Description, emoji and banner are carried through untouched.
     ///
     /// Native polls only. Discord renders a native poll's question and answers as

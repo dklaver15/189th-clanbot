@@ -84,10 +84,9 @@ public sealed record ValheimServerInfo(
 /// Queries the clan's Valheim server with the Steam A2S_INFO protocol over UDP.
 ///
 /// ── Why A2S and not an API ──
-/// Vanilla Valheim ships no REST API and no RCON — unlike Palworld
-/// (<see cref="PalworldApiService"/>) and Satisfactory
-/// (<see cref="SatisfactoryApiService"/>), which both have first-party HTTP
-/// surfaces. The Steam query port is the only thing an unmodded Valheim server
+/// Vanilla Valheim ships no REST API and no RCON — unlike Satisfactory
+/// (<see cref="SatisfactoryApiService"/>), which has a first-party HTTP
+/// surface. The Steam query port is the only thing an unmodded Valheim server
 /// will answer, so it is the only integration that needs nothing installed on
 /// the host. That matters here: the server is on Shockbyte via Discord's Game
 /// Servers, and panel/FTP access is not guaranteed.
@@ -160,7 +159,7 @@ public sealed class ValheimQueryService
     }
 
     /// <summary>
-    /// True once a host is set. Unlike the Palworld and Satisfactory clients there
+    /// True once a host is set. Unlike the Satisfactory client there
     /// is no credential to check — A2S is unauthenticated, which is precisely why
     /// this integration works without panel access.
     /// </summary>

@@ -56,7 +56,7 @@ public sealed record SatisfactoryServerState(
 ///      and transparently refreshed on a 401.
 ///
 /// ── Player names are NOT available ──
-/// Unlike Palworld, this API has no player-list function. QueryServerState returns a
+/// This API has no player-list function. QueryServerState returns a
 /// player COUNT and nothing that identifies who is on. There is therefore no
 /// per-player join/leave feed, no playtime tracking, and no link command — those
 /// simply cannot be built on this API.

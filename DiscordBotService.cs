@@ -64,7 +64,6 @@ public class DiscordBotService : IHostedService
     private readonly FinalsCommandHandler _finalsCommandHandler;
     private readonly SleeperCommandHandler _sleeperCommandHandler;
     private readonly XpCommandHandler _xpCommandHandler;
-    private readonly PalworldCommandHandler _palworldCommandHandler;
     private readonly SatisfactoryCommandHandler _satisfactoryCommandHandler;
     private readonly ValheimCommandHandler _valheimCommandHandler;
     private readonly ValheimEventIngestHandler _valheimIngestHandler;
@@ -159,7 +158,6 @@ public class DiscordBotService : IHostedService
         FinalsCommandHandler finalsCommandHandler,
         SleeperCommandHandler sleeperCommandHandler,
         XpCommandHandler xpCommandHandler,
-        PalworldCommandHandler palworldCommandHandler,
         SatisfactoryCommandHandler satisfactoryCommandHandler,
         ValheimCommandHandler valheimCommandHandler,
         ValheimEventIngestHandler valheimIngestHandler,
@@ -246,7 +244,6 @@ public class DiscordBotService : IHostedService
         _finalsCommandHandler        = finalsCommandHandler;
         _sleeperCommandHandler       = sleeperCommandHandler;
         _xpCommandHandler            = xpCommandHandler;
-        _palworldCommandHandler      = palworldCommandHandler;
         _satisfactoryCommandHandler  = satisfactoryCommandHandler;
         _valheimCommandHandler       = valheimCommandHandler;
         _valheimIngestHandler        = valheimIngestHandler;
@@ -353,7 +350,6 @@ public class DiscordBotService : IHostedService
         _finalsCommandHandler.Register(_client);
         _sleeperCommandHandler.Register(_client);
         _xpCommandHandler.Register(_client);
-        _palworldCommandHandler.Register(_client);
         _satisfactoryCommandHandler.Register(_client);
         _valheimCommandHandler.Register(_client);
         _valheimIngestHandler.Register(_client);
@@ -613,23 +609,6 @@ public class DiscordBotService : IHostedService
                 // CommandsCommandHandler.BuildCatalog in sync.
                 XpCommandHandler.BuildDmsCommand(),
 
-                // /palworld-* — the clan's Palworld server on DatHost, via the
-                // game's built-in REST API (RCON is deprecated upstream and unused).
-                // status/playtime/leaderboard/link are open to all members;
-                // /palworld-admin (announce, kick, ban, unban, save, restart) is
-                // gated to the "Palworld Mod" role (BotConfig.PalworldAdminRoleId)
-                // so the mods can moderate the game server without anyone holding
-                // the Admin Password. All are runtime-gated by BotConfig.PalworldEnabled.
-                // Handled by PalworldCommandHandler. NOTE: keep
-                // CommandsCommandHandler.BuildCatalog in sync when changing these.
-                PalworldCommandHandler.BuildStatusCommand(),
-                PalworldCommandHandler.BuildPlaytimeCommand(),
-                PalworldCommandHandler.BuildLeaderboardCommand(),
-                PalworldCommandHandler.BuildLinkCommand(),
-                PalworldCommandHandler.BuildPerformanceCommand(),
-                PalworldCommandHandler.BuildNameCommand(),
-                PalworldCommandHandler.BuildAdminCommand(),
-
                 // /satisfactory-* — the clan's Satisfactory Dedicated Server via its
                 // built-in HTTPS API (same port as the game, self-signed cert). All of
                 // these are read-only and open to all members; the write commands
@@ -657,7 +636,7 @@ public class DiscordBotService : IHostedService
                 // speaks the Steam A2S query protocol, because vanilla Valheim ships
                 // no REST API and no RCON. That protocol reports a player COUNT and
                 // never a name, so there is no -playtime/-leaderboard/-link here as
-                // there is for Palworld and Satisfactory, and no admin command at all.
+                // there is for Satisfactory, and no admin command at all.
                 // Runtime-gated by BotConfig.ValheimEnabled. Handled by
                 // ValheimCommandHandler.
                 ValheimCommandHandler.BuildStatusCommand(),

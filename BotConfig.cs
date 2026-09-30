@@ -1941,153 +1941,10 @@ public class BotConfig
     /// </summary>
     public string UfcDefaultImageUrl { get; set; } = string.Empty;
 
-    // ─── Palworld server ─────────────────────────────────────────────
-    /// <summary>
-    /// Master switch for the Palworld integration (presence feed, playtime
-    /// tracking, /palworld-* commands, and the in-game event-reminder bridge).
-    /// Default false — nothing runs until the server details are configured.
-    /// Everything additionally requires PalworldBaseUrl + PalworldAdminPassword;
-    /// see <see cref="Services.PalworldApiService.IsConfigured"/>.
-    /// </summary>
-    public bool PalworldEnabled { get; set; } = false;
-
-    /// <summary>
-    /// Base URL of the Palworld server's REST API, scheme and port included —
-    /// e.g. "http://flywheel.dathost.net:29324". No trailing path: the client
-    /// appends /v1/api itself.
-    ///
-    /// On DatHost the port is allocated automatically once the "Enable REST API"
-    /// toggle is switched on in the server's Settings tab; hover the server IP in
-    /// the panel and the REST API row shows the port (it sits just past the
-    /// game/query/RCON ports). We use REST, not RCON: Pocketpair has deprecated
-    /// RCON and it will stop working in a future update.
-    /// </summary>
-    public string PalworldBaseUrl { get; set; } = string.Empty;
-
-    /// <summary>
-    /// The server's Admin Password — the REST API credential (HTTP Basic, with the
-    /// literal username "admin").
-    ///
-    /// ⚠️ This is NOT the "Server Password" players type to join (that one sits
-    /// directly above it in the DatHost Settings tab and is fine to share). This
-    /// one grants kick/ban/save/shutdown over the whole server, and DatHost exposes
-    /// the REST port to the open internet with no IP allowlisting, so this password
-    /// is the ONLY thing protecting the server. It must be a long random string.
-    ///
-    /// ── How to set ──
-    /// Never commit it. docker-compose maps:
-    ///   BotConfig__PalworldAdminPassword=${PALWORLD_ADMIN_PASSWORD}
-    /// Add PALWORLD_ADMIN_PASSWORD=... to the droplet's .env file.
-    /// </summary>
-    public string PalworldAdminPassword { get; set; } = string.Empty;
-
-    /// <summary>
-    /// How often PalworldPresenceService polls /players, in seconds. Default 60.
-    /// Polling is not a design choice — the Palworld REST API has no webhooks, so
-    /// joins/leaves can only be found by diffing snapshots. This also bounds the
-    /// accuracy of recorded playtime. Clamped to 15–3600s.
-    /// </summary>
-    public int PalworldPollIntervalSeconds { get; set; } = 60;
-
-    /// <summary>
-    /// Whether the per-player join/leave messages are posted to
-    /// <see cref="PalworldFeedChannelId"/>. Scoped to ONLY that chatter: turning it
-    /// off still records sessions/playtime, and does NOT affect the server up/down
-    /// notice (<see cref="PalworldServerStatusAnnounceEnabled"/>) or the lag alerts
-    /// (<see cref="PalworldLagAlertEnabled"/>) — those share the channel but have
-    /// their own switches. Default false: the join/leave stream tended to clutter
-    /// the channel, so it's opt-in.
-    /// </summary>
-    public bool PalworldFeedEnabled { get; set; } = false;
-
-    /// <summary>
-    /// Channel for the Palworld join/leave feed (the #palworld channel). 0 disables
-    /// the feed — sessions and playtime are still tracked either way, so turning it
-    /// off only silences the chatter.
-    /// </summary>
-    public ulong PalworldFeedChannelId { get; set; } = 1526389577277771886;
-
-    /// <summary>
-    /// Whether each poll also records a <see cref="PalworldMetricSample"/> (server
-    /// FPS, player count, uptime). Default true. This is what powers
-    /// /palworld-performance and the lag alerts; with it off, both go blind.
-    /// </summary>
-    public bool PalworldMetricsSamplingEnabled { get; set; } = true;
-
-    /// <summary>
-    /// Days of health samples to keep. Default 30 (~43k rows at a 60s cadence —
-    /// negligible for SQLite). Older rows are pruned periodically. 0 disables
-    /// pruning entirely (rows accumulate forever).
-    /// </summary>
-    public int PalworldMetricsRetentionDays { get; set; } = 30;
-
-    /// <summary>
-    /// Whether a lag alert is posted to the feed channel when server FPS stays
-    /// below <see cref="PalworldLagAlertFpsThreshold"/>. Default true.
-    /// </summary>
-    public bool PalworldLagAlertEnabled { get; set; } = true;
-
-    /// <summary>
-    /// Server FPS at or below which the server is considered to be struggling.
-    /// Default 30 — half of the ~60 a healthy Palworld server holds, and low enough
-    /// that players will already be feeling it.
-    /// </summary>
-    public int PalworldLagAlertFpsThreshold { get; set; } = 30;
-
-    /// <summary>
-    /// Consecutive low-FPS samples required before alerting. Default 3, i.e. ~3
-    /// minutes at the default poll interval. A single bad tick is meaningless —
-    /// a world save or a raid spawn can dip FPS for one sample — so the alert is
-    /// deliberately about SUSTAINED degradation.
-    /// </summary>
-    public int PalworldLagAlertConsecutiveSamples { get; set; } = 3;
-
-    /// <summary>
-    /// Minimum minutes between lag alerts, so a server that spends an evening
-    /// hovering at the threshold posts once rather than continuously. Default 60.
-    /// The recovery notice is not rate-limited (it can only follow an alert).
-    /// </summary>
-    public int PalworldLagAlertCooldownMinutes { get; set; } = 60;
-
-    /// <summary>
-    /// Whether the whole-server up/down notice is posted (as a green/red embed) to
-    /// the feed channel when the server comes online or goes offline. Default true.
-    /// Independent of the per-player join/leave feed — this can be silenced on its
-    /// own. Still needs PalworldFeedEnabled + a channel (it shares the feed
-    /// channel), and only fires after the same multi-poll offline delay the session
-    /// logic uses, so a brief DatHost reboot won't trigger a down/up pair.
-    /// SyncWithHandlers: PalworldPresenceService.PostServerStatusAsync.
-    /// </summary>
-    public bool PalworldServerStatusAnnounceEnabled { get; set; } = true;
-
-    /// <summary>
-    /// Role permitted to use /palworld-admin (announce, kick, ban, unban, save,
-    /// restart). The dedicated "Palworld Mod" role: HQ plus the server's owner, who
-    /// isn't in HQ but does own the box. Administrator always bypasses; 0 locks the
-    /// command to Administrators only (fail closed, never fail open).
-    ///
-    /// Deliberately a ROLE ID rather than a rank floor: these commands can shut the
-    /// game server down, so the people who can run them should be an explicit list,
-    /// not "everyone at or above rank X" — a rank ladder would silently widen the
-    /// blast radius every time someone gets promoted. And deliberately its own role
-    /// rather than TicketHqRoleId, because the membership genuinely differs.
-    /// SyncWithHandlers: PalworldCommandHandler.HasAdminRole.
-    /// </summary>
-    public ulong PalworldAdminRoleId { get; set; } = 1526650435396571266;
-
-    /// <summary>
-    /// When true, an event reminder also broadcasts in-game to whoever is on the
-    /// Palworld server (via the REST /announce endpoint), so members deep in a Pal
-    /// run don't miss an event just because they aren't looking at Discord. Default
-    /// true; a no-op unless the Palworld feature is enabled and configured.
-    /// SyncWithHandlers: EventReminderService.AnnouncePalworldAsync.
-    /// </summary>
-    public bool PalworldEventAnnounceEnabled { get; set; } = true;
-
     // ─── Satisfactory server ─────────────────────────────────────────
 
     /// <summary>
-    /// The Palworld announce behaviour, for Satisfactory: an event reminder also
+    /// An event reminder also
     /// goes into the in-game chat via FRM's sendChatMessage, as an A.D.A.
     /// message so it reads as part of the game rather than as another chat line.
     ///
@@ -2113,7 +1970,7 @@ public class BotConfig
     /// "/api/v1" itself.
     ///
     /// ── Where the port comes from ──
-    /// Unlike Palworld, Satisfactory's API is NOT on a separate allocated port: it
+    /// Satisfactory's API is NOT on a separate allocated port: it
     /// rides the SAME port players type into the game to connect (the game port,
     /// 7777 by default). So the IP:port your members enter in-game IS this URL —
     /// just prefix "https://". The scheme MUST be https: the API is always TLS, even
@@ -2147,7 +2004,7 @@ public class BotConfig
 
     /// <summary>
     /// How often SatisfactoryPresenceService polls the server state, in seconds.
-    /// Default 60. Like Palworld, the API has no webhooks, so up/down and player-count
+    /// Default 60. The API has no webhooks, so up/down and player-count
     /// changes can only be found by polling. Clamped to 15–3600s.
     /// </summary>
     public int SatisfactoryPollIntervalSeconds { get; set; } = 60;
@@ -2156,7 +2013,7 @@ public class BotConfig
     /// Whether the presence feed (server up/down + player-count changes) is posted to
     /// <see cref="SatisfactoryFeedChannelId"/>. Default true. Note the Satisfactory
     /// API exposes only a player COUNT, not names, so this feed reports "N players
-    /// online", never per-player join/leave lines like the Palworld feed does.
+    /// online", never per-player join/leave lines.
     /// </summary>
     public bool SatisfactoryFeedEnabled { get; set; } = true;
 
@@ -2495,7 +2352,7 @@ public class BotConfig
     /// player-count feed, and player-count history sampling).
     ///
     /// <para>Additionally requires <see cref="ValheimHost"/>; see
-    /// <see cref="Services.ValheimQueryService.IsConfigured"/>. Unlike Palworld and
+    /// <see cref="Services.ValheimQueryService.IsConfigured"/>. Unlike
     /// Satisfactory there is no credential to set — the Steam A2S query protocol is
     /// unauthenticated, which is exactly why this integration works on a host whose
     /// panel the clan may not have access to.</para>
@@ -2507,8 +2364,8 @@ public class BotConfig
     /// allocation shown on Discord's game server card, e.g. "135.148.252.143".
     ///
     /// <para>Not a secret: it's the address the whole clan types in to join, and it
-    /// is printed in the status embed. Safe to commit, unlike the Palworld and
-    /// Satisfactory credentials.</para>
+    /// is printed in the status embed. Safe to commit, unlike the Satisfactory
+    /// credentials.</para>
     /// </summary>
     public string ValheimHost { get; set; } = string.Empty;
 
@@ -2575,7 +2432,7 @@ public class BotConfig
 
     /// <summary>
     /// Days of Valheim samples to keep. 0 disables pruning entirely. Default 30,
-    /// matching the Palworld and Satisfactory windows.
+    /// matching the Satisfactory window.
     /// </summary>
     public int ValheimMetricsRetentionDays { get; set; } = 30;
 
@@ -3035,9 +2892,8 @@ public class BotConfig
     /// above", and a group whose membership is changed by handing out a role rather
     /// than by a promotion.
     ///
-    /// Its own key rather than a reuse of TicketHqRoleId or OfficerAppHqRoleId, in
-    /// line with how PalworldAdminRoleId is kept separate: the ids happen to match
-    /// today, and the two concerns should be able to diverge without one silently
+    /// Its own key rather than a reuse of TicketHqRoleId or OfficerAppHqRoleId: the
+    /// ids happen to match today, and the two concerns should be able to diverge without one silently
     /// changing the other.
     ///
     /// Fails CLOSED. Set to 0 to fall back to the XpAdminMinRank rank gate; if it

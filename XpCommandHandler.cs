@@ -1187,7 +1187,7 @@ public sealed class XpCommandHandler
             return await RequireAdminAsync(command, "Adjusting XP");
         }
 
-        // Matches how /ticket-panel and /palworld-admin gate: an Administrator
+        // Matches how /ticket-panel gates: an Administrator
         // passes, because anyone holding Administrator can give themselves the role
         // in about four seconds and pretending otherwise only makes the check look
         // stronger than it is.

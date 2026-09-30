@@ -49,11 +49,6 @@ public class BotDbContext : DbContext
     // ── Support tickets ──
     public DbSet<SupportTicket>        SupportTickets        => Set<SupportTicket>();
     public DbSet<SupportTicketMessage> SupportTicketMessages => Set<SupportTicketMessage>();
-    // ── Palworld server ──
-    public DbSet<PalworldSession>      PalworldSessions      => Set<PalworldSession>();
-    public DbSet<PalworldLink>         PalworldLinks         => Set<PalworldLink>();
-    public DbSet<PalworldMetricSample> PalworldMetricSamples => Set<PalworldMetricSample>();
-    public DbSet<PalworldNameOverride> PalworldNameOverrides => Set<PalworldNameOverride>();
     // ── Satisfactory server (via the Ficsit Remote Monitoring mod) ──
     public DbSet<SatisfactorySession>  SatisfactorySessions  => Set<SatisfactorySession>();
     public DbSet<SatisfactoryLink>     SatisfactoryLinks     => Set<SatisfactoryLink>();
@@ -586,38 +581,9 @@ public class BotDbContext : DbContext
             e.HasIndex(m => new { m.TicketId, m.SentUtc });
         });
 
-        // ── Palworld sessions ─────────────────────────────────────────
-        // Three read patterns, all hit on every 60s poll:
-        //   • The poller's own "which sessions are still open?" query. Filtered
-        //     to the open rows so the index stays tiny (a handful of rows) no
-        //     matter how many thousands of closed sessions accumulate.
-        //   • Per-player history — /palworld-playtime sums every session for one
-        //     PalworldUserId, and the poller closes the newest open one on leave.
-        //   • Name lookup, for the `name:` path of /palworld-playtime (which
-        //     deliberately does NOT require a Discord link, so it works for
-        //     people who never joined the server).
-        modelBuilder.Entity<PalworldSession>(e =>
-        {
-            e.HasIndex(s => s.EndedUtc).HasFilter("\"EndedUtc\" IS NULL");
-            e.HasIndex(s => new { s.PalworldUserId, s.StartedUtc });
-            e.HasIndex(s => s.PlayerName);
-        });
-
-        // ── Palworld ↔ Discord links ──────────────────────────────────
-        // Unique in BOTH directions: one Discord account per Palworld identity
-        // and vice versa. The handler deletes the other side before inserting,
-        // so these indexes are the structural backstop preventing two members
-        // from both claiming the same character.
-        modelBuilder.Entity<PalworldLink>(e =>
-        {
-            e.HasIndex(l => new { l.GuildId, l.DiscordUserId }).IsUnique();
-            e.HasIndex(l => new { l.GuildId, l.PalworldUserId }).IsUnique();
-        });
-
         // ── Satisfactory sessions ─────────────────────────────────────
-        // Same access shapes as the Palworld ones, but keyed on the player NAME
-        // rather than a platform id — Satisfactory's only stable-ish identifier
-        // across saves (see SatisfactorySession for the reasoning).
+        // Keyed on the player NAME rather than a platform id — Satisfactory's
+        // only stable-ish identifier across saves (see SatisfactorySession for the reasoning).
         //   • The filtered EndedUtc index serves the poller's hot path: "which
         //     sessions are still open?" runs on every tick.
         //   • (PlayerName, StartedUtc) covers per-player history for
@@ -629,7 +595,7 @@ public class BotDbContext : DbContext
         });
 
         // ── Satisfactory ↔ Discord links ──────────────────────────────
-        // Unique in BOTH directions, same as Palworld: the handler clears the
+        // Unique in BOTH directions: the handler clears the
         // other side before inserting, and these indexes are the structural
         // backstop against two members claiming the same in-game name.
         modelBuilder.Entity<SatisfactoryLink>(e =>
@@ -639,7 +605,7 @@ public class BotDbContext : DbContext
         });
 
         // ── Sleeper ↔ Discord links ───────────────────────────────────
-        // Unique in BOTH directions, same shape as the Palworld and Satisfactory
+        // Unique in BOTH directions, same shape as the Satisfactory
         // links: the handler clears the other side before inserting, and these
         // indexes are the structural backstop against two members claiming the
         // same Sleeper account.
@@ -707,7 +673,7 @@ public class BotDbContext : DbContext
         // ── Satisfactory: power samples ───────────────────────────────
         // Every read is a time-window scan ("the last N hours") and the
         // retention prune deletes by age, so a single index on SampledUtc
-        // covers both — same shape as PalworldMetricSample below.
+        // covers both.
         modelBuilder.Entity<SatisfactoryMetricSample>(e =>
         {
             e.HasIndex(s => s.SampledUtc);
@@ -745,7 +711,7 @@ public class BotDbContext : DbContext
         });
 
         // ── Valheim sessions ──────────────────────────────────────────
-        // Same access shapes as the Palworld sessions: the ingest handler looks up
+        // Same access shapes as the Satisfactory sessions: the ingest handler looks up
         // OPEN rows constantly (every join, leave and death), and the playtime and
         // leaderboard queries sum closed rows per identity.
         //
@@ -760,7 +726,7 @@ public class BotDbContext : DbContext
         });
 
         // ── Valheim ↔ Discord links ───────────────────────────────────
-        // Unique in BOTH directions, same as the Palworld and Satisfactory link
+        // Unique in BOTH directions, same as the Satisfactory link
         // tables: one Discord account per Valheim identity and vice versa, so
         // re-linking overwrites rather than accumulating rival claims.
         modelBuilder.Entity<ValheimLink>(e =>
@@ -784,24 +750,6 @@ public class BotDbContext : DbContext
         modelBuilder.Entity<ValheimServerEvent>(e =>
         {
             e.HasIndex(v => v.OccurredUtc);
-        });
-
-        // ── Palworld health samples ───────────────────────────────────
-        // Every read is a time-window scan ("the last N hours"), and the retention
-        // prune deletes by age, so a single index on SampledUtc covers both.
-        modelBuilder.Entity<PalworldMetricSample>(e =>
-        {
-            e.HasIndex(s => s.SampledUtc);
-        });
-
-        // ── Palworld display-name overrides ───────────────────────────
-        // One canonical name per Palworld account. Unique on PalworldUserId: the
-        // /palworld-name command upserts on it, and every display surface looks up
-        // by it, so at most one row per account. Server-global (no GuildId), like
-        // PalworldSession.
-        modelBuilder.Entity<PalworldNameOverride>(e =>
-        {
-            e.HasIndex(o => o.PalworldUserId).IsUnique();
         });
 
         // ── XP: seasons ───────────────────────────────────────────────

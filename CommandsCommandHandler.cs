@@ -549,17 +549,6 @@ public class CommandsCommandHandler
             return user.Roles.Any(r => r.Id == cfg.XpAdjustRoleId);
         };
 
-        // SyncWithHandlers: PalworldCommandHandler.HasAdminRole
-        // The dedicated "Palworld Mod" role — NOT TicketHqRoleId. Its membership is
-        // HQ plus the server's owner, so it has to be its own key. Fails closed when
-        // unset.
-        Func<SocketGuildUser, BotConfig, bool> palworldMod = (user, cfg) =>
-        {
-            if (user.GuildPermissions.Administrator) return true;
-            if (cfg.PalworldAdminRoleId == 0) return false;
-            return user.Roles.Any(r => r.Id == cfg.PalworldAdminRoleId);
-        };
-
         // SyncWithHandlers: SetNickCommandHandler.HasPermission
         Func<SocketGuildUser, BotConfig, bool> officerOrManageNicknames = (user, cfg) =>
         {
@@ -748,26 +737,6 @@ public class CommandsCommandHandler
 
             new("ticket-panel", "Post (or re-post) the ticket panel to the tickets channel",
                 "HQ", ticketHq),   // SyncWithHandlers: TicketPanelCommandHandler.InvokerHasPermission
-
-            // Open to everyone, same as their Satisfactory counterparts — these
-            // read public server state and change nothing.
-            // SyncWithHandlers: PalworldCommandHandler.PassesMemberGateAsync
-            new("palworld-status", "Live status of the clan's Palworld server — who's on, uptime, in-game day",
-                "Everyone", everyone),
-            new("palworld-playtime", "How long someone has played on the clan's Palworld server",
-                "Everyone", everyone),
-            new("palworld-leaderboard", "Top Palworld players by playtime or level",
-                "Everyone", everyone),
-            new("palworld-link", "Link your Discord account to your Palworld character (be online in-game)",
-                "Everyone", everyone),
-            new("palworld-performance", "Palworld server FPS history — is lag from player count or uptime?",
-                "Everyone", everyone),
-
-            new("palworld-name", "Pin a canonical name for a Palworld player across the feed, playtime & leaderboard",
-                "Palworld Mod", palworldMod),   // SyncWithHandlers: PalworldCommandHandler.HasAdminRole (HandleNameAsync)
-
-            new("palworld-admin", "Administer the Palworld server — announce, kick, ban, unban, save, restart",
-                "Palworld Mod", palworldMod),   // SyncWithHandlers: PalworldCommandHandler.HasAdminRole
 
             new("purge-user", "Delete a member's recent messages server-wide (dry-run unless confirm:true)",
                 "Admin", (user, _) => user.GuildPermissions.Administrator),   // SyncWithHandlers: PurgeUserCommandHandler

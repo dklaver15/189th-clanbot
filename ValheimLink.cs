@@ -4,12 +4,9 @@ namespace ClanGuardBot.Models;
 /// Links a Discord member to their Valheim identity, so playtime and the
 /// leaderboard can name the member rather than a bare character name.
 ///
-/// ── Why linking here is easier than for Palworld ──
-/// <see cref="PalworldLink"/> can only be created while the player is ONLINE,
-/// because the platform id is visible solely in the live player list — which forces
-/// members to be in game the first time they link. DiscordConnector instead reports
-/// the player id on every join, so by the time anyone runs the link command the id
-/// is already on file from their session history. Linking therefore works offline,
+/// ── Why linking works offline ──
+/// DiscordConnector reports the player id on every join, so by the time anyone
+/// runs the link command the id is already on file from their session history. Linking therefore works offline,
 /// against any character the server has seen.
 ///
 /// ── Still asserted, not proven ──
@@ -20,7 +17,7 @@ namespace ClanGuardBot.Models;
 ///
 /// Unique in both directions on (GuildId, DiscordUserId) and
 /// (GuildId, ValheimPlayerId), so re-linking overwrites instead of accumulating
-/// duplicate claims — matching the Palworld and Satisfactory link tables.
+/// duplicate claims — matching the Satisfactory link table.
 /// </summary>
 public class ValheimLink
 {
