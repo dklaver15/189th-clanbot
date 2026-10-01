@@ -2873,7 +2873,7 @@ public class BotConfig
 
     /// <summary>Channels watched for video posts. Threads under them are not included.</summary>
     public List<ulong> VideoRepostChannelIds { get; set; } =
-        new() { 1408199889879564539, 1549891740993982504 };
+        new() { 1408199889879564539, 1549891740993982504, 1551837069632995378 };
 
     /// <summary>
     /// Role allowed to press "Upload" and send a reposted video to the clan's
