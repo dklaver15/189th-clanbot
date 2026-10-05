@@ -755,7 +755,7 @@ public sealed class EventManagementHandler
             return;
         }
 
-        // On-post "Add to Calendar" button → ephemeral Google link, .ics file by DM.
+        // On-post "Add to Calendar" button → Google link and .ics file by DM.
         // Open to everyone; no manage permission required.
         if (cid.StartsWith($"{Prefix}cal:", StringComparison.Ordinal))
         {
@@ -2416,7 +2416,9 @@ public sealed class EventManagementHandler
             return;
         }
 
-        await component.DeferAsync(ephemeral: true);
+        // Everything goes by DM (files on ephemeral messages render as a blank gray
+        // box), so acknowledge silently and only post ephemerally on failure.
+        await component.DeferAsync();
 
         ClanEvent? ev;
         using (var scope = _services.CreateScope())
@@ -2430,34 +2432,27 @@ public sealed class EventManagementHandler
             return;
         }
 
-        // Files on ephemeral messages render as a blank gray box until the client
-        // redraws the channel, so the .ics goes by DM instead.
-        var icsLine = await TryDmIcsAsync(component.User, ev);
+        var failure = await TryDmCalendarAsync(component.User, ev);
+        if (failure is not null)
+            await component.FollowupAsync(failure, ephemeral: true);
+    }
+
+    private const string CalendarDmClosed =
+        "I couldn't DM you the calendar links. Enable **Direct Messages** from server members in your Privacy Settings, then tap the button again.";
+
+    /// <summary>DMs the Google Calendar link and .ics file. Returns null on success, else what to tell the user.</summary>
+    private async Task<string?> TryDmCalendarAsync(IUser user, ClanEvent ev)
+    {
+        var (dm, openFailure) = await DmGuard.TryOpenAsync(user);
+        if (dm is null)
+            return openFailure == DmGuard.OpenFailure.Throttled
+                ? "Discord is throttling me at the moment, so I couldn't DM you the calendar links. Try again in a minute."
+                : CalendarDmClosed;
 
         var comps = new ComponentBuilder()
             .WithButton("Google Calendar", style: ButtonStyle.Link,
                 url: EventCalendarLinks.GoogleUrl(ev), emote: new Emoji("📅"))
             .Build();
-
-        await component.FollowupAsync(
-            $"📅 Add **{ev.Title}** to your calendar:\n" +
-            "• **Google Calendar** — tap the button below.\n" +
-            $"• **Apple Calendar / Outlook** — {icsLine}",
-            components: comps,
-            ephemeral: true);
-    }
-
-    private const string IcsDmClosed =
-        "I couldn't DM you the `.ics` file. Enable **Direct Messages** from server members in your Privacy Settings, then tap the button again.";
-
-    /// <summary>DMs the event's .ics file. Returns the line describing the outcome.</summary>
-    private async Task<string> TryDmIcsAsync(IUser user, ClanEvent ev)
-    {
-        var (dm, failure) = await DmGuard.TryOpenAsync(user);
-        if (dm is null)
-            return failure == DmGuard.OpenFailure.Throttled
-                ? "Discord is throttling me at the moment, so I couldn't DM you the `.ics` file. Try again in a minute."
-                : IcsDmClosed;
 
         using var cts = new CancellationTokenSource(DmGuard.Timeout);
         var options = new RequestOptions { RetryMode = RetryMode.AlwaysFail, CancelToken = cts.Token };
@@ -2465,17 +2460,23 @@ public sealed class EventManagementHandler
         {
             using var fa = new FileAttachment(
                 new MemoryStream(EventCalendarLinks.IcsBytes(ev)), EventCalendarLinks.IcsFileName(ev));
-            await dm.SendFileAsync(fa, $"📅 **{ev.Title}** — open this file to add it to your calendar.", options: options);
-            return $"I've DMed you the `.ics` file — [open it](https://discord.com/channels/@me/{dm.Id}).";
+            await dm.SendFileAsync(
+                fa,
+                $"📅 Add **{ev.Title}** to your calendar:\n" +
+                "• **Google Calendar** — tap the button below.\n" +
+                "• **Apple Calendar / Outlook** — open the attached `.ics` file.",
+                options: options,
+                components: comps);
+            return null;
         }
         catch (HttpException ex) when (ex.DiscordCode == DiscordErrorCode.CannotSendMessageToUser)
         {
-            return IcsDmClosed;
+            return CalendarDmClosed;
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Add to Calendar: failed to DM .ics for event {Id} to {UserId}", ev.Id, user.Id);
-            return "I couldn't DM you the `.ics` file right now. Try again in a minute.";
+            _logger.LogWarning(ex, "Add to Calendar: failed to DM event {Id} to {UserId}", ev.Id, user.Id);
+            return "I couldn't DM you the calendar links right now. Try again in a minute.";
         }
     }
 
