@@ -372,7 +372,7 @@ For quick lookup when the runbook says "the path":
 | SQLite DB (inside container)   | `/app/data/clanguard.db`                                  |
 | SQLite DB (host)               | Named volume `clanguard_bot-data` — find with `docker volume inspect` |
 | Decrypt tool                   | `Tools/decrypt-backup.py` (in repo)                       |
-| Backup encryption format       | See `SqliteBackupCrypto.cs` class comment                 |
+| Backup encryption format       | See `Backup/SqliteBackupCrypto.cs` class comment          |
 | R2 bucket for backups          | `appsettings.json` → `BackupR2.Bucket`                    |
 | R2 account endpoint            | `appsettings.json` → `BackupR2.AccountEndpoint`           |
 | Storage provider selector      | `appsettings.json` → `BackupStorageProvider` (R2 or GoogleDrive) |

@@ -81,7 +81,7 @@ The meeting recorder uses its own bot account (`RECORDER_BOT_TOKEN`).
 
 ### Configuration
 
-Non-secret settings live in `appsettings.json` (the `BotConfig` section; every property is documented in `BotConfig.cs`). Any setting can be overridden with an environment variable such as `BotConfig__WindowDays=28`.
+Non-secret settings live in `appsettings.json` (the `BotConfig` section; every property is documented in `Core/BotConfig.cs`). Any setting can be overridden with an environment variable such as `BotConfig__WindowDays=28`.
 
 Secrets are never committed. `docker-compose.yml` reads them from the environment and from `/opt/clanguard/.env` on the droplet:
 
@@ -140,16 +140,24 @@ Debug builds work without the ImageSharp license key; Release builds need it (se
 
 ## Project layout
 
-Most C# files sit in the repository root. The main pieces:
+C# files are grouped into folders by feature. Most namespaces don't match the folders: they follow a type-based split (`ClanGuardBot.Handlers`, `ClanGuardBot.Services`, `ClanGuardBot.Models`).
 
 | Path | What's there |
 |---|---|
 | `Program.cs` | Startup and dependency injection |
-| `DiscordBotService.cs` | Gateway connection, handler registration and the slash-command list |
-| `BotConfig.cs`, `appsettings.json` | Settings |
-| `BotDbContext.cs`, `Entities.cs`, `Migrations/` | Database model and migrations |
-| `*CommandHandler.cs`, `*Handler.cs` | Slash commands and gateway events |
-| `*Service.cs`, `*Worker.cs` | Background jobs |
+| `Core/` | Gateway connection (`DiscordBotService.cs`), settings (`BotConfig.cs`), slash-command routing, health and watchdog services, Google Sheets client |
+| `Data/`, `Migrations/` | Database context, shared entities and migrations |
+| `Activity/` | Message and voice tracking, command usage stats, `/timeline` |
+| `Awol/` | AWOL checks and kicks |
+| `Members/` | Roster, departures and onboarding reminders |
+| `Moderation/` | Server protection, security audits and webhook audits |
+| `Ranks/` | Rank tracking and promotions |
+| `Xp/` | XP ladder and seasons |
+| `Events/`, `Polls/`, `Reminders/` | Clan events and calendar sync, polls, scheduled reminders |
+| `Tickets/`, `OfficerApplications/` | Support tickets and officer applications |
+| `Invites/`, `Gamertags/`, `Community/` | Invite tracking, gamertag roster, `/qotd`, `/jotd`, `/say` and bump reminders |
+| `Meetings/`, `Videos/`, `Backup/` | Meeting recording and minutes, clip reposts and YouTube uploads, database backups |
+| `Satisfactory/`, `Valheim/`, `Finals/`, `Sleeper/`, `Ufc/` | Game and league integrations |
 | `Briefing/`, `AI/` | Weekly officer briefing and the Claude client |
 | `RedditLeads/` | Reddit recruiting leads |
 | `Recorder/` (Node.js), `Transcriber/` (Python) | Meeting recording sidecars |

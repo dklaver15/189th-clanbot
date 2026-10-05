@@ -28,7 +28,7 @@ Requires
 --------
     pip install cryptography
 
-File format (kept in sync with SqliteBackupCrypto.cs)
+File format (kept in sync with Backup/SqliteBackupCrypto.cs)
 -----------------------------------------------------
     bytes 0..3      Magic "CGB1"
     byte  4         Format version (0x01)
