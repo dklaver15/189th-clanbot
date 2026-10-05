@@ -23,7 +23,7 @@ public static class EventCalendarLinks
     /// event description would otherwise URL-encode past that limit and make the
     /// whole "Add to Calendar" response invalid (the interaction just fails). The
     /// title and time always fit; only the optional details are truncated, and the
-    /// full description is still in the attached .ics anyway.
+    /// full description is still in the .ics anyway.
     /// </summary>
     public static string GoogleUrl(ClanEvent ev)
     {
