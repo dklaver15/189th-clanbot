@@ -2415,6 +2415,10 @@ public sealed class EventManagementHandler
             return;
         }
 
+        // A file on the initial ephemeral response renders as a blank gray box
+        // until the client redraws the channel, so send it as a follow-up instead.
+        await component.DeferAsync(ephemeral: true);
+
         ClanEvent? ev;
         using (var scope = _services.CreateScope())
         {
@@ -2423,7 +2427,7 @@ public sealed class EventManagementHandler
         }
         if (ev is null)
         {
-            await component.RespondAsync("That event is no longer available.", ephemeral: true);
+            await component.FollowupAsync("That event is no longer available.", ephemeral: true);
             return;
         }
 
@@ -2435,7 +2439,7 @@ public sealed class EventManagementHandler
         using var fa = new FileAttachment(
             new MemoryStream(EventCalendarLinks.IcsBytes(ev)), EventCalendarLinks.IcsFileName(ev));
 
-        await component.RespondWithFileAsync(
+        await component.FollowupWithFileAsync(
             fa,
             text: $"📅 Add **{ev.Title}** to your calendar:\n" +
                   "• **Google Calendar** — tap the button below.\n" +
