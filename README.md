@@ -8,7 +8,7 @@ Built with C# on .NET 10 ([Discord.Net](https://github.com/discord-net/Discord.N
 
 **Membership and activity**
 - Tracks messages and voice time per member (the AFK channel doesn't count).
-- Flags members with fewer than 5 messages **and** under 1 hour of voice in a 28-day window with the AWOL role, then lists them in `#awol-list` after 2 days. Officers can kick members who have been listed for 7+ days with `/kick-awols`.
+- Flags members with fewer than 5 messages **and** under 1 hour of voice in a 28-day window (14 days for Guests, RCTs and members without a rank) with the AWOL role, then lists them in `#awol-list` after 2 days. Officers can kick members who have been listed for 7+ days with `/kick-awols`.
 - Exempt roles (`ExemptRoles`, plus the Reserve role) are never flagged.
 - Records joins, departures (left, kicked or banned) and invite attribution, and shows a member's full history with `/timeline`.
 
@@ -27,6 +27,7 @@ Built with C# on .NET 10 ([Discord.Net](https://github.com/discord-net/Discord.N
 - XP seasons: XP from events, meetings, voice and chat, with daily caps that reset at Central midnight, a leaderboard and level-up DMs.
 - `/poll` (native or anonymous), Question and Joke of the Day, scheduled reminders, UFC schedules and results, a Sleeper fantasy football league, and THE FINALS leaderboard lookups.
 - Gamertag roster in Google Sheets (`/gamertags`, `/lookup`).
+- Clips posted in the clip channels are reposted with an "Upload to YouTube" button. Clips are upscaled to 1440p before upload.
 
 **Game servers**
 - Satisfactory (via the Ficsit Remote Monitoring mod): status, playtime, production reports, power and rail charts, and factory maps.
@@ -108,7 +109,9 @@ Pushing to `main` deploys automatically (`.github/workflows/deploy.yml`):
 
 Pushes to other branches run the build plus a Docker image check, without deploying.
 
-Repository secrets used by the workflows: `DROPLET_HOST`, `DROPLET_SSH_KEY`, `GH_PAT`, `GOOGLE_CREDENTIALS_BASE64`, `ANTHROPIC_API_KEY` and `SIXLABORS_LICENSE_KEY`.
+After a successful deploy, `.github/workflows/patch-notes.yml` summarizes the new commits with Claude and posts them to Discord as patch notes.
+
+Repository secrets used by the workflows: `DROPLET_HOST`, `DROPLET_SSH_KEY`, `GH_PAT`, `GOOGLE_CREDENTIALS_BASE64`, `ANTHROPIC_API_KEY`, `DISCORD_PATCHNOTES_WEBHOOK` and `SIXLABORS_LICENSE_KEY`.
 
 The bot applies pending database migrations itself at startup.
 
