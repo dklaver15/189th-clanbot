@@ -105,6 +105,14 @@ public sealed class VideoRepostHandler
     // 0 = the "VideoUploadChannelId not set" warning hasn't been logged yet.
     private int _warnedNoUploadChannel;
 
+    private const string OriginalDeletedMessage = "The original post was deleted, so this clip can't be uploaded.";
+
+    /// <summary>The member's original post is gone, so there is nothing left to upload.</summary>
+    private sealed class OriginalDeletedException : Exception
+    {
+        public OriginalDeletedException() : base(OriginalDeletedMessage) { }
+    }
+
     public VideoRepostHandler(
         IServiceProvider services,
         IHttpClientFactory httpFactory,
@@ -127,6 +135,7 @@ public sealed class VideoRepostHandler
         client.MessageReceived += OnMessageReceived;
         client.ButtonExecuted  += OnButtonExecuted;
         client.MessageDeleted  += OnMessageDeleted;
+        client.MessagesBulkDeleted += OnMessagesBulkDeleted;
         client.Ready           += OnReady;
     }
 
@@ -357,46 +366,71 @@ public sealed class VideoRepostHandler
         }
     }
 
-    /// <summary>
-    /// When an oversized original is deleted, its in-place Upload reply is
-    /// pointless (there is nothing left to upload), so remove it, unless a
-    /// video from it already went to YouTube or is going now: then the reply
-    /// holds the only link to it.
-    /// </summary>
     private Task OnMessageDeleted(Cacheable<IMessage, ulong> message, Cacheable<IMessageChannel, ulong> channel)
     {
         if (!_config.VideoRepostChannelIds.Contains(channel.Id)) return Task.CompletedTask;
 
+        _ = Task.Run(() => HandleOriginalDeletedAsync(message.Id));
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Bulk deletes (e.g. /purge-user) don't fire MessageDeleted.</summary>
+    private Task OnMessagesBulkDeleted(
+        IReadOnlyCollection<Cacheable<IMessage, ulong>> messages, Cacheable<IMessageChannel, ulong> channel)
+    {
+        if (!_config.VideoRepostChannelIds.Contains(channel.Id)) return Task.CompletedTask;
+
+        var ids = messages.Select(m => m.Id).ToList();
         _ = Task.Run(async () =>
         {
-            try
-            {
-                List<VideoSubmission> rows;
-                using (var scope = _services.CreateScope())
-                {
-                    var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-                    rows = await db.VideoSubmissions.AsNoTracking()
-                        .Where(v => v.OriginalMessageId == message.Id && v.KeptOriginal)
-                        .ToListAsync();
-                }
-                if (rows.Count == 0) return;
-                if (rows.Any(v => v.Status != VideoSubmissionStatus.Pending)) return;
-
-                var replyId = rows[0].MessageId;
-                if (await FetchMessageAsync(channel.Id, replyId) is IUserMessage reply)
-                    await RollBackRepostAsync(reply);
-                else
-                    await DeleteRowsAsync(replyId);
-
-                _logger.LogInformation(
-                    "Removed in-place Upload button {Reply} after its original {Original} was deleted", replyId, message.Id);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Could not clean up the Upload button for deleted message {MessageId}", message.Id);
-            }
+            foreach (var id in ids) await HandleOriginalDeletedAsync(id);
         });
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// A member's post in a clip channel was deleted. Its forwarded videos that
+    /// weren't uploaded are marked "Original deleted" (the forward stays). An
+    /// in-place reply from before forwarding is removed as before, unless a video
+    /// from it already went to YouTube or is going now: then the reply holds the
+    /// only link to it.
+    /// </summary>
+    private async Task HandleOriginalDeletedAsync(ulong messageId)
+    {
+        try
+        {
+            List<VideoSubmission> rows;
+            using (var scope = _services.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+                rows = await db.VideoSubmissions.AsNoTracking()
+                    .Where(v => v.OriginalMessageId == messageId && v.KeptOriginal)
+                    .ToListAsync();
+            }
+            if (rows.Count == 0) return;
+
+            if (rows.Any(v => v.OriginalChannelId is not null))
+            {
+                await MarkOriginalDeletedAsync(messageId);
+                _logger.LogInformation("Original {Original} of a forwarded clip was deleted; marked its Upload button(s)", messageId);
+                return;
+            }
+
+            if (rows.Any(v => v.Status != VideoSubmissionStatus.Pending)) return;
+
+            var replyId = rows[0].MessageId;
+            if (await FetchMessageAsync(rows[0].ChannelId, replyId) is IUserMessage reply)
+                await RollBackRepostAsync(reply);
+            else
+                await DeleteRowsAsync(replyId);
+
+            _logger.LogInformation(
+                "Removed in-place Upload button {Reply} after its original {Original} was deleted", replyId, messageId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not handle the deletion of clip post {MessageId}", messageId);
+        }
     }
 
     private async Task RollBackRepostAsync(IUserMessage repost)
@@ -500,6 +534,7 @@ public sealed class VideoRepostHandler
                     => "You're already uploading this one — the button will change to a link when it's done.",
                 VideoSubmissionStatus.Uploading
                     => $"{existing.UploadedByName ?? "Someone"} already started uploading this one — it only goes up once.",
+                VideoSubmissionStatus.OriginalDeleted => OriginalDeletedMessage,
                 _ => "That video can't be uploaded right now.",
             };
             await component.FollowupAsync(reply, ephemeral: true);
@@ -511,9 +546,10 @@ public sealed class VideoRepostHandler
 
         var tempDir = Path.Combine(Path.GetTempPath(), "clanguard-video", $"up-{messageId}-{index}");
         Directory.CreateDirectory(tempDir);
+        VideoSubmission? submission = null;
         try
         {
-            var submission = await LoadAsync(messageId, index)
+            submission = await LoadAsync(messageId, index)
                 ?? throw new InvalidOperationException("Submission row vanished after claim.");
 
             var attachment = await ResolveSourceAttachmentAsync(message, submission);
@@ -550,22 +586,28 @@ public sealed class VideoRepostHandler
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "YouTube upload failed for repost {MessageId} attachment {Index}", messageId, index);
+            // A forwarded clip's original may have been deleted while it uploaded;
+            // then there's nothing to retry from.
+            var originalDeleted = ex is OriginalDeletedException
+                || (submission is { OriginalChannelId: { } originalChannelId }
+                    && await OriginalConfirmedGoneAsync(originalChannelId, submission.OriginalMessageId));
+
+            if (originalDeleted)
+                _logger.LogInformation(
+                    "Upload of message {MessageId} attachment {Index} stopped: the original post was deleted", messageId, index);
+            else
+                _logger.LogError(ex, "YouTube upload failed for message {MessageId} attachment {Index}", messageId, index);
 
             using (var scope = _services.CreateScope())
             {
                 var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-                var error = ex.Message.Length > 500 ? ex.Message[..500] : ex.Message;
-                await db.VideoSubmissions
-                    .Where(v => v.MessageId == messageId && v.AttachmentIndex == index
-                             && v.Status == VideoSubmissionStatus.Uploading)
-                    .ExecuteUpdateAsync(s => s
-                        .SetProperty(v => v.Status,    VideoSubmissionStatus.Pending)
-                        .SetProperty(v => v.LastError, error));
+                await VideoSubmissionStore.ReleaseFailedUploadAsync(db, messageId, index, ex.Message, originalDeleted);
             }
 
             await RefreshButtonsAsync(message);
-            await TryFollowupAsync(component, $"⚠️ The YouTube upload failed: {ex.Message}\nThe button is live again if you want to retry.");
+            await TryFollowupAsync(component, originalDeleted
+                ? OriginalDeletedMessage
+                : $"⚠️ The YouTube upload failed: {ex.Message}\nThe button is live again if you want to retry.");
         }
         finally
         {
@@ -574,10 +616,11 @@ public sealed class VideoRepostHandler
     }
 
     /// <summary>
-    /// The attachment to upload, with a freshly signed CDN URL. For a repost it's
-    /// on component.Message, which arrives with the click. For a kept original
-    /// it's on the member's message, fetched over REST rather than from the
-    /// gateway cache: a cached copy's URLs can be past their ~24h expiry.
+    /// The attachment to upload, with a freshly signed CDN URL. For an older repost
+    /// it's on component.Message, which arrives with the click. Otherwise it's on
+    /// the member's message, fetched over REST rather than from the gateway cache:
+    /// a cached copy's URLs can be past their ~24h expiry. A deleted original
+    /// throws <see cref="OriginalDeletedException"/>.
     /// </summary>
     private async Task<IAttachment> ResolveSourceAttachmentAsync(IUserMessage buttonMessage, VideoSubmission submission)
     {
@@ -587,8 +630,8 @@ public sealed class VideoRepostHandler
                 ?? throw new InvalidOperationException($"The repost no longer has attachment #{submission.AttachmentIndex}.");
         }
 
-        var original = await FetchMessageAsync(submission.ChannelId, submission.OriginalMessageId)
-            ?? throw new InvalidOperationException("The original post has been deleted, so there's nothing to upload.");
+        var original = await FetchMessageAsync(submission.OriginalChannelId ?? submission.ChannelId, submission.OriginalMessageId)
+            ?? throw new OriginalDeletedException();
         return original.Attachments.ElementAtOrDefault(submission.AttachmentIndex)
             ?? throw new InvalidOperationException($"The original post no longer has attachment #{submission.AttachmentIndex}.");
     }
