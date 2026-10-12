@@ -27,7 +27,7 @@ Built with C# on .NET 10 ([Discord.Net](https://github.com/discord-net/Discord.N
 - XP seasons: XP from events, meetings, voice and chat, with daily caps that reset at Central midnight, a leaderboard and level-up DMs.
 - `/poll` (native or anonymous), Question and Joke of the Day, scheduled reminders, UFC schedules and results, a Sleeper fantasy football league, and THE FINALS leaderboard lookups.
 - Gamertag roster in Google Sheets (`/gamertags`, `/lookup`).
-- Clips posted in the clip channels are reposted with an "Upload to YouTube" button. Clips are upscaled to 1440p before upload.
+- Clips posted in the clip channels stay where they are and are forwarded to a private upload channel (`VideoUploadChannelId`), where the Media Team can send them to YouTube with an "Upload" button. Clips are upscaled to 1440p before upload.
 
 **Game servers**
 - Satisfactory (via the Ficsit Remote Monitoring mod): status, playtime, production reports, power and rail charts, and factory maps.
@@ -76,6 +76,7 @@ When adding a command, register it in `DiscordBotService` and add it to the cata
 The features use these permissions:
 - **Manage Roles**, **Manage Nicknames**, **Kick Members**, **Ban Members** and **Moderate Members** (timeouts).
 - **Manage Messages**, **Manage Channels**, **Manage Webhooks**, **Manage Server** (invite tracking), **Create Invite** and **View Audit Log**.
+- Clip uploads: **Read Message History** in the clip channels, and **View Channel**, **Send Messages** and **Read Message History** in the upload channel.
 - The usual send, embed, attach and read-history permissions.
 
 The meeting recorder uses its own bot account (`RECORDER_BOT_TOKEN`).
@@ -159,7 +160,7 @@ C# files are grouped into folders by feature. Most namespaces don't match the fo
 | `Events/`, `Polls/`, `Reminders/` | Clan events and calendar sync, polls, scheduled reminders |
 | `Tickets/`, `OfficerApplications/` | Support tickets and officer applications |
 | `Invites/`, `Gamertags/`, `Community/` | Invite tracking, gamertag roster, `/qotd`, `/jotd`, `/say` and bump reminders |
-| `Meetings/`, `Videos/`, `Backup/` | Meeting recording and minutes, clip reposts and YouTube uploads, database backups |
+| `Meetings/`, `Videos/`, `Backup/` | Meeting recording and minutes, clip forwarding and YouTube uploads, database backups |
 | `Satisfactory/`, `Valheim/`, `Finals/`, `Sleeper/`, `Ufc/` | Game and league integrations |
 | `Briefing/`, `AI/` | Weekly officer briefing and the Claude client |
 | `RedditLeads/` | Reddit recruiting leads |
