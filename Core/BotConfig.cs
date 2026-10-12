@@ -2865,9 +2865,9 @@ public class BotConfig
     /// <summary>
     /// Master switch for <see cref="Handlers.VideoRepostHandler"/>. When a member
     /// posts a message carrying a video attachment in one of
-    /// <see cref="VideoRepostChannelIds"/>, the bot reposts the video (plus the
-    /// message text and who posted it) with an "Upload" button, then deletes the
-    /// original. Messages without a video are never touched. Default true.
+    /// <see cref="VideoRepostChannelIds"/>, the bot forwards it to
+    /// <see cref="VideoUploadChannelId"/> with an "Upload" button. The member's post
+    /// is left as it is. Messages without a video are never touched. Default true.
     /// </summary>
     public bool VideoRepostEnabled { get; set; } = true;
 
@@ -2876,7 +2876,18 @@ public class BotConfig
         new() { 1408199889879564539, 1549891740993982504, 1551837069632995378 };
 
     /// <summary>
-    /// Role allowed to press "Upload" and send a reposted video to the clan's
+    /// Private channel (Media Team + HQ) where clip posts are forwarded. The bot
+    /// forwards each video post from <see cref="VideoRepostChannelIds"/> here and
+    /// replies to the forward with the poster, a jump link and the Upload
+    /// button(s). 0 = off: clip posts are left alone and get no Upload button
+    /// (buttons on older reposts keep working). The bot needs View Channel, Send
+    /// Messages and Read Message History here, and Read Message History in the
+    /// clip channels so it can forward from them.
+    /// </summary>
+    public ulong VideoUploadChannelId { get; set; } = 0;
+
+    /// <summary>
+    /// Role allowed to press "Upload" and send a clip to the clan's
     /// YouTube channel, plus Administrators. 0 fails CLOSED (Administrators only).
     /// </summary>
     public ulong VideoUploadRoleId { get; set; } = 1553078561072480326;

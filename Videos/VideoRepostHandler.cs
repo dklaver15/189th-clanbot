@@ -13,43 +13,39 @@ using Microsoft.Extensions.Options;
 namespace ClanGuardBot.Handlers;
 
 /// <summary>
-/// Video repost + "Upload to YouTube" button for the clip channels
-/// (<see cref="BotConfig.VideoRepostChannelIds"/>).
+/// Clip posts in the clip channels (<see cref="BotConfig.VideoRepostChannelIds"/>)
+/// get an "Upload to YouTube" button in the private upload channel
+/// (<see cref="BotConfig.VideoUploadChannelId"/>).
 ///
 /// ── What it does ──
 /// When a member posts a message carrying at least one video attachment, the
-/// bot reposts every attachment with the message text quoted under a
-/// "Posted by @member" line, adds one "Upload" button per video, and deletes
-/// the original. Messages without a video (plain chat, image-only posts) are
-/// left alone, since members talk in these channels too.
+/// bot leaves the post as it is and forwards it to the upload channel. A
+/// native Discord forward re-uploads nothing, so no size limit applies. It
+/// then replies to the forward with who posted it, a jump link and one
+/// "Upload" button per video. Messages without a video are ignored, and with
+/// no upload channel set nothing happens at all.
 ///
 /// Pressing "Upload" (holders of <see cref="BotConfig.VideoUploadRoleId"/>, plus
-/// Administrators) re-downloads that video from the repost and sends it to the
-/// clan's YouTube channel through <see cref="YouTubeUploadService"/>. The button
-/// then turns into a "Watch on YouTube" link.
+/// Administrators) downloads that video from the member's post and sends it to
+/// the clan's YouTube channel through <see cref="YouTubeUploadService"/>. The
+/// button then turns into a "Watch on YouTube" link.
 ///
-/// ── Posts too large to repost ──
-/// A bot can only re-upload files up to the guild's boost-tier limit, and a
-/// Nitro member can post far bigger clips than that (often the best-quality
-/// ones). Those posts are left where they are: the bot replies to the
-/// original with the Upload button(s) instead, and at upload time fetches the
-/// video from the member's own message. The same fallback kicks in if Discord
-/// rejects the repost as too large (413) despite passing the pre-check. If the
-/// member (or a moderation handler) deletes the original before anything was
-/// uploaded, the bot's reply is removed with it.
+/// ── Original deleted ──
+/// A forward is a snapshot, so it stays when the member deletes their post.
+/// Videos not uploaded yet are marked OriginalDeleted: their buttons are
+/// disabled and the reply says so. A deletion missed while the bot was offline
+/// is caught by the next click, which finds the post gone.
+///
+/// ── Older messages ──
+/// Before forwarding, the bot reposted clips in the clip channel (deleting the
+/// original) or, for posts too big to repost, replied to the original in place.
+/// Those rows have no OriginalChannelId. Their buttons keep working, and an
+/// in-place reply is still withdrawn when its original is deleted.
 ///
 /// ── Upscaling ──
 /// Before the upload, <see cref="VideoUpscaler"/> scales sub-1440p clips up to
 /// 1440p so YouTube gives them its better encode. It never blocks an upload:
 /// on any skip or failure the original file goes up instead.
-///
-/// ── Order: repost, THEN delete ──
-/// The repost is sent before the original is deleted, so a repost that fails
-/// (file over the guild's upload limit, missing Attach Files) never loses the
-/// member's video. If the original can't be deleted afterwards, the repost is
-/// rolled back instead. That includes a 404: the moderation handlers
-/// (invite filter, token-grabber scanner, honeypot) may have removed the
-/// original while it was downloading, and the bot must not resurrect it.
 ///
 /// ── Upload state / simultaneous clicks ──
 /// One <see cref="VideoSubmission"/> row per video. When several media-team
@@ -71,7 +67,7 @@ namespace ClanGuardBot.Handlers;
 /// re-enabled (a disabled button can't be clicked to recover it).
 ///
 /// ── Threading ──
-/// Downloads and uploads take seconds to minutes, so both gateway callbacks
+/// Forwards, downloads and uploads can take seconds to minutes, so both gateway callbacks
 /// hand the work to the thread pool and return at once rather than blocking
 /// Discord.Net's gateway task. The message is edited through the bot's own
 /// REST session, not the interaction token, so an upload that outlives the
@@ -84,8 +80,6 @@ public sealed class VideoRepostHandler
     {
         ".mp4", ".mov", ".webm", ".mkv", ".m4v", ".avi",
     };
-
-    private const int DiscordMessageLimit = 2000;
 
     private readonly IServiceProvider _services;
     private readonly IHttpClientFactory _httpFactory;
@@ -107,6 +101,9 @@ public sealed class VideoRepostHandler
     // Ready fires on every reconnect, but a reconnect doesn't kill in-flight
     // uploads; only a process start does. 0 = recovery not yet run.
     private int _recoveredStuckUploads;
+
+    // 0 = the "VideoUploadChannelId not set" warning hasn't been logged yet.
+    private int _warnedNoUploadChannel;
 
     public VideoRepostHandler(
         IServiceProvider services,
@@ -186,7 +183,7 @@ public sealed class VideoRepostHandler
         }
     }
 
-    // ─── Repost ──────────────────────────────────────────────────────
+    // ─── Forward ─────────────────────────────────────────────────────
 
     private Task OnMessageReceived(SocketMessage message)
     {
@@ -196,17 +193,28 @@ public sealed class VideoRepostHandler
         if (msg.Channel is not SocketTextChannel channel) return Task.CompletedTask;
         if (!_config.VideoRepostChannelIds.Contains(channel.Id)) return Task.CompletedTask;
         if (!msg.Attachments.Any(IsVideo)) return Task.CompletedTask;
+
+        if (_config.VideoUploadChannelId == 0)
+        {
+            if (Interlocked.Exchange(ref _warnedNoUploadChannel, 1) == 0)
+                _logger.LogWarning(
+                    "VideoUploadChannelId is not set, so clip posts are left alone and get no Upload button. " +
+                    "Set BotConfig__VideoUploadChannelId to the upload channel's ID.");
+            return Task.CompletedTask;
+        }
+
         if (!_inFlight.TryAdd(msg.Id, 0)) return Task.CompletedTask;
 
         _ = Task.Run(async () =>
         {
             try
             {
-                await RepostAsync(msg, channel);
+                await ForwardAsync(msg, channel);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Video repost failed for message {MessageId} in #{Channel}", msg.Id, channel.Name);
+                _logger.LogError(ex, "Forwarding video post {MessageId} from #{Channel} to the upload channel failed",
+                    msg.Id, channel.Name);
             }
             finally
             {
@@ -216,220 +224,137 @@ public sealed class VideoRepostHandler
         return Task.CompletedTask;
     }
 
-    private async Task RepostAsync(SocketUserMessage msg, SocketTextChannel channel)
+    /// <summary>
+    /// Forwards the member's post to the upload channel, replies to the forward
+    /// with the Upload button(s) and saves one row per video. The member's post is
+    /// never touched; if a later step fails, the bot's own messages are removed.
+    /// </summary>
+    private async Task ForwardAsync(SocketUserMessage msg, SocketTextChannel channel)
     {
-        var attachments  = msg.Attachments.ToList();
-        var poster       = msg.Author as SocketGuildUser;
-        var posterName   = poster?.DisplayName ?? msg.Author.GlobalName ?? msg.Author.Username;
-        var videoIndexes = Enumerable.Range(0, attachments.Count).Where(i => IsVideo(attachments[i])).ToList();
-
-        var totalBytes = attachments.Sum(a => (long)a.Size);
-        if ((ulong)totalBytes > channel.Guild.MaxUploadLimit)
+        if (_client?.GetChannel(_config.VideoUploadChannelId) is not ITextChannel uploadChannel)
         {
-            _logger.LogInformation(
-                "Video post {MessageId} in #{Channel} is {Size:N0} bytes, over the guild's {Limit:N0}-byte bot upload limit; adding the Upload button in place",
-                msg.Id, channel.Name, totalBytes, channel.Guild.MaxUploadLimit);
-            await KeepInPlaceAsync(msg, channel, attachments, videoIndexes, posterName);
+            _logger.LogError(
+                "Upload channel {UploadChannelId} not found or not a text channel; video post {MessageId} in #{Channel} not forwarded",
+                _config.VideoUploadChannelId, msg.Id, channel.Name);
             return;
         }
 
-        var tempDir = Path.Combine(Path.GetTempPath(), "clanguard-video", msg.Id.ToString());
-        Directory.CreateDirectory(tempDir);
-        try
+        // The gateway can deliver a message twice; the in-flight guard only
+        // covers overlapping deliveries.
+        using (var scope = _services.CreateScope())
         {
-            // Every attachment is carried over, not just the videos, so a
-            // screenshot posted alongside a clip isn't lost with the original.
-            var paths = new List<string>(attachments.Count);
-            for (var i = 0; i < attachments.Count; i++)
-            {
-                var path = Path.Combine(tempDir, i.ToString());
-                await DownloadAsync(attachments[i].Url, path);
-                paths.Add(path);
-            }
-
-            var pending = videoIndexes
-                .Select(i => new VideoSubmission { AttachmentIndex = i, Status = VideoSubmissionStatus.Pending })
-                .ToList();
-
-            // Keep a reply a reply.
-            MessageReference? reference = null;
-            if (msg.Type == MessageType.Reply && msg.Reference?.MessageId.IsSpecified == true)
-                reference = new MessageReference(msg.Reference.MessageId.Value, failIfNotExists: false);
-
-            IUserMessage repost;
-            var files = paths
-                .Select((p, i) => new FileAttachment(
-                    File.OpenRead(p), attachments[i].Filename, attachments[i].Description, attachments[i].IsSpoiler()))
-                .ToList();
-            try
-            {
-                repost = await channel.SendFilesAsync(
-                    files,
-                    text: BuildRepostText(msg.Author.Id, msg.Content),
-                    allowedMentions: AllowedMentions.None,
-                    messageReference: reference,
-                    components: VideoUploadCard.BuildComponents(pending));
-            }
-            catch (HttpException ex) when (IsTooLarge(ex))
-            {
-                // The boost-tier pre-check passed but Discord still refused the size.
-                _logger.LogInformation(
-                    "Discord rejected the repost of {MessageId} as too large; adding the Upload button in place", msg.Id);
-                await KeepInPlaceAsync(msg, channel, attachments, videoIndexes, posterName);
-                return;
-            }
-            finally
-            {
-                foreach (var f in files) f.Dispose();
-            }
-
-            try
-            {
-                var now = DateTime.UtcNow;
-                var repostAttachments = repost.Attachments.ToList();
-                using (var scope = _services.CreateScope())
-                {
-                    var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-                    foreach (var i in videoIndexes)
-                    {
-                        db.VideoSubmissions.Add(new VideoSubmission
-                        {
-                            GuildId           = channel.Guild.Id,
-                            ChannelId         = channel.Id,
-                            MessageId         = repost.Id,
-                            AttachmentIndex   = i,
-                            // Discord may rewrite the filename on upload; record what it kept.
-                            FileName          = repostAttachments.ElementAtOrDefault(i)?.Filename ?? attachments[i].Filename,
-                            OriginalMessageId = msg.Id,
-                            PosterUserId      = msg.Author.Id,
-                            PosterName        = posterName,
-                            OriginalContent   = msg.CleanContent ?? string.Empty,
-                            PostedUtc         = now,
-                        });
-                    }
-                    await db.SaveChangesAsync();
-                }
-
-                await msg.DeleteAsync();
-            }
-            catch (Exception ex)
-            {
-                await RollBackRepostAsync(repost);
-
-                if (ex is HttpException { HttpCode: System.Net.HttpStatusCode.NotFound })
-                {
-                    _logger.LogInformation(
-                        "Video post {MessageId} in #{Channel} was deleted by something else mid-repost; repost withdrawn",
-                        msg.Id, channel.Name);
-                    return;
-                }
-                throw;
-            }
-
-            _logger.LogInformation(
-                "Reposted {Count} video(s) from {User} in #{Channel} (original {Original} → repost {Repost})",
-                videoIndexes.Count, posterName, channel.Name, msg.Id, repost.Id);
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+            if (await db.VideoSubmissions.AnyAsync(v => v.OriginalMessageId == msg.Id)) return;
         }
-        finally
-        {
-            TryDeleteDirectory(tempDir);
-        }
-    }
 
-    /// <summary>
-    /// The oversized path: leave the member's post alone and reply to it with
-    /// the Upload button(s). The rows point at the original (KeptOriginal), and
-    /// the video is fetched from it when someone presses Upload.
-    /// </summary>
-    private async Task KeepInPlaceAsync(
-        SocketUserMessage msg, SocketTextChannel channel, List<Attachment> attachments,
-        List<int> videoIndexes, string posterName)
-    {
-        var pending = videoIndexes
-            .Select(i => new VideoSubmission { AttachmentIndex = i, Status = VideoSubmissionStatus.Pending })
+        var attachments = msg.Attachments.ToList();
+        var posterName  = (msg.Author as SocketGuildUser)?.DisplayName ?? msg.Author.GlobalName ?? msg.Author.Username;
+        var now         = DateTime.UtcNow;
+        var rows = Enumerable.Range(0, attachments.Count)
+            .Where(i => IsVideo(attachments[i]))
+            .Select(i => new VideoSubmission
+            {
+                GuildId           = channel.Guild.Id,
+                ChannelId         = uploadChannel.Id,
+                AttachmentIndex   = i,
+                KeptOriginal      = true,
+                FileName          = attachments[i].Filename,
+                OriginalChannelId = channel.Id,
+                OriginalMessageId = msg.Id,
+                PosterUserId      = msg.Author.Id,
+                PosterName        = posterName,
+                OriginalContent   = msg.CleanContent ?? string.Empty,
+                PostedUtc         = now,
+            })
             .ToList();
 
-        var text = videoIndexes.Count == 1
-            ? "🎬 This clip is too big for me to repost, so it stays up here. It can still go to YouTube:"
-            : "🎬 These clips are too big for me to repost, so they stay up here. They can still go to YouTube:";
+        var forward = await uploadChannel.SendMessageAsync(
+            messageReference: new MessageReference(msg.Id, channel.Id, channel.Guild.Id, true, MessageReferenceType.Forward));
 
         IUserMessage reply;
         try
         {
-            reply = await channel.SendMessageAsync(
-                text,
+            reply = await uploadChannel.SendMessageAsync(
+                VideoUploadCard.BuildText(rows[0], originalDeleted: false),
                 allowedMentions: AllowedMentions.None,
-                messageReference: new MessageReference(msg.Id, failIfNotExists: true),
-                components: VideoUploadCard.BuildComponents(pending));
+                messageReference: new MessageReference(forward.Id),
+                components: VideoUploadCard.BuildComponents(rows));
         }
-        catch (HttpException)
+        catch
         {
-            // Most likely the reply's target is gone (member or moderation
-            // deleted it first): nothing to attach a button to. Anything else
-            // is a real failure and goes to the caller's error log.
-            if (await FetchMessageAsync(channel.Id, msg.Id) is not null) throw;
-            _logger.LogInformation("Oversized video post {MessageId} was deleted before the Upload button could be added", msg.Id);
-            return;
+            await TryDeleteAsync(forward);
+            throw;
         }
 
         try
         {
-            var now = DateTime.UtcNow;
-            using (var scope = _services.CreateScope())
-            {
-                var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-                foreach (var i in videoIndexes)
-                {
-                    db.VideoSubmissions.Add(new VideoSubmission
-                    {
-                        GuildId           = channel.Guild.Id,
-                        ChannelId         = channel.Id,
-                        MessageId         = reply.Id,
-                        AttachmentIndex   = i,
-                        KeptOriginal      = true,
-                        FileName          = attachments[i].Filename,
-                        OriginalMessageId = msg.Id,
-                        PosterUserId      = msg.Author.Id,
-                        PosterName        = posterName,
-                        OriginalContent   = msg.CleanContent ?? string.Empty,
-                        PostedUtc         = now,
-                    });
-                }
-                await db.SaveChangesAsync();
-            }
+            using var scope = _services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+            foreach (var row in rows) row.MessageId = reply.Id;
+            db.VideoSubmissions.AddRange(rows);
+            await db.SaveChangesAsync();
         }
-        catch (Exception ex)
+        catch
         {
-            _logger.LogWarning(ex, "Could not save the in-place Upload button for {MessageId}; withdrawing it", msg.Id);
-            await RollBackRepostAsync(reply);
-            return;
+            await TryDeleteAsync(reply);
+            await TryDeleteAsync(forward);
+            throw;
         }
 
-        // A moderation handler may have deleted the original between the reply
-        // going out and the rows landing, in which case the deletion cleanup
-        // found nothing to clean. Check once now that it's saved. A failed
-        // check (Discord hiccup) keeps the button: only a confirmed deletion
-        // withdraws it.
-        bool originalGone;
-        try
-        {
-            originalGone = await FetchMessageAsync(channel.Id, msg.Id) is null;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Could not re-check original {MessageId}; keeping the Upload button", msg.Id);
-            originalGone = false;
-        }
-        if (originalGone)
-        {
-            _logger.LogInformation("Original {MessageId} was deleted while the Upload button was added; withdrawing it", msg.Id);
-            await RollBackRepostAsync(reply);
-            return;
-        }
+        // The member may have deleted the post between the forward and the save,
+        // when the deletion handler still found no rows to mark. Check once now.
+        if (await OriginalConfirmedGoneAsync(channel.Id, msg.Id))
+            await MarkOriginalDeletedAsync(msg.Id);
 
         _logger.LogInformation(
-            "Added in-place Upload button for {Count} oversized video(s) from {User} in #{Channel} (original {Original} → reply {Reply})",
-            videoIndexes.Count, posterName, channel.Name, msg.Id, reply.Id);
+            "Forwarded {Count} video(s) from {User} in #{Channel} to #{UploadChannel} (original {Original} → reply {Reply})",
+            rows.Count, posterName, channel.Name, uploadChannel.Name, msg.Id, reply.Id);
+    }
+
+    /// <summary>
+    /// The member's post is gone: marks its forwarded videos that weren't uploaded
+    /// yet as OriginalDeleted and redraws their reply.
+    /// </summary>
+    private async Task MarkOriginalDeletedAsync(ulong originalMessageId)
+    {
+        IReadOnlyList<(ulong ChannelId, ulong MessageId)> replies;
+        using (var scope = _services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+            replies = await VideoSubmissionStore.MarkOriginalDeletedAsync(db, originalMessageId);
+        }
+
+        foreach (var (channelId, messageId) in replies)
+        {
+            if (await FetchMessageAsync(channelId, messageId) is IUserMessage reply)
+                await RefreshButtonsAsync(reply);
+        }
+    }
+
+    /// <summary>True only when Discord confirms the message is gone; a failed check counts as still there.</summary>
+    private async Task<bool> OriginalConfirmedGoneAsync(ulong channelId, ulong messageId)
+    {
+        try
+        {
+            return await FetchMessageAsync(channelId, messageId) is null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not check whether original {MessageId} still exists", messageId);
+            return false;
+        }
+    }
+
+    private async Task TryDeleteAsync(IMessage message)
+    {
+        try
+        {
+            await message.DeleteAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not delete bot message {MessageId}", message.Id);
+        }
     }
 
     /// <summary>
@@ -476,15 +401,7 @@ public sealed class VideoRepostHandler
 
     private async Task RollBackRepostAsync(IUserMessage repost)
     {
-        try
-        {
-            await repost.DeleteAsync();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Could not withdraw video repost {MessageId}", repost.Id);
-        }
-
+        await TryDeleteAsync(repost);
         await DeleteRowsAsync(repost.Id);
     }
 
@@ -500,18 +417,6 @@ public sealed class VideoRepostHandler
         {
             _logger.LogWarning(ex, "Could not clear VideoSubmission rows for withdrawn message {MessageId}", buttonMessageId);
         }
-    }
-
-    private static string BuildRepostText(ulong posterId, string content)
-    {
-        var header = $"🎬 Posted by <@{posterId}>";
-        content = content.Trim();
-        if (content.Length == 0) return header;
-
-        const string quote = "\n>>> ";
-        var room = DiscordMessageLimit - header.Length - quote.Length;
-        if (content.Length > room) content = content[..(room - 1)].TrimEnd() + "…";
-        return header + quote + content;
     }
 
     // ─── Upload button ───────────────────────────────────────────────
@@ -729,11 +634,6 @@ public sealed class VideoRepostHandler
     }
 
     // ─── Shared helpers ──────────────────────────────────────────────
-
-    /// <summary>Discord reports an oversized upload either as HTTP 413 or as JSON error 40005.</summary>
-    private static bool IsTooLarge(HttpException ex) =>
-        ex.HttpCode == System.Net.HttpStatusCode.RequestEntityTooLarge
-        || ex.DiscordCode == DiscordErrorCode.RequestEntityTooLarge;
 
     private static bool IsVideo(IAttachment a) =>
         (a.ContentType?.StartsWith("video/", StringComparison.OrdinalIgnoreCase) ?? false)
