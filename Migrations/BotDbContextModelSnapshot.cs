@@ -2471,6 +2471,9 @@ namespace ClanGuardBot.Migrations
                     b.Property<ulong>("MessageId")
                         .HasColumnType("INTEGER");
 
+                    b.Property<ulong?>("OriginalChannelId")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("OriginalContent")
                         .IsRequired()
                         .HasColumnType("TEXT");

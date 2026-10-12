@@ -582,7 +582,7 @@ public sealed class VideoRepostHandler
         using (var scope = _services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-            claimed = await TryClaimAsync(db, messageId, index, user.Id, uploaderName, now);
+            claimed = await VideoSubmissionStore.TryClaimAsync(db, messageId, index, user.Id, uploaderName, now);
         }
 
         if (!claimed)
@@ -703,25 +703,6 @@ public sealed class VideoRepostHandler
         {
             return null;
         }
-    }
-
-    /// <summary>
-    /// Atomically moves one video from Pending to Uploading for this uploader.
-    /// A single UPDATE guarded on Status = Pending: of any number of
-    /// simultaneous clicks, exactly one returns true.
-    /// </summary>
-    public static async Task<bool> TryClaimAsync(
-        BotDbContext db, ulong messageId, int index, ulong userId, string userName, DateTime now)
-    {
-        var rows = await db.VideoSubmissions
-            .Where(v => v.MessageId == messageId && v.AttachmentIndex == index
-                     && v.Status == VideoSubmissionStatus.Pending)
-            .ExecuteUpdateAsync(s => s
-                .SetProperty(v => v.Status,           VideoSubmissionStatus.Uploading)
-                .SetProperty(v => v.UploadStartedUtc, (DateTime?)now)
-                .SetProperty(v => v.UploadedByUserId, (ulong?)userId)
-                .SetProperty(v => v.UploadedByName,   userName));
-        return rows == 1;
     }
 
     private bool CanUpload(SocketGuildUser user)
