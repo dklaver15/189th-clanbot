@@ -79,8 +79,6 @@ namespace ClanGuardBot.Handlers;
 /// </summary>
 public sealed class VideoRepostHandler
 {
-    public const string CustomIdPrefix = "vidup:";
-
     // Fallback for attachments Discord didn't give a content type.
     private static readonly HashSet<string> VideoExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -270,7 +268,7 @@ public sealed class VideoRepostHandler
                     text: BuildRepostText(msg.Author.Id, msg.Content),
                     allowedMentions: AllowedMentions.None,
                     messageReference: reference,
-                    components: BuildComponents(pending));
+                    components: VideoUploadCard.BuildComponents(pending));
             }
             catch (HttpException ex) when (IsTooLarge(ex))
             {
@@ -362,7 +360,7 @@ public sealed class VideoRepostHandler
                 text,
                 allowedMentions: AllowedMentions.None,
                 messageReference: new MessageReference(msg.Id, failIfNotExists: true),
-                components: BuildComponents(pending));
+                components: VideoUploadCard.BuildComponents(pending));
         }
         catch (HttpException)
         {
@@ -521,7 +519,7 @@ public sealed class VideoRepostHandler
     private Task OnButtonExecuted(SocketMessageComponent component)
     {
         var customId = component.Data.CustomId;
-        if (string.IsNullOrEmpty(customId) || !customId.StartsWith(CustomIdPrefix, StringComparison.Ordinal))
+        if (string.IsNullOrEmpty(customId) || !customId.StartsWith(VideoUploadCard.CustomIdPrefix, StringComparison.Ordinal))
             return Task.CompletedTask;
 
         _ = Task.Run(async () =>
@@ -548,7 +546,7 @@ public sealed class VideoRepostHandler
 
     private async Task HandleUploadClickAsync(SocketMessageComponent component, string customId)
     {
-        if (!int.TryParse(customId[CustomIdPrefix.Length..], out var index) || index < 0)
+        if (!int.TryParse(customId[VideoUploadCard.CustomIdPrefix.Length..], out var index) || index < 0)
         {
             _logger.LogWarning("Malformed video upload customId: {CustomId}", customId);
             return;
@@ -741,44 +739,6 @@ public sealed class VideoRepostHandler
         (a.ContentType?.StartsWith("video/", StringComparison.OrdinalIgnoreCase) ?? false)
         || VideoExtensions.Contains(Path.GetExtension(a.Filename));
 
-    /// <summary>
-    /// One button per video, in attachment order. Numbered only when the post
-    /// carries more than one video. Up to 5 buttons per row (Discord's cap);
-    /// a message carries at most 10 attachments, so two rows at most.
-    /// </summary>
-    private static MessageComponent BuildComponents(IReadOnlyList<VideoSubmission> videos)
-    {
-        var builder  = new ComponentBuilder();
-        var numbered = videos.Count > 1;
-        var ordered  = videos.OrderBy(v => v.AttachmentIndex).ToList();
-
-        for (var n = 0; n < ordered.Count; n++)
-        {
-            var v      = ordered[n];
-            var suffix = numbered ? $" #{n + 1}" : "";
-            var row    = n / 5;
-            var id     = CustomIdPrefix + v.AttachmentIndex;
-
-            switch (v.Status)
-            {
-                case VideoSubmissionStatus.Uploaded:
-                    builder.WithButton("Watch on YouTube" + suffix, style: ButtonStyle.Link,
-                        url: $"https://youtu.be/{v.YouTubeVideoId}", row: row);
-                    break;
-                case VideoSubmissionStatus.Uploading:
-                    builder.WithButton("Uploading…" + suffix, id, ButtonStyle.Secondary,
-                        disabled: true, row: row);
-                    break;
-                default:
-                    builder.WithButton("Upload" + suffix, id, ButtonStyle.Primary,
-                        emote: new Emoji("📤"), row: row);
-                    break;
-            }
-        }
-
-        return builder.Build();
-    }
-
     private async Task RefreshButtonsAsync(IUserMessage message)
     {
         var gate = _redrawLocks.GetOrAdd(message.Id, _ => new SemaphoreSlim(1, 1));
@@ -797,11 +757,23 @@ public sealed class VideoRepostHandler
             }
             if (rows.Count == 0) return;
 
-            await message.ModifyAsync(p => p.Components = BuildComponents(rows));
+            // A forwarded clip's reply text carries the "original deleted" line,
+            // so it's rebuilt along with the buttons. Older messages: buttons only.
+            var forwarded = rows[0].OriginalChannelId is not null;
+            var deleted   = rows.Any(r => r.Status == VideoSubmissionStatus.OriginalDeleted);
+            await message.ModifyAsync(p =>
+            {
+                p.Components = VideoUploadCard.BuildComponents(rows);
+                if (forwarded)
+                {
+                    p.Content         = VideoUploadCard.BuildText(rows[0], deleted);
+                    p.AllowedMentions = AllowedMentions.None;
+                }
+            });
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Could not refresh upload buttons on repost {MessageId}", message.Id);
+            _logger.LogWarning(ex, "Could not refresh upload buttons on message {MessageId}", message.Id);
         }
         finally
         {
