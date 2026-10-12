@@ -107,11 +107,11 @@ public sealed class VideoRepostHandler
 
     private const string OriginalDeletedMessage = "The original post was deleted, so this clip can't be uploaded.";
 
-    /// <summary>The member's original post is gone, so there is nothing left to upload.</summary>
-    private sealed class OriginalDeletedException : Exception
-    {
-        public OriginalDeletedException() : base(OriginalDeletedMessage) { }
-    }
+    /// <summary>
+    /// The member's original post (or this clip in it) is gone, so there is nothing
+    /// left to upload. The message is what the clicker is told.
+    /// </summary>
+    private sealed class OriginalDeletedException(string message = OriginalDeletedMessage) : Exception(message);
 
     public VideoRepostHandler(
         IServiceProvider services,
@@ -606,7 +606,7 @@ public sealed class VideoRepostHandler
 
             await RefreshButtonsAsync(message);
             await TryFollowupAsync(component, originalDeleted
-                ? OriginalDeletedMessage
+                ? (ex as OriginalDeletedException)?.Message ?? OriginalDeletedMessage
                 : $"⚠️ The YouTube upload failed: {ex.Message}\nThe button is live again if you want to retry.");
         }
         finally
@@ -632,8 +632,30 @@ public sealed class VideoRepostHandler
 
         var original = await FetchMessageAsync(submission.OriginalChannelId ?? submission.ChannelId, submission.OriginalMessageId)
             ?? throw new OriginalDeletedException();
-        return original.Attachments.ElementAtOrDefault(submission.AttachmentIndex)
-            ?? throw new InvalidOperationException($"The original post no longer has attachment #{submission.AttachmentIndex}.");
+
+        var names = original.Attachments.Select(a => a.Filename).ToList();
+        if (ResolveAttachmentIndex(names, submission.AttachmentIndex, submission.FileName) is { } index)
+            return original.Attachments.ElementAt(index);
+
+        if (!names.Contains(submission.FileName))
+            throw new OriginalDeletedException("This clip was removed from the original post, so it can't be uploaded.");
+        throw new InvalidOperationException(
+            "The original post was edited and this clip can't be told apart from another one with the same name.");
+    }
+
+    /// <summary>
+    /// Where the stored video sits in the member's post now. The member can edit
+    /// the post and remove attachments, which shifts the positions, so the stored
+    /// file name has to match: by position when it still does, otherwise the one
+    /// attachment with that name. Null when the clip is gone or can't be told
+    /// apart from a same-named one, so a different clip is never uploaded.
+    /// </summary>
+    internal static int? ResolveAttachmentIndex(IReadOnlyList<string> fileNames, int storedIndex, string storedFileName)
+    {
+        if (storedIndex < fileNames.Count && fileNames[storedIndex] == storedFileName) return storedIndex;
+
+        var matches = Enumerable.Range(0, fileNames.Count).Where(i => fileNames[i] == storedFileName).ToList();
+        return matches.Count == 1 ? matches[0] : null;
     }
 
     /// <summary>REST fetch (bypassing the gateway cache); null if the message is gone.</summary>
