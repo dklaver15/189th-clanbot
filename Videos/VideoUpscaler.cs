@@ -24,7 +24,8 @@ namespace ClanGuardBot.Services;
 /// the caller uploads the original file. A clip always reaches YouTube.
 ///
 /// ── Keeping the droplet healthy ──
-/// One encode at a time (a second upload waits its turn), capped decoder,
+/// One encode at a time across upscales and Shorts (<see cref="EncodeGate"/>;
+/// a second one waits its turn), capped decoder,
 /// filter and encoder threads so peak memory stays near 320 MB inside the
 /// 640m container (see EncodeAsync), and below-normal CPU priority so the
 /// gateway and every other handler stay responsive while it runs.
@@ -36,12 +37,13 @@ namespace ClanGuardBot.Services;
 public sealed class VideoUpscaler
 {
     private readonly BotConfig _config;
+    private readonly EncodeGate _gate;
     private readonly ILogger<VideoUpscaler> _logger;
-    private readonly SemaphoreSlim _encodeGate = new(1, 1);
 
-    public VideoUpscaler(IOptions<BotConfig> config, ILogger<VideoUpscaler> logger)
+    public VideoUpscaler(IOptions<BotConfig> config, EncodeGate gate, ILogger<VideoUpscaler> logger)
     {
         _config = config.Value;
+        _gate   = gate;
         _logger = logger;
     }
 
@@ -83,15 +85,10 @@ public sealed class VideoUpscaler
                 return null;
             }
 
-            await _encodeGate.WaitAsync(ct);
-            try
+            using (await _gate.AcquireAsync(ct))
             {
                 if (onEncodeStarting is not null) await onEncodeStarting();
                 return await EncodeAsync(inputPath, workDir, probe, target, ct);
-            }
-            finally
-            {
-                _encodeGate.Release();
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -141,14 +138,15 @@ public sealed class VideoUpscaler
 
         var timeout = TimeSpan.FromMinutes(_config.VideoUploadUpscaleTimeoutMinutes);
         var sw = Stopwatch.StartNew();
-        var (exitCode, stderr) = await RunAsync(_config.FfmpegPath, args, timeout, lowPriority: true, ct);
+        var (exitCode, _, stderr) = await FfmpegProcess.RunAsync(
+            _config.FfmpegPath, args, timeout, lowPriority: true, captureStdout: false, _logger, ct);
         sw.Stop();
 
         if (exitCode != 0 || !File.Exists(output) || new FileInfo(output).Length == 0)
         {
             _logger.LogWarning(
                 "ffmpeg upscale exited {Code} after {Elapsed}; uploading the original. Tail: {Tail}",
-                exitCode, sw.Elapsed, Tail(stderr));
+                exitCode, sw.Elapsed, FfmpegProcess.Tail(stderr));
             return null;
         }
 
@@ -175,10 +173,11 @@ public sealed class VideoUpscaler
             inputPath,
         };
 
-        var (exitCode, stdout, stderr) = await RunCaptureAsync(_config.FfprobePath, args, TimeSpan.FromMinutes(1), ct);
+        var (exitCode, stdout, stderr) = await FfmpegProcess.RunAsync(
+            _config.FfprobePath, args, TimeSpan.FromMinutes(1), lowPriority: false, captureStdout: true, _logger, ct);
         if (exitCode != 0)
         {
-            _logger.LogWarning("ffprobe exited {Code}; skipping upscale. {Tail}", exitCode, Tail(stderr));
+            _logger.LogWarning("ffprobe exited {Code}; skipping upscale. {Tail}", exitCode, FfmpegProcess.Tail(stderr));
             return null;
         }
 
@@ -202,63 +201,4 @@ public sealed class VideoUpscaler
         if (width <= 0 || height <= 0) return null;
         return new ProbeResult(width, height, duration, transfer);
     }
-
-    private async Task<(int ExitCode, string Stderr)> RunAsync(
-        string exe, IEnumerable<string> args, TimeSpan timeout, bool lowPriority, CancellationToken ct)
-    {
-        var (code, _, stderr) = await RunCoreAsync(exe, args, timeout, lowPriority, captureStdout: false, ct);
-        return (code, stderr);
-    }
-
-    private Task<(int ExitCode, string Stdout, string Stderr)> RunCaptureAsync(
-        string exe, IEnumerable<string> args, TimeSpan timeout, CancellationToken ct) =>
-        RunCoreAsync(exe, args, timeout, lowPriority: false, captureStdout: true, ct);
-
-    private async Task<(int ExitCode, string Stdout, string Stderr)> RunCoreAsync(
-        string exe, IEnumerable<string> args, TimeSpan timeout, bool lowPriority, bool captureStdout, CancellationToken ct)
-    {
-        var psi = new ProcessStartInfo(exe)
-        {
-            RedirectStandardOutput = true,
-            RedirectStandardError  = true,
-            UseShellExecute        = false,
-            CreateNoWindow         = true,
-        };
-        foreach (var a in args) psi.ArgumentList.Add(a);
-
-        using var process = Process.Start(psi)
-            ?? throw new InvalidOperationException($"Could not start {exe}");
-
-        if (lowPriority)
-        {
-            try { process.PriorityClass = ProcessPriorityClass.BelowNormal; }
-            catch (Exception ex) { _logger.LogDebug(ex, "Could not lower {Exe} priority", exe); }
-        }
-
-        // Drain both pipes concurrently: ffmpeg writes progress to stderr
-        // continuously and would block once the pipe buffer fills.
-        var stdoutTask = process.StandardOutput.ReadToEndAsync(ct);
-        var stderrTask = process.StandardError.ReadToEndAsync(ct);
-
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeoutCts.CancelAfter(timeout);
-        try
-        {
-            await process.WaitForExitAsync(timeoutCts.Token);
-        }
-        catch (OperationCanceledException)
-        {
-            try { process.Kill(entireProcessTree: true); } catch { /* already gone */ }
-            if (ct.IsCancellationRequested) throw;
-            _logger.LogWarning("{Exe} timed out after {Timeout} and was killed", exe, timeout);
-            return (-1, string.Empty, "timed out");
-        }
-
-        var stdout = await stdoutTask;
-        var stderr = await stderrTask;
-        return (process.ExitCode, captureStdout ? stdout : string.Empty, stderr);
-    }
-
-    private static string Tail(string s, int max = 600) =>
-        s.Length <= max ? s.Trim() : "…" + s[^max..].Trim();
 }

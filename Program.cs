@@ -525,6 +525,8 @@ try
     // BotConfig.YouTubeClientId/Secret/RefreshToken. Self-registers MessageReceived
     // + MessageDeleted + MessagesBulkDeleted + ButtonExecuted + Ready.
     builder.Services.AddSingleton<YouTubeUploadService>();
+    // EncodeGate: one ffmpeg encode at a time (upscales and Short renders share it).
+    builder.Services.AddSingleton<EncodeGate>();
     // VideoUpscaler: ffmpeg upscale to 1440p before upload (BotConfig.VideoUploadUpscale*).
     builder.Services.AddSingleton<VideoUpscaler>();
     builder.Services.AddSingleton<VideoRepostHandler>();

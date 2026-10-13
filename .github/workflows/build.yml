@@ -28,6 +28,10 @@ jobs:
           # ImageSharp 4 fails a Release build without a Six Labors license key.
           SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
 
+      # The render tests run real ffmpeg (they skip themselves where it's missing).
+      - name: Install ffmpeg
+        run: command -v ffmpeg || (sudo apt-get update && sudo apt-get install -y ffmpeg)
+
       # Debug, so it needs no Six Labors license key.
       - name: Run tests
         run: dotnet test Tests/ClanGuardBot.Tests
