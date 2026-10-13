@@ -81,6 +81,14 @@ public class ClanEvent
     public DateTime StartUtc { get; set; }
     public DateTime EndUtc { get; set; }
 
+    /// <summary>
+    /// The rule-generated cadence slot this occurrence fills, set only when a
+    /// single occurrence of a rule-based series has been moved off that slot
+    /// (null otherwise). The recurrence scheduler counts this slot as taken, so
+    /// it doesn't regenerate a duplicate at the original time.
+    /// </summary>
+    public DateTime? OriginalStartUtc { get; set; }
+
     public ClanEventStatus Status { get; set; } = ClanEventStatus.Scheduled;
 
     /// <summary>

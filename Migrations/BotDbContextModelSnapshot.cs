@@ -413,6 +413,9 @@ namespace ClanGuardBot.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<DateTime?>("OriginalStartUtc")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("RemindersSentCsv")
                         .IsRequired()
                         .HasColumnType("TEXT");

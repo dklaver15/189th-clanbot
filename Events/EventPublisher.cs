@@ -585,17 +585,22 @@ public sealed class EventPublisher : IEventPublisher
         // Dates that already have an occurrence (other than a dropped slot) don't
         // count toward EventRecurrenceMaxBackfill, which caps NEW occurrences per
         // pass. Counting them used to pin every series at its next 4 dates.
+        // A moved occurrence also holds its original slot.
         HashSet<DateTime> taken;
         using (var scope = _services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-            taken = (await db.ClanEvents
-                .Where(e => e.SeriesId == series.Id && e.StartUtc > fromUtc
+            var rows = await db.ClanEvents
+                .Where(e => e.SeriesId == series.Id
+                         && (e.StartUtc > fromUtc || e.OriginalStartUtc > fromUtc)
                          && (e.Status != ClanEventStatus.Cancelled
                           || e.MessageId != 0
                           || db.EventRsvps.Any(r => r.ClanEventId == e.Id)))
-                .Select(e => e.StartUtc)
-                .ToListAsync()).ToHashSet();
+                .Select(e => new { e.StartUtc, e.OriginalStartUtc })
+                .ToListAsync();
+            taken = rows.Select(r => r.StartUtc).ToHashSet();
+            foreach (var r in rows)
+                if (r.OriginalStartUtc is DateTime orig) taken.Add(orig);
         }
 
         var occurrences = ClanEventRecurrence
