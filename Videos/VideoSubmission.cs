@@ -15,10 +15,35 @@ public enum VideoSubmissionStatus
     OriginalDeleted = 3,
 }
 
+/// <summary>Which button a row belongs to. Each forwarded video has one row of each kind.</summary>
+public enum VideoSubmissionKind
+{
+    /// <summary>The normal "Upload" button: the clip as a regular YouTube video.</summary>
+    Video = 0,
+    /// <summary>The "Short" button: a 9:16 YouTube Short made from the clip.</summary>
+    Short = 1,
+}
+
+/// <summary>How a Short frames its clip.</summary>
+public enum ShortLayout
+{
+    /// <summary>The whole frame on top, a zoomed centre crop below (the default).</summary>
+    FullViewZoom = 0,
+    /// <summary>A centred 9:16 crop of the frame.</summary>
+    CenterCrop = 1,
+    /// <summary>A vertical or square clip kept as it is (only scaled).</summary>
+    AsIs = 2,
+}
+
+/// <summary>What the uploader chose in the Short form.</summary>
+/// <param name="EndSeconds">Null = to the end of the clip (at most <c>ShortRequest.MaxSeconds</c> after the start).</param>
+public sealed record ShortSettings(ShortLayout Layout, double StartSeconds, double? EndSeconds, string Title);
+
 /// <summary>
 /// One video from a clip post in a watched channel (see
-/// <see cref="Handlers.VideoRepostHandler"/>). One row per video, so a message
-/// with two clips gets two rows and two independent Upload buttons.
+/// <see cref="Handlers.VideoRepostHandler"/>). One row per video and button
+/// (<see cref="Kind"/>), so a forwarded post with two clips gets four rows: an
+/// Upload and a Short button per clip.
 ///
 /// ── Why this is persisted ──
 /// The Upload button can be pressed hours or days after the repost, across bot
@@ -52,6 +77,13 @@ public class VideoSubmission
     public int AttachmentIndex { get; set; }
 
     /// <summary>
+    /// Which button this row is: the normal upload or the Short. Unique with
+    /// <see cref="MessageId"/> and <see cref="AttachmentIndex"/>. Rows from before
+    /// Shorts are all <see cref="VideoSubmissionKind.Video"/>.
+    /// </summary>
+    public VideoSubmissionKind Kind { get; set; } = VideoSubmissionKind.Video;
+
+    /// <summary>
     /// True when the member's post stays where it is and the video is fetched
     /// from it at upload time: every forwarded clip, and older oversized posts
     /// the bot replied to in place. False only for older reposts.
@@ -74,6 +106,28 @@ public class VideoSubmission
     /// original was in <see cref="ChannelId"/>.
     /// </summary>
     public ulong? OriginalChannelId { get; set; }
+
+    /// <summary>
+    /// Size of the source video as Discord reported it when the clip was
+    /// forwarded; null when it didn't. Lets the Short button decide at once
+    /// whether to ask for a framing (no time to download the clip first).
+    /// </summary>
+    public int? Width { get; set; }
+
+    /// <summary>See <see cref="Width"/>.</summary>
+    public int? Height { get; set; }
+
+    /// <summary>Short rows: the framing chosen when the Short was claimed.</summary>
+    public ShortLayout? ShortLayout { get; set; }
+
+    /// <summary>Short rows: where the Short starts in the clip, in seconds.</summary>
+    public double? ShortStartSeconds { get; set; }
+
+    /// <summary>Short rows: where it ends; null = end of the clip (max 3:00 after the start).</summary>
+    public double? ShortEndSeconds { get; set; }
+
+    /// <summary>Short rows: the title from the form.</summary>
+    public string? ShortTitle { get; set; }
 
     public ulong PosterUserId { get; set; }
 

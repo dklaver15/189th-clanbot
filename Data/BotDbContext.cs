@@ -576,8 +576,9 @@ public class BotDbContext : DbContext
         // click; unique so one video can only ever have one state row.
         modelBuilder.Entity<VideoSubmission>(e =>
         {
-            e.HasIndex(v => new { v.MessageId, v.AttachmentIndex }).IsUnique();
+            e.HasIndex(v => new { v.MessageId, v.AttachmentIndex, v.Kind }).IsUnique();
             e.Property(v => v.Status).HasConversion<int>();
+            e.Property(v => v.Kind).HasConversion<int>();
         });
 
         // ── Sleeper weekly posts ──────────────────────────────────────

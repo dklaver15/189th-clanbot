@@ -519,12 +519,12 @@ public sealed class VideoRepostHandler
         using (var scope = _services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-            claimed = await VideoSubmissionStore.TryClaimAsync(db, messageId, index, user.Id, uploaderName, now);
+            claimed = await VideoSubmissionStore.TryClaimAsync(db, messageId, index, VideoSubmissionKind.Video, user.Id, uploaderName, now);
         }
 
         if (!claimed)
         {
-            var existing = await LoadAsync(messageId, index);
+            var existing = await LoadAsync(messageId, index, VideoSubmissionKind.Video);
             await RefreshButtonsAsync(message);
             var reply = existing?.Status switch
             {
@@ -549,7 +549,7 @@ public sealed class VideoRepostHandler
         VideoSubmission? submission = null;
         try
         {
-            submission = await LoadAsync(messageId, index)
+            submission = await LoadAsync(messageId, index, VideoSubmissionKind.Video)
                 ?? throw new InvalidOperationException("Submission row vanished after claim.");
 
             var attachment = await ResolveSourceAttachmentAsync(message, submission);
@@ -601,7 +601,7 @@ public sealed class VideoRepostHandler
             using (var scope = _services.CreateScope())
             {
                 var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-                await VideoSubmissionStore.ReleaseFailedUploadAsync(db, messageId, index, ex.Message, originalDeleted);
+                await VideoSubmissionStore.ReleaseFailedUploadAsync(db, messageId, index, VideoSubmissionKind.Video, ex.Message, originalDeleted);
             }
 
             await RefreshButtonsAsync(message);
@@ -746,19 +746,19 @@ public sealed class VideoRepostHandler
         }
     }
 
-    private async Task<VideoSubmission?> LoadAsync(ulong messageId, int index)
+    private async Task<VideoSubmission?> LoadAsync(ulong messageId, int index, VideoSubmissionKind kind)
     {
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
         return await db.VideoSubmissions.AsNoTracking()
-            .FirstOrDefaultAsync(v => v.MessageId == messageId && v.AttachmentIndex == index);
+            .FirstOrDefaultAsync(v => v.MessageId == messageId && v.AttachmentIndex == index && v.Kind == kind);
     }
 
     private async Task<int> CountVideosAsync(ulong messageId)
     {
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-        return await db.VideoSubmissions.CountAsync(v => v.MessageId == messageId);
+        return await VideoSubmissionStore.CountVideosAsync(db, messageId);
     }
 
     private async Task DownloadAsync(string url, string path)

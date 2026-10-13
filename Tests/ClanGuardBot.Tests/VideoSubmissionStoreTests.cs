@@ -9,11 +9,12 @@ public class VideoSubmissionStoreTests
     private const ulong UploadChannel = 500;
     private const ulong ClipChannel   = 600;
 
-    /// <summary>A clip forwarded to the upload channel (the new flow).</summary>
+    /// <summary>A clip forwarded to the upload channel (the new flow); one row per button kind.</summary>
     private static VideoSubmission Forwarded(
-        ulong replyId, ulong originalId, int index, VideoSubmissionStatus status = VideoSubmissionStatus.Pending) => new()
+        ulong replyId, ulong originalId, int index, VideoSubmissionStatus status = VideoSubmissionStatus.Pending,
+        VideoSubmissionKind kind = VideoSubmissionKind.Video) => new()
     {
-        GuildId = 1, ChannelId = UploadChannel, MessageId = replyId, AttachmentIndex = index,
+        GuildId = 1, ChannelId = UploadChannel, MessageId = replyId, AttachmentIndex = index, Kind = kind,
         KeptOriginal = true, OriginalChannelId = ClipChannel, OriginalMessageId = originalId,
         FileName = $"clip{index}.mp4", Status = status,
     };
@@ -35,11 +36,12 @@ public class VideoSubmissionStoreTests
         await db.SaveChangesAsync();
     }
 
-    private static async Task<VideoSubmission> RowAsync(TestDb test, ulong messageId, int index)
+    private static async Task<VideoSubmission> RowAsync(
+        TestDb test, ulong messageId, int index, VideoSubmissionKind kind = VideoSubmissionKind.Video)
     {
         await using var db = test.NewContext();
         return await db.VideoSubmissions.AsNoTracking()
-            .SingleAsync(v => v.MessageId == messageId && v.AttachmentIndex == index);
+            .SingleAsync(v => v.MessageId == messageId && v.AttachmentIndex == index && v.Kind == kind);
     }
 
     // ─── TryClaimAsync ───────────────────────────────────────────────
@@ -52,9 +54,9 @@ public class VideoSubmissionStoreTests
         var now = DateTime.UtcNow;
 
         await using (var db = test.NewContext())
-            Assert.True(await VideoSubmissionStore.TryClaimAsync(db, 10, 0, 7, "Alice", now));
+            Assert.True(await VideoSubmissionStore.TryClaimAsync(db, 10, 0, VideoSubmissionKind.Video, 7, "Alice", now));
         await using (var db = test.NewContext())
-            Assert.False(await VideoSubmissionStore.TryClaimAsync(db, 10, 0, 8, "Bob", now));
+            Assert.False(await VideoSubmissionStore.TryClaimAsync(db, 10, 0, VideoSubmissionKind.Video, 8, "Bob", now));
 
         var row = await RowAsync(test, 10, 0);
         Assert.Equal(VideoSubmissionStatus.Uploading, row.Status);
@@ -69,7 +71,7 @@ public class VideoSubmissionStoreTests
         await SeedAsync(test, Forwarded(10, 100, 0, VideoSubmissionStatus.OriginalDeleted));
 
         await using var db = test.NewContext();
-        Assert.False(await VideoSubmissionStore.TryClaimAsync(db, 10, 0, 7, "Alice", DateTime.UtcNow));
+        Assert.False(await VideoSubmissionStore.TryClaimAsync(db, 10, 0, VideoSubmissionKind.Video, 7, "Alice", DateTime.UtcNow));
     }
 
     // ─── MarkOriginalDeletedAsync ────────────────────────────────────
@@ -132,7 +134,7 @@ public class VideoSubmissionStoreTests
         await SeedAsync(test, Forwarded(10, 100, 0, VideoSubmissionStatus.Uploading));
 
         await using (var db = test.NewContext())
-            Assert.Equal(1, await VideoSubmissionStore.ReleaseFailedUploadAsync(db, 10, 0, "quota", originalDeleted: false));
+            Assert.Equal(1, await VideoSubmissionStore.ReleaseFailedUploadAsync(db, 10, 0, VideoSubmissionKind.Video, "quota", originalDeleted: false));
 
         var row = await RowAsync(test, 10, 0);
         Assert.Equal(VideoSubmissionStatus.Pending, row.Status);
@@ -146,7 +148,7 @@ public class VideoSubmissionStoreTests
         await SeedAsync(test, Forwarded(10, 100, 0, VideoSubmissionStatus.Uploading));
 
         await using (var db = test.NewContext())
-            await VideoSubmissionStore.ReleaseFailedUploadAsync(db, 10, 0, "gone", originalDeleted: true);
+            await VideoSubmissionStore.ReleaseFailedUploadAsync(db, 10, 0, VideoSubmissionKind.Video, "gone", originalDeleted: true);
 
         Assert.Equal(VideoSubmissionStatus.OriginalDeleted, (await RowAsync(test, 10, 0)).Status);
     }
@@ -158,7 +160,7 @@ public class VideoSubmissionStoreTests
         await SeedAsync(test, Forwarded(10, 100, 0, VideoSubmissionStatus.Uploaded));
 
         await using (var db = test.NewContext())
-            Assert.Equal(0, await VideoSubmissionStore.ReleaseFailedUploadAsync(db, 10, 0, "late", originalDeleted: true));
+            Assert.Equal(0, await VideoSubmissionStore.ReleaseFailedUploadAsync(db, 10, 0, VideoSubmissionKind.Video, "late", originalDeleted: true));
 
         Assert.Equal(VideoSubmissionStatus.Uploaded, (await RowAsync(test, 10, 0)).Status);
     }
@@ -170,8 +172,84 @@ public class VideoSubmissionStoreTests
         await SeedAsync(test, Forwarded(10, 100, 0, VideoSubmissionStatus.Uploading));
 
         await using (var db = test.NewContext())
-            await VideoSubmissionStore.ReleaseFailedUploadAsync(db, 10, 0, new string('x', 900), originalDeleted: false);
+            await VideoSubmissionStore.ReleaseFailedUploadAsync(db, 10, 0, VideoSubmissionKind.Video, new string('x', 900), originalDeleted: false);
 
         Assert.Equal(500, (await RowAsync(test, 10, 0)).LastError!.Length);
+    }
+
+    // ─── Two kinds per video ─────────────────────────────────────────
+
+    [Fact]
+    public async Task Claiming_the_short_leaves_the_video_row_alone_and_saves_its_settings()
+    {
+        using var test = new TestDb();
+        await SeedAsync(test, Forwarded(10, 100, 0), Forwarded(10, 100, 0, kind: VideoSubmissionKind.Short));
+        var settings = new ShortSettings(ShortLayout.CenterCrop, 5, 15, "Nice shot");
+
+        await using (var db = test.NewContext())
+            Assert.True(await VideoSubmissionStore.TryClaimAsync(
+                db, 10, 0, VideoSubmissionKind.Short, 7, "Alice", DateTime.UtcNow, settings));
+
+        var shortRow = await RowAsync(test, 10, 0, VideoSubmissionKind.Short);
+        Assert.Equal(VideoSubmissionStatus.Uploading, shortRow.Status);
+        Assert.Equal(ShortLayout.CenterCrop, shortRow.ShortLayout);
+        Assert.Equal(5, shortRow.ShortStartSeconds);
+        Assert.Equal(15, shortRow.ShortEndSeconds);
+        Assert.Equal("Nice shot", shortRow.ShortTitle);
+        Assert.Equal(VideoSubmissionStatus.Pending, (await RowAsync(test, 10, 0)).Status);
+    }
+
+    [Fact]
+    public async Task Claiming_the_video_leaves_the_short_row_alone()
+    {
+        using var test = new TestDb();
+        await SeedAsync(test, Forwarded(10, 100, 0), Forwarded(10, 100, 0, kind: VideoSubmissionKind.Short));
+
+        await using (var db = test.NewContext())
+            Assert.True(await VideoSubmissionStore.TryClaimAsync(db, 10, 0, VideoSubmissionKind.Video, 7, "Alice", DateTime.UtcNow));
+
+        Assert.Equal(VideoSubmissionStatus.Uploading, (await RowAsync(test, 10, 0)).Status);
+        Assert.Equal(VideoSubmissionStatus.Pending, (await RowAsync(test, 10, 0, VideoSubmissionKind.Short)).Status);
+    }
+
+    [Fact]
+    public async Task ReleaseFailedUpload_only_touches_its_own_kind()
+    {
+        using var test = new TestDb();
+        await SeedAsync(test,
+            Forwarded(10, 100, 0, VideoSubmissionStatus.Uploading),
+            Forwarded(10, 100, 0, VideoSubmissionStatus.Uploading, VideoSubmissionKind.Short));
+
+        await using (var db = test.NewContext())
+            Assert.Equal(1, await VideoSubmissionStore.ReleaseFailedUploadAsync(
+                db, 10, 0, VideoSubmissionKind.Short, "render failed", originalDeleted: false));
+
+        Assert.Equal(VideoSubmissionStatus.Pending, (await RowAsync(test, 10, 0, VideoSubmissionKind.Short)).Status);
+        Assert.Equal(VideoSubmissionStatus.Uploading, (await RowAsync(test, 10, 0)).Status);
+    }
+
+    [Fact]
+    public async Task MarkOriginalDeleted_marks_both_kinds()
+    {
+        using var test = new TestDb();
+        await SeedAsync(test, Forwarded(10, 100, 0), Forwarded(10, 100, 0, kind: VideoSubmissionKind.Short));
+
+        await using (var db = test.NewContext())
+            Assert.Single(await VideoSubmissionStore.MarkOriginalDeletedAsync(db, 100));
+
+        Assert.Equal(VideoSubmissionStatus.OriginalDeleted, (await RowAsync(test, 10, 0)).Status);
+        Assert.Equal(VideoSubmissionStatus.OriginalDeleted, (await RowAsync(test, 10, 0, VideoSubmissionKind.Short)).Status);
+    }
+
+    [Fact]
+    public async Task CountVideos_counts_video_rows_only()
+    {
+        using var test = new TestDb();
+        await SeedAsync(test,
+            Forwarded(10, 100, 0), Forwarded(10, 100, 0, kind: VideoSubmissionKind.Short),
+            Forwarded(10, 100, 1), Forwarded(10, 100, 1, kind: VideoSubmissionKind.Short));
+
+        await using var db = test.NewContext();
+        Assert.Equal(2, await VideoSubmissionStore.CountVideosAsync(db, 10));
     }
 }
