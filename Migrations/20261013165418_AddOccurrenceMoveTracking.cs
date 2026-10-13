@@ -6,11 +6,18 @@ using Microsoft.EntityFrameworkCore.Migrations;
 namespace ClanGuardBot.Migrations
 {
     /// <inheritdoc />
-    public partial class AddClanEventOriginalStartUtc : Migration
+    public partial class AddOccurrenceMoveTracking : Migration
     {
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
+            migrationBuilder.AddColumn<bool>(
+                name: "CancelledByUser",
+                table: "ClanEvents",
+                type: "INTEGER",
+                nullable: false,
+                defaultValue: false);
+
             migrationBuilder.AddColumn<DateTime>(
                 name: "OriginalStartUtc",
                 table: "ClanEvents",
@@ -21,6 +28,10 @@ namespace ClanGuardBot.Migrations
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
+            migrationBuilder.DropColumn(
+                name: "CancelledByUser",
+                table: "ClanEvents");
+
             migrationBuilder.DropColumn(
                 name: "OriginalStartUtc",
                 table: "ClanEvents");

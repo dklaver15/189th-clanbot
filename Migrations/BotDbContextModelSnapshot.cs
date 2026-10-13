@@ -372,6 +372,9 @@ namespace ClanGuardBot.Migrations
                     b.Property<DateTime?>("CancelledAt")
                         .HasColumnType("TEXT");
 
+                    b.Property<bool>("CancelledByUser")
+                        .HasColumnType("INTEGER");
+
                     b.Property<ulong>("ChannelId")
                         .HasColumnType("INTEGER");
 

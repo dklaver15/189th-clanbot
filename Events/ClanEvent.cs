@@ -116,6 +116,14 @@ public class ClanEvent
     public DateTime? CancelledAt { get; set; }
 
     /// <summary>
+    /// True when a person cancelled this occurrence (Cancel button or
+    /// /event cancel), as opposed to a schedule edit dropping it. A
+    /// person-cancelled slot stays filled, so the recurrence scheduler never
+    /// brings it back, even when it was never posted and has no RSVPs.
+    /// </summary>
+    public bool CancelledByUser { get; set; }
+
+    /// <summary>
     /// Optional banner image bytes for a one-off event, attached to the #events
     /// post as <c>attachment://</c><see cref="ImageFileName"/>. Null for series
     /// occurrences — they resolve bytes from their <see cref="ClanEventSeries"/>

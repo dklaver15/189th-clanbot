@@ -81,6 +81,8 @@ public sealed class EventManagementHandler
         public string Title = string.Empty;
         public DateTime StartUtc;
         public DateTime EndUtc;
+        public DateTime LoadedStartUtc;
+        public DateTime LoadedEndUtc;
         public string Description = string.Empty;
         public int? MaxParticipants;
 
@@ -974,6 +976,8 @@ public sealed class EventManagementHandler
             Title           = ev.Title,
             StartUtc        = ev.StartUtc,
             EndUtc          = ev.EndUtc,
+            LoadedStartUtc  = ev.StartUtc,
+            LoadedEndUtc    = ev.EndUtc,
             Description     = ev.Description ?? string.Empty,
             MaxParticipants = ev.MaxParticipants,
             HasImage        = !string.IsNullOrWhiteSpace(ev.ImageFileName),
@@ -1883,12 +1887,20 @@ public sealed class EventManagementHandler
                 var ev = await db.ClanEvents.FirstOrDefaultAsync(x => x.Id == s.ClanEventId);
                 if (ev is null || ev.Status != ClanEventStatus.Scheduled) { await s.Dm.SendMessageAsync(embed: EditForm("Gone", "That event is no longer available.")); return; }
 
-                var startMoved  = ev.StartUtc != s.StartUtc;
+                // Apply times only if this session changed them, so a session opened
+                // before someone else moved the event doesn't move it back.
+                var startEdited = s.StartUtc != s.LoadedStartUtc;
+                var endEdited   = s.EndUtc != s.LoadedEndUtc;
+                var newStartUtc = startEdited ? s.StartUtc : ev.StartUtc;
+                var newEndUtc   = startEdited ? s.EndUtc
+                                : endEdited   ? ev.StartUtc + (s.EndUtc - s.StartUtc)
+                                : ev.EndUtc;
+                var startMoved  = ev.StartUtc != newStartUtc;
                 var oldStartUtc = ev.StartUtc;
 
                 if (startMoved && ev.SeriesId is int moveSid)
                 {
-                    if (await OccurrenceMoveConflictsAsync(db, ev, s.StartUtc))
+                    if (await OccurrenceMoveConflictsAsync(db, ev, newStartUtc))
                     {
                         await s.Dm.SendMessageAsync(embed: EditForm("Not saved",
                             "Another occurrence of this series now uses that date and time, so **nothing was changed**. Hit Edit again to pick a different time."));
@@ -1899,14 +1911,14 @@ public sealed class EventManagementHandler
                     if (series is not null && series.Frequency != ClanEventFrequency.Custom)
                     {
                         var slot = ev.OriginalStartUtc ?? ev.StartUtc;
-                        ev.OriginalStartUtc = s.StartUtc == slot ? null : slot;
+                        ev.OriginalStartUtc = newStartUtc == slot ? null : slot;
                     }
                     movedSeriesId = moveSid;
                 }
 
                 ev.Title           = s.Title;
-                ev.StartUtc        = s.StartUtc;
-                ev.EndUtc          = s.EndUtc;
+                ev.StartUtc        = newStartUtc;
+                ev.EndUtc          = newEndUtc;
                 ev.Description     = s.Description;
                 ev.MaxParticipants = s.MaxParticipants;
                 if (pending is not null)
@@ -1948,20 +1960,29 @@ public sealed class EventManagementHandler
         foreach (var (ev, uid) in promoted)
             await EventWaitlist.NotifyPromotedAsync(_client, ev, uid);
 
-        if (rescheduledEv is not null)
-            await NotifyRescheduleAsync(rescheduledEv, rescheduleOldStart, rescheduleNotifyIds);
-
         // A moved occurrence may now come before or after the series' posted
-        // next-up occurrence, so re-pick which one shows in #events.
+        // next-up occurrence, so re-pick which one shows in #events. Done before
+        // the reschedule DM so its jump link reflects the post's current state.
         if (movedSeriesId is int promoteSid)
         {
             try
             {
                 using var scope = _services.CreateScope();
                 await scope.ServiceProvider.GetRequiredService<IEventPublisher>().PromoteNextAsync(promoteSid);
+                if (rescheduledEv is not null)
+                {
+                    var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+                    rescheduledEv.MessageId = await db.ClanEvents
+                        .Where(e => e.Id == rescheduledEv.Id)
+                        .Select(e => e.MessageId)
+                        .FirstOrDefaultAsync();
+                }
             }
             catch (Exception ex) { _logger.LogWarning(ex, "PromoteNext after moving an occurrence of series {SeriesId} failed", promoteSid); }
         }
+
+        if (rescheduledEv is not null)
+            await NotifyRescheduleAsync(rescheduledEv, rescheduleOldStart, rescheduleNotifyIds);
 
         // Snapshot the series' posted occurrences + their RSVPs BEFORE the schedule
         // change, so we can DM those people if the change moves or cancels the
@@ -2000,7 +2021,11 @@ public sealed class EventManagementHandler
     {
         if (!_config.EventRescheduleNotifyEnabled || userIds.Count == 0) return;
 
-        var jump  = $"https://discord.com/channels/{ev.GuildId}/{ev.ChannelId}/{ev.MessageId}";
+        // An unposted series occurrence has no message to link to yet.
+        var openLine = ev.MessageId != 0
+            ? $"Your RSVP carried over — open the event to update it if the new time changes things for you.\n" +
+              $"[Jump to the event](https://discord.com/channels/{ev.GuildId}/{ev.ChannelId}/{ev.MessageId})"
+            : "Your RSVP carried over. The event will be posted in the events channel when it's the next one up.";
         var embed = new EmbedBuilder()
             .WithColor(new Color(0xFAA61A))
             .WithTitle("🔄 Event Rescheduled")
@@ -2008,8 +2033,7 @@ public sealed class EventManagementHandler
                 $"**{ev.Title}** has been moved to a new time.\n\n" +
                 $"🕒 **New:** {EventTimeParser.Stamp(ev.StartUtc, 'F')} ({EventTimeParser.Stamp(ev.StartUtc, 'R')})\n" +
                 $"Was: ~~{EventTimeParser.Stamp(oldStartUtc, 'F')}~~\n\n" +
-                $"Your RSVP carried over — open the event to update it if the new time changes things for you.\n" +
-                $"[Jump to the event]({jump})")
+                openLine)
             .Build();
 
         var sent = await DmAllAsync(ev.GuildId, userIds, embed);
@@ -2283,12 +2307,18 @@ public sealed class EventManagementHandler
 
         // Every date the new rule produces up to the horizon, or up to the latest
         // existing occurrence if that's further out, so a matching occurrence is
-        // never dropped just for sitting past a cap.
+        // never dropped just for sitting past a cap. A moved occurrence is judged
+        // by its original slot, which can sit before now or past its new start.
         var horizonEnd = now.AddDays(_config.EventRecurrenceHorizonDays);
-        if (futures.Count > 0 && futures.Max(f => f.StartUtc) > horizonEnd)
-            horizonEnd = futures.Max(f => f.StartUtc);
+        var windowStart = now;
+        foreach (var f in futures)
+        {
+            var slot = f.OriginalStartUtc ?? f.StartUtc;
+            if (slot > horizonEnd)  horizonEnd  = slot;
+            if (slot < windowStart) windowStart = slot;
+        }
         var newSet = ClanEventRecurrence
-            .Occurrences(series, now.AddMinutes(-1), horizonEnd, int.MaxValue)
+            .Occurrences(series, windowStart.AddMinutes(-1), horizonEnd, int.MaxValue)
             .Select(o => o.StartUtc)
             .ToHashSet();
 
@@ -2361,7 +2391,10 @@ public sealed class EventManagementHandler
             .ToListAsync();
         var existing  = futures.Select(f => f.StartUtc).ToHashSet();
         var targetSet = target.ToHashSet();
-        foreach (var occ in futures) occ.OriginalStartUtc = null;
+        var movedRows = await db.ClanEvents
+            .Where(e => e.SeriesId == series.Id && e.OriginalStartUtc != null)
+            .ToListAsync();
+        foreach (var occ in movedRows) occ.OriginalStartUtc = null;
 
         var dropped = new List<ClanEvent>();
         foreach (var occ in futures)
@@ -2679,7 +2712,10 @@ public sealed class EventManagementHandler
         }
 
         foreach (var t in targets)
+        {
             await CancelOccurrenceAsync(db, t);
+            t.CancelledByUser = true;
+        }
 
         await db.SaveChangesAsync();
 

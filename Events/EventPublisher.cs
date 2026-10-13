@@ -238,6 +238,8 @@ public sealed class EventPublisher : IEventPublisher
     /// ClanEvent already exists for (SeriesId, StartUtc) — the same guard the
     /// scheduler relies on — unless that row is a slot a schedule edit dropped
     /// (see <see cref="IsDroppedSlotAsync"/>), which is cleared and re-created.
+    /// <paramref name="explicitDate"/> marks a date someone listed by hand, which
+    /// may also revive an unposted occurrence a person cancelled.
     /// Returns true when an occurrence was created.
     /// </summary>
     public async Task<bool> CreateOccurrenceAsync(
@@ -245,7 +247,7 @@ public sealed class EventPublisher : IEventPublisher
         string title, string description, ulong organizerId, string organizerName,
         DateTime startUtc, DateTime endUtc,
         byte[]? attachImageBytes = null, string? imageFileName = null,
-        int? maxParticipants = null, ulong? hostId = null)
+        int? maxParticipants = null, ulong? hostId = null, bool explicitDate = false)
     {
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
@@ -255,7 +257,7 @@ public sealed class EventPublisher : IEventPublisher
             var existing = await db.ClanEvents.FirstOrDefaultAsync(e => e.SeriesId == sid && e.StartUtc == startUtc);
             if (existing is not null)
             {
-                if (!await IsDroppedSlotAsync(db, existing))
+                if (!await IsDroppedSlotAsync(db, existing, explicitDate))
                 {
                     _logger.LogDebug("Occurrence for series {SeriesId} at {Start:o} already exists; skipping", sid, startUtc);
                     return false;
@@ -445,12 +447,13 @@ public sealed class EventPublisher : IEventPublisher
     }
 
     /// <summary>
-    /// A cancelled occurrence that was never posted and has no RSVPs. Only a
-    /// schedule edit leaves one (people can only cancel a posted occurrence), so
-    /// the date may be created again if a later edit brings it back.
+    /// A cancelled occurrence that was never posted and has no RSVPs, so its date
+    /// may be created again. One a person cancelled only qualifies when the date
+    /// was explicitly listed again; rule-based fills must leave it cancelled.
     /// </summary>
-    private static async Task<bool> IsDroppedSlotAsync(BotDbContext db, ClanEvent ev) =>
+    private static async Task<bool> IsDroppedSlotAsync(BotDbContext db, ClanEvent ev, bool explicitDate) =>
         ev.Status == ClanEventStatus.Cancelled
+        && (explicitDate || !ev.CancelledByUser)
         && ev.MessageId == 0
         && !await db.EventRsvps.AnyAsync(r => r.ClanEventId == ev.Id);
 
@@ -594,6 +597,7 @@ public sealed class EventPublisher : IEventPublisher
                 .Where(e => e.SeriesId == series.Id
                          && (e.StartUtc > fromUtc || e.OriginalStartUtc > fromUtc)
                          && (e.Status != ClanEventStatus.Cancelled
+                          || e.CancelledByUser
                           || e.MessageId != 0
                           || db.EventRsvps.Any(r => r.ClanEventId == e.Id)))
                 .Select(e => new { e.StartUtc, e.OriginalStartUtc })
@@ -634,7 +638,7 @@ public sealed class EventPublisher : IEventPublisher
                     series.Title, series.Description, series.OrganizerId, series.OrganizerName,
                     startUtc, startUtc + duration,
                     attachImageBytes: series.ImageBytes, imageFileName: series.ImageFileName,
-                    maxParticipants: series.MaxParticipants))
+                    maxParticipants: series.MaxParticipants, explicitDate: true))
                 created++;
 
         await PromoteNextAsync(series.Id);

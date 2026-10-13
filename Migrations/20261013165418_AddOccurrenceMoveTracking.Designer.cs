@@ -11,8 +11,8 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace ClanGuardBot.Migrations
 {
     [DbContext(typeof(BotDbContext))]
-    [Migration("20261013164341_AddClanEventOriginalStartUtc")]
-    partial class AddClanEventOriginalStartUtc
+    [Migration("20261013165418_AddOccurrenceMoveTracking")]
+    partial class AddOccurrenceMoveTracking
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -374,6 +374,9 @@ namespace ClanGuardBot.Migrations
 
                     b.Property<DateTime?>("CancelledAt")
                         .HasColumnType("TEXT");
+
+                    b.Property<bool>("CancelledByUser")
+                        .HasColumnType("INTEGER");
 
                     b.Property<ulong>("ChannelId")
                         .HasColumnType("INTEGER");
