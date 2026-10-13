@@ -529,6 +529,8 @@ try
     builder.Services.AddSingleton<EncodeGate>();
     // VideoUpscaler: ffmpeg upscale to 1440p before upload (BotConfig.VideoUploadUpscale*).
     builder.Services.AddSingleton<VideoUpscaler>();
+    // ShortRenderer: 9:16 YouTube Shorts from clips (BotConfig.VideoShorts*).
+    builder.Services.AddSingleton<ShortRenderer>();
     builder.Services.AddSingleton<VideoRepostHandler>();
 
     // /qotd — Question of the Day. Self-contained handler: gated SGT+, opens a

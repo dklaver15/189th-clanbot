@@ -2966,6 +2966,18 @@ public class BotConfig
     /// <summary>See <see cref="FfmpegPath"/>.</summary>
     public string FfprobePath { get; set; } = "ffprobe";
 
+    /// <summary>
+    /// The "Short" button next to "Upload" on forwarded clips: renders a 9:16
+    /// YouTube Short (framing, trim, title from a form) and uploads it. When false,
+    /// newly forwarded clips get no Short button and clicks on existing ones are
+    /// refused. Renders run on the droplet CPU, one at a time with upscales.
+    /// Default true.
+    /// </summary>
+    public bool VideoShortsEnabled { get; set; } = true;
+
+    /// <summary>Give up on a Short render after this many minutes. Default 20.</summary>
+    public int VideoShortRenderTimeoutMinutes { get; set; } = 20;
+
     public bool IsYouTubeConfigured =>
         !string.IsNullOrWhiteSpace(YouTubeClientId)
         && !string.IsNullOrWhiteSpace(YouTubeClientSecret)
