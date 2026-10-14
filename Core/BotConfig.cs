@@ -136,10 +136,10 @@ public class BotConfig
 
     /// <summary>
     /// User IDs tagged (pinged) in the monthly AWOL wipe reminder. Empty means the
-    /// reminder still posts but pings no one.
+    /// reminder still posts but pings no one. Set in appsettings.json; empty here
+    /// because the config binder appends to a list default, which pinged everyone twice.
     /// </summary>
-    public List<ulong> AwolWipeReminderMentionUserIds { get; set; } =
-        new() { 825902140639412225, 1290399637882273894 };
+    public List<ulong> AwolWipeReminderMentionUserIds { get; set; } = new();
 
     /// <summary>
     /// Day of the month (1-31) on which the monthly AWOL wipe reminder posts.
