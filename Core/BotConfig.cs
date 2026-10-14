@@ -2869,8 +2869,13 @@ public class BotConfig
     /// </summary>
     public ulong RedsecManagerRoleId { get; set; } = 1408089365816541264;
 
-    /// <summary>Individual users allowed to add and remove REDSEC wins without the role.</summary>
-    public List<ulong> RedsecManagerUserIds { get; set; } = new() { 460857355442192435 };
+    /// <summary>
+    /// Individual users allowed to add and remove REDSEC wins without the role.
+    /// Set in appsettings.json. Empty here because the config binder appends to a
+    /// list default rather than replacing it, which would make a default user
+    /// impossible to remove.
+    /// </summary>
+    public List<ulong> RedsecManagerUserIds { get; set; } = new();
 
     // ─── Video repost + YouTube upload ───────────────────────────────
     /// <summary>

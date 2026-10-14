@@ -333,6 +333,9 @@ public sealed partial class RedsecCommandHandler
     {
         var requested = command.Data.Options.FirstOrDefault(o => o.Name == SeasonOption)?.Value as long?;
 
+        // Acknowledge before any I/O. The card is public, so the replies below are too.
+        await command.DeferAsync();
+
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
 
@@ -345,7 +348,7 @@ public sealed partial class RedsecCommandHandler
 
         if (seasonCounts.Count == 0)
         {
-            await command.RespondAsync("No ranked REDSEC wins have been recorded yet.", ephemeral: true);
+            await command.FollowupAsync("No ranked REDSEC wins have been recorded yet.");
             return;
         }
 
@@ -353,12 +356,9 @@ public sealed partial class RedsecCommandHandler
         if (seasonCounts.All(s => s.Season != season))
         {
             var known = string.Join(", ", seasonCounts.Select(s => $"Season {s.Season}"));
-            await command.RespondAsync($"No wins recorded for Season {season}. Seasons with wins: {known}.",
-                ephemeral: true);
+            await command.FollowupAsync($"No wins recorded for Season {season}. Seasons with wins: {known}.");
             return;
         }
-
-        await command.DeferAsync();
 
         var wins = await db.RedsecWins
             .Where(w => w.GuildId == guild.Id && w.Season == season)
@@ -515,7 +515,7 @@ public sealed partial class RedsecCommandHandler
                                 string.Join(", ", squad.Select(p => p.DisplayName));
                     var randoms = RedsecWinsRenderer.SquadSize - squad.Count;
                     if (randoms > 0) label += $" +{randoms}";
-                    return new AutocompleteResult(label.Length > 100 ? label[..99] + "…" : label, (long)w.Id);
+                    return new AutocompleteResult(Truncate(label, 100), (long)w.Id);
                 }));
             }
         }
@@ -544,6 +544,14 @@ public sealed partial class RedsecCommandHandler
         await command.FollowupAsync($"❌ Recording REDSEC wins is restricted to {who}.",
             ephemeral: true, allowedMentions: AllowedMentions.None);
         return false;
+    }
+
+    private static string Truncate(string text, int max)
+    {
+        if (text.Length <= max) return text;
+        var cut = max - 1;
+        if (char.IsHighSurrogate(text[cut - 1])) cut--;
+        return text[..cut] + "…";
     }
 
     private static string DisplayNameOf(SocketUser user) =>

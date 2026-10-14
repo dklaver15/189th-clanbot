@@ -107,13 +107,13 @@ public sealed class RedsecWinsRenderer
                     var inLeft = i < rowBands;
                     var band   = inLeft ? i : i - rowBands;
                     var x0     = inLeft ? Pad : Pad + colW + ColumnGap;
-                    DrawOperatorRow(canvas, f, rows[i], avatars, y + band * RowH, maxWins, x0, x0 + colW);
+                    DrawOperatorRow(canvas, f, rows[i], avatars, y + band * RowH, maxWins, x0, x0 + colW, band % 2 == 1);
                 }
             }
             else
             {
                 for (var i = 0; i < rows.Count; i++)
-                    DrawOperatorRow(canvas, f, rows[i], avatars, y + i * RowH, maxWins, Pad, Width - Pad);
+                    DrawOperatorRow(canvas, f, rows[i], avatars, y + i * RowH, maxWins, Pad, Width - Pad, i % 2 == 1);
             }
             y += rowBands * RowH;
 
@@ -311,10 +311,10 @@ public sealed class RedsecWinsRenderer
 
     private static void DrawOperatorRow(
         SKCanvas canvas, Fonts f, RedsecOperatorLine line, IReadOnlyDictionary<ulong, SKImage> avatars,
-        float top, int maxWins, float left, float right)
+        float top, int maxWins, float left, float right, bool alt)
     {
         var rect = new SKRect(left, top + 4f, right, top + RowH - 4f);
-        using (var bg = Paint(line.Place % 2 == 0 ? PanelAltHex : PanelHex))
+        using (var bg = Paint(alt ? PanelAltHex : PanelHex))
             canvas.DrawRoundRect(rect, 10f, 10f, bg);
 
         var frac = Math.Clamp(line.Wins / (float)maxWins, 0.03f, 1f);
