@@ -27,6 +27,7 @@ Built with C# on .NET 10 ([Discord.Net](https://github.com/discord-net/Discord.N
 - XP seasons: XP from events, meetings, voice and chat, with daily caps that reset at Central midnight, a leaderboard and level-up DMs.
 - `/poll` (native or anonymous), Question and Joke of the Day, scheduled reminders, UFC schedules and results, a Sleeper fantasy football league, and THE FINALS leaderboard lookups.
 - Gamertag roster in Google Sheets (`/gamertags`, `/lookup`).
+- Ranked REDSEC wins: HQ records each squad win with its season, date and the clan members on the squad (`/redsec-add-win`, `/redsec-remove-win`). `/redsec-wins` posts a season card with a win leaderboard and the most recent wins.
 - Clips posted in the clip channels stay where they are and are forwarded to a private upload channel (`VideoUploadChannelId`). There the Media Team can send each clip to YouTube with "Upload" (upscaled to 1440p first) or as a 9:16 YouTube Short with "Short" (choose a framing, trim and title).
 
 **Game servers**
@@ -47,19 +48,19 @@ Built with C# on .NET 10 ([Discord.Net](https://github.com/discord-net/Discord.N
 `/command-catalog` shows each member the commands they can use. The table below uses the current `appsettings.json` values.
 
 - **Officer+** means Manage Roles, Administrator, or an officer role (`ExemptRoles` minus the Reserve role).
-- **HQ** means the feature's configured HQ role, or Administrator.
+- **HQ** means the feature's configured HQ role, or Administrator. The REDSEC commands also allow the users in `RedsecManagerUserIds`.
 - Server Administrators pass every rank gate.
 
 | Access | Commands |
 |---|---|
-| Everyone | `/awol-status` `/calendar` `/command-catalog` `/gamertags` `/lookup` `/my-invites` `/invite` (list and stats) `/promo-eligibility` `/timezone` `/xp` `/xp-leaderboard` `/xp-season` `/xp-dms` `/finals-rank` `/finals-club` `/sleeper-standings` `/sleeper-matchups` `/sleeper-link` `/ufc-schedule` `/ufc-results` `/satisfactory-status` `/satisfactory-mods` `/satisfactory-report` `/satisfactory-playtime` `/satisfactory-leaderboard` `/satisfactory-graph` `/satisfactory-production` `/satisfactory-trains` `/satisfactory-map` `/satisfactory-link` `/valheim-status` `/valheim-playtime` `/valheim-leaderboard` `/valheim-link` |
+| Everyone | `/awol-status` `/calendar` `/command-catalog` `/gamertags` `/lookup` `/my-invites` `/invite` (list and stats) `/promo-eligibility` `/timezone` `/xp` `/xp-leaderboard` `/xp-season` `/xp-dms` `/redsec-wins` `/finals-rank` `/finals-club` `/sleeper-standings` `/sleeper-matchups` `/sleeper-link` `/ufc-schedule` `/ufc-results` `/satisfactory-status` `/satisfactory-mods` `/satisfactory-report` `/satisfactory-playtime` `/satisfactory-leaderboard` `/satisfactory-graph` `/satisfactory-production` `/satisfactory-trains` `/satisfactory-map` `/satisfactory-link` `/valheim-status` `/valheim-playtime` `/valheim-leaderboard` `/valheim-link` |
 | SGT+ | `/poll` `/qotd` `/jotd` |
 | 2ndLT+ | `/event` (create; members can also edit their own events), `/reminder`, `/invite` management |
 | CPT+ | `/comp-event` `/say` `/add-event-credit` `/remove-event-credit` `/fix-rank-date` |
 | MAJ+ | `/promote` `/demote` `/seed-promotion-credit` `/kick-awols` `/clear-awol-list` `/attendance` `/late-check` `/leads` `/usage-stats` |
 | BG+ | `/security-audit` `/webhook-audit` `/briefing-now` |
 | Officer+ | `/awol-check` `/clear-awol` `/banhammer` `/health` `/roster-export` `/setnick` `/squads` `/timeline` |
-| HQ | `/xp-adjust` `/ticket-panel` `/setup-gamertags` `/gamertag-backfill-ids` `/setup-officer-app` |
+| HQ | `/xp-adjust` `/redsec-add-win` `/redsec-remove-win` `/ticket-panel` `/setup-gamertags` `/gamertag-backfill-ids` `/setup-officer-app` |
 | Administrator | `/purge-user` `/allow-new-account` `/bot-fix-channel-perms` |
 
 When adding a command, register it in `DiscordBotService` and add it to the catalog in `CommandsCommandHandler.BuildCatalog`.
@@ -157,6 +158,7 @@ C# files are grouped into folders by feature. Most namespaces don't match the fo
 | `Moderation/` | Server protection, security audits and webhook audits |
 | `Ranks/` | Rank tracking and promotions |
 | `Xp/` | XP ladder and seasons |
+| `Redsec/` | Ranked REDSEC win tracking and the season card |
 | `Events/`, `Polls/`, `Reminders/` | Clan events and calendar sync, polls, scheduled reminders |
 | `Tickets/`, `OfficerApplications/` | Support tickets and officer applications |
 | `Invites/`, `Gamertags/`, `Community/` | Invite tracking, gamertag roster, `/qotd`, `/jotd`, `/say` and bump reminders |

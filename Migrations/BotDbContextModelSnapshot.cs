@@ -372,6 +372,9 @@ namespace ClanGuardBot.Migrations
                     b.Property<DateTime?>("CancelledAt")
                         .HasColumnType("TEXT");
 
+                    b.Property<bool>("CancelledByUser")
+                        .HasColumnType("INTEGER");
+
                     b.Property<ulong>("ChannelId")
                         .HasColumnType("INTEGER");
 
@@ -411,6 +414,9 @@ namespace ClanGuardBot.Migrations
 
                     b.Property<string>("OrganizerName")
                         .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("OriginalStartUtc")
                         .HasColumnType("TEXT");
 
                     b.Property<string>("RemindersSentCsv")
@@ -1587,6 +1593,61 @@ namespace ClanGuardBot.Migrations
                     b.HasIndex("Subreddit");
 
                     b.ToTable("RedditLeads");
+                });
+
+            modelBuilder.Entity("ClanGuardBot.Models.RedsecWin", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<ulong>("GuildId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Notes")
+                        .HasColumnType("TEXT");
+
+                    b.Property<ulong>("RecordedByUserId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime>("RecordedUtc")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Season")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateOnly>("WonOn")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("GuildId", "Season", "WonOn");
+
+                    b.ToTable("RedsecWins");
+                });
+
+            modelBuilder.Entity("ClanGuardBot.Models.RedsecWinPlayer", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("DisplayName")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("RedsecWinId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<ulong>("UserId")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RedsecWinId", "UserId")
+                        .IsUnique();
+
+                    b.ToTable("RedsecWinPlayers");
                 });
 
             modelBuilder.Entity("ClanGuardBot.Models.SatisfactoryCircuitSample", b =>
@@ -2816,6 +2877,15 @@ namespace ClanGuardBot.Migrations
                     b.HasIndex("GuildId", "Status");
 
                     b.ToTable("XpSeasons");
+                });
+
+            modelBuilder.Entity("ClanGuardBot.Models.RedsecWinPlayer", b =>
+                {
+                    b.HasOne("ClanGuardBot.Models.RedsecWin", null)
+                        .WithMany()
+                        .HasForeignKey("RedsecWinId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 #pragma warning restore 612, 618
         }

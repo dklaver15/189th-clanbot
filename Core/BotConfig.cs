@@ -136,10 +136,10 @@ public class BotConfig
 
     /// <summary>
     /// User IDs tagged (pinged) in the monthly AWOL wipe reminder. Empty means the
-    /// reminder still posts but pings no one.
+    /// reminder still posts but pings no one. Set in appsettings.json; empty here
+    /// because the config binder appends to a list default, which pinged everyone twice.
     /// </summary>
-    public List<ulong> AwolWipeReminderMentionUserIds { get; set; } =
-        new() { 825902140639412225, 1290399637882273894 };
+    public List<ulong> AwolWipeReminderMentionUserIds { get; set; } = new();
 
     /// <summary>
     /// Day of the month (1-31) on which the monthly AWOL wipe reminder posts.
@@ -2860,6 +2860,22 @@ public class BotConfig
     /// can adjust XP and the handler logs why.
     /// </summary>
     public ulong XpAdjustRoleId { get; set; } = 1408089365816541264;
+
+    // ─── REDSEC ranked wins ──────────────────────────────────────────
+    /// <summary>
+    /// Role allowed to run /redsec-add-win and /redsec-remove-win. Set to the HQ
+    /// role. Administrators and <see cref="RedsecManagerUserIds"/> also pass.
+    /// 0 leaves only those two.
+    /// </summary>
+    public ulong RedsecManagerRoleId { get; set; } = 1408089365816541264;
+
+    /// <summary>
+    /// Individual users allowed to add and remove REDSEC wins without the role.
+    /// Set in appsettings.json. Empty here because the config binder appends to a
+    /// list default rather than replacing it, which would make a default user
+    /// impossible to remove.
+    /// </summary>
+    public List<ulong> RedsecManagerUserIds { get; set; } = new();
 
     // ─── Video repost + YouTube upload ───────────────────────────────
     /// <summary>

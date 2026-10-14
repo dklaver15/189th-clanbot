@@ -37,4 +37,7 @@ public interface IEventPublisher
     /// banner, title, and cap. Returns the number created.
     /// </summary>
     Task<int> MaterializeDatesAsync(ClanEventSeries series, IEnumerable<DateTime> startsUtc);
+
+    /// <summary>Post the series' soonest upcoming occurrence and un-post any others.</summary>
+    Task PromoteNextAsync(int seriesId);
 }

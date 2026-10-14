@@ -650,11 +650,17 @@ public sealed class XpLeaderboardRenderer
 
     // ─── Avatars ────────────────────────────────────────────────────────
 
-    private async Task<Dictionary<ulong, SKImage>> LoadAvatarsAsync(
-        IReadOnlyList<XpBoardEntry> entries, CancellationToken ct)
+    private Task<Dictionary<ulong, SKImage>> LoadAvatarsAsync(
+        IReadOnlyList<XpBoardEntry> entries, CancellationToken ct) =>
+        _config.XpBoardShowAvatars
+            ? LoadAvatarImagesAsync(entries.Select(e => (e.UserId, e.AvatarUrl)).ToList(), ct)
+            : Task.FromResult(new Dictionary<ulong, SKImage>());
+
+    /// <summary>Shared with other renderers so they use the same avatar cache. Dispose the result with <see cref="AvatarLease"/>.</summary>
+    internal async Task<Dictionary<ulong, SKImage>> LoadAvatarImagesAsync(
+        IReadOnlyList<(ulong UserId, string? AvatarUrl)> entries, CancellationToken ct)
     {
         var result = new Dictionary<ulong, SKImage>();
-        if (!_config.XpBoardShowAvatars) return result;
 
         // A whole-batch deadline, not just a per-request one. Sequentially, 25 cold
         // fetches at the per-request timeout is minutes of wall clock — and the board
@@ -727,7 +733,7 @@ public sealed class XpLeaderboardRenderer
         }
     }
 
-    private static void DrawAvatar(
+    internal static void DrawAvatar(
         SKCanvas canvas, IReadOnlyDictionary<ulong, SKImage> avatars, ulong userId,
         float cx, float cy, float radius, SKColor ring)
     {
@@ -771,7 +777,7 @@ public sealed class XpLeaderboardRenderer
     /// the families explicitly, most-preferred first, keeps the rendering stable;
     /// the null lookup stays as the last resort before SKTypeface.Default.
     /// </summary>
-    private static SKTypeface ResolveTypeface(SKFontStyle style)
+    internal static SKTypeface ResolveTypeface(SKFontStyle style)
     {
         foreach (var family in new[] { "DejaVu Sans", "Liberation Sans", "Noto Sans", "Arial" })
         {
@@ -790,7 +796,7 @@ public sealed class XpLeaderboardRenderer
     /// native memory, and a board refresh decodes up to a page of them every few
     /// minutes — cheap to leak, but pointless to leave to finalizers.
     /// </summary>
-    private sealed class AvatarLease : IDisposable
+    internal sealed class AvatarLease : IDisposable
     {
         private readonly Dictionary<ulong, SKImage> _images;
         public AvatarLease(Dictionary<ulong, SKImage> images) => _images = images;
@@ -804,13 +810,13 @@ public sealed class XpLeaderboardRenderer
 
     // ─── Text helpers ───────────────────────────────────────────────────
 
-    private static void DrawCentered(SKCanvas canvas, string text, float cx, float baseline, SKFont font, SKPaint paint)
+    internal static void DrawCentered(SKCanvas canvas, string text, float cx, float baseline, SKFont font, SKPaint paint)
     {
         var w = font.MeasureText(text);
         canvas.DrawText(text, cx - w / 2f, baseline, font, paint);
     }
 
-    private static void DrawRightAligned(SKCanvas canvas, string text, float right, float baseline, SKFont font, SKPaint paint)
+    internal static void DrawRightAligned(SKCanvas canvas, string text, float right, float baseline, SKFont font, SKPaint paint)
     {
         var w = font.MeasureText(text);
         canvas.DrawText(text, right - w, baseline, font, paint);
@@ -823,7 +829,7 @@ public sealed class XpLeaderboardRenderer
     /// wildly — an estimate overflows the column on exactly the names people care
     /// most about seeing.
     /// </summary>
-    private static string Ellipsize(string text, SKFont font, float maxWidth) =>
+    internal static string Ellipsize(string text, SKFont font, float maxWidth) =>
         EllipsizeCore(RenderableText(text, font), font, maxWidth);
 
     /// <summary>

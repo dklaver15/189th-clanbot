@@ -626,6 +626,13 @@ try
     builder.Services.AddHostedService<XpSeasonSchedulerService>();
     builder.Services.AddSingleton<XpCommandHandler>();
 
+    // ── REDSEC ranked wins ───────────────────────────────────────────
+    // RedsecCommandHandler owns /redsec-add-win, /redsec-remove-win and
+    // /redsec-wins (Register() called from DiscordBotService). The season card
+    // reuses XpLeaderboardRenderer's fonts and avatar cache.
+    builder.Services.AddSingleton<RedsecWinsRenderer>();
+    builder.Services.AddSingleton<RedsecCommandHandler>();
+
     // ── Satisfactory (Dedicated Server HTTPS API) ────────────────────
     // SatisfactoryApiService is the client for the game's built-in HTTPS API, which
     // rides the SAME port players connect to (7777) and presents a SELF-SIGNED cert —

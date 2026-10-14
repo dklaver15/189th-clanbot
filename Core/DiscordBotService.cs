@@ -62,6 +62,7 @@ public class DiscordBotService : IHostedService
     private readonly FinalsCommandHandler _finalsCommandHandler;
     private readonly SleeperCommandHandler _sleeperCommandHandler;
     private readonly XpCommandHandler _xpCommandHandler;
+    private readonly RedsecCommandHandler _redsecCommandHandler;
     private readonly SatisfactoryCommandHandler _satisfactoryCommandHandler;
     private readonly ValheimCommandHandler _valheimCommandHandler;
     private readonly ValheimEventIngestHandler _valheimIngestHandler;
@@ -153,6 +154,7 @@ public class DiscordBotService : IHostedService
         FinalsCommandHandler finalsCommandHandler,
         SleeperCommandHandler sleeperCommandHandler,
         XpCommandHandler xpCommandHandler,
+        RedsecCommandHandler redsecCommandHandler,
         SatisfactoryCommandHandler satisfactoryCommandHandler,
         ValheimCommandHandler valheimCommandHandler,
         ValheimEventIngestHandler valheimIngestHandler,
@@ -236,6 +238,7 @@ public class DiscordBotService : IHostedService
         _finalsCommandHandler        = finalsCommandHandler;
         _sleeperCommandHandler       = sleeperCommandHandler;
         _xpCommandHandler            = xpCommandHandler;
+        _redsecCommandHandler        = redsecCommandHandler;
         _satisfactoryCommandHandler  = satisfactoryCommandHandler;
         _valheimCommandHandler       = valheimCommandHandler;
         _valheimIngestHandler        = valheimIngestHandler;
@@ -325,6 +328,7 @@ public class DiscordBotService : IHostedService
         _finalsCommandHandler.Register(_client);
         _sleeperCommandHandler.Register(_client);
         _xpCommandHandler.Register(_client);
+        _redsecCommandHandler.Register(_client);
         _satisfactoryCommandHandler.Register(_client);
         _valheimCommandHandler.Register(_client);
         _valheimIngestHandler.Register(_client);
@@ -579,6 +583,14 @@ public class DiscordBotService : IHostedService
                 // does, but usable to turn them back ON. NOTE: keep
                 // CommandsCommandHandler.BuildCatalog in sync.
                 XpCommandHandler.BuildDmsCommand(),
+
+                // /redsec-add-win and /redsec-remove-win are HQ-gated (plus
+                // RedsecManagerUserIds); /redsec-wins is open to all and posts
+                // publicly. Handled by RedsecCommandHandler. NOTE: keep
+                // CommandsCommandHandler.BuildCatalog in sync.
+                RedsecCommandHandler.BuildAddCommand(),
+                RedsecCommandHandler.BuildRemoveCommand(),
+                RedsecCommandHandler.BuildWinsCommand(),
 
                 // /satisfactory-* — the clan's Satisfactory Dedicated Server via its
                 // built-in HTTPS API (same port as the game, self-signed cert). All of

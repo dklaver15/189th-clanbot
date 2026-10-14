@@ -81,6 +81,14 @@ public class ClanEvent
     public DateTime StartUtc { get; set; }
     public DateTime EndUtc { get; set; }
 
+    /// <summary>
+    /// The rule-generated cadence slot this occurrence fills, set only when a
+    /// single occurrence of a rule-based series has been moved off that slot
+    /// (null otherwise). The recurrence scheduler counts this slot as taken, so
+    /// it doesn't regenerate a duplicate at the original time.
+    /// </summary>
+    public DateTime? OriginalStartUtc { get; set; }
+
     public ClanEventStatus Status { get; set; } = ClanEventStatus.Scheduled;
 
     /// <summary>
@@ -106,6 +114,14 @@ public class ClanEvent
 
     /// <summary>Stamped when Status flips to Cancelled.</summary>
     public DateTime? CancelledAt { get; set; }
+
+    /// <summary>
+    /// True when a person cancelled this occurrence (Cancel button or
+    /// /event cancel), as opposed to a schedule edit dropping it. A
+    /// person-cancelled slot stays filled, so the recurrence scheduler never
+    /// brings it back, even when it was never posted and has no RSVPs.
+    /// </summary>
+    public bool CancelledByUser { get; set; }
 
     /// <summary>
     /// Optional banner image bytes for a one-off event, attached to the #events
