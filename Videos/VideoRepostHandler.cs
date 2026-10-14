@@ -590,15 +590,14 @@ public sealed partial class VideoRepostHandler
             var path = Path.Combine(tempDir, "video" + Path.GetExtension(attachment.Filename));
             await DownloadAsync(attachment.Url, path);
 
-            var upscaled = await _upscaler.TryUpscaleAsync(
-                path, tempDir,
-                onEncodeStarting: () => TryFollowupAsync(component,
-                    $"Making a {_config.VideoUploadUpscaleTargetSize}p version first so YouTube gives it a better encode. This can take a few minutes."));
+            var toUpload = await _upscaler.PrepareAsync(
+                path, tempDir, startSeconds: 0, endSeconds: null,
+                onEncodeStarting: message => TryFollowupAsync(component, message));
 
             var videoCount = await CountVideosAsync(messageId);
             var guildName  = (message.Channel as SocketGuildChannel)?.Guild.Name ?? "clan";
             var youtubeId  = await _youtube.UploadAsync(
-                upscaled ?? path,
+                toUpload,
                 BuildTitle(submission, videoCount),
                 BuildDescription(submission, guildName));
 

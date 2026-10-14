@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Globalization;
-using System.Text.Json;
 using ClanGuardBot.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -8,7 +7,8 @@ using Microsoft.Extensions.Options;
 namespace ClanGuardBot.Services;
 
 /// <summary>
-/// Scales a clip up to 1440p (by its shorter side) before it goes to YouTube.
+/// Prepares the file for a normal YouTube upload: scales a clip up to 1440p (by
+/// its shorter side) and, when the uploader set Start/End, cuts it.
 ///
 /// ── Why upscale at all ──
 /// YouTube picks its encoder by upload resolution: 1440p and above get VP9 or
@@ -18,10 +18,15 @@ namespace ClanGuardBot.Services;
 /// 1440p first does not. The upscale adds no detail of its own; it only buys
 /// the better YouTube encode.
 ///
-/// ── Never blocks an upload ──
-/// <see cref="TryUpscaleAsync"/> returns null whenever it skips or fails
-/// (already 1440p+, too long, HDR, ffmpeg missing, encode error, timeout), and
-/// the caller uploads the original file. A clip always reaches YouTube.
+/// ── Untrimmed: never blocks an upload ──
+/// Without Start/End, every skip or failure (already 1440p+, too long, HDR,
+/// ffmpeg missing, encode error, timeout) uploads the original file instead.
+///
+/// ── Trimmed: one exact cut ──
+/// With Start/End the clip is re-encoded once, cut exactly (and upscaled when
+/// it's smaller than 1440p). This never falls back: refusals (HDR, Start past
+/// the end, an empty result) and failures are reported, so an untrimmed clip is
+/// never uploaded by mistake.
 ///
 /// ── Keeping the droplet healthy ──
 /// One encode at a time across upscales and Shorts (<see cref="EncodeGate"/>;
@@ -36,6 +41,8 @@ namespace ClanGuardBot.Services;
 /// </summary>
 public sealed class VideoUpscaler
 {
+    private const string CutMessage = "Cutting the clip to your Start and End…";
+
     private readonly BotConfig _config;
     private readonly EncodeGate _gate;
     private readonly ILogger<VideoUpscaler> _logger;
@@ -47,49 +54,49 @@ public sealed class VideoUpscaler
         _logger = logger;
     }
 
+    private string UpscaleMessage =>
+        $"Making a {_config.VideoUploadUpscaleTargetSize}p version first so YouTube gives it a better encode. This can take a few minutes.";
+
     /// <summary>
-    /// Writes an upscaled copy of <paramref name="inputPath"/> into
-    /// <paramref name="workDir"/> and returns its path, or null to upload the
-    /// original. <paramref name="onEncodeStarting"/> runs once, just before a
-    /// real encode begins (after any wait for the encode slot).
+    /// The file to upload for a normal YouTube video: <paramref name="inputPath"/>
+    /// itself, or an encoded copy in <paramref name="workDir"/>. Untrimmed (start 0,
+    /// no end) behaves as before; trimmed throws on refusals and failures.
+    /// <paramref name="onEncodeStarting"/> receives the message to show the uploader
+    /// once a real encode begins (after any wait for the encode slot).
     /// </summary>
-    public async Task<string?> TryUpscaleAsync(
-        string inputPath, string workDir, Func<Task>? onEncodeStarting = null, CancellationToken ct = default)
+    public async Task<string> PrepareAsync(
+        string inputPath, string workDir, double startSeconds, double? endSeconds,
+        Func<string, Task>? onEncodeStarting = null, CancellationToken ct = default)
+    {
+        var trimmed = startSeconds > 0 || endSeconds is not null;
+        return trimmed
+            ? await CutAsync(inputPath, workDir, startSeconds, endSeconds, onEncodeStarting, ct)
+            : await TryUpscaleAsync(inputPath, workDir, onEncodeStarting, ct) ?? inputPath;
+    }
+
+    /// <summary>An upscaled copy, or null to upload the original.</summary>
+    private async Task<string?> TryUpscaleAsync(
+        string inputPath, string workDir, Func<string, Task>? onEncodeStarting, CancellationToken ct)
     {
         if (!_config.VideoUploadUpscaleEnabled) return null;
-
-        var target = _config.VideoUploadUpscaleTargetSize;
         try
         {
-            var probe = await ProbeAsync(inputPath, ct);
-            if (probe is null) return null;
+            var info = await MediaProbe.ProbeAsync(_config.FfprobePath, inputPath, _logger, ct);
+            if (!WantsUpscale(info, info.Duration)) return null;
 
-            var shortSide = Math.Min(probe.Width, probe.Height);
-            if (shortSide >= target)
-            {
-                _logger.LogInformation("Upscale skipped: clip is already {W}x{H}", probe.Width, probe.Height);
-                return null;
-            }
-            if (probe.DurationSeconds > _config.VideoUploadUpscaleMaxMinutes * 60)
-            {
-                _logger.LogInformation(
-                    "Upscale skipped: clip is {Minutes:F1} min, over the {Max}-min cap",
-                    probe.DurationSeconds / 60, _config.VideoUploadUpscaleMaxMinutes);
-                return null;
-            }
-            if (probe.IsHdr)
-            {
-                // Tone-mapping HDR to SDR is its own can of worms; YouTube handles
-                // HDR uploads well as-is, so leave those alone.
-                _logger.LogInformation("Upscale skipped: clip is HDR ({Transfer})", probe.ColorTransfer);
-                return null;
-            }
-
+            string? output;
             using (await _gate.AcquireAsync(ct))
             {
-                if (onEncodeStarting is not null) await onEncodeStarting();
-                return await EncodeAsync(inputPath, workDir, probe, target, ct);
+                if (onEncodeStarting is not null) await onEncodeStarting(UpscaleMessage);
+                output = await EncodeAsync(inputPath, workDir, info, start: null, length: null, upscale: true, ct);
             }
+            if (output is not null
+                && await MediaProbe.DurationAsync(_config.FfprobePath, output, _logger, ct) < MediaProbe.MinUsefulSeconds)
+            {
+                _logger.LogWarning("Upscale came out empty; uploading the original file instead");
+                return null;
+            }
+            return output;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -102,9 +109,70 @@ public sealed class VideoUpscaler
         }
     }
 
-    private async Task<string?> EncodeAsync(string inputPath, string workDir, ProbeResult probe, int target, CancellationToken ct)
+    /// <summary>One exact-cut encode (upscaled when smaller than the target).</summary>
+    private async Task<string> CutAsync(
+        string inputPath, string workDir, double start, double? end, Func<string, Task>? onEncodeStarting, CancellationToken ct)
     {
-        var output = Path.Combine(workDir, "upscaled.mkv");
+        var info = await MediaProbe.ProbeAsync(_config.FfprobePath, inputPath, _logger, ct);
+        if (info.IsHdr)
+            throw new ClipRejectedException("This clip is HDR, so it can't be trimmed. Leave Start and End empty to upload it whole.");
+        if (info.Duration > 0 && start >= info.Duration)
+            throw ClipRejectedException.StartPastEnd(start, info.Duration);
+
+        // Unknown length and no End: encode to the end of the file.
+        double? length = end is { } e
+            ? (info.Duration > 0 ? Math.Min(e, info.Duration) : e) - start
+            : info.Duration > 0 ? info.Duration - start : null;
+        var upscale = _config.VideoUploadUpscaleEnabled && WantsUpscale(info, length ?? info.Duration);
+
+        string? output;
+        using (await _gate.AcquireAsync(ct))
+        {
+            if (onEncodeStarting is not null) await onEncodeStarting(upscale ? UpscaleMessage : CutMessage);
+            output = await EncodeAsync(inputPath, workDir, info, start, length, upscale, ct);
+        }
+
+        if (output is null)
+            throw new InvalidOperationException("Cutting the clip failed (see the bot's log).");
+        // A Start past the end of a file whose length ffprobe can't read encodes
+        // "successfully" into nothing; never hand that to YouTube.
+        if (await MediaProbe.DurationAsync(_config.FfprobePath, output, _logger, ct) < MediaProbe.MinUsefulSeconds)
+            throw ClipRejectedException.CameOutEmpty();
+        return output;
+    }
+
+    /// <summary>Upscale only clips below the target, not too long, not HDR.</summary>
+    private bool WantsUpscale(MediaInfo info, double lengthSeconds)
+    {
+        var target = _config.VideoUploadUpscaleTargetSize;
+        if (Math.Min(info.Width, info.Height) >= target)
+        {
+            _logger.LogInformation("Upscale skipped: clip is already {W}x{H}", info.Width, info.Height);
+            return false;
+        }
+        if (lengthSeconds > _config.VideoUploadUpscaleMaxMinutes * 60)
+        {
+            _logger.LogInformation(
+                "Upscale skipped: clip is {Minutes:F1} min, over the {Max}-min cap",
+                lengthSeconds / 60, _config.VideoUploadUpscaleMaxMinutes);
+            return false;
+        }
+        if (info.IsHdr)
+        {
+            // Tone-mapping HDR to SDR is its own can of worms; YouTube handles
+            // HDR uploads well as-is, so leave those alone.
+            _logger.LogInformation("Upscale skipped: clip is HDR");
+            return false;
+        }
+        return true;
+    }
+
+    /// <summary>One x264 encode: optional cut (start/length), optional upscale. Null on failure.</summary>
+    private async Task<string?> EncodeAsync(
+        string inputPath, string workDir, MediaInfo info, double? start, double? length, bool upscale, CancellationToken ct)
+    {
+        var target = _config.VideoUploadUpscaleTargetSize;
+        var output = Path.Combine(workDir, upscale ? "upscaled.mkv" : "cut.mkv");
 
         // The scale runs after ffmpeg's automatic rotation, so iw/ih are the
         // clip as it's meant to be seen: the shorter side goes to the target and
@@ -123,10 +191,18 @@ public sealed class VideoUpscaler
             // two sliced x264 threads and a 10-frame lookahead measured ~320 MB.
             // Frame threading buys nothing on the droplet's single vCPU anyway.
             "-threads", "1",
-            "-i", inputPath,
-            "-map", "0:v:0", "-map", "0:a?",
-            "-filter_threads", "1",
-            "-vf", scale,
+        };
+        args.AddRange(["-i", inputPath]);
+        // -ss after -i, not before: with the audio copied, an input-side seek
+        // left the video's timestamps starting at Start (ffmpeg 9), so the file
+        // reported Start + the cut as its length. This decodes up to Start,
+        // which costs time on a long clip but cuts exactly.
+        if (start is { } s) args.AddRange(["-ss", Seconds(s)]);
+        if (length is { } l) args.AddRange(["-t", Seconds(l)]);
+        args.AddRange(["-map", "0:v:0", "-map", "0:a?", "-filter_threads", "1"]);
+        if (upscale) args.AddRange(["-vf", scale]);
+        args.AddRange(
+        [
             "-c:v", "libx264", "-preset", "veryfast",
             "-crf", _config.VideoUploadUpscaleCrf.ToString(CultureInfo.InvariantCulture),
             "-pix_fmt", "yuv420p",
@@ -134,7 +210,7 @@ public sealed class VideoUpscaler
             "-x264-params", "rc-lookahead=10:sliced-threads=1",
             "-c:a", "copy",
             output,
-        };
+        ]);
 
         var timeout = TimeSpan.FromMinutes(_config.VideoUploadUpscaleTimeoutMinutes);
         var sw = Stopwatch.StartNew();
@@ -145,60 +221,23 @@ public sealed class VideoUpscaler
         if (exitCode != 0 || !File.Exists(output) || new FileInfo(output).Length == 0)
         {
             _logger.LogWarning(
-                "ffmpeg upscale exited {Code} after {Elapsed}; uploading the original. Tail: {Tail}",
-                exitCode, sw.Elapsed, FfmpegProcess.Tail(stderr));
+                "ffmpeg {What} exited {Code} after {Elapsed}. Tail: {Tail}",
+                upscale ? "upscale" : "cut", exitCode, sw.Elapsed, FfmpegProcess.Tail(stderr));
             return null;
         }
 
-        _logger.LogInformation(
-            "Upscaled {W}x{H} clip ({InMb:F1} MB) to {Target}p in {Elapsed:mm\\:ss} ({OutMb:F1} MB)",
-            probe.Width, probe.Height, new FileInfo(inputPath).Length / 1048576.0,
-            target, sw.Elapsed, new FileInfo(output).Length / 1048576.0);
+        if (upscale)
+            _logger.LogInformation(
+                "Upscaled {W}x{H} clip ({InMb:F1} MB) to {Target}p in {Elapsed:mm\\:ss} ({OutMb:F1} MB)",
+                info.Width, info.Height, new FileInfo(inputPath).Length / 1048576.0,
+                target, sw.Elapsed, new FileInfo(output).Length / 1048576.0);
+        if (start is not null)
+            _logger.LogInformation(
+                "Cut {Start}–{End} from a {W}x{H} clip in {Elapsed:mm\\:ss} ({OutMb:F1} MB)",
+                ClipTime.Format(start.Value), length is { } len ? ClipTime.Format(start.Value + len) : "end",
+                info.Width, info.Height, sw.Elapsed, new FileInfo(output).Length / 1048576.0);
         return output;
     }
 
-    private sealed record ProbeResult(int Width, int Height, double DurationSeconds, string? ColorTransfer)
-    {
-        public bool IsHdr => ColorTransfer is "smpte2084" or "arib-std-b67";
-    }
-
-    private async Task<ProbeResult?> ProbeAsync(string inputPath, CancellationToken ct)
-    {
-        var args = new List<string>
-        {
-            "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height,color_transfer:format=duration",
-            "-of", "json",
-            inputPath,
-        };
-
-        var (exitCode, stdout, stderr) = await FfmpegProcess.RunAsync(
-            _config.FfprobePath, args, TimeSpan.FromMinutes(1), lowPriority: false, captureStdout: true, _logger, ct);
-        if (exitCode != 0)
-        {
-            _logger.LogWarning("ffprobe exited {Code}; skipping upscale. {Tail}", exitCode, FfmpegProcess.Tail(stderr));
-            return null;
-        }
-
-        using var doc = JsonDocument.Parse(stdout);
-        var root = doc.RootElement;
-        if (!root.TryGetProperty("streams", out var streams) || streams.GetArrayLength() == 0) return null;
-
-        var s = streams[0];
-        var width  = s.TryGetProperty("width", out var w) ? w.GetInt32() : 0;
-        var height = s.TryGetProperty("height", out var h) ? h.GetInt32() : 0;
-        var transfer = s.TryGetProperty("color_transfer", out var t) ? t.GetString() : null;
-
-        double duration = 0;
-        if (root.TryGetProperty("format", out var format)
-            && format.TryGetProperty("duration", out var d)
-            && d.GetString() is { } ds)
-        {
-            double.TryParse(ds, NumberStyles.Float, CultureInfo.InvariantCulture, out duration);
-        }
-
-        if (width <= 0 || height <= 0) return null;
-        return new ProbeResult(width, height, duration, transfer);
-    }
+    private static string Seconds(double s) => s.ToString("0.###", CultureInfo.InvariantCulture);
 }
