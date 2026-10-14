@@ -146,7 +146,6 @@ public sealed partial class VideoRepostHandler
         ulong channelId, ulong messageId, VideoSubmission row, VideoSubmissionKind kind, ShortLayout layout)
     {
         var title = BuildTitle(row, await CountVideosAsync(messageId));
-        if (title.Length > 100) title = title[..100];
         var isShort = kind == VideoSubmissionKind.Short;
 
         return new ModalBuilder()

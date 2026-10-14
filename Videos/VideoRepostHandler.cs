@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using ClanGuardBot.Data;
 using ClanGuardBot.Models;
 using ClanGuardBot.Services;
@@ -521,7 +522,17 @@ public sealed partial class VideoRepostHandler
         return user.Roles.Any(r => r.Id == _config.VideoUploadRoleId);
     }
 
-    private static string BuildTitle(VideoSubmission s, int videoCount)
+    /// <summary>Longest title the upload form (and YouTube) accepts.</summary>
+    private const int MaxTitleLength = 100;
+
+    /// <summary>
+    /// The title pre-filled in the upload form: the post's first line (or poster and
+    /// date), plus " (part N)" when the post carries several videos. A long first line
+    /// is shortened with "…", never the part number, so two clips from one post can't
+    /// end up with the same title; the cut falls between whole characters, so an emoji
+    /// is never split in half.
+    /// </summary>
+    internal static string BuildTitle(VideoSubmission s, int videoCount)
     {
         var firstLine = s.OriginalContent
             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
@@ -529,7 +540,19 @@ public sealed partial class VideoRepostHandler
         var title = string.IsNullOrEmpty(firstLine)
             ? $"{s.PosterName} — {s.PostedUtc:MMM d, yyyy}"
             : firstLine;
-        return videoCount > 1 ? $"{title} (part {s.AttachmentIndex + 1})" : title;
+        var suffix = videoCount > 1 ? $" (part {s.AttachmentIndex + 1})" : "";
+        if (title.Length + suffix.Length <= MaxTitleLength) return title + suffix;
+
+        var budget = MaxTitleLength - suffix.Length - 1; // room for the "…"
+        var cut = 0;
+        var elements = StringInfo.GetTextElementEnumerator(title);
+        while (elements.MoveNext())
+        {
+            var end = elements.ElementIndex + elements.GetTextElement().Length;
+            if (end > budget) break;
+            cut = end;
+        }
+        return title[..cut].TrimEnd() + "…" + suffix;
     }
 
     private static string BuildDescription(VideoSubmission s, string guildName)
