@@ -287,8 +287,21 @@ public sealed partial class VideoRepostHandler
             })
             .ToList();
 
-        var forward = await uploadChannel.SendMessageAsync(
-            messageReference: new MessageReference(msg.Id, channel.Id, channel.Guild.Id, true, MessageReferenceType.Forward));
+        IUserMessage forward;
+        try
+        {
+            forward = await uploadChannel.SendMessageAsync(
+                messageReference: new MessageReference(msg.Id, channel.Id, channel.Guild.Id, true, MessageReferenceType.Forward));
+        }
+        catch (HttpException)
+        {
+            // A member who deletes their post straight away beats the forward to it;
+            // that's not an error. Anything else still is.
+            if (!await OriginalConfirmedGoneAsync(channel.Id, msg.Id)) throw;
+            _logger.LogInformation(
+                "Video post {MessageId} in #{Channel} was deleted before it could be forwarded", msg.Id, channel.Name);
+            return;
+        }
 
         IUserMessage reply;
         try
@@ -321,9 +334,17 @@ public sealed partial class VideoRepostHandler
         }
 
         // The member may have deleted the post between the forward and the save,
-        // when the deletion handler still found no rows to mark. Check once now.
-        if (await OriginalConfirmedGoneAsync(channel.Id, msg.Id))
-            await MarkOriginalDeletedAsync(msg.Id);
+        // when the deletion handler still found no rows to mark. Check once now. The
+        // forward itself worked, so a failure here is only a warning.
+        try
+        {
+            if (await OriginalConfirmedGoneAsync(channel.Id, msg.Id))
+                await MarkOriginalDeletedAsync(msg.Id);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not re-check whether video post {MessageId} was deleted while it was forwarded", msg.Id);
+        }
 
         _logger.LogInformation(
             "Forwarded {Count} video(s) from {User} in #{Channel} to #{UploadChannel} (original {Original} → reply {Reply})",
