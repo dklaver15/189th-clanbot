@@ -28,7 +28,7 @@ Built with C# on .NET 10 ([Discord.Net](https://github.com/discord-net/Discord.N
 - `/poll` (native or anonymous), Question and Joke of the Day, scheduled reminders, UFC schedules and results, a Sleeper fantasy football league, and THE FINALS leaderboard lookups.
 - Gamertag roster in Google Sheets (`/gamertags`, `/lookup`).
 - Ranked REDSEC wins: HQ records each squad win with its season, date and the clan members on the squad (`/redsec-add-win`, `/redsec-remove-win`). `/redsec-wins` posts a season card with a win leaderboard and the most recent wins.
-- Clips posted in the clip channels are reposted with an "Upload to YouTube" button. Clips are upscaled to 1440p before upload.
+- Clips posted in the clip channels stay where they are and are forwarded to a private upload channel (`VideoUploadChannelId`). There the Media Team sends each clip to YouTube with one "Upload" button: as a normal video (upscaled to 1440p first) or as a 9:16 YouTube Short (choose a framing), with its own start time, end time and title.
 
 **Game servers**
 - Satisfactory (via the Ficsit Remote Monitoring mod): status, playtime, production reports, power and rail charts, and factory maps.
@@ -77,6 +77,7 @@ When adding a command, register it in `DiscordBotService` and add it to the cata
 The features use these permissions:
 - **Manage Roles**, **Manage Nicknames**, **Kick Members**, **Ban Members** and **Moderate Members** (timeouts).
 - **Manage Messages**, **Manage Channels**, **Manage Webhooks**, **Manage Server** (invite tracking), **Create Invite** and **View Audit Log**.
+- Clip uploads: **Read Message History** in the clip channels, and **View Channel**, **Send Messages** and **Read Message History** in the upload channel.
 - The usual send, embed, attach and read-history permissions.
 
 The meeting recorder uses its own bot account (`RECORDER_BOT_TOKEN`).
@@ -161,7 +162,7 @@ C# files are grouped into folders by feature. Most namespaces don't match the fo
 | `Events/`, `Polls/`, `Reminders/` | Clan events and calendar sync, polls, scheduled reminders |
 | `Tickets/`, `OfficerApplications/` | Support tickets and officer applications |
 | `Invites/`, `Gamertags/`, `Community/` | Invite tracking, gamertag roster, `/qotd`, `/jotd`, `/say` and bump reminders |
-| `Meetings/`, `Videos/`, `Backup/` | Meeting recording and minutes, clip reposts and YouTube uploads, database backups |
+| `Meetings/`, `Videos/`, `Backup/` | Meeting recording and minutes, clip forwarding and YouTube uploads, database backups |
 | `Satisfactory/`, `Valheim/`, `Finals/`, `Sleeper/`, `Ufc/` | Game and league integrations |
 | `Briefing/`, `AI/` | Weekly officer briefing and the Claude client |
 | `RedditLeads/` | Reddit recruiting leads |

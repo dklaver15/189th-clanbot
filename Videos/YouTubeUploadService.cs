@@ -25,7 +25,7 @@ namespace ClanGuardBot.Services;
 /// ── Quota ──
 /// Since 2026-06-01 videos.insert has its own quota bucket: 100 uploads per
 /// project per day by default, separate from the 10,000-unit pool the other
-/// endpoints share. Only Upload clicks count; reposts cost nothing. A quotaExceeded error
+/// endpoints share. Only uploads count; forwards cost nothing. A quotaExceeded error
 /// surfaces to the uploader as a normal failure and the button stays live.
 /// </summary>
 public sealed class YouTubeUploadService

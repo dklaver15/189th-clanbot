@@ -2523,13 +2523,22 @@ namespace ClanGuardBot.Migrations
                     b.Property<ulong>("GuildId")
                         .HasColumnType("INTEGER");
 
+                    b.Property<int?>("Height")
+                        .HasColumnType("INTEGER");
+
                     b.Property<bool>("KeptOriginal")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("Kind")
                         .HasColumnType("INTEGER");
 
                     b.Property<string>("LastError")
                         .HasColumnType("TEXT");
 
                     b.Property<ulong>("MessageId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<ulong?>("OriginalChannelId")
                         .HasColumnType("INTEGER");
 
                     b.Property<string>("OriginalContent")
@@ -2549,8 +2558,20 @@ namespace ClanGuardBot.Migrations
                     b.Property<ulong>("PosterUserId")
                         .HasColumnType("INTEGER");
 
+                    b.Property<int?>("ShortLayout")
+                        .HasColumnType("INTEGER");
+
                     b.Property<int>("Status")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("Title")
+                        .HasColumnType("TEXT");
+
+                    b.Property<double?>("TrimEndSeconds")
+                        .HasColumnType("REAL");
+
+                    b.Property<double?>("TrimStartSeconds")
+                        .HasColumnType("REAL");
 
                     b.Property<DateTime?>("UploadStartedUtc")
                         .HasColumnType("TEXT");
@@ -2563,6 +2584,9 @@ namespace ClanGuardBot.Migrations
 
                     b.Property<DateTime?>("UploadedUtc")
                         .HasColumnType("TEXT");
+
+                    b.Property<int?>("Width")
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("YouTubeVideoId")
                         .HasColumnType("TEXT");

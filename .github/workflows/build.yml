@@ -28,6 +28,14 @@ jobs:
           # ImageSharp 4 fails a Release build without a Six Labors license key.
           SixLaborsLicenseKey: ${{ secrets.SIXLABORS_LICENSE_KEY }}
 
+      # The render tests run real ffmpeg (they skip themselves where it's missing).
+      - name: Install ffmpeg
+        run: command -v ffmpeg || (sudo apt-get update && sudo apt-get install -y ffmpeg)
+
+      # Debug, so it needs no Six Labors license key.
+      - name: Run tests
+        run: dotnet test Tests/ClanGuardBot.Tests
+
       # EF Core 9+ refuses to apply migrations when the model has changes that
       # no migration covers, which would stop the bot at startup.
       - name: Check for model changes without a migration

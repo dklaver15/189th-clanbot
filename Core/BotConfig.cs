@@ -2881,9 +2881,10 @@ public class BotConfig
     /// <summary>
     /// Master switch for <see cref="Handlers.VideoRepostHandler"/>. When a member
     /// posts a message carrying a video attachment in one of
-    /// <see cref="VideoRepostChannelIds"/>, the bot reposts the video (plus the
-    /// message text and who posted it) with an "Upload" button, then deletes the
-    /// original. Messages without a video are never touched. Default true.
+    /// <see cref="VideoRepostChannelIds"/>, the bot forwards it to
+    /// <see cref="VideoUploadChannelId"/> with an "Upload" button per video. The
+    /// member's post is left as it is. Messages without a video are never touched.
+    /// Default true.
     /// </summary>
     public bool VideoRepostEnabled { get; set; } = true;
 
@@ -2892,7 +2893,17 @@ public class BotConfig
         new() { 1408199889879564539, 1549891740993982504, 1551837069632995378 };
 
     /// <summary>
-    /// Role allowed to press "Upload" and send a reposted video to the clan's
+    /// Private channel (Media Team + HQ) where clip posts are forwarded. The bot
+    /// forwards each video post from <see cref="VideoRepostChannelIds"/> here and
+    /// replies to the forward with the poster, a jump link and the Upload
+    /// button(s). 0 = off: clip posts are left alone and get no Upload button.
+    /// The bot needs View Channel, Send Messages and Read Message History here,
+    /// and Read Message History in the clip channels so it can forward from them.
+    /// </summary>
+    public ulong VideoUploadChannelId { get; set; } = 0;
+
+    /// <summary>
+    /// Role allowed to press "Upload" and send a clip to the clan's
     /// YouTube channel, plus Administrators. 0 fails CLOSED (Administrators only).
     /// </summary>
     public ulong VideoUploadRoleId { get; set; } = 1553078561072480326;
@@ -2913,8 +2924,8 @@ public class BotConfig
     /// the clan's YouTube channel, with the youtube.upload scope. Treat as a
     /// password: it can post to the channel. Supply via env
     /// (BotConfig__YouTubeRefreshToken). While any of the three YouTube values
-    /// are blank, videos are still reposted with the button, but pressing it
-    /// says uploads aren't configured.
+    /// are blank, clips are still forwarded with the Upload button, but pressing
+    /// it says uploads aren't configured.
     ///
     /// If the OAuth consent screen is left in "Testing", Google expires this
     /// token after 7 days; publish the consent screen to "In production".
@@ -2970,6 +2981,17 @@ public class BotConfig
 
     /// <summary>See <see cref="FfmpegPath"/>.</summary>
     public string FfprobePath { get; set; } = "ffprobe";
+
+    /// <summary>
+    /// Offer the Short choices (full view + zoom, center crop; a vertical or square
+    /// clip gets a single "Short") when someone presses Upload on a forwarded clip.
+    /// When false, Upload goes straight to the normal video form. Shorts render on
+    /// the droplet CPU, one at a time with upscales. Default true.
+    /// </summary>
+    public bool VideoShortsEnabled { get; set; } = true;
+
+    /// <summary>Give up on a Short render after this many minutes. Default 20.</summary>
+    public int VideoShortRenderTimeoutMinutes { get; set; } = 20;
 
     public bool IsYouTubeConfigured =>
         !string.IsNullOrWhiteSpace(YouTubeClientId)
