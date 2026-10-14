@@ -28,7 +28,7 @@ Built with C# on .NET 10 ([Discord.Net](https://github.com/discord-net/Discord.N
 - `/poll` (native or anonymous), Question and Joke of the Day, scheduled reminders, UFC schedules and results, a Sleeper fantasy football league, and THE FINALS leaderboard lookups.
 - Gamertag roster in Google Sheets (`/gamertags`, `/lookup`).
 - Ranked REDSEC wins: HQ records each squad win with its season, date and the clan members on the squad (`/redsec-add-win`, `/redsec-remove-win`). `/redsec-wins` posts a season card with a win leaderboard and the most recent wins.
-- Clips posted in the clip channels stay where they are and are forwarded to a private upload channel (`VideoUploadChannelId`). There the Media Team can send each clip to YouTube with "Upload" (upscaled to 1440p first) or as a 9:16 YouTube Short with "Short" (choose a framing, trim and title).
+- Clips posted in the clip channels stay where they are and are forwarded to a private upload channel (`VideoUploadChannelId`). There the Media Team sends each clip to YouTube with one "Upload" button: as a normal video (upscaled to 1440p first) or as a 9:16 YouTube Short (choose a framing), with its own start time, end time and title.
 
 **Game servers**
 - Satisfactory (via the Ficsit Remote Monitoring mod): status, playtime, production reports, power and rail charts, and factory maps.
