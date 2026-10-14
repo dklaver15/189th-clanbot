@@ -73,7 +73,7 @@ namespace ClanGuardBot.Handlers;
 /// REST session, not the interaction token, so an upload that outlives the
 /// 15-minute interaction window still updates the button.
 /// </summary>
-public sealed class VideoRepostHandler
+public sealed partial class VideoRepostHandler
 {
     // Fallback for attachments Discord didn't give a content type.
     private static readonly HashSet<string> VideoExtensions = new(StringComparer.OrdinalIgnoreCase)
@@ -85,6 +85,7 @@ public sealed class VideoRepostHandler
     private readonly IHttpClientFactory _httpFactory;
     private readonly YouTubeUploadService _youtube;
     private readonly VideoUpscaler _upscaler;
+    private readonly ShortRenderer _shorts;
     private readonly ILogger<VideoRepostHandler> _logger;
     private readonly BotConfig _config;
 
@@ -113,11 +114,21 @@ public sealed class VideoRepostHandler
     /// </summary>
     private sealed class OriginalDeletedException(string message = OriginalDeletedMessage) : Exception(message);
 
+    private const string YouTubeNotConfiguredMessage =
+        "YouTube uploading isn't set up yet — the bot is missing its YouTube credentials.";
+
+    private string NotAllowedMessage()
+    {
+        var who = _config.VideoUploadRoleId != 0 ? $"members with the <@&{_config.VideoUploadRoleId}> role" : "Administrators";
+        return $"Only {who} can upload videos to YouTube.";
+    }
+
     public VideoRepostHandler(
         IServiceProvider services,
         IHttpClientFactory httpFactory,
         YouTubeUploadService youtube,
         VideoUpscaler upscaler,
+        ShortRenderer shorts,
         ILogger<VideoRepostHandler> logger,
         IOptions<BotConfig> config)
     {
@@ -125,6 +136,7 @@ public sealed class VideoRepostHandler
         _httpFactory = httpFactory;
         _youtube     = youtube;
         _upscaler    = upscaler;
+        _shorts      = shorts;
         _logger      = logger;
         _config      = config.Value;
     }
@@ -134,6 +146,7 @@ public sealed class VideoRepostHandler
         _client = client;
         client.MessageReceived += OnMessageReceived;
         client.ButtonExecuted  += OnButtonExecuted;
+        client.ModalSubmitted  += OnModalSubmitted;
         client.MessageDeleted  += OnMessageDeleted;
         client.MessagesBulkDeleted += OnMessagesBulkDeleted;
         client.Ready           += OnReady;
@@ -261,20 +274,26 @@ public sealed class VideoRepostHandler
         var now         = DateTime.UtcNow;
         var rows = Enumerable.Range(0, attachments.Count)
             .Where(i => IsVideo(attachments[i]))
-            .Select(i => new VideoSubmission
-            {
-                GuildId           = channel.Guild.Id,
-                ChannelId         = uploadChannel.Id,
-                AttachmentIndex   = i,
-                KeptOriginal      = true,
-                FileName          = attachments[i].Filename,
-                OriginalChannelId = channel.Id,
-                OriginalMessageId = msg.Id,
-                PosterUserId      = msg.Author.Id,
-                PosterName        = posterName,
-                OriginalContent   = msg.CleanContent ?? string.Empty,
-                PostedUtc         = now,
-            })
+            .SelectMany(i => (_config.VideoShortsEnabled
+                    ? new[] { VideoSubmissionKind.Video, VideoSubmissionKind.Short }
+                    : new[] { VideoSubmissionKind.Video })
+                .Select(kind => new VideoSubmission
+                {
+                    GuildId           = channel.Guild.Id,
+                    ChannelId         = uploadChannel.Id,
+                    AttachmentIndex   = i,
+                    Kind              = kind,
+                    KeptOriginal      = true,
+                    FileName          = attachments[i].Filename,
+                    OriginalChannelId = channel.Id,
+                    OriginalMessageId = msg.Id,
+                    PosterUserId      = msg.Author.Id,
+                    PosterName        = posterName,
+                    OriginalContent   = msg.CleanContent ?? string.Empty,
+                    PostedUtc         = now,
+                    Width             = attachments[i].Width,
+                    Height            = attachments[i].Height,
+                }))
             .ToList();
 
         var forward = await uploadChannel.SendMessageAsync(
@@ -317,7 +336,7 @@ public sealed class VideoRepostHandler
 
         _logger.LogInformation(
             "Forwarded {Count} video(s) from {User} in #{Channel} to #{UploadChannel} (original {Original} → reply {Reply})",
-            rows.Count, posterName, channel.Name, uploadChannel.Name, msg.Id, reply.Id);
+            rows.Count(r => r.Kind == VideoSubmissionKind.Video), posterName, channel.Name, uploadChannel.Name, msg.Id, reply.Id);
     }
 
     /// <summary>
@@ -457,30 +476,49 @@ public sealed class VideoRepostHandler
 
     private Task OnButtonExecuted(SocketMessageComponent component)
     {
-        var customId = component.Data.CustomId;
-        if (string.IsNullOrEmpty(customId) || !customId.StartsWith(VideoUploadCard.CustomIdPrefix, StringComparison.Ordinal))
+        var customId = component.Data.CustomId ?? string.Empty;
+        Func<Task> handle;
+        if (customId.StartsWith(VideoUploadCard.CustomIdPrefix, StringComparison.Ordinal))
+            handle = () => HandleUploadClickAsync(component, customId);
+        else if (customId.StartsWith(VideoUploadCard.ShortCustomIdPrefix, StringComparison.Ordinal))
+            handle = () => HandleShortClickAsync(component, customId);
+        else if (customId.StartsWith(ShortFramingPrefix, StringComparison.Ordinal))
+            handle = () => HandleShortFramingAsync(component, customId);
+        else
             return Task.CompletedTask;
 
-        _ = Task.Run(async () =>
+        _ = Task.Run(() => RunInteractionAsync(component, customId, handle));
+        return Task.CompletedTask;
+    }
+
+    private Task OnModalSubmitted(SocketModal modal)
+    {
+        var customId = modal.Data.CustomId ?? string.Empty;
+        if (!customId.StartsWith(ShortFormPrefix, StringComparison.Ordinal)) return Task.CompletedTask;
+
+        _ = Task.Run(() => RunInteractionAsync(modal, customId, () => HandleShortFormAsync(modal, customId)));
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Runs one button/form handler; on an unexpected error, tells the clicker privately.</summary>
+    private async Task RunInteractionAsync(SocketInteraction interaction, string customId, Func<Task> handle)
+    {
+        try
         {
+            await handle();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error handling video button or form (customId={CustomId})", customId);
             try
             {
-                await HandleUploadClickAsync(component, customId);
+                if (interaction.HasResponded)
+                    await interaction.FollowupAsync("Something went wrong handling that click.", ephemeral: true);
+                else
+                    await interaction.RespondAsync("Something went wrong handling that click.", ephemeral: true);
             }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error handling video upload button (customId={CustomId})", customId);
-                try
-                {
-                    if (component.HasResponded)
-                        await component.FollowupAsync("Something went wrong handling that click.", ephemeral: true);
-                    else
-                        await component.RespondAsync("Something went wrong handling that click.", ephemeral: true);
-                }
-                catch { /* interaction expired */ }
-            }
-        });
-        return Task.CompletedTask;
+            catch { /* interaction expired */ }
+        }
     }
 
     private async Task HandleUploadClickAsync(SocketMessageComponent component, string customId)
@@ -493,18 +531,13 @@ public sealed class VideoRepostHandler
 
         if (component.User is not SocketGuildUser user || !CanUpload(user))
         {
-            var who = _config.VideoUploadRoleId != 0 ? $"members with the <@&{_config.VideoUploadRoleId}> role" : "Administrators";
-            await component.RespondAsync(
-                $"Only {who} can upload videos to YouTube.",
-                ephemeral: true, allowedMentions: AllowedMentions.None);
+            await component.RespondAsync(NotAllowedMessage(), ephemeral: true, allowedMentions: AllowedMentions.None);
             return;
         }
 
         if (!_youtube.IsConfigured)
         {
-            await component.RespondAsync(
-                "YouTube uploading isn't set up yet — the bot is missing its YouTube credentials.",
-                ephemeral: true);
+            await component.RespondAsync(YouTubeNotConfiguredMessage, ephemeral: true);
             return;
         }
 
@@ -569,17 +602,7 @@ public sealed class VideoRepostHandler
                 BuildTitle(submission, videoCount),
                 BuildDescription(submission, guildName));
 
-            using (var scope = _services.CreateScope())
-            {
-                var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-                await db.VideoSubmissions
-                    .Where(v => v.Id == submission.Id)
-                    .ExecuteUpdateAsync(s => s
-                        .SetProperty(v => v.Status,         VideoSubmissionStatus.Uploaded)
-                        .SetProperty(v => v.YouTubeVideoId, youtubeId)
-                        .SetProperty(v => v.UploadedUtc,    (DateTime?)DateTime.UtcNow)
-                        .SetProperty(v => v.LastError,      (string?)null));
-            }
+            await MarkUploadedAsync(submission.Id, youtubeId);
 
             await RefreshButtonsAsync(message);
             await TryFollowupAsync(component, $"✅ Uploaded: https://youtu.be/{youtubeId}");
@@ -622,11 +645,11 @@ public sealed class VideoRepostHandler
     /// a cached copy's URLs can be past their ~24h expiry. A deleted original
     /// throws <see cref="OriginalDeletedException"/>.
     /// </summary>
-    private async Task<IAttachment> ResolveSourceAttachmentAsync(IUserMessage buttonMessage, VideoSubmission submission)
+    private async Task<IAttachment> ResolveSourceAttachmentAsync(IUserMessage? buttonMessage, VideoSubmission submission)
     {
         if (!submission.KeptOriginal)
         {
-            return buttonMessage.Attachments.ElementAtOrDefault(submission.AttachmentIndex)
+            return buttonMessage?.Attachments.ElementAtOrDefault(submission.AttachmentIndex)
                 ?? throw new InvalidOperationException($"The repost no longer has attachment #{submission.AttachmentIndex}.");
         }
 
@@ -754,6 +777,19 @@ public sealed class VideoRepostHandler
             .FirstOrDefaultAsync(v => v.MessageId == messageId && v.AttachmentIndex == index && v.Kind == kind);
     }
 
+    private async Task MarkUploadedAsync(int rowId, string youtubeId)
+    {
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+        await db.VideoSubmissions
+            .Where(v => v.Id == rowId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(v => v.Status,         VideoSubmissionStatus.Uploaded)
+                .SetProperty(v => v.YouTubeVideoId, youtubeId)
+                .SetProperty(v => v.UploadedUtc,    (DateTime?)DateTime.UtcNow)
+                .SetProperty(v => v.LastError,      (string?)null));
+    }
+
     private async Task<int> CountVideosAsync(ulong messageId)
     {
         using var scope = _services.CreateScope();
@@ -773,11 +809,11 @@ public sealed class VideoRepostHandler
     }
 
     /// <summary>A followup after the 15-minute interaction window fails; the button edit already told everyone.</summary>
-    private async Task TryFollowupAsync(SocketMessageComponent component, string text)
+    private async Task TryFollowupAsync(SocketInteraction interaction, string text)
     {
         try
         {
-            await component.FollowupAsync(text, ephemeral: true);
+            await interaction.FollowupAsync(text, ephemeral: true);
         }
         catch (Exception ex)
         {
