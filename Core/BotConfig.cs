@@ -2882,8 +2882,9 @@ public class BotConfig
     /// Master switch for <see cref="Handlers.VideoRepostHandler"/>. When a member
     /// posts a message carrying a video attachment in one of
     /// <see cref="VideoRepostChannelIds"/>, the bot forwards it to
-    /// <see cref="VideoUploadChannelId"/> with "Upload" and "Short" buttons. The member's post
-    /// is left as it is. Messages without a video are never touched. Default true.
+    /// <see cref="VideoUploadChannelId"/> with an "Upload" button per video. The
+    /// member's post is left as it is. Messages without a video are never touched.
+    /// Default true.
     /// </summary>
     public bool VideoRepostEnabled { get; set; } = true;
 
