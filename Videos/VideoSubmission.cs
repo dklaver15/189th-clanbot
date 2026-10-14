@@ -37,13 +37,9 @@ public enum ShortLayout
 
 /// <summary>What the uploader chose: video or Short, the Short's framing, the trim and the title.</summary>
 /// <param name="Layout">The Short's framing; ignored for a video.</param>
-/// <param name="EndSeconds">Null = to the end of the clip (a Short stops at most <c>UploadRequest.MaxShortSeconds</c> after the start).</param>
+/// <param name="EndSeconds">Null = to the end of the clip (a Short stops just under <c>UploadRequest.MaxShortSeconds</c> after the start).</param>
 public sealed record UploadSettings(
-    VideoSubmissionKind Kind, ShortLayout Layout, double StartSeconds, double? EndSeconds, string Title)
-{
-    /// <summary>True when Start or End was changed from "the whole clip".</summary>
-    public bool IsTrimmed => StartSeconds > 0 || EndSeconds is not null;
-}
+    VideoSubmissionKind Kind, ShortLayout Layout, double StartSeconds, double? EndSeconds, string Title);
 
 /// <summary>
 /// One video from a clip post in a watched channel (see

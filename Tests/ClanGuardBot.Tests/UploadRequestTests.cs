@@ -82,11 +82,4 @@ public class UploadRequestTests
     [Fact]
     public void An_empty_title_is_refused() =>
         Assert.Equal("Title can't be empty.", Fails("0:00", null, "   "));
-
-    [Theory]
-    [InlineData("0:00", null, false)]
-    [InlineData("0:05", null, true)]
-    [InlineData("0:00", "0:10", true)]
-    public void Only_a_changed_start_or_end_counts_as_trimmed(string start, string? end, bool trimmed) =>
-        Assert.Equal(trimmed, Ok(start, end).IsTrimmed);
 }

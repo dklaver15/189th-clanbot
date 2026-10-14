@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using ClanGuardBot.Data;
 using ClanGuardBot.Models;
 using ClanGuardBot.Services;
@@ -78,14 +79,9 @@ public sealed partial class VideoRepostHandler
 
         var message = component.Message;
         var row = await LoadAsync(message.Id, index);
-        if (row is { OriginalChannelId: null })
+        if (!CanStartUpload(row, component.User.Id, out var refusal))
         {
-            await component.RespondAsync(OldMessageReply, ephemeral: true);
-            return;
-        }
-        if (row is not { Status: VideoSubmissionStatus.Pending })
-        {
-            await component.RespondAsync(StatusReply(row, component.User.Id), ephemeral: true);
+            await component.RespondAsync(refusal, ephemeral: true);
             return;
         }
 
@@ -128,14 +124,9 @@ public sealed partial class VideoRepostHandler
         if (await RefuseUploadAsync(component, kind)) return;
 
         var row = await LoadAsync(messageId, index);
-        if (row is { OriginalChannelId: null })
+        if (!CanStartUpload(row, component.User.Id, out var refusal))
         {
-            await component.RespondAsync(OldMessageReply, ephemeral: true);
-            return;
-        }
-        if (row is not { Status: VideoSubmissionStatus.Pending })
-        {
-            await component.RespondAsync(StatusReply(row, component.User.Id), ephemeral: true);
+            await component.RespondAsync(refusal, ephemeral: true);
             return;
         }
 
@@ -306,6 +297,20 @@ public sealed partial class VideoRepostHandler
 
         await interaction.RespondAsync(refusal, ephemeral: true, allowedMentions: AllowedMentions.None);
         return true;
+    }
+
+    /// <summary>
+    /// Whether a click can go on to the choice or the form: the clip has a row from
+    /// a forward and is still waiting to be uploaded. Otherwise
+    /// <paramref name="refusal"/> is the private reply (an old message, or the clip's
+    /// status: already up, going up, original deleted).
+    /// </summary>
+    private static bool CanStartUpload([NotNullWhen(true)] VideoSubmission? row, ulong userId, out string refusal)
+    {
+        refusal = row is { OriginalChannelId: null } ? OldMessageReply
+            : row is not { Status: VideoSubmissionStatus.Pending } ? StatusReply(row, userId)
+            : string.Empty;
+        return refusal.Length == 0;
     }
 
     private static string StatusReply(VideoSubmission? row, ulong userId) => row?.Status switch

@@ -45,12 +45,12 @@ public static partial class UploadRequest
             }
             if (parsedEnd <= from)
             {
-                error = $"End ({FormatTime(parsedEnd)}) must be after Start ({FormatTime(from)}).";
+                error = $"End ({ClipTime.Format(parsedEnd)}) must be after Start ({ClipTime.Format(from)}).";
                 return false;
             }
             if (kind == VideoSubmissionKind.Short && parsedEnd - from > MaxShortSeconds)
             {
-                error = $"A Short can be at most {FormatTime(MaxShortSeconds)} long, and {FormatTime(from)} to {FormatTime(parsedEnd)} is {FormatTime(parsedEnd - from)}.";
+                error = $"A Short can be at most {ClipTime.Format(MaxShortSeconds)} long, and {ClipTime.Format(from)} to {ClipTime.Format(parsedEnd)} is {ClipTime.Format(parsedEnd - from)}.";
                 return false;
             }
             to = parsedEnd;
@@ -67,9 +67,6 @@ public static partial class UploadRequest
         error = string.Empty;
         return true;
     }
-
-    /// <summary>Whole seconds as <c>m:ss</c>, e.g. 65 → "1:05".</summary>
-    public static string FormatTime(double seconds) => ClipTime.Format(seconds);
 
     private static bool TryParseTime(string text, out double seconds)
     {
