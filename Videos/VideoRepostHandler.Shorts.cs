@@ -145,6 +145,10 @@ public sealed partial class VideoRepostHandler
 
         await modal.DeferAsync(ephemeral: true);
 
+        // Fetched before the claim: a REST failure here then leaves nothing claimed,
+        // instead of a Short stuck on Uploading until the next restart.
+        var reply = await FetchMessageAsync(channelId, messageId) as IUserMessage;
+
         bool claimed;
         using (var scope = _services.CreateScope())
         {
@@ -153,7 +157,6 @@ public sealed partial class VideoRepostHandler
                 db, messageId, index, VideoSubmissionKind.Short, user.Id, user.DisplayName, DateTime.UtcNow, settings);
         }
 
-        var reply = await FetchMessageAsync(channelId, messageId) as IUserMessage;
         if (!claimed)
         {
             var existing = await LoadAsync(messageId, index, VideoSubmissionKind.Short);
