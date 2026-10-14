@@ -519,11 +519,12 @@ try
 
     // VideoRepostHandler: in BotConfig.VideoRepostChannelIds, a member's post that
     // carries a video is forwarded to BotConfig.VideoUploadChannelId and the bot
-    // replies there with an "Upload" button; the member's post is left as it is.
-    // The button (VideoUploadRoleId + Administrators) sends the clip to the clan
-    // YouTube channel through YouTubeUploadService, which signs in with
-    // BotConfig.YouTubeClientId/Secret/RefreshToken. Self-registers MessageReceived
-    // + MessageDeleted + MessagesBulkDeleted + ButtonExecuted + Ready.
+    // replies there with "Upload" and "Short" buttons; the member's post is left as
+    // it is. Upload (VideoUploadRoleId + Administrators) sends the clip to the clan
+    // YouTube channel through YouTubeUploadService (BotConfig.YouTubeClientId/
+    // Secret/RefreshToken); Short renders a 9:16 Short with ShortRenderer first.
+    // Self-registers MessageReceived + MessageDeleted + MessagesBulkDeleted +
+    // ButtonExecuted + ModalSubmitted + Ready.
     builder.Services.AddSingleton<YouTubeUploadService>();
     // EncodeGate: one ffmpeg encode at a time (upscales and Short renders share it).
     builder.Services.AddSingleton<EncodeGate>();

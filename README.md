@@ -27,7 +27,7 @@ Built with C# on .NET 10 ([Discord.Net](https://github.com/discord-net/Discord.N
 - XP seasons: XP from events, meetings, voice and chat, with daily caps that reset at Central midnight, a leaderboard and level-up DMs.
 - `/poll` (native or anonymous), Question and Joke of the Day, scheduled reminders, UFC schedules and results, a Sleeper fantasy football league, and THE FINALS leaderboard lookups.
 - Gamertag roster in Google Sheets (`/gamertags`, `/lookup`).
-- Clips posted in the clip channels stay where they are and are forwarded to a private upload channel (`VideoUploadChannelId`), where the Media Team can send them to YouTube with an "Upload" button. Clips are upscaled to 1440p before upload.
+- Clips posted in the clip channels stay where they are and are forwarded to a private upload channel (`VideoUploadChannelId`). There the Media Team can send each clip to YouTube with "Upload" (upscaled to 1440p first) or as a 9:16 YouTube Short with "Short" (choose a framing, trim and title).
 
 **Game servers**
 - Satisfactory (via the Ficsit Remote Monitoring mod): status, playtime, production reports, power and rail charts, and factory maps.
