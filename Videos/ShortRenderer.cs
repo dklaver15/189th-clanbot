@@ -7,7 +7,8 @@ namespace ClanGuardBot.Services;
 
 /// <summary>
 /// Makes a 1080x1920 YouTube Short from a clip: trims it to the chosen start/end
-/// (at most <see cref="UploadRequest.MaxShortSeconds"/>) and frames it.
+/// (just under <see cref="UploadRequest.MaxShortSeconds"/>, see <see cref="MaxRenderSeconds"/>)
+/// and frames it.
 ///
 /// ── Framing ──
 /// FullViewZoom puts the whole frame on top and a zoomed centre crop below, the
@@ -83,9 +84,7 @@ public sealed class ShortRenderer
         if (info.Duration > 0 && settings.StartSeconds >= info.Duration)
             throw ClipRejectedException.StartPastEnd(settings.StartSeconds, info.Duration);
 
-        var end = settings.EndSeconds ?? settings.StartSeconds + UploadRequest.MaxShortSeconds;
-        if (info.Duration > 0) end = Math.Min(end, info.Duration);
-        var length = end - settings.StartSeconds;
+        var length = RenderSeconds(settings.StartSeconds, settings.EndSeconds, info.Duration);
 
         var frame = BuildFilter(settings.Layout, info.Width, info.Height);
         // Drop frames before both scale branches run, not after.
@@ -124,9 +123,29 @@ public sealed class ShortRenderer
 
         _logger.LogInformation(
             "Rendered Short ({Layout}, {Start}–{End}) from a {W}x{H} clip",
-            settings.Layout, ClipTime.Format(settings.StartSeconds), ClipTime.Format(end),
+            settings.Layout, ClipTime.Format(settings.StartSeconds), ClipTime.Format(settings.StartSeconds + length),
             info.Width, info.Height);
         return output;
+    }
+
+    /// <summary>
+    /// Longest Short rendered: just under <see cref="UploadRequest.MaxShortSeconds"/>.
+    /// A render of exactly 3:00 can come out a few ms over once muxed, and YouTube
+    /// then files it as a normal video instead of a Short.
+    /// </summary>
+    internal const double MaxRenderSeconds = UploadRequest.MaxShortSeconds - 0.5;
+
+    /// <summary>
+    /// Seconds of the clip to render from <paramref name="start"/>: up to
+    /// <paramref name="end"/> (null = the end of the clip), never past the clip's end
+    /// when its <paramref name="duration"/> is known (0 = unknown), and at most
+    /// <see cref="MaxRenderSeconds"/>.
+    /// </summary>
+    internal static double RenderSeconds(double start, double? end, double duration)
+    {
+        var stop = end ?? double.MaxValue;
+        if (duration > 0) stop = Math.Min(stop, duration);
+        return Math.Min(stop - start, MaxRenderSeconds);
     }
 
     private static string Seconds(double s) => s.ToString("0.###", CultureInfo.InvariantCulture);
