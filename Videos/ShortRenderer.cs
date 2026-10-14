@@ -1,14 +1,9 @@
 using System.Globalization;
-using System.Text.Json;
 using ClanGuardBot.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace ClanGuardBot.Services;
-
-/// <summary>The Short's start time is at or past the end of the clip.</summary>
-public sealed class ShortTimeOutOfRangeException(double start, double duration)
-    : Exception($"Start ({ShortRequest.FormatTime(start)}) is past the end of the clip ({ShortRequest.FormatTime(duration)}).");
 
 /// <summary>
 /// Makes a 1080x1920 YouTube Short from a clip: trims it to the chosen start/end
@@ -21,6 +16,7 @@ public sealed class ShortTimeOutOfRangeException(double start, double duration)
 /// keep their shape (fitted inside 1080x1920), whatever layout was chosen, and
 /// AsIs on a landscape clip falls back to FullViewZoom, so the result is always
 /// vertical and YouTube classifies it as a Short.
+/// HDR clips are refused: re-encoding them to 8-bit without tone mapping would wash them out.
 ///
 /// ── Droplet ──
 /// Same limits as <see cref="VideoUpscaler"/>: one encode at a time
@@ -81,16 +77,19 @@ public sealed class ShortRenderer
     /// <summary>Renders the Short into <paramref name="workDir"/> and returns its path.</summary>
     public async Task<string> RenderAsync(string inputPath, string workDir, ShortSettings settings, CancellationToken ct = default)
     {
-        var probe = await ProbeAsync(inputPath, ct);
-        if (probe.Duration > 0 && settings.StartSeconds >= probe.Duration)
-            throw new ShortTimeOutOfRangeException(settings.StartSeconds, probe.Duration);
+        var info = await MediaProbe.ProbeAsync(_config.FfprobePath, inputPath, _logger, ct);
+        if (info.IsHdr)
+            throw new ClipRejectedException("This clip is HDR, so it can't be made into a Short.");
+        if (info.Duration > 0 && settings.StartSeconds >= info.Duration)
+            throw ClipRejectedException.StartPastEnd(settings.StartSeconds, info.Duration);
 
         var end = settings.EndSeconds ?? settings.StartSeconds + ShortRequest.MaxSeconds;
-        if (probe.Duration > 0) end = Math.Min(end, probe.Duration);
+        if (info.Duration > 0) end = Math.Min(end, info.Duration);
         var length = end - settings.StartSeconds;
 
-        var frame  = BuildFilter(settings.Layout, probe.Width, probe.Height);
-        var filter = probe.Fps > 60 ? frame.Filter + ",fps=60" : frame.Filter;
+        var frame = BuildFilter(settings.Layout, info.Width, info.Height);
+        // Drop frames before both scale branches run, not after.
+        var filter = info.Fps > 60 ? "fps=60," + frame.Filter : frame.Filter;
         var output = Path.Combine(workDir, "short.mp4");
 
         var args = new List<string>
@@ -120,73 +119,14 @@ public sealed class ShortRenderer
         // ffprobe can't always tell a clip's length (some WebMs carry none), and a
         // Start past the end then encodes "successfully" into a file with nothing in
         // it. Never hand that to YouTube.
-        if (await OutputSecondsAsync(output, ct) < MinOutputSeconds)
-            throw new InvalidOperationException("The Short came out empty. Is Start past the end of the clip?");
+        if (await MediaProbe.DurationAsync(_config.FfprobePath, output, _logger, ct) < MediaProbe.MinUsefulSeconds)
+            throw ClipRejectedException.CameOutEmpty();
 
         _logger.LogInformation(
             "Rendered Short ({Layout}, {Start}–{End}) from a {W}x{H} clip",
             settings.Layout, ShortRequest.FormatTime(settings.StartSeconds), ShortRequest.FormatTime(end),
-            probe.Width, probe.Height);
+            info.Width, info.Height);
         return output;
-    }
-
-    private sealed record Probe(int Width, int Height, double Duration, double Fps);
-
-    /// <summary>Displayed size (rotation applied), duration and frame rate of the first video stream.</summary>
-    private async Task<Probe> ProbeAsync(string inputPath, CancellationToken ct)
-    {
-        var args = new[]
-        {
-            "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "stream=width,height,r_frame_rate:stream_side_data=rotation:format=duration",
-            "-of", "json", inputPath,
-        };
-        var (exitCode, stdout, stderr) = await FfmpegProcess.RunAsync(
-            _config.FfprobePath, args, TimeSpan.FromMinutes(1), lowPriority: false, captureStdout: true, _logger, ct);
-        if (exitCode != 0)
-            throw new InvalidOperationException($"ffprobe exited {exitCode}: {FfmpegProcess.Tail(stderr, 300)}");
-
-        using var doc = JsonDocument.Parse(stdout);
-        var stream = doc.RootElement.GetProperty("streams")[0];
-        var width  = stream.GetProperty("width").GetInt32();
-        var height = stream.GetProperty("height").GetInt32();
-
-        var rotation = 0;
-        if (stream.TryGetProperty("side_data_list", out var sideData))
-            foreach (var d in sideData.EnumerateArray())
-                if (d.TryGetProperty("rotation", out var r) && r.TryGetInt32(out var deg)) rotation = deg;
-        if (Math.Abs(rotation) % 180 == 90) (width, height) = (height, width);
-
-        double duration = 0;
-        if (doc.RootElement.TryGetProperty("format", out var format)
-            && format.TryGetProperty("duration", out var d2) && d2.GetString() is { } ds)
-            double.TryParse(ds, NumberStyles.Float, CultureInfo.InvariantCulture, out duration);
-
-        var fps = stream.TryGetProperty("r_frame_rate", out var rate) ? ParseRate(rate.GetString()) : 0;
-        return new Probe(width, height, duration, fps);
-    }
-
-    /// <summary>A rendered Short shorter than this has nothing in it.</summary>
-    private const double MinOutputSeconds = 0.1;
-
-    /// <summary>The rendered file's length in seconds; 0 when ffprobe can't read one.</summary>
-    private async Task<double> OutputSecondsAsync(string path, CancellationToken ct)
-    {
-        var (exitCode, stdout, _) = await FfmpegProcess.RunAsync(
-            _config.FfprobePath, ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
-            TimeSpan.FromMinutes(1), lowPriority: false, captureStdout: true, _logger, ct);
-        return exitCode == 0
-            && double.TryParse(stdout.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds)
-            ? seconds : 0;
-    }
-
-    private static double ParseRate(string? rate)
-    {
-        var parts = (rate ?? "").Split('/');
-        return parts.Length == 2
-            && double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var n)
-            && double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var d) && d > 0
-            ? n / d : 0;
     }
 
     private static string Seconds(double s) => s.ToString("0.###", CultureInfo.InvariantCulture);

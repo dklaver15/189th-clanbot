@@ -15,10 +15,10 @@ public class ShortRendererRenderTests : IDisposable
     private static ShortRenderer NewRenderer() =>
         new(Options.Create(new BotConfig()), new EncodeGate(), NullLogger<ShortRenderer>.Instance);
 
-    private string Clip(int w, int h, double seconds, bool audio = true, int rotation = 0)
+    private string Clip(int w, int h, double seconds, bool audio = true, int rotation = 0, bool hdr = false)
     {
-        var path = Path.Combine(_dir, $"in-{w}x{h}-{rotation}.mp4");
-        Ffmpeg.MakeClip(path, w, h, seconds, audio, rotation);
+        var path = Path.Combine(_dir, $"in-{w}x{h}-{rotation}-{hdr}.mp4");
+        Ffmpeg.MakeClip(path, w, h, seconds, audio, rotation, hdr: hdr);
         return path;
     }
 
@@ -71,17 +71,26 @@ public class ShortRendererRenderTests : IDisposable
         var input = Path.Combine(_dir, "live.webm");
         Ffmpeg.MakeClipWithoutDuration(input, 2);
 
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        var ex = await Assert.ThrowsAsync<ClipRejectedException>(() =>
             NewRenderer().RenderAsync(input, _dir, new ShortSettings(ShortLayout.FullViewZoom, 5, null, "t")));
-        Assert.Equal("The Short came out empty. Is Start past the end of the clip?", ex.Message);
+        Assert.Equal("The clip came out empty. Is Start past the end of the clip?", ex.Message);
     }
 
     [SkippableFact]
     public async Task A_start_past_the_end_is_refused()
     {
         Skip.IfNot(Ffmpeg.Available, "ffmpeg isn't on PATH");
-        var ex = await Assert.ThrowsAsync<ShortTimeOutOfRangeException>(() =>
+        var ex = await Assert.ThrowsAsync<ClipRejectedException>(() =>
             NewRenderer().RenderAsync(Clip(1280, 720, 2), _dir, new ShortSettings(ShortLayout.FullViewZoom, 5, null, "t")));
         Assert.Equal("Start (0:05) is past the end of the clip (0:02).", ex.Message);
+    }
+
+    [SkippableFact]
+    public async Task An_hdr_clip_is_refused()
+    {
+        Skip.IfNot(Ffmpeg.Available, "ffmpeg isn't on PATH");
+        var ex = await Assert.ThrowsAsync<ClipRejectedException>(() =>
+            NewRenderer().RenderAsync(Clip(1280, 720, 1, hdr: true), _dir, new ShortSettings(ShortLayout.FullViewZoom, 0, null, "t")));
+        Assert.Equal("This clip is HDR, so it can't be made into a Short.", ex.Message);
     }
 }

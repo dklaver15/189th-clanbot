@@ -192,7 +192,7 @@ public sealed partial class VideoRepostHandler
         }
         catch (Exception ex)
         {
-            var tooLate = ex is ShortTimeOutOfRangeException;
+            var tooLate = ex is ClipRejectedException;
             var originalDeleted = ex is OriginalDeletedException
                 || (!tooLate && submission is { OriginalChannelId: { } originalChannelId }
                     && await OriginalConfirmedGoneAsync(originalChannelId, submission.OriginalMessageId));
