@@ -333,8 +333,8 @@ public sealed partial class RedsecCommandHandler
     {
         var requested = command.Data.Options.FirstOrDefault(o => o.Name == SeasonOption)?.Value as long?;
 
-        // Acknowledge before any I/O. The card is public, so the replies below are too.
-        await command.DeferAsync();
+        // Acknowledge before any I/O. The card itself is posted as a channel message below.
+        await command.DeferAsync(ephemeral: true);
 
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
@@ -348,7 +348,7 @@ public sealed partial class RedsecCommandHandler
 
         if (seasonCounts.Count == 0)
         {
-            await command.FollowupAsync("No ranked REDSEC wins have been recorded yet.");
+            await command.FollowupAsync("No ranked REDSEC wins have been recorded yet.", ephemeral: true);
             return;
         }
 
@@ -356,7 +356,8 @@ public sealed partial class RedsecCommandHandler
         if (seasonCounts.All(s => s.Season != season))
         {
             var known = string.Join(", ", seasonCounts.Select(s => $"Season {s.Season}"));
-            await command.FollowupAsync($"No wins recorded for Season {season}. Seasons with wins: {known}.");
+            await command.FollowupAsync($"No wins recorded for Season {season}. Seasons with wins: {known}.",
+                ephemeral: true);
             return;
         }
 
@@ -430,22 +431,73 @@ public sealed partial class RedsecCommandHandler
                 string.Join(" · ", seasonCounts.Select(s => $"S{s.Season}: {s.Wins}")));
         }
 
+        var footer = $"Requested by {DisplayNameOf(command.User)}";
+        if (png is not null && operators.Count > OperatorsShown)
+            footer += $" · card shows the top {OperatorsShown} of {operators.Count} operators";
+        embed.WithFooter(footer);
+
+        var fileName = $"redsec-season-{season}.png";
         if (png is null)
         {
             embed.AddField("Top operators", string.Join("\n",
                 operators.Take(10).Select(o => $"**#{o.Place}** <@{o.Member.UserId}> — {o.Wins}")));
             embed.AddField("Recent wins", string.Join("\n", recent.Select(FormatWinLine)));
-            await command.FollowupAsync(embed: embed.Build(), allowedMentions: AllowedMentions.None);
+        }
+        else
+        {
+            embed.WithImageUrl($"attachment://{fileName}");
+        }
+
+        await PostCardAsync(command, embed.Build(), png, fileName, season);
+    }
+
+    /// <summary>
+    /// Posts the card as a normal channel message, the way the XP board is posted.
+    /// The iPad client cropped the same image to 400pt tall when it was sent as the
+    /// interaction's own reply. Falls back to a private reply if the bot can't post here.
+    /// </summary>
+    private async Task PostCardAsync(SocketSlashCommand command, Embed embed, byte[]? png, string fileName, int season)
+    {
+        var posted = false;
+        try
+        {
+            var channel = await command.GetChannelAsync();
+            if (channel is not null)
+            {
+                if (png is null)
+                {
+                    await channel.SendMessageAsync(embed: embed, allowedMentions: AllowedMentions.None);
+                }
+                else
+                {
+                    using var fa = new FileAttachment(new MemoryStream(png), fileName);
+                    await channel.SendFileAsync(fa, embed: embed, allowedMentions: AllowedMentions.None);
+                }
+                posted = true;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Couldn't post the REDSEC card in channel {Channel}", command.ChannelId);
+        }
+
+        if (posted)
+        {
+            await command.FollowupAsync($"Posted the Season {season} card.", ephemeral: true);
             return;
         }
 
-        var fileName = $"redsec-season-{season}.png";
-        embed.WithImageUrl($"attachment://{fileName}");
-        if (operators.Count > OperatorsShown)
-            embed.WithFooter($"Card shows the top {OperatorsShown} of {operators.Count} operators.");
-
-        using var fa = new FileAttachment(new MemoryStream(png), fileName);
-        await command.FollowupWithFileAsync(fa, embed: embed.Build(), allowedMentions: AllowedMentions.None);
+        const string note = "I couldn't post in this channel, so here's a private copy.";
+        if (png is null)
+        {
+            await command.FollowupAsync(note, embed: embed, ephemeral: true, allowedMentions: AllowedMentions.None);
+        }
+        else
+        {
+            using var fa = new FileAttachment(new MemoryStream(png), fileName);
+            await command.FollowupWithFileAsync(fa, note, embed: embed, ephemeral: true,
+                allowedMentions: AllowedMentions.None);
+        }
     }
 
     // ─── Autocomplete ────────────────────────────────────────────────────────
