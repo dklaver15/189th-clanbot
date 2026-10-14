@@ -117,6 +117,12 @@ public sealed class ShortRenderer
                 throw new InvalidOperationException($"ffmpeg exited {exitCode}: {FfmpegProcess.Tail(stderr, 300)}");
         }
 
+        // ffprobe can't always tell a clip's length (some WebMs carry none), and a
+        // Start past the end then encodes "successfully" into a file with nothing in
+        // it. Never hand that to YouTube.
+        if (await OutputSecondsAsync(output, ct) < MinOutputSeconds)
+            throw new InvalidOperationException("The Short came out empty. Is Start past the end of the clip?");
+
         _logger.LogInformation(
             "Rendered Short ({Layout}, {Start}–{End}) from a {W}x{H} clip",
             settings.Layout, ShortRequest.FormatTime(settings.StartSeconds), ShortRequest.FormatTime(end),
@@ -158,6 +164,20 @@ public sealed class ShortRenderer
 
         var fps = stream.TryGetProperty("r_frame_rate", out var rate) ? ParseRate(rate.GetString()) : 0;
         return new Probe(width, height, duration, fps);
+    }
+
+    /// <summary>A rendered Short shorter than this has nothing in it.</summary>
+    private const double MinOutputSeconds = 0.1;
+
+    /// <summary>The rendered file's length in seconds; 0 when ffprobe can't read one.</summary>
+    private async Task<double> OutputSecondsAsync(string path, CancellationToken ct)
+    {
+        var (exitCode, stdout, _) = await FfmpegProcess.RunAsync(
+            _config.FfprobePath, ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
+            TimeSpan.FromMinutes(1), lowPriority: false, captureStdout: true, _logger, ct);
+        return exitCode == 0
+            && double.TryParse(stdout.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds)
+            ? seconds : 0;
     }
 
     private static double ParseRate(string? rate)

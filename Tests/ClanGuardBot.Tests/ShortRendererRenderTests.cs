@@ -52,12 +52,28 @@ public class ShortRendererRenderTests : IDisposable
     public async Task A_rotated_phone_clip_is_treated_as_vertical()
     {
         Skip.IfNot(Ffmpeg.Available, "ffmpeg isn't on PATH");
-        // Stored 1280x720 with a 90° display rotation: 720x1280 on screen.
-        var output = await NewRenderer().RenderAsync(Clip(1280, 720, 1, rotation: 90), _dir,
+        // Stored 1600x720 with a 90° display rotation: 720x1600 on screen, taller
+        // than 9:16, so it fits by height (864x1920). Were the rotation missed, the
+        // landscape full-view + zoom path would give 1080x1920 instead.
+        var output = await NewRenderer().RenderAsync(Clip(1600, 720, 1, rotation: 90), _dir,
             new ShortSettings(ShortLayout.AsIs, 0, null, "t"));
 
         var p = Ffmpeg.Probe(output);
-        Assert.Equal((1080, 1920), (p.Width, p.Height));
+        Assert.Equal((864, 1920), (p.Width, p.Height));
+    }
+
+    [SkippableFact]
+    public async Task A_start_past_the_end_of_a_clip_with_unknown_length_is_refused()
+    {
+        Skip.IfNot(Ffmpeg.Available, "ffmpeg isn't on PATH");
+        // ffprobe reports no duration for this file, so only the rendered output can
+        // show that nothing was left after Start; it must never reach YouTube.
+        var input = Path.Combine(_dir, "live.webm");
+        Ffmpeg.MakeClipWithoutDuration(input, 2);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            NewRenderer().RenderAsync(input, _dir, new ShortSettings(ShortLayout.FullViewZoom, 5, null, "t")));
+        Assert.Equal("The Short came out empty. Is Start past the end of the clip?", ex.Message);
     }
 
     [SkippableFact]

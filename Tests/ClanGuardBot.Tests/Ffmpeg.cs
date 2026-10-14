@@ -29,6 +29,18 @@ internal static class Ffmpeg
         File.Move(tmp, path, overwrite: true);
     }
 
+    /// <summary>
+    /// A WebM written in live mode: it carries no duration at all, so ffprobe
+    /// can't say how long it is (some real clips are like this).
+    /// </summary>
+    public static void MakeClipWithoutDuration(string path, double seconds)
+    {
+        var made = Run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30",
+                       "-f", "lavfi", "-i", "sine", "-t", seconds.ToString(CultureInfo.InvariantCulture),
+                       "-c:v", "libvpx", "-deadline", "realtime", "-c:a", "libopus", "-f", "webm", "-live", "1", path);
+        if (made.ExitCode != 0) throw new InvalidOperationException(made.Stderr);
+    }
+
     public static (int Width, int Height, double Duration, bool HasAudio) Probe(string path)
     {
         var r = Run("ffprobe", "-v", "error", "-show_entries", "stream=codec_type,width,height:format=duration", "-of", "json", path);
