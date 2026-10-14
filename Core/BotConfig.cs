@@ -2861,6 +2861,17 @@ public class BotConfig
     /// </summary>
     public ulong XpAdjustRoleId { get; set; } = 1408089365816541264;
 
+    // ─── REDSEC ranked wins ──────────────────────────────────────────
+    /// <summary>
+    /// Role allowed to run /redsec-add-win and /redsec-remove-win. Set to the HQ
+    /// role. Administrators and <see cref="RedsecManagerUserIds"/> also pass.
+    /// 0 leaves only those two.
+    /// </summary>
+    public ulong RedsecManagerRoleId { get; set; } = 1408089365816541264;
+
+    /// <summary>Individual users allowed to add and remove REDSEC wins without the role.</summary>
+    public List<ulong> RedsecManagerUserIds { get; set; } = new() { 460857355442192435 };
+
     // ─── Video repost + YouTube upload ───────────────────────────────
     /// <summary>
     /// Master switch for <see cref="Handlers.VideoRepostHandler"/>. When a member

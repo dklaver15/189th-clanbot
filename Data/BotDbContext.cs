@@ -77,6 +77,9 @@ public class BotDbContext : DbContext
     public DbSet<XpMemberSeason>       XpMemberSeasons       => Set<XpMemberSeason>();
     public DbSet<XpMemberTotal>        XpMemberTotals        => Set<XpMemberTotal>();
     public DbSet<XpDmOptOut>           XpDmOptOuts           => Set<XpDmOptOut>();
+    // ── REDSEC ranked wins ──
+    public DbSet<RedsecWin>            RedsecWins            => Set<RedsecWin>();
+    public DbSet<RedsecWinPlayer>      RedsecWinPlayers      => Set<RedsecWinPlayer>();
 
     public BotDbContext(DbContextOptions<BotDbContext> options) : base(options) { }
 
@@ -748,6 +751,21 @@ public class BotDbContext : DbContext
         modelBuilder.Entity<XpDmOptOut>(e =>
         {
             e.HasIndex(o => new { o.GuildId, o.UserId }).IsUnique();
+        });
+
+        // ── REDSEC ranked wins ────────────────────────────────────────
+        modelBuilder.Entity<RedsecWin>(e =>
+        {
+            e.HasIndex(w => new { w.GuildId, w.Season, w.WonOn });
+            e.HasMany<RedsecWinPlayer>()
+                .WithOne()
+                .HasForeignKey(p => p.RedsecWinId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<RedsecWinPlayer>(e =>
+        {
+            e.HasIndex(p => new { p.RedsecWinId, p.UserId }).IsUnique();
         });
     }
 }

@@ -644,6 +644,8 @@ public class CommandsCommandHandler
                 "Everyone", everyone),
             new("xp-dms", "Turn level-up DMs on or off for yourself",
                 "Everyone", everyone),
+            new("redsec-wins", "Show the clan's ranked REDSEC wins for a season",
+                "Everyone", everyone),
             new("lookup", "Look up someone's gamertags from the roster",
                 "Everyone", everyone),
             new("my-invites", "Show invites you created with use counts and attribution",
@@ -727,6 +729,11 @@ public class CommandsCommandHandler
 
             new("xp-adjust", "Grant or deduct clan XP manually, with a reason",
                 "HQ", xpAdjust),   // SyncWithHandlers: XpCommandHandler.RequireAdjustRoleAsync
+
+            new("redsec-add-win", "Record a ranked REDSEC win with its season, date and squad",
+                "HQ", RedsecCommandHandler.CanManage),
+            new("redsec-remove-win", "Delete a ranked REDSEC win entered by mistake",
+                "HQ", RedsecCommandHandler.CanManage),
 
             new("add-event-credit", "Manually add 1 event credit at member's current rank",
                 eventCreditLbl, MinRank("CPT")),
