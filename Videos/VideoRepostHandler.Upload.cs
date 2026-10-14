@@ -213,15 +213,16 @@ public sealed partial class VideoRepostHandler
         }
 
         if (reply is not null) await RefreshButtonsAsync(reply);
-        await modal.FollowupAsync(isShort
+        await TryFollowupAsync(modal, isShort
             ? "Making your Short… the button will change to a link when it's on YouTube."
-            : "Working on it… the button will change to a link when it's on YouTube.", ephemeral: true);
+            : "Working on it… the button will change to a link when it's on YouTube.");
 
         var tempDir = Path.Combine(Path.GetTempPath(), "clanguard-video", $"up-{messageId}-{index}");
-        Directory.CreateDirectory(tempDir);
         VideoSubmission? submission = null;
+        string? youtubeId = null;
         try
         {
+            Directory.CreateDirectory(tempDir);
             submission = await LoadAsync(messageId, index)
                 ?? throw new InvalidOperationException("Submission row vanished after claim.");
 
@@ -244,12 +245,23 @@ public sealed partial class VideoRepostHandler
                     onEncodeStarting: text => TryFollowupAsync(modal, text));
             }
 
-            var youtubeId = await _youtube.UploadAsync(fileToUpload, settings.Title, description);
+            youtubeId = await _youtube.UploadAsync(fileToUpload, settings.Title, description);
             await MarkUploadedAsync(submission.Id, youtubeId);
             if (reply is not null) await RefreshButtonsAsync(reply);
             await TryFollowupAsync(modal, isShort
                 ? $"✅ Short uploaded: https://youtube.com/shorts/{youtubeId}"
                 : $"✅ Uploaded: https://youtu.be/{youtubeId}");
+        }
+        catch (Exception ex) when (youtubeId is not null)
+        {
+            // On YouTube already: releasing the row would invite a duplicate upload.
+            _logger.LogError(ex,
+                "Marking message {MessageId} attachment {Index} uploaded failed after YouTube video {YouTubeId} was created",
+                messageId, index, youtubeId);
+            if (reply is not null) await RefreshButtonsAsync(reply);
+            await TryFollowupAsync(modal, isShort
+                ? $"⚠️ Your Short IS on YouTube: https://youtube.com/shorts/{youtubeId}\nI couldn't update the button, so don't upload it again."
+                : $"⚠️ Your video IS on YouTube: https://youtu.be/{youtubeId}\nI couldn't update the button, so don't upload it again.");
         }
         catch (Exception ex)
         {

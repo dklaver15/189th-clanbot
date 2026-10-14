@@ -24,9 +24,12 @@ namespace ClanGuardBot.Services;
 ///
 /// ── Trimmed: one exact cut ──
 /// With Start/End the clip is re-encoded once, cut exactly (and upscaled when
-/// it's smaller than 1440p). This never falls back: refusals (HDR, Start past
-/// the end, an empty result) and failures are reported, so an untrimmed clip is
-/// never uploaded by mistake.
+/// it's smaller than 1440p, scaled down to 1440p when it's larger so the encode
+/// never runs above the size the memory figure below was measured at). This
+/// never falls back: refusals (HDR, Start past the end, an empty result) and
+/// failures are reported, so an untrimmed clip is never uploaded by mistake.
+/// A Start of 0 with an End at or past the clip's length is not a trim: it takes
+/// the untrimmed path.
 ///
 /// ── Keeping the droplet healthy ──
 /// One encode at a time across upscales and Shorts (<see cref="EncodeGate"/>;
@@ -88,7 +91,7 @@ public sealed class VideoUpscaler
             using (await _gate.AcquireAsync(ct))
             {
                 if (onEncodeStarting is not null) await onEncodeStarting(UpscaleMessage);
-                output = await EncodeAsync(inputPath, workDir, info, start: null, length: null, upscale: true, ct);
+                output = await EncodeAsync(inputPath, workDir, info, start: null, length: null, scale: true, ct);
             }
             if (output is not null
                 && await MediaProbe.DurationAsync(_config.FfprobePath, output, _logger, ct) < MediaProbe.MinUsefulSeconds)
@@ -109,11 +112,14 @@ public sealed class VideoUpscaler
         }
     }
 
-    /// <summary>One exact-cut encode (upscaled when smaller than the target).</summary>
+    /// <summary>One exact-cut encode (scaled to the target when the clip is smaller or larger).</summary>
     private async Task<string> CutAsync(
         string inputPath, string workDir, double start, double? end, Func<string, Task>? onEncodeStarting, CancellationToken ct)
     {
         var info = await MediaProbe.ProbeAsync(_config.FfprobePath, inputPath, _logger, ct);
+        // "Whole clip" typed out (0 to the end or past it) is not a trim.
+        if (start <= 0 && info.Duration > 0 && (end is null || end >= info.Duration))
+            return await TryUpscaleAsync(inputPath, workDir, onEncodeStarting, ct) ?? inputPath;
         if (info.IsHdr)
             throw new ClipRejectedException("This clip is HDR, so it can't be trimmed. Leave Start and End empty to upload it whole.");
         if (info.Duration > 0 && start >= info.Duration)
@@ -124,16 +130,19 @@ public sealed class VideoUpscaler
             ? (info.Duration > 0 ? Math.Min(e, info.Duration) : e) - start
             : info.Duration > 0 ? info.Duration - start : null;
         var upscale = _config.VideoUploadUpscaleEnabled && WantsUpscale(info, length ?? info.Duration);
+        // Larger clips are scaled down so the encode never exceeds the target
+        // size (memory); a clip exactly at the target is only cut.
+        var scale = upscale || Math.Min(info.Width, info.Height) > _config.VideoUploadUpscaleTargetSize;
 
         string? output;
         using (await _gate.AcquireAsync(ct))
         {
             if (onEncodeStarting is not null) await onEncodeStarting(upscale ? UpscaleMessage : CutMessage);
-            output = await EncodeAsync(inputPath, workDir, info, start, length, upscale, ct);
+            output = await EncodeAsync(inputPath, workDir, info, start, length, scale, ct);
         }
 
         if (output is null)
-            throw new InvalidOperationException("Cutting the clip failed (see the bot's log).");
+            throw new InvalidOperationException("Cutting the clip failed or took too long. Try again, or pick a shorter Start–End range.");
         // A Start past the end of a file whose length ffprobe can't read encodes
         // "successfully" into nothing; never hand that to YouTube.
         if (await MediaProbe.DurationAsync(_config.FfprobePath, output, _logger, ct) < MediaProbe.MinUsefulSeconds)
@@ -167,17 +176,17 @@ public sealed class VideoUpscaler
         return true;
     }
 
-    /// <summary>One x264 encode: optional cut (start/length), optional upscale. Null on failure.</summary>
+    /// <summary>One x264 encode: optional cut (start/length), optional scale to the target size. Null on failure.</summary>
     private async Task<string?> EncodeAsync(
-        string inputPath, string workDir, MediaInfo info, double? start, double? length, bool upscale, CancellationToken ct)
+        string inputPath, string workDir, MediaInfo info, double? start, double? length, bool scale, CancellationToken ct)
     {
         var target = _config.VideoUploadUpscaleTargetSize;
-        var output = Path.Combine(workDir, upscale ? "upscaled.mkv" : "cut.mkv");
+        var output = Path.Combine(workDir, scale ? "scaled.mkv" : "cut.mkv");
 
         // The scale runs after ffmpeg's automatic rotation, so iw/ih are the
         // clip as it's meant to be seen: the shorter side goes to the target and
         // the longer side follows the aspect ratio (-2 keeps it even for x264).
-        var scale = $"scale=w='if(gte(iw,ih),-2,{target})':h='if(gte(iw,ih),{target},-2)':flags=lanczos";
+        var scaleFilter = $"scale=w='if(gte(iw,ih),-2,{target})':h='if(gte(iw,ih),{target},-2)':flags=lanczos";
 
         var args = new List<string>
         {
@@ -200,7 +209,7 @@ public sealed class VideoUpscaler
         if (start is { } s) args.AddRange(["-ss", Seconds(s)]);
         if (length is { } l) args.AddRange(["-t", Seconds(l)]);
         args.AddRange(["-map", "0:v:0", "-map", "0:a?", "-filter_threads", "1"]);
-        if (upscale) args.AddRange(["-vf", scale]);
+        if (scale) args.AddRange(["-vf", scaleFilter]);
         args.AddRange(
         [
             "-c:v", "libx264", "-preset", "veryfast",
@@ -222,13 +231,13 @@ public sealed class VideoUpscaler
         {
             _logger.LogWarning(
                 "ffmpeg {What} exited {Code} after {Elapsed}. Tail: {Tail}",
-                upscale ? "upscale" : "cut", exitCode, sw.Elapsed, FfmpegProcess.Tail(stderr));
+                scale ? "scale" : "cut", exitCode, sw.Elapsed, FfmpegProcess.Tail(stderr));
             return null;
         }
 
-        if (upscale)
+        if (scale)
             _logger.LogInformation(
-                "Upscaled {W}x{H} clip ({InMb:F1} MB) to {Target}p in {Elapsed:mm\\:ss} ({OutMb:F1} MB)",
+                "Scaled {W}x{H} clip ({InMb:F1} MB) to {Target}p in {Elapsed:mm\\:ss} ({OutMb:F1} MB)",
                 info.Width, info.Height, new FileInfo(inputPath).Length / 1048576.0,
                 target, sw.Elapsed, new FileInfo(output).Length / 1048576.0);
         if (start is not null)
