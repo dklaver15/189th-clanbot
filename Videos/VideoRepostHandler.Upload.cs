@@ -203,7 +203,9 @@ public sealed partial class VideoRepostHandler
         }
 
         if (reply is not null) await RefreshButtonsAsync(reply);
-        await TryFollowupAsync(modal, isShort
+        // Removed again when the upload ends: the button becomes the link on success,
+        // and a failure gets its own message.
+        var working = await TryFollowupAsync(modal, isShort
             ? "Making your Short… the button will change to a link when it's on YouTube."
             : "Working on it… the button will change to a link when it's on YouTube.");
 
@@ -230,17 +232,13 @@ public sealed partial class VideoRepostHandler
             }
             else
             {
-                fileToUpload = await _upscaler.PrepareAsync(
-                    path, tempDir, settings.StartSeconds, settings.EndSeconds,
-                    onEncodeStarting: text => TryFollowupAsync(modal, text));
+                fileToUpload = await _upscaler.PrepareAsync(path, tempDir, settings.StartSeconds, settings.EndSeconds);
             }
 
             youtubeId = await _youtube.UploadAsync(fileToUpload, settings.Title, description);
             await MarkUploadedAsync(submission.Id, youtubeId);
             if (reply is not null) await RefreshButtonsAsync(reply);
-            await TryFollowupAsync(modal, isShort
-                ? $"✅ Short uploaded: https://youtube.com/shorts/{youtubeId}"
-                : $"✅ Uploaded: https://youtu.be/{youtubeId}");
+            await TryRemoveWorkingMessageAsync(working);
         }
         catch (Exception ex) when (youtubeId is not null)
         {
@@ -249,6 +247,7 @@ public sealed partial class VideoRepostHandler
                 "Marking message {MessageId} attachment {Index} uploaded failed after YouTube video {YouTubeId} was created",
                 messageId, index, youtubeId);
             if (reply is not null) await RefreshButtonsAsync(reply);
+            await TryRemoveWorkingMessageAsync(working);
             await TryFollowupAsync(modal, isShort
                 ? $"⚠️ Your Short IS on YouTube: https://youtube.com/shorts/{youtubeId}\nI couldn't update the button, so don't upload it again."
                 : $"⚠️ Your video IS on YouTube: https://youtu.be/{youtubeId}\nI couldn't update the button, so don't upload it again.");
@@ -272,6 +271,7 @@ public sealed partial class VideoRepostHandler
             }
 
             if (reply is not null) await RefreshButtonsAsync(reply);
+            await TryRemoveWorkingMessageAsync(working);
             await TryFollowupAsync(modal,
                 originalDeleted ? (ex as OriginalDeletedException)?.Message ?? OriginalDeletedMessage
                 : rejected ? $"{ex.Message} The Upload button is live again."
@@ -284,6 +284,24 @@ public sealed partial class VideoRepostHandler
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Deletes the private "Working on it…" message. Discord allows that only while
+    /// the interaction token is valid (15 minutes after the form was sent); after a
+    /// longer upload it stays until the uploader dismisses it.
+    /// </summary>
+    private async Task TryRemoveWorkingMessageAsync(IUserMessage? working)
+    {
+        if (working is null) return;
+        try
+        {
+            await working.DeleteAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not remove the upload's working message (interaction likely expired)");
+        }
+    }
 
     /// <summary>Permission, Shorts switch and YouTube setup; responds privately and returns true when refused.</summary>
     private async Task<bool> RefuseUploadAsync(SocketInteraction interaction, VideoSubmissionKind kind)

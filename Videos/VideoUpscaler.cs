@@ -44,8 +44,6 @@ namespace ClanGuardBot.Services;
 /// </summary>
 public sealed class VideoUpscaler
 {
-    private const string CutMessage = "Cutting the clip to your Start and End…";
-
     private readonly BotConfig _config;
     private readonly EncodeGate _gate;
     private readonly ILogger<VideoUpscaler> _logger;
@@ -57,29 +55,22 @@ public sealed class VideoUpscaler
         _logger = logger;
     }
 
-    private string UpscaleMessage =>
-        $"Making a {_config.VideoUploadUpscaleTargetSize}p version first so YouTube gives it a better encode. This can take a few minutes.";
-
     /// <summary>
     /// The file to upload for a normal YouTube video: <paramref name="inputPath"/>
     /// itself, or an encoded copy in <paramref name="workDir"/>. Untrimmed (start 0,
     /// no end) behaves as before; trimmed throws on refusals and failures.
-    /// <paramref name="onEncodeStarting"/> receives the message to show the uploader
-    /// once a real encode begins (after any wait for the encode slot).
     /// </summary>
     public async Task<string> PrepareAsync(
-        string inputPath, string workDir, double startSeconds, double? endSeconds,
-        Func<string, Task>? onEncodeStarting = null, CancellationToken ct = default)
+        string inputPath, string workDir, double startSeconds, double? endSeconds, CancellationToken ct = default)
     {
         var trimmed = startSeconds > 0 || endSeconds is not null;
         return trimmed
-            ? await CutAsync(inputPath, workDir, startSeconds, endSeconds, onEncodeStarting, ct)
-            : await TryUpscaleAsync(inputPath, workDir, onEncodeStarting, ct) ?? inputPath;
+            ? await CutAsync(inputPath, workDir, startSeconds, endSeconds, ct)
+            : await TryUpscaleAsync(inputPath, workDir, ct) ?? inputPath;
     }
 
     /// <summary>An upscaled copy, or null to upload the original.</summary>
-    private async Task<string?> TryUpscaleAsync(
-        string inputPath, string workDir, Func<string, Task>? onEncodeStarting, CancellationToken ct)
+    private async Task<string?> TryUpscaleAsync(string inputPath, string workDir, CancellationToken ct)
     {
         if (!_config.VideoUploadUpscaleEnabled) return null;
         try
@@ -89,10 +80,7 @@ public sealed class VideoUpscaler
 
             string? output;
             using (await _gate.AcquireAsync(ct))
-            {
-                if (onEncodeStarting is not null) await onEncodeStarting(UpscaleMessage);
                 output = await EncodeAsync(inputPath, workDir, info, start: null, length: null, scale: true, ct);
-            }
             if (output is not null
                 && await MediaProbe.DurationAsync(_config.FfprobePath, output, _logger, ct) < MediaProbe.MinUsefulSeconds)
             {
@@ -114,12 +102,12 @@ public sealed class VideoUpscaler
 
     /// <summary>One exact-cut encode (scaled to the target when the clip is smaller or larger).</summary>
     private async Task<string> CutAsync(
-        string inputPath, string workDir, double start, double? end, Func<string, Task>? onEncodeStarting, CancellationToken ct)
+        string inputPath, string workDir, double start, double? end, CancellationToken ct)
     {
         var info = await MediaProbe.ProbeAsync(_config.FfprobePath, inputPath, _logger, ct);
         // "Whole clip" typed out (0 to the end or past it) is not a trim.
         if (start <= 0 && info.Duration > 0 && (end is null || end >= info.Duration))
-            return await TryUpscaleAsync(inputPath, workDir, onEncodeStarting, ct) ?? inputPath;
+            return await TryUpscaleAsync(inputPath, workDir, ct) ?? inputPath;
         if (info.IsHdr)
             throw new ClipRejectedException("This clip is HDR, so it can't be trimmed. Leave Start and End empty to upload it whole.");
         if (info.Duration > 0 && start >= info.Duration)
@@ -136,10 +124,7 @@ public sealed class VideoUpscaler
 
         string? output;
         using (await _gate.AcquireAsync(ct))
-        {
-            if (onEncodeStarting is not null) await onEncodeStarting(upscale ? UpscaleMessage : CutMessage);
             output = await EncodeAsync(inputPath, workDir, info, start, length, scale, ct);
-        }
 
         if (output is null)
             throw new InvalidOperationException("Cutting the clip failed or took too long. Try again, or pick a shorter Start–End range.");

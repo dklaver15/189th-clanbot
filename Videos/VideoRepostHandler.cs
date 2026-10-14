@@ -671,16 +671,20 @@ public sealed partial class VideoRepostHandler
         await source.CopyToAsync(target);
     }
 
-    /// <summary>A followup after the 15-minute interaction window fails; the button edit already told everyone.</summary>
-    private async Task TryFollowupAsync(SocketInteraction interaction, string text)
+    /// <summary>
+    /// A private followup; null when it wasn't delivered (after the 15-minute
+    /// interaction window it fails, and the button edit already told everyone).
+    /// </summary>
+    private async Task<IUserMessage?> TryFollowupAsync(SocketInteraction interaction, string text)
     {
         try
         {
-            await interaction.FollowupAsync(text, ephemeral: true);
+            return await interaction.FollowupAsync(text, ephemeral: true);
         }
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Upload followup not delivered (interaction likely expired)");
+            return null;
         }
     }
 
