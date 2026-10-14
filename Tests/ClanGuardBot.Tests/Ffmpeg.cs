@@ -9,13 +9,15 @@ internal static class Ffmpeg
 {
     public static readonly bool Available = Run("ffmpeg", "-version").ExitCode == 0;
 
-    /// <summary>A test-pattern clip, optionally with a 440 Hz tone and a rotation tag (phone clips).</summary>
-    public static void MakeClip(string path, int width, int height, double seconds, bool audio = true, int rotation = 0)
+    /// <summary>A test-pattern clip, optionally with a 440 Hz tone, a rotation tag (phone clips) and HDR (PQ) colour tags.</summary>
+    public static void MakeClip(string path, int width, int height, double seconds, bool audio = true, int rotation = 0, bool hdr = false)
     {
         var s = seconds.ToString(CultureInfo.InvariantCulture);
         var args = new List<string> { "-v", "error", "-y", "-f", "lavfi", "-i", $"testsrc2=size={width}x{height}:rate=30" };
         if (audio) args.AddRange(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"]);
         args.AddRange(["-t", s, "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p"]);
+        // x264's own VUI params: the -color_trc output option is dropped by libx264 on current ffmpeg builds.
+        if (hdr) args.AddRange(["-x264-params", "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc"]);
         if (audio) args.AddRange(["-c:a", "aac"]);
         args.Add(path);
         var made = Run("ffmpeg", args.ToArray());
@@ -38,6 +40,14 @@ internal static class Ffmpeg
         var made = Run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30",
                        "-f", "lavfi", "-i", "sine", "-t", seconds.ToString(CultureInfo.InvariantCulture),
                        "-c:v", "libvpx", "-deadline", "realtime", "-c:a", "libopus", "-f", "webm", "-live", "1", path);
+        if (made.ExitCode != 0) throw new InvalidOperationException(made.Stderr);
+    }
+
+    /// <summary>An audio-only file (no video track).</summary>
+    public static void MakeAudioOnly(string path, double seconds)
+    {
+        var made = Run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine", "-t",
+                       seconds.ToString(CultureInfo.InvariantCulture), "-c:a", "aac", path);
         if (made.ExitCode != 0) throw new InvalidOperationException(made.Stderr);
     }
 
