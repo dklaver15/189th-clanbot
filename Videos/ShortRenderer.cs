@@ -121,9 +121,10 @@ public sealed class ShortRenderer
         if (await MediaProbe.DurationAsync(_config.FfprobePath, output, _logger, ct) < MediaProbe.MinUsefulSeconds)
             throw ClipRejectedException.CameOutEmpty();
 
+        // End floored: a capped 179.5 s render must not log as "3:00".
         _logger.LogInformation(
             "Rendered Short ({Layout}, {Start}–{End}) from a {W}x{H} clip",
-            settings.Layout, ClipTime.Format(settings.StartSeconds), ClipTime.Format(settings.StartSeconds + length),
+            settings.Layout, ClipTime.Format(settings.StartSeconds), ClipTime.Format(Math.Floor(settings.StartSeconds + length)),
             info.Width, info.Height);
         return output;
     }

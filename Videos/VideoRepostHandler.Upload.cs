@@ -148,7 +148,7 @@ public sealed partial class VideoRepostHandler
                 placeholder: isShort ? "empty = end of clip (max 3:00)" : "empty = end of clip",
                 minLength: 0, maxLength: 8, required: false)
             .AddTextInput(label: "Title", customId: TitleInputId, style: TextInputStyle.Short,
-                minLength: 1, maxLength: 100, required: true, value: title)
+                minLength: 1, maxLength: MaxTitleLength, required: true, value: title)
             .Build();
     }
 

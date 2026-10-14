@@ -38,6 +38,20 @@ public class UploadTitleTests
     }
 
     [Fact]
+    public void A_numbered_title_of_exactly_100_characters_is_left_alone()
+    {
+        var title = VideoRepostHandler.BuildTitle(Clip(new string('a', 91)), 2);
+        Assert.Equal(new string('a', 91) + " (part 1)", title);
+    }
+
+    [Fact]
+    public void A_numbered_title_one_character_over_is_shortened_to_100()
+    {
+        var title = VideoRepostHandler.BuildTitle(Clip(new string('a', 92)), 2);
+        Assert.Equal(new string('a', 90) + "… (part 1)", title);
+    }
+
+    [Fact]
     public void A_long_first_line_is_shortened_but_keeps_the_part_number()
     {
         var title = VideoRepostHandler.BuildTitle(Clip(new string('a', 150)), 2);

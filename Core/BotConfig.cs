@@ -2896,9 +2896,8 @@ public class BotConfig
     /// forwards each video post from <see cref="VideoRepostChannelIds"/> here and
     /// replies to the forward with the poster, a jump link and the Upload
     /// button(s). 0 = off: clip posts are left alone and get no Upload button.
-    /// The bot needs View Channel, Send
-    /// Messages and Read Message History here, and Read Message History in the
-    /// clip channels so it can forward from them.
+    /// The bot needs View Channel, Send Messages and Read Message History here,
+    /// and Read Message History in the clip channels so it can forward from them.
     /// </summary>
     public ulong VideoUploadChannelId { get; set; } = 0;
 
@@ -2984,9 +2983,9 @@ public class BotConfig
 
     /// <summary>
     /// Offer the Short choices (full view + zoom, center crop; a vertical or square
-    /// clip gets a single "Short") when someone presses Upload on a forwarded clip. When false, Upload goes straight to the normal
-    /// video form. Shorts render on the droplet CPU, one at a time with upscales.
-    /// Default true.
+    /// clip gets a single "Short") when someone presses Upload on a forwarded clip.
+    /// When false, Upload goes straight to the normal video form. Shorts render on
+    /// the droplet CPU, one at a time with upscales. Default true.
     /// </summary>
     public bool VideoShortsEnabled { get; set; } = true;
 
