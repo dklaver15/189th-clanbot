@@ -28,7 +28,7 @@ public class ShortRendererRenderTests : IDisposable
     public async Task A_landscape_clip_becomes_a_trimmed_1080x1920_short(ShortLayout layout)
     {
         Skip.IfNot(Ffmpeg.Available, "ffmpeg isn't on PATH");
-        var output = await NewRenderer().RenderAsync(Clip(1280, 720, 3), _dir, new ShortSettings(layout, 1, 3, "t"));
+        var output = await NewRenderer().RenderAsync(Clip(1280, 720, 3), _dir, new UploadSettings(VideoSubmissionKind.Short, layout, 1, 3, "t"));
 
         var p = Ffmpeg.Probe(output);
         Assert.Equal((1080, 1920), (p.Width, p.Height));
@@ -41,7 +41,7 @@ public class ShortRendererRenderTests : IDisposable
     {
         Skip.IfNot(Ffmpeg.Available, "ffmpeg isn't on PATH");
         var output = await NewRenderer().RenderAsync(Clip(1280, 720, 2, audio: false), _dir,
-            new ShortSettings(ShortLayout.FullViewZoom, 0, null, "t"));
+            new UploadSettings(VideoSubmissionKind.Short, ShortLayout.FullViewZoom, 0, null, "t"));
 
         var p = Ffmpeg.Probe(output);
         Assert.Equal((1080, 1920), (p.Width, p.Height));
@@ -56,7 +56,7 @@ public class ShortRendererRenderTests : IDisposable
         // than 9:16, so it fits by height (864x1920). Were the rotation missed, the
         // landscape full-view + zoom path would give 1080x1920 instead.
         var output = await NewRenderer().RenderAsync(Clip(1600, 720, 1, rotation: 90), _dir,
-            new ShortSettings(ShortLayout.AsIs, 0, null, "t"));
+            new UploadSettings(VideoSubmissionKind.Short, ShortLayout.AsIs, 0, null, "t"));
 
         var p = Ffmpeg.Probe(output);
         Assert.Equal((864, 1920), (p.Width, p.Height));
@@ -72,7 +72,7 @@ public class ShortRendererRenderTests : IDisposable
         Ffmpeg.MakeClipWithoutDuration(input, 2);
 
         var ex = await Assert.ThrowsAsync<ClipRejectedException>(() =>
-            NewRenderer().RenderAsync(input, _dir, new ShortSettings(ShortLayout.FullViewZoom, 5, null, "t")));
+            NewRenderer().RenderAsync(input, _dir, new UploadSettings(VideoSubmissionKind.Short, ShortLayout.FullViewZoom, 5, null, "t")));
         Assert.Equal("The clip came out empty. Is Start past the end of the clip?", ex.Message);
     }
 
@@ -81,7 +81,7 @@ public class ShortRendererRenderTests : IDisposable
     {
         Skip.IfNot(Ffmpeg.Available, "ffmpeg isn't on PATH");
         var ex = await Assert.ThrowsAsync<ClipRejectedException>(() =>
-            NewRenderer().RenderAsync(Clip(1280, 720, 2), _dir, new ShortSettings(ShortLayout.FullViewZoom, 5, null, "t")));
+            NewRenderer().RenderAsync(Clip(1280, 720, 2), _dir, new UploadSettings(VideoSubmissionKind.Short, ShortLayout.FullViewZoom, 5, null, "t")));
         Assert.Equal("Start (0:05) is past the end of the clip (0:02).", ex.Message);
     }
 
@@ -90,7 +90,7 @@ public class ShortRendererRenderTests : IDisposable
     {
         Skip.IfNot(Ffmpeg.Available, "ffmpeg isn't on PATH");
         var ex = await Assert.ThrowsAsync<ClipRejectedException>(() =>
-            NewRenderer().RenderAsync(Clip(1280, 720, 1, hdr: true), _dir, new ShortSettings(ShortLayout.FullViewZoom, 0, null, "t")));
+            NewRenderer().RenderAsync(Clip(1280, 720, 1, hdr: true), _dir, new UploadSettings(VideoSubmissionKind.Short, ShortLayout.FullViewZoom, 0, null, "t")));
         Assert.Equal("This clip is HDR, so it can't be made into a Short.", ex.Message);
     }
 }

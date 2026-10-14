@@ -4,18 +4,14 @@ using Discord;
 namespace ClanGuardBot.Handlers;
 
 /// <summary>
-/// The bot message that carries a clip's Upload button(s): its text (for clips
-/// forwarded to the upload channel) and its buttons. Both are built from the
-/// <see cref="VideoSubmission"/> rows alone, so any redraw can rebuild the
-/// message from the database.
+/// The bot message that carries a clip's Upload button(s): its text and its
+/// buttons. Both are built from the <see cref="VideoSubmission"/> rows alone, so
+/// any redraw can rebuild the message from the database.
 /// </summary>
 internal static class VideoUploadCard
 {
-    /// <summary>Button custom id prefix; the attachment index follows.</summary>
+    /// <summary>Upload button custom id prefix; the attachment index follows.</summary>
     public const string CustomIdPrefix = "vidup:";
-
-    /// <summary>Short button custom id prefix; the attachment index follows.</summary>
-    public const string ShortCustomIdPrefix = "vidshort:";
 
     public const string OriginalDeletedLine = "🗑️ Original post deleted, so this clip can't be uploaded.";
 
@@ -31,72 +27,50 @@ internal static class VideoUploadCard
     }
 
     /// <summary>
-    /// The buttons for every video, in attachment order: Upload, then Short when
-    /// the video has a Short row. Numbered only when the post carries more than one
-    /// video. Discord allows 5 buttons per row and 5 rows: with Short buttons two
-    /// videos share a row (10 videos = 5 rows of 4); without them, as before, up to
-    /// 5 Upload buttons per row.
+    /// One button per video, in attachment order. Numbered only when the post
+    /// carries more than one video. Up to 5 buttons per row (Discord's cap);
+    /// a message carries at most 10 attachments, so two rows at most. Once a clip
+    /// is up, its button is the link to the video or the Short.
     /// </summary>
-    public static MessageComponent BuildComponents(IReadOnlyList<VideoSubmission> rows)
+    public static MessageComponent BuildComponents(IReadOnlyList<VideoSubmission> videos)
     {
-        var builder   = new ComponentBuilder();
-        var videos    = rows.GroupBy(r => r.AttachmentIndex).OrderBy(g => g.Key).ToList();
-        var numbered  = videos.Count > 1;
-        var hasShorts = rows.Any(r => r.Kind == VideoSubmissionKind.Short);
+        var builder  = new ComponentBuilder();
+        var numbered = videos.Count > 1;
+        var ordered  = videos.OrderBy(v => v.AttachmentIndex).ToList();
 
-        for (var n = 0; n < videos.Count; n++)
+        for (var n = 0; n < ordered.Count; n++)
         {
-            var suffix = numbered ? $" #{n + 1}" : "";
-            var row    = hasShorts ? n / 2 : n / 5;
+            var v       = ordered[n];
+            var suffix  = numbered ? $" #{n + 1}" : "";
+            var row     = n / 5;
+            var id      = CustomIdPrefix + v.AttachmentIndex;
+            var isShort = v.Kind == VideoSubmissionKind.Short;
 
-            if (videos[n].FirstOrDefault(r => r.Kind == VideoSubmissionKind.Video) is { } video)
-                AddUploadButton(builder, video, suffix, row);
-            if (videos[n].FirstOrDefault(r => r.Kind == VideoSubmissionKind.Short) is { } shortRow)
-                AddShortButton(builder, shortRow, suffix, row);
+            switch (v.Status)
+            {
+                case VideoSubmissionStatus.Uploaded when isShort:
+                    builder.WithButton("Watch Short" + suffix, style: ButtonStyle.Link, emote: new Emoji("▶️"),
+                        url: $"https://youtube.com/shorts/{v.YouTubeVideoId}", row: row);
+                    break;
+                case VideoSubmissionStatus.Uploaded:
+                    builder.WithButton("Watch on YouTube" + suffix, style: ButtonStyle.Link,
+                        url: $"https://youtu.be/{v.YouTubeVideoId}", row: row);
+                    break;
+                case VideoSubmissionStatus.Uploading:
+                    builder.WithButton((isShort ? "Making Short…" : "Uploading…") + suffix, id,
+                        ButtonStyle.Secondary, disabled: true, row: row);
+                    break;
+                case VideoSubmissionStatus.OriginalDeleted:
+                    builder.WithButton("Original deleted" + suffix, id, ButtonStyle.Secondary,
+                        disabled: true, row: row);
+                    break;
+                default:
+                    builder.WithButton("Upload" + suffix, id, ButtonStyle.Primary,
+                        emote: new Emoji("📤"), row: row);
+                    break;
+            }
         }
 
         return builder.Build();
-    }
-
-    private static void AddUploadButton(ComponentBuilder builder, VideoSubmission v, string suffix, int row)
-    {
-        var id = CustomIdPrefix + v.AttachmentIndex;
-        switch (v.Status)
-        {
-            case VideoSubmissionStatus.Uploaded:
-                builder.WithButton("Watch on YouTube" + suffix, style: ButtonStyle.Link,
-                    url: $"https://youtu.be/{v.YouTubeVideoId}", row: row);
-                break;
-            case VideoSubmissionStatus.Uploading:
-                builder.WithButton("Uploading…" + suffix, id, ButtonStyle.Secondary, disabled: true, row: row);
-                break;
-            case VideoSubmissionStatus.OriginalDeleted:
-                builder.WithButton("Original deleted" + suffix, id, ButtonStyle.Secondary, disabled: true, row: row);
-                break;
-            default:
-                builder.WithButton("Upload" + suffix, id, ButtonStyle.Primary, emote: new Emoji("📤"), row: row);
-                break;
-        }
-    }
-
-    private static void AddShortButton(ComponentBuilder builder, VideoSubmission v, string suffix, int row)
-    {
-        var id = ShortCustomIdPrefix + v.AttachmentIndex;
-        switch (v.Status)
-        {
-            case VideoSubmissionStatus.Uploaded:
-                builder.WithButton("Watch Short" + suffix, style: ButtonStyle.Link, emote: new Emoji("▶️"),
-                    url: $"https://youtube.com/shorts/{v.YouTubeVideoId}", row: row);
-                break;
-            case VideoSubmissionStatus.Uploading:
-                builder.WithButton("Making Short…" + suffix, id, ButtonStyle.Secondary, disabled: true, row: row);
-                break;
-            case VideoSubmissionStatus.OriginalDeleted:
-                builder.WithButton("Original deleted" + suffix, id, ButtonStyle.Secondary, disabled: true, row: row);
-                break;
-            default:
-                builder.WithButton("Short" + suffix, id, ButtonStyle.Secondary, emote: new Emoji("📱"), row: row);
-                break;
-        }
     }
 }

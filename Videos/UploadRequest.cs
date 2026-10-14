@@ -6,24 +6,27 @@ using ClanGuardBot.Models;
 namespace ClanGuardBot.Services;
 
 /// <summary>
-/// Reads the Short form (start, end, title). Times are <c>m:ss</c>, <c>mm:ss</c>
-/// or whole seconds; an empty end means the end of the clip. A Short is at most
-/// <see cref="MaxSeconds"/> long (YouTube's Shorts limit).
+/// Reads the upload form (start, end, title) for a video or a Short. Times are
+/// <c>m:ss</c>, <c>mm:ss</c> or whole seconds, ASCII digits only; an empty end
+/// means the end of the clip. A Short is at most <see cref="MaxShortSeconds"/>
+/// long (YouTube's Shorts limit); a video has no limit here.
 /// </summary>
-public static partial class ShortRequest
+public static partial class UploadRequest
 {
-    public const int MaxSeconds = 180;
+    public const int MaxShortSeconds = 180;
 
-    [GeneratedRegex(@"^(\d{1,2}):([0-5]\d)$")]
+    // [0-9], not \d: \d also matches non-ASCII digits (e.g. full-width), which
+    // int.Parse with the invariant culture then rejects.
+    [GeneratedRegex(@"^([0-9]{1,2}):([0-5][0-9])$")]
     private static partial Regex Clock();
 
-    [GeneratedRegex(@"^\d{1,4}$")]
+    [GeneratedRegex(@"^[0-9]{1,4}$")]
     private static partial Regex Plain();
 
-    /// <summary>On failure <paramref name="error"/> is the message for the clicker.</summary>
+    /// <summary>On failure <paramref name="error"/> is the message for the uploader.</summary>
     public static bool TryParse(
-        string start, string? end, string title, ShortLayout layout,
-        [MaybeNullWhen(false)] out ShortSettings settings, out string error)
+        string start, string? end, string title, VideoSubmissionKind kind, ShortLayout layout,
+        [MaybeNullWhen(false)] out UploadSettings settings, out string error)
     {
         settings = null;
         if (!TryParseTime(start, out var from))
@@ -45,9 +48,9 @@ public static partial class ShortRequest
                 error = $"End ({FormatTime(parsedEnd)}) must be after Start ({FormatTime(from)}).";
                 return false;
             }
-            if (parsedEnd - from > MaxSeconds)
+            if (kind == VideoSubmissionKind.Short && parsedEnd - from > MaxShortSeconds)
             {
-                error = $"A Short can be at most {FormatTime(MaxSeconds)} long, and {FormatTime(from)} to {FormatTime(parsedEnd)} is {FormatTime(parsedEnd - from)}.";
+                error = $"A Short can be at most {FormatTime(MaxShortSeconds)} long, and {FormatTime(from)} to {FormatTime(parsedEnd)} is {FormatTime(parsedEnd - from)}.";
                 return false;
             }
             to = parsedEnd;
@@ -60,17 +63,13 @@ public static partial class ShortRequest
             return false;
         }
 
-        settings = new ShortSettings(layout, from, to, trimmedTitle);
+        settings = new UploadSettings(kind, layout, from, to, trimmedTitle);
         error = string.Empty;
         return true;
     }
 
     /// <summary>Whole seconds as <c>m:ss</c>, e.g. 65 → "1:05".</summary>
-    public static string FormatTime(double seconds)
-    {
-        var total = (int)Math.Round(seconds, MidpointRounding.AwayFromZero);
-        return $"{total / 60}:{total % 60:00}";
-    }
+    public static string FormatTime(double seconds) => ClipTime.Format(seconds);
 
     private static bool TryParseTime(string text, out double seconds)
     {

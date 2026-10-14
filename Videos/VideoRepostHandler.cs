@@ -14,7 +14,7 @@ namespace ClanGuardBot.Handlers;
 
 /// <summary>
 /// Clip posts in the clip channels (<see cref="BotConfig.VideoRepostChannelIds"/>)
-/// get an "Upload to YouTube" button in the private upload channel
+/// get an "Upload" button in the private upload channel
 /// (<see cref="BotConfig.VideoUploadChannelId"/>).
 ///
 /// ── What it does ──
@@ -26,52 +26,46 @@ namespace ClanGuardBot.Handlers;
 /// no upload channel set nothing happens at all.
 ///
 /// Pressing "Upload" (holders of <see cref="BotConfig.VideoUploadRoleId"/>, plus
-/// Administrators) downloads that video from the member's post and sends it to
-/// the clan's YouTube channel through <see cref="YouTubeUploadService"/>. The
-/// button then turns into a "Watch on YouTube" link.
+/// Administrators) asks whether the clip goes to YouTube as a normal video or
+/// as a Short (and its framing), then a form sets Start, End and Title; see
+/// VideoRepostHandler.Upload.cs. Each clip is uploaded once; afterwards its
+/// button is the link.
 ///
 /// ── Original deleted ──
 /// A forward is a snapshot, so it stays when the member deletes their post.
 /// Videos not uploaded yet are marked OriginalDeleted: their buttons are
 /// disabled and the reply says so. A deletion missed while the bot was offline
-/// is caught by the next click, which finds the post gone.
+/// is caught by the next upload, which finds the post gone.
 ///
 /// ── Older messages ──
-/// Before forwarding, the bot reposted clips in the clip channel (deleting the
-/// original) or, for posts too big to repost, replied to the original in place.
-/// Those rows have no OriginalChannelId. Their buttons keep working, and an
-/// in-place reply is still withdrawn when its original is deleted.
-///
-/// ── Upscaling ──
-/// Before the upload, <see cref="VideoUpscaler"/> scales sub-1440p clips up to
-/// 1440p so YouTube gives them its better encode. It never blocks an upload:
-/// on any skip or failure the original file goes up instead.
+/// Clips the bot reposted (or replied to in place) before forwarding have rows
+/// without an OriginalChannelId. They're no longer supported: their Upload
+/// button only explains why.
 ///
 /// ── Upload state / simultaneous clicks ──
 /// One <see cref="VideoSubmission"/> row per video. When several media-team
-/// members press Upload at nearly the same moment, each click runs the same
+/// members submit the form at nearly the same moment, each submit runs the same
 /// Pending → Uploading UPDATE with the Pending state in its WHERE clause.
-/// SQLite applies writes one at a time, so exactly one click affects the row
-/// and wins; every other click affects 0 rows and is told privately who is
+/// SQLite applies writes one at a time, so exactly one submit affects the row
+/// and wins; every other one affects 0 rows and is told privately who is
 /// already uploading it. No second upload is ever started.
 ///
-/// The button redraw is the other half of the race: each click (and each
+/// The button redraw is the other half of the race: each submit (and each
 /// finished upload) re-reads the rows and edits the message, and two of those
 /// edits landing out of order would let a stale "Uploading…" overwrite a newer
-/// "Watch on YouTube". Redraws are therefore serialized per message, with the
-/// read taken inside the lock, so the last edit always reflects the latest
-/// state. The same applies to two videos on one post uploading in parallel.
+/// link. Redraws are therefore serialized per message, with the read taken
+/// inside the lock, so the last edit always reflects the latest state.
 ///
 /// An upload dies with the process, so on the first Ready after
 /// a start any row still Uploading is put back to Pending and its button
 /// re-enabled (a disabled button can't be clicked to recover it).
 ///
 /// ── Threading ──
-/// Forwards, downloads and uploads can take seconds to minutes, so both gateway callbacks
-/// hand the work to the thread pool and return at once rather than blocking
-/// Discord.Net's gateway task. The message is edited through the bot's own
-/// REST session, not the interaction token, so an upload that outlives the
-/// 15-minute interaction window still updates the button.
+/// Forwards, downloads, encodes and uploads can take seconds to minutes, so the
+/// gateway callbacks hand the work to the thread pool and return at once rather
+/// than blocking Discord.Net's gateway task. The message is edited through the
+/// bot's own REST session, not the interaction token, so an upload that outlives
+/// the 15-minute interaction window still updates the button.
 /// </summary>
 public sealed partial class VideoRepostHandler
 {
@@ -92,9 +86,9 @@ public sealed partial class VideoRepostHandler
     // Guards against the gateway delivering the same message twice.
     private readonly ConcurrentDictionary<ulong, byte> _inFlight = new();
 
-    // One lock per repost message, serializing button redraws. Entries are a
-    // few bytes each and only created for reposts someone clicked, so they
-    // are kept for the life of the process rather than evicted.
+    // One lock per bot reply, serializing button redraws. Entries are a few bytes
+    // each and only created for replies someone used, so they are kept for the
+    // life of the process rather than evicted.
     private readonly ConcurrentDictionary<ulong, SemaphoreSlim> _redrawLocks = new();
 
     private DiscordSocketClient? _client;
@@ -200,7 +194,7 @@ public sealed partial class VideoRepostHandler
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Could not re-enable upload button on repost {MessageId}", group.Key.MessageId);
+                _logger.LogWarning(ex, "Could not re-enable the Upload button on message {MessageId}", group.Key.MessageId);
             }
         }
     }
@@ -274,26 +268,22 @@ public sealed partial class VideoRepostHandler
         var now         = DateTime.UtcNow;
         var rows = Enumerable.Range(0, attachments.Count)
             .Where(i => IsVideo(attachments[i]))
-            .SelectMany(i => (_config.VideoShortsEnabled
-                    ? new[] { VideoSubmissionKind.Video, VideoSubmissionKind.Short }
-                    : new[] { VideoSubmissionKind.Video })
-                .Select(kind => new VideoSubmission
-                {
-                    GuildId           = channel.Guild.Id,
-                    ChannelId         = uploadChannel.Id,
-                    AttachmentIndex   = i,
-                    Kind              = kind,
-                    KeptOriginal      = true,
-                    FileName          = attachments[i].Filename,
-                    OriginalChannelId = channel.Id,
-                    OriginalMessageId = msg.Id,
-                    PosterUserId      = msg.Author.Id,
-                    PosterName        = posterName,
-                    OriginalContent   = msg.CleanContent ?? string.Empty,
-                    PostedUtc         = now,
-                    Width             = attachments[i].Width,
-                    Height            = attachments[i].Height,
-                }))
+            .Select(i => new VideoSubmission
+            {
+                GuildId           = channel.Guild.Id,
+                ChannelId         = uploadChannel.Id,
+                AttachmentIndex   = i,
+                KeptOriginal      = true,
+                FileName          = attachments[i].Filename,
+                OriginalChannelId = channel.Id,
+                OriginalMessageId = msg.Id,
+                PosterUserId      = msg.Author.Id,
+                PosterName        = posterName,
+                OriginalContent   = msg.CleanContent ?? string.Empty,
+                PostedUtc         = now,
+                Width             = attachments[i].Width,
+                Height            = attachments[i].Height,
+            })
             .ToList();
 
         var forward = await uploadChannel.SendMessageAsync(
@@ -336,14 +326,14 @@ public sealed partial class VideoRepostHandler
 
         _logger.LogInformation(
             "Forwarded {Count} video(s) from {User} in #{Channel} to #{UploadChannel} (original {Original} → reply {Reply})",
-            rows.Count(r => r.Kind == VideoSubmissionKind.Video), posterName, channel.Name, uploadChannel.Name, msg.Id, reply.Id);
+            rows.Count, posterName, channel.Name, uploadChannel.Name, msg.Id, reply.Id);
     }
 
     /// <summary>
     /// The member's post is gone: marks its forwarded videos that weren't uploaded
-    /// yet as OriginalDeleted and redraws their reply.
+    /// yet as OriginalDeleted and redraws their reply. Returns how many replies changed.
     /// </summary>
-    private async Task MarkOriginalDeletedAsync(ulong originalMessageId)
+    private async Task<int> MarkOriginalDeletedAsync(ulong originalMessageId)
     {
         IReadOnlyList<(ulong ChannelId, ulong MessageId)> replies;
         using (var scope = _services.CreateScope())
@@ -357,6 +347,7 @@ public sealed partial class VideoRepostHandler
             if (await FetchMessageAsync(channelId, messageId) is IUserMessage reply)
                 await RefreshButtonsAsync(reply);
         }
+        return replies.Count;
     }
 
     /// <summary>True only when Discord confirms the message is gone; a failed check counts as still there.</summary>
@@ -407,44 +398,13 @@ public sealed partial class VideoRepostHandler
         return Task.CompletedTask;
     }
 
-    /// <summary>
-    /// A member's post in a clip channel was deleted. Its forwarded videos that
-    /// weren't uploaded are marked "Original deleted" (the forward stays). An
-    /// in-place reply from before forwarding is removed as before, unless a video
-    /// from it already went to YouTube or is going now: then the reply holds the
-    /// only link to it.
-    /// </summary>
+    /// <summary>A member's post in a clip channel was deleted: mark its forwarded videos that weren't uploaded.</summary>
     private async Task HandleOriginalDeletedAsync(ulong messageId)
     {
         try
         {
-            List<VideoSubmission> rows;
-            using (var scope = _services.CreateScope())
-            {
-                var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-                rows = await db.VideoSubmissions.AsNoTracking()
-                    .Where(v => v.OriginalMessageId == messageId && v.KeptOriginal)
-                    .ToListAsync();
-            }
-            if (rows.Count == 0) return;
-
-            if (rows.Any(v => v.OriginalChannelId is not null))
-            {
-                await MarkOriginalDeletedAsync(messageId);
+            if (await MarkOriginalDeletedAsync(messageId) > 0)
                 _logger.LogInformation("Original {Original} of a forwarded clip was deleted; marked its Upload button(s)", messageId);
-                return;
-            }
-
-            if (rows.Any(v => v.Status != VideoSubmissionStatus.Pending)) return;
-
-            var replyId = rows[0].MessageId;
-            if (await FetchMessageAsync(rows[0].ChannelId, replyId) is IUserMessage reply)
-                await RollBackRepostAsync(reply);
-            else
-                await DeleteRowsAsync(replyId);
-
-            _logger.LogInformation(
-                "Removed in-place Upload button {Reply} after its original {Original} was deleted", replyId, messageId);
         }
         catch (Exception ex)
         {
@@ -452,27 +412,7 @@ public sealed partial class VideoRepostHandler
         }
     }
 
-    private async Task RollBackRepostAsync(IUserMessage repost)
-    {
-        await TryDeleteAsync(repost);
-        await DeleteRowsAsync(repost.Id);
-    }
-
-    private async Task DeleteRowsAsync(ulong buttonMessageId)
-    {
-        try
-        {
-            using var scope = _services.CreateScope();
-            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-            await db.VideoSubmissions.Where(v => v.MessageId == buttonMessageId).ExecuteDeleteAsync();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Could not clear VideoSubmission rows for withdrawn message {MessageId}", buttonMessageId);
-        }
-    }
-
-    // ─── Upload button ───────────────────────────────────────────────
+    // ─── Buttons and forms ───────────────────────────────────────────
 
     private Task OnButtonExecuted(SocketMessageComponent component)
     {
@@ -480,10 +420,8 @@ public sealed partial class VideoRepostHandler
         Func<Task> handle;
         if (customId.StartsWith(VideoUploadCard.CustomIdPrefix, StringComparison.Ordinal))
             handle = () => HandleUploadClickAsync(component, customId);
-        else if (customId.StartsWith(VideoUploadCard.ShortCustomIdPrefix, StringComparison.Ordinal))
-            handle = () => HandleShortClickAsync(component, customId);
-        else if (customId.StartsWith(ShortFramingPrefix, StringComparison.Ordinal))
-            handle = () => HandleShortFramingAsync(component, customId);
+        else if (customId.StartsWith(ChoicePrefix, StringComparison.Ordinal))
+            handle = () => HandleUploadChoiceAsync(component, customId);
         else
             return Task.CompletedTask;
 
@@ -494,9 +432,9 @@ public sealed partial class VideoRepostHandler
     private Task OnModalSubmitted(SocketModal modal)
     {
         var customId = modal.Data.CustomId ?? string.Empty;
-        if (!customId.StartsWith(ShortFormPrefix, StringComparison.Ordinal)) return Task.CompletedTask;
+        if (!customId.StartsWith(FormPrefix, StringComparison.Ordinal)) return Task.CompletedTask;
 
-        _ = Task.Run(() => RunInteractionAsync(modal, customId, () => HandleShortFormAsync(modal, customId)));
+        _ = Task.Run(() => RunInteractionAsync(modal, customId, () => HandleUploadFormAsync(modal, customId)));
         return Task.CompletedTask;
     }
 
@@ -521,138 +459,19 @@ public sealed partial class VideoRepostHandler
         }
     }
 
-    private async Task HandleUploadClickAsync(SocketMessageComponent component, string customId)
-    {
-        if (!int.TryParse(customId[VideoUploadCard.CustomIdPrefix.Length..], out var index) || index < 0)
-        {
-            _logger.LogWarning("Malformed video upload customId: {CustomId}", customId);
-            return;
-        }
-
-        if (component.User is not SocketGuildUser user || !CanUpload(user))
-        {
-            await component.RespondAsync(NotAllowedMessage(), ephemeral: true, allowedMentions: AllowedMentions.None);
-            return;
-        }
-
-        if (!_youtube.IsConfigured)
-        {
-            await component.RespondAsync(YouTubeNotConfiguredMessage, ephemeral: true);
-            return;
-        }
-
-        await component.DeferAsync(ephemeral: true);
-
-        var message    = component.Message;
-        var messageId  = message.Id;
-        var uploaderName = user.DisplayName;
-        var now        = DateTime.UtcNow;
-
-        bool claimed;
-        using (var scope = _services.CreateScope())
-        {
-            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-            claimed = await VideoSubmissionStore.TryClaimAsync(db, messageId, index, VideoSubmissionKind.Video, user.Id, uploaderName, now);
-        }
-
-        if (!claimed)
-        {
-            var existing = await LoadAsync(messageId, index, VideoSubmissionKind.Video);
-            await RefreshButtonsAsync(message);
-            var reply = existing?.Status switch
-            {
-                null => "I have no record of this video, so it can't be uploaded from here.",
-                VideoSubmissionStatus.Uploaded => $"Already on YouTube: https://youtu.be/{existing.YouTubeVideoId}",
-                VideoSubmissionStatus.Uploading when existing.UploadedByUserId == user.Id
-                    => "You're already uploading this one — the button will change to a link when it's done.",
-                VideoSubmissionStatus.Uploading
-                    => $"{existing.UploadedByName ?? "Someone"} already started uploading this one — it only goes up once.",
-                VideoSubmissionStatus.OriginalDeleted => OriginalDeletedMessage,
-                _ => "That video can't be uploaded right now.",
-            };
-            await component.FollowupAsync(reply, ephemeral: true);
-            return;
-        }
-
-        await RefreshButtonsAsync(message);
-        await component.FollowupAsync("Working on it… the button will change to a link when it's on YouTube.", ephemeral: true);
-
-        var tempDir = Path.Combine(Path.GetTempPath(), "clanguard-video", $"up-{messageId}-{index}");
-        Directory.CreateDirectory(tempDir);
-        VideoSubmission? submission = null;
-        try
-        {
-            submission = await LoadAsync(messageId, index, VideoSubmissionKind.Video)
-                ?? throw new InvalidOperationException("Submission row vanished after claim.");
-
-            var attachment = await ResolveSourceAttachmentAsync(message, submission);
-
-            var path = Path.Combine(tempDir, "video" + Path.GetExtension(attachment.Filename));
-            await DownloadAsync(attachment.Url, path);
-
-            var toUpload = await _upscaler.PrepareAsync(
-                path, tempDir, startSeconds: 0, endSeconds: null,
-                onEncodeStarting: message => TryFollowupAsync(component, message));
-
-            var videoCount = await CountVideosAsync(messageId);
-            var guildName  = (message.Channel as SocketGuildChannel)?.Guild.Name ?? "clan";
-            var youtubeId  = await _youtube.UploadAsync(
-                toUpload,
-                BuildTitle(submission, videoCount),
-                BuildDescription(submission, guildName));
-
-            await MarkUploadedAsync(submission.Id, youtubeId);
-
-            await RefreshButtonsAsync(message);
-            await TryFollowupAsync(component, $"✅ Uploaded: https://youtu.be/{youtubeId}");
-        }
-        catch (Exception ex)
-        {
-            // A forwarded clip's original may have been deleted while it uploaded;
-            // then there's nothing to retry from.
-            var originalDeleted = ex is OriginalDeletedException
-                || (submission is { OriginalChannelId: { } originalChannelId }
-                    && await OriginalConfirmedGoneAsync(originalChannelId, submission.OriginalMessageId));
-
-            if (originalDeleted)
-                _logger.LogInformation(
-                    "Upload of message {MessageId} attachment {Index} stopped: the original post was deleted", messageId, index);
-            else
-                _logger.LogError(ex, "YouTube upload failed for message {MessageId} attachment {Index}", messageId, index);
-
-            using (var scope = _services.CreateScope())
-            {
-                var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
-                await VideoSubmissionStore.ReleaseFailedUploadAsync(db, messageId, index, VideoSubmissionKind.Video, ex.Message, originalDeleted);
-            }
-
-            await RefreshButtonsAsync(message);
-            await TryFollowupAsync(component, originalDeleted
-                ? (ex as OriginalDeletedException)?.Message ?? OriginalDeletedMessage
-                : $"⚠️ The YouTube upload failed: {ex.Message}\nThe button is live again if you want to retry.");
-        }
-        finally
-        {
-            TryDeleteDirectory(tempDir);
-        }
-    }
+    // ─── Source clip ─────────────────────────────────────────────────
 
     /// <summary>
-    /// The attachment to upload, with a freshly signed CDN URL. For an older repost
-    /// it's on component.Message, which arrives with the click. Otherwise it's on
-    /// the member's message, fetched over REST rather than from the gateway cache:
-    /// a cached copy's URLs can be past their ~24h expiry. A deleted original
-    /// throws <see cref="OriginalDeletedException"/>.
+    /// The attachment to upload, from the member's post, fetched over REST rather
+    /// than from the gateway cache: a cached copy's URLs can be past their ~24h
+    /// expiry. A deleted original, or this clip removed from it, throws
+    /// <see cref="OriginalDeletedException"/>.
     /// </summary>
-    private async Task<IAttachment> ResolveSourceAttachmentAsync(IUserMessage? buttonMessage, VideoSubmission submission)
+    private async Task<IAttachment> ResolveSourceAttachmentAsync(VideoSubmission submission)
     {
-        if (!submission.KeptOriginal)
-        {
-            return buttonMessage?.Attachments.ElementAtOrDefault(submission.AttachmentIndex)
-                ?? throw new InvalidOperationException($"The repost no longer has attachment #{submission.AttachmentIndex}.");
-        }
-
-        var original = await FetchMessageAsync(submission.OriginalChannelId ?? submission.ChannelId, submission.OriginalMessageId)
+        var channelId = submission.OriginalChannelId
+            ?? throw new InvalidOperationException("This clip was posted before uploads moved to the upload channel.");
+        var original = await FetchMessageAsync(channelId, submission.OriginalMessageId)
             ?? throw new OriginalDeletedException();
 
         var names = original.Attachments.Select(a => a.Filename).ToList();
@@ -732,7 +551,7 @@ public sealed partial class VideoRepostHandler
         await gate.WaitAsync();
         try
         {
-            // Read INSIDE the lock: a redraw that read before another click's
+            // Read INSIDE the lock: a redraw that read before another submit's
             // redraw finished could otherwise publish the older state last.
             List<VideoSubmission> rows;
             using (var scope = _services.CreateScope())
@@ -744,8 +563,9 @@ public sealed partial class VideoRepostHandler
             }
             if (rows.Count == 0) return;
 
-            // A forwarded clip's reply text carries the "original deleted" line,
-            // so it's rebuilt along with the buttons. Older messages: buttons only.
+            // The reply text carries the "original deleted" line, so it's rebuilt
+            // with the buttons. Rows from before forwarding (restart recovery can
+            // still touch them) have no reply text to rebuild.
             var forwarded = rows[0].OriginalChannelId is not null;
             var deleted   = rows.Any(r => r.Status == VideoSubmissionStatus.OriginalDeleted);
             await message.ModifyAsync(p =>
@@ -768,12 +588,12 @@ public sealed partial class VideoRepostHandler
         }
     }
 
-    private async Task<VideoSubmission?> LoadAsync(ulong messageId, int index, VideoSubmissionKind kind)
+    private async Task<VideoSubmission?> LoadAsync(ulong messageId, int index)
     {
         using var scope = _services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
         return await db.VideoSubmissions.AsNoTracking()
-            .FirstOrDefaultAsync(v => v.MessageId == messageId && v.AttachmentIndex == index && v.Kind == kind);
+            .FirstOrDefaultAsync(v => v.MessageId == messageId && v.AttachmentIndex == index);
     }
 
     private async Task MarkUploadedAsync(int rowId, string youtubeId)

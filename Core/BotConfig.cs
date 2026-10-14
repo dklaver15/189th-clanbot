@@ -2983,10 +2983,9 @@ public class BotConfig
     public string FfprobePath { get; set; } = "ffprobe";
 
     /// <summary>
-    /// The "Short" button next to "Upload" on forwarded clips: renders a 9:16
-    /// YouTube Short (framing, trim, title from a form) and uploads it. When false,
-    /// newly forwarded clips get no Short button and clicks on existing ones are
-    /// refused. Renders run on the droplet CPU, one at a time with upscales.
+    /// Offer the Short choices (full view + zoom, center crop) when someone presses
+    /// Upload on a forwarded clip. When false, Upload goes straight to the normal
+    /// video form. Shorts render on the droplet CPU, one at a time with upscales.
     /// Default true.
     /// </summary>
     public bool VideoShortsEnabled { get; set; } = true;

@@ -575,11 +575,11 @@ public class BotDbContext : DbContext
         });
 
         // ── Video repost submissions ──────────────────────────────────
-        // Looked up by (repost message, attachment index) on every Upload
-        // click; unique so one video can only ever have one state row.
+        // Looked up by (bot reply, attachment index) on every Upload click and
+        // form submit; unique so one video can only ever have one state row.
         modelBuilder.Entity<VideoSubmission>(e =>
         {
-            e.HasIndex(v => new { v.MessageId, v.AttachmentIndex, v.Kind }).IsUnique();
+            e.HasIndex(v => new { v.MessageId, v.AttachmentIndex }).IsUnique();
             e.Property(v => v.Status).HasConversion<int>();
             e.Property(v => v.Kind).HasConversion<int>();
         });

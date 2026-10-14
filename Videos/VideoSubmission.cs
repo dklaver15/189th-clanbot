@@ -2,9 +2,9 @@ namespace ClanGuardBot.Models;
 
 public enum VideoSubmissionStatus
 {
-    /// <summary>Reposted with a live "Upload" button.</summary>
+    /// <summary>Forwarded with a live "Upload" button.</summary>
     Pending   = 0,
-    /// <summary>An uploader pressed the button and the YouTube upload is running.</summary>
+    /// <summary>An uploader submitted the form and the YouTube upload is running.</summary>
     Uploading = 1,
     /// <summary>On YouTube; <see cref="VideoSubmission.YouTubeVideoId"/> is set.</summary>
     Uploaded  = 2,
@@ -15,12 +15,12 @@ public enum VideoSubmissionStatus
     OriginalDeleted = 3,
 }
 
-/// <summary>Which button a row belongs to. Each forwarded video has one row of each kind.</summary>
+/// <summary>What a clip went (or goes) to YouTube as.</summary>
 public enum VideoSubmissionKind
 {
-    /// <summary>The normal "Upload" button: the clip as a regular YouTube video.</summary>
+    /// <summary>A regular YouTube video.</summary>
     Video = 0,
-    /// <summary>The "Short" button: a 9:16 YouTube Short made from the clip.</summary>
+    /// <summary>A 9:16 YouTube Short.</summary>
     Short = 1,
 }
 
@@ -35,23 +35,28 @@ public enum ShortLayout
     AsIs = 2,
 }
 
-/// <summary>What the uploader chose in the Short form.</summary>
-/// <param name="EndSeconds">Null = to the end of the clip (at most <c>ShortRequest.MaxSeconds</c> after the start).</param>
-public sealed record ShortSettings(ShortLayout Layout, double StartSeconds, double? EndSeconds, string Title);
+/// <summary>What the uploader chose: video or Short, the Short's framing, the trim and the title.</summary>
+/// <param name="Layout">The Short's framing; ignored for a video.</param>
+/// <param name="EndSeconds">Null = to the end of the clip (a Short stops at most <c>UploadRequest.MaxShortSeconds</c> after the start).</param>
+public sealed record UploadSettings(
+    VideoSubmissionKind Kind, ShortLayout Layout, double StartSeconds, double? EndSeconds, string Title)
+{
+    /// <summary>True when Start or End was changed from "the whole clip".</summary>
+    public bool IsTrimmed => StartSeconds > 0 || EndSeconds is not null;
+}
 
 /// <summary>
 /// One video from a clip post in a watched channel (see
-/// <see cref="Handlers.VideoRepostHandler"/>). One row per video and button
-/// (<see cref="Kind"/>), so a forwarded post with two clips gets four rows: an
-/// Upload and a Short button per clip.
+/// <see cref="Handlers.VideoRepostHandler"/>). One row per video, so a forwarded
+/// post with two clips gets two rows and two independent Upload buttons.
 ///
 /// ── Why this is persisted ──
-/// The Upload button can be pressed hours or days after the repost, across bot
+/// The Upload button can be pressed hours or days after the forward, across bot
 /// restarts. The row carries what the YouTube title/description are built from
-/// (the original text and the poster) and the upload state, which is what stops
-/// two uploaders from sending the same clip twice. The video bytes themselves
-/// are NOT stored: they're re-downloaded at upload time, from the member's post
-/// (or, for older reposts, from the repost).
+/// (the original text and the poster), what the uploader chose in the form, and
+/// the upload state, which is what stops two uploaders from sending the same clip
+/// twice. The video bytes themselves are NOT stored: they're re-downloaded from
+/// the member's post at upload time.
 /// </summary>
 public class VideoSubmission
 {
@@ -62,72 +67,59 @@ public class VideoSubmission
     public ulong ChannelId { get; set; }
 
     /// <summary>
-    /// The bot's message carrying the Upload button: for a forwarded clip, the
-    /// reply under the forward in the upload channel; for older rows, the repost
-    /// or the in-place reply under the original.
+    /// The bot's message carrying the Upload button: the reply under the forward
+    /// in the upload channel (older rows: the repost or in-place reply).
     /// </summary>
     public ulong MessageId { get; set; }
 
     /// <summary>
-    /// Position of this video in the attachment list of the message that holds
-    /// the file: the member's original when <see cref="KeptOriginal"/>, the
-    /// repost otherwise. Unique with <see cref="MessageId"/>, and what the
-    /// button's custom id carries.
+    /// Position of this video in the attachment list of the member's post. Unique
+    /// with <see cref="MessageId"/>, and what the button's custom id carries.
     /// </summary>
     public int AttachmentIndex { get; set; }
 
-    /// <summary>
-    /// Which button this row is: the normal upload or the Short. Unique with
-    /// <see cref="MessageId"/> and <see cref="AttachmentIndex"/>. Rows from before
-    /// Shorts are all <see cref="VideoSubmissionKind.Video"/>.
-    /// </summary>
+    /// <summary>What the clip was uploaded as; set when the upload is claimed. Default Video.</summary>
     public VideoSubmissionKind Kind { get; set; } = VideoSubmissionKind.Video;
 
     /// <summary>
     /// True when the member's post stays where it is and the video is fetched
-    /// from it at upload time: every forwarded clip, and older oversized posts
-    /// the bot replied to in place. False only for older reposts.
+    /// from it at upload time (every forwarded clip). False only for older reposts.
     /// </summary>
     public bool KeptOriginal { get; set; }
 
     public string FileName { get; set; } = string.Empty;
 
-    /// <summary>
-    /// The member's message: left in place when <see cref="KeptOriginal"/>
-    /// (forwarded, or replied to in place), otherwise deleted and replaced by
-    /// the repost.
-    /// </summary>
+    /// <summary>The member's message.</summary>
     public ulong OriginalMessageId { get; set; }
 
     /// <summary>
     /// Channel of the member's original post, set for clips forwarded to
-    /// <see cref="BotConfig.VideoUploadChannelId"/> (then <see cref="ChannelId"/>
-    /// is the upload channel). Null on rows from before forwarding, whose
-    /// original was in <see cref="ChannelId"/>.
+    /// <see cref="BotConfig.VideoUploadChannelId"/>. Null on rows from before
+    /// forwarding, which can no longer be uploaded.
     /// </summary>
     public ulong? OriginalChannelId { get; set; }
 
     /// <summary>
     /// Size of the source video as Discord reported it when the clip was
-    /// forwarded; null when it didn't. Lets the Short button decide at once
-    /// whether to ask for a framing (no time to download the clip first).
+    /// forwarded; null when it didn't. Lets the Upload button decide at once
+    /// which Short framings to offer (no time to download the clip first).
     /// </summary>
     public int? Width { get; set; }
 
     /// <summary>See <see cref="Width"/>.</summary>
     public int? Height { get; set; }
 
-    /// <summary>Short rows: the framing chosen when the Short was claimed.</summary>
+    /// <summary>Shorts: the framing chosen.</summary>
     public ShortLayout? ShortLayout { get; set; }
 
-    /// <summary>Short rows: where the Short starts in the clip, in seconds.</summary>
-    public double? ShortStartSeconds { get; set; }
+    /// <summary>Where the upload starts in the clip, in seconds (from the form).</summary>
+    public double? TrimStartSeconds { get; set; }
 
-    /// <summary>Short rows: where it ends; null = end of the clip (max 3:00 after the start).</summary>
-    public double? ShortEndSeconds { get; set; }
+    /// <summary>Where it ends; null = end of the clip.</summary>
+    public double? TrimEndSeconds { get; set; }
 
-    /// <summary>Short rows: the title from the form.</summary>
-    public string? ShortTitle { get; set; }
+    /// <summary>The YouTube title from the form.</summary>
+    public string? Title { get; set; }
 
     public ulong PosterUserId { get; set; }
 

@@ -2558,20 +2558,20 @@ namespace ClanGuardBot.Migrations
                     b.Property<ulong>("PosterUserId")
                         .HasColumnType("INTEGER");
 
-                    b.Property<double?>("ShortEndSeconds")
-                        .HasColumnType("REAL");
-
                     b.Property<int?>("ShortLayout")
                         .HasColumnType("INTEGER");
 
-                    b.Property<double?>("ShortStartSeconds")
-                        .HasColumnType("REAL");
-
-                    b.Property<string>("ShortTitle")
-                        .HasColumnType("TEXT");
-
                     b.Property<int>("Status")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("Title")
+                        .HasColumnType("TEXT");
+
+                    b.Property<double?>("TrimEndSeconds")
+                        .HasColumnType("REAL");
+
+                    b.Property<double?>("TrimStartSeconds")
+                        .HasColumnType("REAL");
 
                     b.Property<DateTime?>("UploadStartedUtc")
                         .HasColumnType("TEXT");
@@ -2593,7 +2593,7 @@ namespace ClanGuardBot.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("MessageId", "AttachmentIndex", "Kind")
+                    b.HasIndex("MessageId", "AttachmentIndex")
                         .IsUnique();
 
                     b.ToTable("VideoSubmissions");

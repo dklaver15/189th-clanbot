@@ -7,7 +7,7 @@ namespace ClanGuardBot.Services;
 
 /// <summary>
 /// Makes a 1080x1920 YouTube Short from a clip: trims it to the chosen start/end
-/// (at most <see cref="ShortRequest.MaxSeconds"/>) and frames it.
+/// (at most <see cref="UploadRequest.MaxShortSeconds"/>) and frames it.
 ///
 /// ── Framing ──
 /// FullViewZoom puts the whole frame on top and a zoomed centre crop below, the
@@ -75,7 +75,7 @@ public sealed class ShortRenderer
     }
 
     /// <summary>Renders the Short into <paramref name="workDir"/> and returns its path.</summary>
-    public async Task<string> RenderAsync(string inputPath, string workDir, ShortSettings settings, CancellationToken ct = default)
+    public async Task<string> RenderAsync(string inputPath, string workDir, UploadSettings settings, CancellationToken ct = default)
     {
         var info = await MediaProbe.ProbeAsync(_config.FfprobePath, inputPath, _logger, ct);
         if (info.IsHdr)
@@ -83,7 +83,7 @@ public sealed class ShortRenderer
         if (info.Duration > 0 && settings.StartSeconds >= info.Duration)
             throw ClipRejectedException.StartPastEnd(settings.StartSeconds, info.Duration);
 
-        var end = settings.EndSeconds ?? settings.StartSeconds + ShortRequest.MaxSeconds;
+        var end = settings.EndSeconds ?? settings.StartSeconds + UploadRequest.MaxShortSeconds;
         if (info.Duration > 0) end = Math.Min(end, info.Duration);
         var length = end - settings.StartSeconds;
 
@@ -124,7 +124,7 @@ public sealed class ShortRenderer
 
         _logger.LogInformation(
             "Rendered Short ({Layout}, {Start}–{End}) from a {W}x{H} clip",
-            settings.Layout, ShortRequest.FormatTime(settings.StartSeconds), ShortRequest.FormatTime(end),
+            settings.Layout, ClipTime.Format(settings.StartSeconds), ClipTime.Format(end),
             info.Width, info.Height);
         return output;
     }

@@ -15,32 +15,32 @@ internal static class VideoSubmissionStore
     private const int MaxErrorLength = 500;
 
     /// <summary>
-    /// Moves one button's row from Pending to Uploading for this uploader. Of any
-    /// number of simultaneous clicks on that button, exactly one returns true; the
-    /// other kind's row is never touched. A Short claim also records the form's
-    /// <paramref name="settings"/> in the same UPDATE.
+    /// Moves one video from Pending to Uploading for this uploader and records the
+    /// form (video or Short, framing, trim, title) in the same UPDATE. Of any
+    /// number of simultaneous submits, exactly one returns true.
     /// </summary>
     public static async Task<bool> TryClaimAsync(
-        BotDbContext db, ulong messageId, int index, VideoSubmissionKind kind,
-        ulong userId, string userName, DateTime now, ShortSettings? settings = null)
+        BotDbContext db, ulong messageId, int index, ulong userId, string userName, DateTime now, UploadSettings settings)
     {
-        ShortLayout? layout = settings?.Layout;
-        double? start = settings?.StartSeconds;
-        double? end = settings?.EndSeconds;
-        string? title = settings?.Title;
+        var kind  = settings.Kind;
+        ShortLayout? layout = settings.Kind == VideoSubmissionKind.Short ? settings.Layout : null;
+        double? start = settings.StartSeconds;
+        var end   = settings.EndSeconds;
+        var title = settings.Title;
 
         var rows = await db.VideoSubmissions
-            .Where(v => v.MessageId == messageId && v.AttachmentIndex == index && v.Kind == kind
+            .Where(v => v.MessageId == messageId && v.AttachmentIndex == index
                      && v.Status == VideoSubmissionStatus.Pending)
             .ExecuteUpdateAsync(s => s
-                .SetProperty(v => v.Status,            VideoSubmissionStatus.Uploading)
-                .SetProperty(v => v.UploadStartedUtc,  (DateTime?)now)
-                .SetProperty(v => v.UploadedByUserId,  (ulong?)userId)
-                .SetProperty(v => v.UploadedByName,    userName)
-                .SetProperty(v => v.ShortLayout,       layout)
-                .SetProperty(v => v.ShortStartSeconds, start)
-                .SetProperty(v => v.ShortEndSeconds,   end)
-                .SetProperty(v => v.ShortTitle,        title));
+                .SetProperty(v => v.Status,           VideoSubmissionStatus.Uploading)
+                .SetProperty(v => v.UploadStartedUtc, (DateTime?)now)
+                .SetProperty(v => v.UploadedByUserId, (ulong?)userId)
+                .SetProperty(v => v.UploadedByName,   userName)
+                .SetProperty(v => v.Kind,             kind)
+                .SetProperty(v => v.ShortLayout,      layout)
+                .SetProperty(v => v.TrimStartSeconds, start)
+                .SetProperty(v => v.TrimEndSeconds,   end)
+                .SetProperty(v => v.Title,            title));
         return rows == 1;
     }
 
@@ -69,29 +69,25 @@ internal static class VideoSubmissionStore
     }
 
     /// <summary>
-    /// Ends a failed upload of one button: back to Pending with the error, so the
-    /// button can be pressed again, or OriginalDeleted when the member's post is
-    /// confirmed gone. Only moves a row of <paramref name="kind"/> that is still
-    /// Uploading. Returns the rows changed (0 or 1).
+    /// Ends a failed upload: back to Pending with the error, so the button can be
+    /// pressed again, or OriginalDeleted when the member's post is confirmed gone.
+    /// Only moves a video that is still Uploading. Returns the rows changed (0 or 1).
     /// </summary>
     public static Task<int> ReleaseFailedUploadAsync(
-        BotDbContext db, ulong messageId, int index, VideoSubmissionKind kind, string error, bool originalDeleted)
+        BotDbContext db, ulong messageId, int index, string error, bool originalDeleted)
     {
         var status = originalDeleted ? VideoSubmissionStatus.OriginalDeleted : VideoSubmissionStatus.Pending;
         if (error.Length > MaxErrorLength) error = error[..MaxErrorLength];
 
         return db.VideoSubmissions
-            .Where(v => v.MessageId == messageId && v.AttachmentIndex == index && v.Kind == kind
+            .Where(v => v.MessageId == messageId && v.AttachmentIndex == index
                      && v.Status == VideoSubmissionStatus.Uploading)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(v => v.Status,    status)
                 .SetProperty(v => v.LastError, error));
     }
 
-    /// <summary>
-    /// How many videos the post behind <paramref name="messageId"/> carries (one
-    /// Video row each; Short rows don't count). Drives the "(part N)" title suffix.
-    /// </summary>
+    /// <summary>How many videos the post behind <paramref name="messageId"/> carries. Drives the "(part N)" title suffix.</summary>
     public static Task<int> CountVideosAsync(BotDbContext db, ulong messageId) =>
-        db.VideoSubmissions.CountAsync(v => v.MessageId == messageId && v.Kind == VideoSubmissionKind.Video);
+        db.VideoSubmissions.CountAsync(v => v.MessageId == messageId);
 }
