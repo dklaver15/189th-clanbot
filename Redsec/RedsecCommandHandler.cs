@@ -36,6 +36,7 @@ public sealed partial class RedsecCommandHandler
     private const int RecentWinsShown = 5;
     private const int RequiredClanPlayers = 3;
     private const int MaxEngagements = 500;
+    private const int MaxNotesLength = 100;
 
     private static readonly string[] PlayerOptions = { "player1", "player2", "player3", "player4" };
     private static readonly string[] EngagementOptions =
@@ -225,15 +226,29 @@ public sealed partial class RedsecCommandHandler
         if (!await RequireManagerAsync(command, caller)) return;
 
         var options = command.Data.Options;
-        var season = (int)(options.FirstOrDefault(o => o.Name == SeasonOption)?.Value as long? ?? 0);
+        // Discord's docs don't promise to enforce min/max, so every number is range-checked here too.
+        var seasonValue = options.FirstOrDefault(o => o.Name == SeasonOption)?.Value as long? ?? 0;
+        if (seasonValue is < 1 or > MaxSeason)
+        {
+            await command.FollowupAsync($"❌ Season has to be between 1 and {MaxSeason}.", ephemeral: true);
+            return;
+        }
+        var season = (int)seasonValue;
         var notes = (options.FirstOrDefault(o => o.Name == "notes")?.Value as string)?.Trim();
         if (string.IsNullOrEmpty(notes)) notes = null;
+        else if (notes.Length > MaxNotesLength) notes = Truncate(notes, MaxNotesLength);
 
         var players = new List<SocketUser>();
         var engagements = new Dictionary<ulong, int?>();
         for (var i = 0; i < PlayerOptions.Length; i++)
         {
             var given = options.FirstOrDefault(o => o.Name == EngagementOptions[i])?.Value as long?;
+            if (given is < 0 or > MaxEngagements)
+            {
+                await command.FollowupAsync(
+                    $"❌ Engagements have to be between 0 and {MaxEngagements} (player {i + 1}).", ephemeral: true);
+                return;
+            }
             if (options.FirstOrDefault(o => o.Name == PlayerOptions[i])?.Value is not SocketUser picked)
             {
                 if (given is not null)
@@ -262,10 +277,10 @@ public sealed partial class RedsecCommandHandler
             engagements[picked.Id] = given is long g ? (int)g : null;
         }
 
-        if (season < 1 || players.Count < RequiredClanPlayers)
+        if (players.Count < RequiredClanPlayers)
         {
             await command.FollowupAsync(
-                $"Give me a season and at least {RequiredClanPlayers} clan members.", ephemeral: true);
+                $"❌ A win needs at least {RequiredClanPlayers} clan members.", ephemeral: true);
             return;
         }
 
@@ -372,7 +387,15 @@ public sealed partial class RedsecCommandHandler
         var players = await db.RedsecWinPlayers.Where(p => p.RedsecWinId == win.Id).ToListAsync();
         db.RedsecWinPlayers.RemoveRange(players);
         db.RedsecWins.Remove(win);
-        await db.SaveChangesAsync();
+        try
+        {
+            await db.SaveChangesAsync();
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            await command.FollowupAsync($"Win #{win.Id} was already deleted by someone else.", ephemeral: true);
+            return;
+        }
 
         _logger.LogInformation(
             "REDSEC win #{Id} removed by {Caller} ({CallerId}): season {Season}, {Date}, players {Players}",
@@ -401,6 +424,11 @@ public sealed partial class RedsecCommandHandler
             await command.FollowupAsync("Give me a win, a player and their engagements.", ephemeral: true);
             return;
         }
+        if (value is < 0 or > MaxEngagements)
+        {
+            await command.FollowupAsync($"❌ Engagements have to be between 0 and {MaxEngagements}.", ephemeral: true);
+            return;
+        }
 
         var guildId = command.GuildId!.Value;
 
@@ -427,7 +455,15 @@ public sealed partial class RedsecCommandHandler
 
         var previous = row.Engagements;
         row.Engagements = (int)value.Value;
-        await db.SaveChangesAsync();
+        try
+        {
+            await db.SaveChangesAsync();
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            await command.FollowupAsync($"Win #{win.Id} was deleted while you were updating it.", ephemeral: true);
+            return;
+        }
 
         _logger.LogInformation(
             "REDSEC win #{Id}: {Caller} ({CallerId}) set engagements for {Player} from {Old} to {New}",
@@ -478,6 +514,12 @@ public sealed partial class RedsecCommandHandler
             .Where(w => w.GuildId == guild.Id && w.Season == season)
             .OrderByDescending(w => w.WonOn).ThenByDescending(w => w.Id)
             .ToListAsync();
+        if (wins.Count == 0)
+        {
+            // Its last win was deleted between the two queries.
+            await command.FollowupAsync($"No wins recorded for Season {season}.", ephemeral: true);
+            return;
+        }
         var winIds = wins.Select(w => w.Id).ToList();
         var playersByWin = (await db.RedsecWinPlayers
                 .Where(p => winIds.Contains(p.RedsecWinId))
@@ -565,28 +607,12 @@ public sealed partial class RedsecCommandHandler
     /// </summary>
     private async Task PostCardAsync(SocketSlashCommand command, Embed embed, byte[]? png, string fileName, int season)
     {
-        var posted = false;
-        try
-        {
-            var channel = await command.GetChannelAsync();
-            if (channel is not null)
-            {
-                if (png is null)
-                {
-                    await channel.SendMessageAsync(embed: embed, allowedMentions: AllowedMentions.None);
-                }
-                else
-                {
-                    using var fa = new FileAttachment(new MemoryStream(png), fileName);
-                    await channel.SendFileAsync(fa, embed: embed, allowedMentions: AllowedMentions.None);
-                }
-                posted = true;
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Couldn't post the REDSEC card in channel {Channel}", command.ChannelId);
-        }
+        // The bot's permissions in this channel, from the interaction itself.
+        var missing = new List<string>();
+        if (!command.Permissions.EmbedLinks) missing.Add("Embed Links");
+        if (png is not null && !command.Permissions.AttachFiles) missing.Add("Attach Files");
+
+        var posted = missing.Count == 0 && await TryPostToChannelAsync(command, embed, png, fileName);
 
         if (posted)
         {
@@ -594,7 +620,9 @@ public sealed partial class RedsecCommandHandler
             return;
         }
 
-        const string note = "I couldn't post in this channel, so here's a private copy.";
+        var note = missing.Count > 0
+            ? $"I need the {string.Join(" and ", missing)} permission in this channel to post the card, so here's a private copy."
+            : "I couldn't post in this channel, so here's a private copy.";
         if (png is null)
         {
             await command.FollowupAsync(note, embed: embed, ephemeral: true, allowedMentions: AllowedMentions.None);
@@ -604,6 +632,31 @@ public sealed partial class RedsecCommandHandler
             using var fa = new FileAttachment(new MemoryStream(png), fileName);
             await command.FollowupWithFileAsync(fa, note, embed: embed, ephemeral: true,
                 allowedMentions: AllowedMentions.None);
+        }
+    }
+
+    private async Task<bool> TryPostToChannelAsync(SocketSlashCommand command, Embed embed, byte[]? png, string fileName)
+    {
+        try
+        {
+            var channel = await command.GetChannelAsync();
+            if (channel is null) return false;
+
+            if (png is null)
+            {
+                await channel.SendMessageAsync(embed: embed, allowedMentions: AllowedMentions.None);
+            }
+            else
+            {
+                using var fa = new FileAttachment(new MemoryStream(png), fileName);
+                await channel.SendFileAsync(fa, embed: embed, allowedMentions: AllowedMentions.None);
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Couldn't post the REDSEC card in channel {Channel}", command.ChannelId);
+            return false;
         }
     }
 
@@ -783,10 +836,15 @@ public sealed partial class RedsecCommandHandler
         {
             date = DateOnly.FromDateTime(full);
         }
-        else if (DateTime.TryParseExact(text, withoutYear, culture, styles, out var partial))
+        else if (DateTime.TryParseExact($"{text} 2000", withoutYear.Select(f => f + " yyyy").ToArray(),
+                     culture, styles, out var partial))
         {
-            date = new DateOnly(today.Year, partial.Month, partial.Day);
-            if (date > today) date = date.AddYears(-1);
+            // 2000 is a leap year, so "2/29" parses; then take the most recent valid occurrence.
+            var year = today.Year;
+            while (partial.Day > DateTime.DaysInMonth(year, partial.Month)
+                   || new DateOnly(year, partial.Month, partial.Day) > today)
+                year--;
+            date = new DateOnly(year, partial.Month, partial.Day);
         }
         else
         {
