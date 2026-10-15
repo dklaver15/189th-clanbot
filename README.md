@@ -27,7 +27,7 @@ Built with C# on .NET 10 ([Discord.Net](https://github.com/discord-net/Discord.N
 - XP seasons: XP from events, meetings, voice and chat, with daily caps that reset at Central midnight, a leaderboard and level-up DMs.
 - `/poll` (native or anonymous), Question and Joke of the Day, scheduled reminders, UFC schedules and results, a Sleeper fantasy football league, and THE FINALS leaderboard lookups.
 - Gamertag roster in Google Sheets (`/gamertags`, `/lookup`).
-- Ranked REDSEC wins: HQ records each squad win with its season, date and the clan members on the squad (`/redsec-add-win`, `/redsec-remove-win`). `/redsec-wins` posts a season card with a win leaderboard and the most recent wins.
+- Ranked REDSEC wins: HQ records each squad win with its season, date, the 3 or 4 clan members on the squad and, optionally, each player's engagements (kills + assists) (`/redsec-add-win`, `/redsec-remove-win`, `/redsec-set-engagements`). `/redsec-wins` posts a season card ranking members by wins, then engagements, plus the most recent wins.
 - Clips posted in the clip channels are reposted with an "Upload to YouTube" button. Clips are upscaled to 1440p before upload.
 
 **Game servers**
@@ -60,7 +60,7 @@ Built with C# on .NET 10 ([Discord.Net](https://github.com/discord-net/Discord.N
 | MAJ+ | `/promote` `/demote` `/seed-promotion-credit` `/kick-awols` `/clear-awol-list` `/attendance` `/late-check` `/leads` `/usage-stats` |
 | BG+ | `/security-audit` `/webhook-audit` `/briefing-now` |
 | Officer+ | `/awol-check` `/clear-awol` `/banhammer` `/health` `/roster-export` `/setnick` `/squads` `/timeline` |
-| HQ | `/xp-adjust` `/redsec-add-win` `/redsec-remove-win` `/ticket-panel` `/setup-gamertags` `/gamertag-backfill-ids` `/setup-officer-app` |
+| HQ | `/xp-adjust` `/redsec-add-win` `/redsec-remove-win` `/redsec-set-engagements` `/ticket-panel` `/setup-gamertags` `/gamertag-backfill-ids` `/setup-officer-app` |
 | Administrator | `/purge-user` `/allow-new-account` `/bot-fix-channel-perms` |
 
 When adding a command, register it in `DiscordBotService` and add it to the catalog in `CommandsCommandHandler.BuildCatalog`.

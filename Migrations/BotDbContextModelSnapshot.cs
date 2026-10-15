@@ -1636,6 +1636,9 @@ namespace ClanGuardBot.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<int?>("Engagements")
+                        .HasColumnType("INTEGER");
+
                     b.Property<int>("RedsecWinId")
                         .HasColumnType("INTEGER");
 

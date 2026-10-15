@@ -730,9 +730,11 @@ public class CommandsCommandHandler
             new("xp-adjust", "Grant or deduct clan XP manually, with a reason",
                 "HQ", xpAdjust),   // SyncWithHandlers: XpCommandHandler.RequireAdjustRoleAsync
 
-            new("redsec-add-win", "Record a ranked REDSEC win with its season, date and squad",
+            new("redsec-add-win", "Record a ranked REDSEC win with its season, date, squad and engagements",
                 "HQ", RedsecCommandHandler.CanManage),
             new("redsec-remove-win", "Delete a ranked REDSEC win entered by mistake",
+                "HQ", RedsecCommandHandler.CanManage),
+            new("redsec-set-engagements", "Set a player's engagements (kills + assists) on a recorded REDSEC win",
                 "HQ", RedsecCommandHandler.CanManage),
 
             new("add-event-credit", "Manually add 1 event credit at member's current rank",
