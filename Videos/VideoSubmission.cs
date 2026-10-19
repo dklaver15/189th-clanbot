@@ -90,8 +90,9 @@ public class VideoSubmission
 
     /// <summary>
     /// Channel of the member's original post, set for clips forwarded to
-    /// <see cref="BotConfig.VideoUploadChannelId"/>. Null on rows from before
-    /// forwarding, which can no longer be uploaded.
+    /// <see cref="BotConfig.VideoUploadChannelId"/> and for older oversized clips
+    /// answered in place (then equal to <see cref="ChannelId"/>). Null on older
+    /// reposts, which can no longer be uploaded.
     /// </summary>
     public ulong? OriginalChannelId { get; set; }
 

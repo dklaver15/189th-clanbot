@@ -608,9 +608,9 @@ public sealed partial class VideoRepostHandler
             if (rows.Count == 0) return;
 
             // The reply text carries the "original deleted" line, so it's rebuilt
-            // with the buttons. Rows from before forwarding (restart recovery can
-            // still touch them) have no reply text to rebuild.
-            var forwarded = rows[0].OriginalChannelId is not null;
+            // with the buttons. Messages from before forwarding (old reposts, and
+            // replies left in place under oversized clips) keep their own text.
+            var forwarded = rows[0].OriginalChannelId is { } originalChannelId && originalChannelId != rows[0].ChannelId;
             var deleted   = rows.Any(r => r.Status == VideoSubmissionStatus.OriginalDeleted);
             await message.ModifyAsync(p =>
             {
