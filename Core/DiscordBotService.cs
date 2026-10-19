@@ -590,6 +590,7 @@ public class DiscordBotService : IHostedService
                 // CommandsCommandHandler.BuildCatalog in sync.
                 RedsecCommandHandler.BuildAddCommand(),
                 RedsecCommandHandler.BuildRemoveCommand(),
+                RedsecCommandHandler.BuildSetEngagementsCommand(),
                 RedsecCommandHandler.BuildWinsCommand(),
 
                 // /satisfactory-* — the clan's Satisfactory Dedicated Server via its

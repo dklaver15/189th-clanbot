@@ -33,4 +33,7 @@ public class RedsecWinPlayer
 
     /// <summary>Display name when the win was recorded. Used when the member has since left.</summary>
     public string DisplayName { get; set; } = string.Empty;
+
+    /// <summary>Kills plus assists in this win. Null when not entered; ranks as 0.</summary>
+    public int? Engagements { get; set; }
 }

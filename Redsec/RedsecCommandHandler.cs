@@ -15,23 +15,32 @@ namespace ClanGuardBot.Handlers;
 /// <summary>
 /// Ranked REDSEC win tracking.
 ///
-///   /redsec-add-win     — record a win: season, date and 1–4 clan members (HQ).
-///   /redsec-remove-win  — delete a win entered by mistake (HQ).
-///   /redsec-wins        — public season card with the win leaderboard (everyone).
+///   /redsec-add-win          — record a win: season, date, 3–4 clan members and their engagements (HQ).
+///   /redsec-remove-win       — delete a win entered by mistake (HQ).
+///   /redsec-set-engagements  — set one player's engagements on a recorded win (HQ).
+///   /redsec-wins             — public season card with the win leaderboard (everyone).
+///
+/// Members are ranked by wins, then by total engagements (kills + assists).
 /// </summary>
 public sealed partial class RedsecCommandHandler
 {
     public const string AddCommandName = "redsec-add-win";
     public const string RemoveCommandName = "redsec-remove-win";
     public const string WinsCommandName = "redsec-wins";
+    public const string SetEngagementsCommandName = "redsec-set-engagements";
 
     private const string SeasonOption = "season";
     private const string WinOption = "win";
     private const int MaxSeason = 99;
     private const int OperatorsShown = 12;
     private const int RecentWinsShown = 5;
+    private const int RequiredClanPlayers = 3;
+    private const int MaxEngagements = 500;
+    private const int MaxNotesLength = 100;
 
     private static readonly string[] PlayerOptions = { "player1", "player2", "player3", "player4" };
+    private static readonly string[] EngagementOptions =
+        { "player1_engagements", "player2_engagements", "player3_engagements", "player4_engagements" };
     private static readonly Color RedsecRed = new(0xFF4148);
 
     private readonly IServiceProvider _services;
@@ -79,14 +88,23 @@ public sealed partial class RedsecCommandHandler
                 .WithType(ApplicationCommandOptionType.Integer)
                 .WithRequired(true)
                 .WithMinValue(1)
-                .WithMaxValue(MaxSeason))
-            .AddOption(PlayerOptions[0], ApplicationCommandOptionType.User,
-                "A clan member on the winning squad", isRequired: true);
+                .WithMaxValue(MaxSeason));
 
-        for (var i = 1; i < PlayerOptions.Length; i++)
+        for (var i = 0; i < PlayerOptions.Length; i++)
         {
+            var required = i < RequiredClanPlayers;
             builder.AddOption(PlayerOptions[i], ApplicationCommandOptionType.User,
-                "Another clan member on the squad. Leave blank for a non-clan player.", isRequired: false);
+                required
+                    ? "A clan member on the winning squad"
+                    : "The fourth squad member if they're in the clan. Leave blank for a non-clan player.",
+                isRequired: required);
+        }
+
+        for (var i = 0; i < EngagementOptions.Length; i++)
+        {
+            builder.AddOption(EngagementsOption(EngagementOptions[i],
+                $"Player {i + 1}'s engagements (kills + assists). Optional; counts as 0 if left blank.",
+                required: false));
         }
 
         return builder
@@ -118,6 +136,31 @@ public sealed partial class RedsecCommandHandler
                 .WithAutocomplete(true))
             .Build();
 
+    public static SlashCommandProperties BuildSetEngagementsCommand() =>
+        new SlashCommandBuilder()
+            .WithName(SetEngagementsCommandName)
+            .WithDescription("Set a player's engagements (kills + assists) on a recorded REDSEC win (HQ only)")
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName(WinOption)
+                .WithDescription("The win. Start typing to search recent wins, or enter its # number.")
+                .WithType(ApplicationCommandOptionType.Integer)
+                .WithRequired(true)
+                .WithMinValue(1)
+                .WithAutocomplete(true))
+            .AddOption("player", ApplicationCommandOptionType.User,
+                "The clan member on that win", isRequired: true)
+            .AddOption(EngagementsOption("engagements", "Their kills + assists in that match", required: true))
+            .Build();
+
+    private static SlashCommandOptionBuilder EngagementsOption(string name, string description, bool required) =>
+        new SlashCommandOptionBuilder()
+            .WithName(name)
+            .WithDescription(description)
+            .WithType(ApplicationCommandOptionType.Integer)
+            .WithRequired(required)
+            .WithMinValue(0)
+            .WithMaxValue(MaxEngagements);
+
     public static SlashCommandProperties BuildWinsCommand() =>
         new SlashCommandBuilder()
             .WithName(WinsCommandName)
@@ -136,7 +179,7 @@ public sealed partial class RedsecCommandHandler
 
     private Task OnSlashCommandAsync(SocketSlashCommand command)
     {
-        if (command.Data.Name is not (AddCommandName or RemoveCommandName or WinsCommandName))
+        if (command.Data.Name is not (AddCommandName or RemoveCommandName or WinsCommandName or SetEngagementsCommandName))
             return Task.CompletedTask;
 
         // Off the gateway task: the season card fetches avatars over HTTP.
@@ -155,6 +198,7 @@ public sealed partial class RedsecCommandHandler
                     case AddCommandName:    await HandleAddAsync(command, user); break;
                     case RemoveCommandName: await HandleRemoveAsync(command, user); break;
                     case WinsCommandName:   await HandleWinsAsync(command, user.Guild); break;
+                    case SetEngagementsCommandName: await HandleSetEngagementsAsync(command, user); break;
                 }
             }
             catch (Exception ex)
@@ -182,14 +226,40 @@ public sealed partial class RedsecCommandHandler
         if (!await RequireManagerAsync(command, caller)) return;
 
         var options = command.Data.Options;
-        var season = (int)(options.FirstOrDefault(o => o.Name == SeasonOption)?.Value as long? ?? 0);
+        // Discord's docs don't promise to enforce min/max, so every number is range-checked here too.
+        var seasonValue = options.FirstOrDefault(o => o.Name == SeasonOption)?.Value as long? ?? 0;
+        if (seasonValue is < 1 or > MaxSeason)
+        {
+            await command.FollowupAsync($"❌ Season has to be between 1 and {MaxSeason}.", ephemeral: true);
+            return;
+        }
+        var season = (int)seasonValue;
         var notes = (options.FirstOrDefault(o => o.Name == "notes")?.Value as string)?.Trim();
         if (string.IsNullOrEmpty(notes)) notes = null;
+        else if (notes.Length > MaxNotesLength) notes = Truncate(notes, MaxNotesLength);
 
         var players = new List<SocketUser>();
-        foreach (var name in PlayerOptions)
+        var engagements = new Dictionary<ulong, int?>();
+        for (var i = 0; i < PlayerOptions.Length; i++)
         {
-            if (options.FirstOrDefault(o => o.Name == name)?.Value is not SocketUser picked) continue;
+            var given = options.FirstOrDefault(o => o.Name == EngagementOptions[i])?.Value as long?;
+            if (given is < 0 or > MaxEngagements)
+            {
+                await command.FollowupAsync(
+                    $"❌ Engagements have to be between 0 and {MaxEngagements} (player {i + 1}).", ephemeral: true);
+                return;
+            }
+            if (options.FirstOrDefault(o => o.Name == PlayerOptions[i])?.Value is not SocketUser picked)
+            {
+                if (given is not null)
+                {
+                    await command.FollowupAsync(
+                        $"❌ You entered engagements for player {i + 1} but didn't pick player {i + 1}.",
+                        ephemeral: true);
+                    return;
+                }
+                continue;
+            }
 
             if (picked.IsBot)
             {
@@ -204,11 +274,13 @@ public sealed partial class RedsecCommandHandler
                 return;
             }
             players.Add(picked);
+            engagements[picked.Id] = given is long g ? (int)g : null;
         }
 
-        if (season < 1 || players.Count == 0)
+        if (players.Count < RequiredClanPlayers)
         {
-            await command.FollowupAsync("Give me a season and at least one clan member.", ephemeral: true);
+            await command.FollowupAsync(
+                $"❌ A win needs at least {RequiredClanPlayers} clan members.", ephemeral: true);
             return;
         }
 
@@ -257,6 +329,7 @@ public sealed partial class RedsecCommandHandler
                 RedsecWinId = win.Id,
                 UserId = p.Id,
                 DisplayName = DisplayNameOf(p),
+                Engagements = engagements[p.Id],
             }));
             await db.SaveChangesAsync();
             await tx.CommitAsync();
@@ -269,7 +342,7 @@ public sealed partial class RedsecCommandHandler
             win.Id, caller.Username, caller.Id, season, wonOn, string.Join(",", newSquad));
 
         var randoms = RedsecWinsRenderer.SquadSize - players.Count;
-        var squad = string.Join("\n", players.Select(p => $"• {p.Mention}"));
+        var squad = string.Join("\n", players.Select(p => $"• {p.Mention}{EngagementsSuffix(engagements[p.Id])}"));
         if (randoms > 0) squad += $"\n• +{randoms} non-clan player{(randoms == 1 ? "" : "s")}";
 
         var embed = new EmbedBuilder()
@@ -314,7 +387,15 @@ public sealed partial class RedsecCommandHandler
         var players = await db.RedsecWinPlayers.Where(p => p.RedsecWinId == win.Id).ToListAsync();
         db.RedsecWinPlayers.RemoveRange(players);
         db.RedsecWins.Remove(win);
-        await db.SaveChangesAsync();
+        try
+        {
+            await db.SaveChangesAsync();
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            await command.FollowupAsync($"Win #{win.Id} was already deleted by someone else.", ephemeral: true);
+            return;
+        }
 
         _logger.LogInformation(
             "REDSEC win #{Id} removed by {Caller} ({CallerId}): season {Season}, {Date}, players {Players}",
@@ -324,6 +405,74 @@ public sealed partial class RedsecCommandHandler
         var squad = players.Count == 0 ? "—" : string.Join(", ", players.Select(p => $"<@{p.UserId}>"));
         await command.FollowupAsync(
             $"🗑️ Deleted win #{win.Id}: Season {win.Season}, {FormatDate(win.WonOn)}, {squad}.",
+            ephemeral: true, allowedMentions: AllowedMentions.None);
+    }
+
+    // ─── /redsec-set-engagements ─────────────────────────────────────────────
+
+    private async Task HandleSetEngagementsAsync(SocketSlashCommand command, SocketGuildUser caller)
+    {
+        await command.DeferAsync(ephemeral: true);
+        if (!await RequireManagerAsync(command, caller)) return;
+
+        var options = command.Data.Options;
+        var id = (int)(options.FirstOrDefault(o => o.Name == WinOption)?.Value as long? ?? 0);
+        var target = options.FirstOrDefault(o => o.Name == "player")?.Value as SocketUser;
+        var value = options.FirstOrDefault(o => o.Name == "engagements")?.Value as long?;
+        if (target is null || value is null)
+        {
+            await command.FollowupAsync("Give me a win, a player and their engagements.", ephemeral: true);
+            return;
+        }
+        if (value is < 0 or > MaxEngagements)
+        {
+            await command.FollowupAsync($"❌ Engagements have to be between 0 and {MaxEngagements}.", ephemeral: true);
+            return;
+        }
+
+        var guildId = command.GuildId!.Value;
+
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+        var win = await db.RedsecWins.FirstOrDefaultAsync(w => w.Id == id && w.GuildId == guildId);
+        if (win is null)
+        {
+            await command.FollowupAsync($"❌ There's no win #{id}. Start typing in the `win` option to search.",
+                ephemeral: true);
+            return;
+        }
+
+        var squad = await db.RedsecWinPlayers.Where(p => p.RedsecWinId == win.Id).ToListAsync();
+        var row = squad.FirstOrDefault(p => p.UserId == target.Id);
+        if (row is null)
+        {
+            var onWin = string.Join(", ", squad.Select(p => $"<@{p.UserId}>"));
+            await command.FollowupAsync($"❌ {target.Mention} isn't on win #{win.Id}. That squad was {onWin}.",
+                ephemeral: true, allowedMentions: AllowedMentions.None);
+            return;
+        }
+
+        var previous = row.Engagements;
+        row.Engagements = (int)value.Value;
+        try
+        {
+            await db.SaveChangesAsync();
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            await command.FollowupAsync($"Win #{win.Id} was deleted while you were updating it.", ephemeral: true);
+            return;
+        }
+
+        _logger.LogInformation(
+            "REDSEC win #{Id}: {Caller} ({CallerId}) set engagements for {Player} from {Old} to {New}",
+            win.Id, caller.Username, caller.Id, target.Id, previous, row.Engagements);
+
+        var was = previous is int p ? $"was {p}" : "not entered before";
+        await command.FollowupAsync(
+            $"✅ {target.Mention} now has {row.Engagements} engagement{(row.Engagements == 1 ? "" : "s")} " +
+            $"on win #{win.Id} (Season {win.Season}, {FormatDate(win.WonOn)}); {was}.",
             ephemeral: true, allowedMentions: AllowedMentions.None);
     }
 
@@ -365,6 +514,12 @@ public sealed partial class RedsecCommandHandler
             .Where(w => w.GuildId == guild.Id && w.Season == season)
             .OrderByDescending(w => w.WonOn).ThenByDescending(w => w.Id)
             .ToListAsync();
+        if (wins.Count == 0)
+        {
+            // Its last win was deleted between the two queries.
+            await command.FollowupAsync($"No wins recorded for Season {season}.", ephemeral: true);
+            return;
+        }
         var winIds = wins.Select(w => w.Id).ToList();
         var playersByWin = (await db.RedsecWinPlayers
                 .Where(p => winIds.Contains(p.RedsecWinId))
@@ -387,24 +542,16 @@ public sealed partial class RedsecCommandHandler
                 live?.GetDisplayAvatarUrl(ImageFormat.Png, 128));
         }
 
-        var tallies = wins
-            .SelectMany(w => playersByWin[w.Id])
-            .GroupBy(p => p.UserId)
-            .Select(g => (Member: Member(g.Key), Wins: g.Count()))
-            .OrderByDescending(t => t.Wins)
-            .ThenBy(t => t.Member.Name, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        var operators = RankOperators(wins.SelectMany(w => playersByWin[w.Id]), Member);
 
-        var operators = new List<RedsecOperatorLine>();
-        for (var i = 0; i < tallies.Count; i++)
-        {
-            var place = i > 0 && tallies[i].Wins == tallies[i - 1].Wins ? operators[i - 1].Place : i + 1;
-            operators.Add(new RedsecOperatorLine(place, tallies[i].Member, tallies[i].Wins));
-        }
+        var showEngagements = wins.Any(w => playersByWin[w.Id].Any(p => p.Engagements is not null));
 
         var recent = wins.Take(RecentWinsShown)
             .Select(w => new RedsecWinLine(w.Id, w.WonOn,
-                playersByWin[w.Id].Select(p => Member(p.UserId)).ToList(), w.Notes))
+                playersByWin[w.Id].Select(p => Member(p.UserId)).ToList(), w.Notes,
+                playersByWin[w.Id].Any(p => p.Engagements is not null)
+                    ? playersByWin[w.Id].Sum(p => p.Engagements ?? 0)
+                    : null))
             .ToList();
 
         var card = new RedsecSeasonCard(
@@ -414,7 +561,8 @@ public sealed partial class RedsecCommandHandler
             operators.Count,
             wins[0].WonOn,
             operators.Take(OperatorsShown).ToList(),
-            recent);
+            recent,
+            showEngagements);
 
         var png = await _renderer.TryRenderSeasonAsync(card, CancellationToken.None);
 
@@ -440,7 +588,8 @@ public sealed partial class RedsecCommandHandler
         if (png is null)
         {
             embed.AddField("Top operators", string.Join("\n",
-                operators.Take(10).Select(o => $"**#{o.Place}** <@{o.Member.UserId}> — {o.Wins}")));
+                operators.Take(10).Select(o => $"**#{o.Place}** <@{o.Member.UserId}> — {o.Wins} " +
+                    $"win{(o.Wins == 1 ? "" : "s")}{(showEngagements ? $" · {o.Engagements} eng" : "")}")));
             embed.AddField("Recent wins", string.Join("\n", recent.Select(FormatWinLine)));
         }
         else
@@ -458,28 +607,12 @@ public sealed partial class RedsecCommandHandler
     /// </summary>
     private async Task PostCardAsync(SocketSlashCommand command, Embed embed, byte[]? png, string fileName, int season)
     {
-        var posted = false;
-        try
-        {
-            var channel = await command.GetChannelAsync();
-            if (channel is not null)
-            {
-                if (png is null)
-                {
-                    await channel.SendMessageAsync(embed: embed, allowedMentions: AllowedMentions.None);
-                }
-                else
-                {
-                    using var fa = new FileAttachment(new MemoryStream(png), fileName);
-                    await channel.SendFileAsync(fa, embed: embed, allowedMentions: AllowedMentions.None);
-                }
-                posted = true;
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Couldn't post the REDSEC card in channel {Channel}", command.ChannelId);
-        }
+        // The bot's permissions in this channel, from the interaction itself.
+        var missing = new List<string>();
+        if (!command.Permissions.EmbedLinks) missing.Add("Embed Links");
+        if (png is not null && !command.Permissions.AttachFiles) missing.Add("Attach Files");
+
+        var posted = missing.Count == 0 && await TryPostToChannelAsync(command, embed, png, fileName);
 
         if (posted)
         {
@@ -487,7 +620,9 @@ public sealed partial class RedsecCommandHandler
             return;
         }
 
-        const string note = "I couldn't post in this channel, so here's a private copy.";
+        var note = missing.Count > 0
+            ? $"I need the {string.Join(" and ", missing)} permission in this channel to post the card, so here's a private copy."
+            : "I couldn't post in this channel, so here's a private copy.";
         if (png is null)
         {
             await command.FollowupAsync(note, embed: embed, ephemeral: true, allowedMentions: AllowedMentions.None);
@@ -500,6 +635,31 @@ public sealed partial class RedsecCommandHandler
         }
     }
 
+    private async Task<bool> TryPostToChannelAsync(SocketSlashCommand command, Embed embed, byte[]? png, string fileName)
+    {
+        try
+        {
+            var channel = await command.GetChannelAsync();
+            if (channel is null) return false;
+
+            if (png is null)
+            {
+                await channel.SendMessageAsync(embed: embed, allowedMentions: AllowedMentions.None);
+            }
+            else
+            {
+                using var fa = new FileAttachment(new MemoryStream(png), fileName);
+                await channel.SendFileAsync(fa, embed: embed, allowedMentions: AllowedMentions.None);
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Couldn't post the REDSEC card in channel {Channel}", command.ChannelId);
+            return false;
+        }
+    }
+
     // ─── Autocomplete ────────────────────────────────────────────────────────
 
     private async Task OnAutocompleteAsync(SocketAutocompleteInteraction interaction)
@@ -507,7 +667,7 @@ public sealed partial class RedsecCommandHandler
         try
         {
             var name = interaction.Data.CommandName;
-            if (name is not (RemoveCommandName or WinsCommandName)) return;
+            if (name is not (RemoveCommandName or WinsCommandName or SetEngagementsCommandName)) return;
 
             if (interaction.GuildId is not ulong guildId || interaction.User is not SocketGuildUser user)
             {
@@ -537,7 +697,7 @@ public sealed partial class RedsecCommandHandler
                 return;
             }
 
-            if (name == RemoveCommandName && interaction.Data.Current?.Name == WinOption)
+            if (name is (RemoveCommandName or SetEngagementsCommandName) && interaction.Data.Current?.Name == WinOption)
             {
                 if (!CanManage(user, _config))
                 {
@@ -617,8 +777,39 @@ public sealed partial class RedsecCommandHandler
         var line = $"`#{w.Id}` {w.WonOn.ToString("MMM d", CultureInfo.InvariantCulture)} — " +
                    string.Join(", ", w.Players.Select(p => $"<@{p.UserId}>"));
         var randoms = RedsecWinsRenderer.SquadSize - w.Players.Count;
-        return randoms > 0 ? $"{line} +{randoms}" : line;
+        if (randoms > 0) line += $" +{randoms}";
+        return w.SquadEngagements is int e ? $"{line} · {e} eng" : line;
     }
+
+    /// <summary>
+    /// Ranks by wins, then total engagements (missing counts as 0). Members tied on
+    /// both share a place; name only orders them within it.
+    /// </summary>
+    internal static List<RedsecOperatorLine> RankOperators(
+        IEnumerable<RedsecWinPlayer> rows, Func<ulong, RedsecSquadMember> member)
+    {
+        var tallies = rows
+            .GroupBy(p => p.UserId)
+            .Select(g => (Member: member(g.Key), Wins: g.Count(), Engagements: g.Sum(p => p.Engagements ?? 0)))
+            .OrderByDescending(t => t.Wins)
+            .ThenByDescending(t => t.Engagements)
+            .ThenBy(t => t.Member.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var operators = new List<RedsecOperatorLine>();
+        for (var i = 0; i < tallies.Count; i++)
+        {
+            var tied = i > 0
+                       && tallies[i].Wins == tallies[i - 1].Wins
+                       && tallies[i].Engagements == tallies[i - 1].Engagements;
+            var place = tied ? operators[i - 1].Place : i + 1;
+            operators.Add(new RedsecOperatorLine(place, tallies[i].Member, tallies[i].Wins, tallies[i].Engagements));
+        }
+        return operators;
+    }
+
+    private static string EngagementsSuffix(int? engagements) =>
+        engagements is int e ? $" — {e} engagement{(e == 1 ? "" : "s")}" : string.Empty;
 
     /// <summary>
     /// Parses a past date in the clan's zone. Blank means today. A date without a
@@ -645,10 +836,15 @@ public sealed partial class RedsecCommandHandler
         {
             date = DateOnly.FromDateTime(full);
         }
-        else if (DateTime.TryParseExact(text, withoutYear, culture, styles, out var partial))
+        else if (DateTime.TryParseExact($"{text} 2000", withoutYear.Select(f => f + " yyyy").ToArray(),
+                     culture, styles, out var partial))
         {
-            date = new DateOnly(today.Year, partial.Month, partial.Day);
-            if (date > today) date = date.AddYears(-1);
+            // 2000 is a leap year, so "2/29" parses; then take the most recent valid occurrence.
+            var year = today.Year;
+            while (partial.Day > DateTime.DaysInMonth(year, partial.Month)
+                   || new DateOnly(year, partial.Month, partial.Day) > today)
+                year--;
+            date = new DateOnly(year, partial.Month, partial.Day);
         }
         else
         {

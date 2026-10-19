@@ -6,10 +6,12 @@ namespace ClanGuardBot.Services;
 
 public sealed record RedsecSquadMember(ulong UserId, string Name, string? AvatarUrl);
 
-/// <summary>A member's win count. Tied members share a <paramref name="Place"/>.</summary>
-public sealed record RedsecOperatorLine(int Place, RedsecSquadMember Member, int Wins);
+/// <summary>A member's wins and total engagements. Members tied on both share a <paramref name="Place"/>.</summary>
+public sealed record RedsecOperatorLine(int Place, RedsecSquadMember Member, int Wins, int Engagements);
 
-public sealed record RedsecWinLine(int Id, DateOnly WonOn, IReadOnlyList<RedsecSquadMember> Players, string? Notes);
+/// <summary><paramref name="SquadEngagements"/> is null when no one's engagements were entered for that win.</summary>
+public sealed record RedsecWinLine(
+    int Id, DateOnly WonOn, IReadOnlyList<RedsecSquadMember> Players, string? Notes, int? SquadEngagements);
 
 public sealed record RedsecSeasonCard(
     int Season,
@@ -18,7 +20,8 @@ public sealed record RedsecSeasonCard(
     int TotalOperators,
     DateOnly? LastWin,
     IReadOnlyList<RedsecOperatorLine> Operators,
-    IReadOnlyList<RedsecWinLine> RecentWins);
+    IReadOnlyList<RedsecWinLine> RecentWins,
+    bool ShowEngagements);
 
 /// <summary>
 /// Draws the /redsec-wins season card. Reuses XpLeaderboardRenderer's typeface,
@@ -95,7 +98,7 @@ public sealed class RedsecWinsRenderer
             y = DrawTiles(canvas, f, card, y);
 
             y = DrawSectionLabel(canvas, f, "TOP OPERATORS", $"{card.TotalOperators} with a win", y);
-            DrawPodium(canvas, f, podium, avatars, y);
+            DrawPodium(canvas, f, podium, avatars, y, card.ShowEngagements);
             y += PodiumH;
 
             var maxWins = Math.Max(1, card.Operators.Count > 0 ? card.Operators.Max(o => o.Wins) : 1);
@@ -107,13 +110,15 @@ public sealed class RedsecWinsRenderer
                     var inLeft = i < rowBands;
                     var band   = inLeft ? i : i - rowBands;
                     var x0     = inLeft ? Pad : Pad + colW + ColumnGap;
-                    DrawOperatorRow(canvas, f, rows[i], avatars, y + band * RowH, maxWins, x0, x0 + colW, band % 2 == 1);
+                    DrawOperatorRow(canvas, f, rows[i], avatars, y + band * RowH, maxWins, x0, x0 + colW, band % 2 == 1,
+                        card.ShowEngagements);
                 }
             }
             else
             {
                 for (var i = 0; i < rows.Count; i++)
-                    DrawOperatorRow(canvas, f, rows[i], avatars, y + i * RowH, maxWins, Pad, Width - Pad, i % 2 == 1);
+                    DrawOperatorRow(canvas, f, rows[i], avatars, y + i * RowH, maxWins, Pad, Width - Pad, i % 2 == 1,
+                        card.ShowEngagements);
             }
             y += rowBands * RowH;
 
@@ -242,7 +247,7 @@ public sealed class RedsecWinsRenderer
     /// <summary>2–1–3 podium. Accent colour follows the shared place, so tied members match.</summary>
     private static void DrawPodium(
         SKCanvas canvas, Fonts f, IReadOnlyList<RedsecOperatorLine> podium,
-        IReadOnlyDictionary<ulong, SKImage> avatars, float top)
+        IReadOnlyDictionary<ulong, SKImage> avatars, float top, bool showEngagements)
     {
         if (podium.Count == 0)
         {
@@ -290,9 +295,15 @@ public sealed class RedsecWinsRenderer
             using var accentPaint = new SKPaint { Color = accent, IsAntialias = true };
             using var white = Paint(TextHex);
 
-            var textTop = rect.Bottom - 78f;
+            var textTop = rect.Bottom - (showEngagements ? 92f : 78f);
             DrawPlaceAndName(canvas, f, line, slot.Cx, textTop, slot.W - 30f, accentPaint, white);
-            XpLeaderboardRenderer.DrawCentered(canvas, WinsLabel(line.Wins), slot.Cx, textTop + 60f, f.Value, accentPaint);
+            XpLeaderboardRenderer.DrawCentered(canvas, WinsLabel(line.Wins), slot.Cx, textTop + 58f, f.Value, accentPaint);
+            if (showEngagements)
+            {
+                using var muted = Paint(MutedHex);
+                XpLeaderboardRenderer.DrawCentered(canvas, EngagementsLabel(line.Engagements), slot.Cx, textTop + 82f,
+                    f.Small, muted);
+            }
         }
     }
 
@@ -311,7 +322,7 @@ public sealed class RedsecWinsRenderer
 
     private static void DrawOperatorRow(
         SKCanvas canvas, Fonts f, RedsecOperatorLine line, IReadOnlyDictionary<ulong, SKImage> avatars,
-        float top, int maxWins, float left, float right, bool alt)
+        float top, int maxWins, float left, float right, bool alt, bool showEngagements)
     {
         var rect = new SKRect(left, top + 4f, right, top + RowH - 4f);
         using (var bg = Paint(alt ? PanelAltHex : PanelHex))
@@ -346,8 +357,16 @@ public sealed class RedsecWinsRenderer
         var winsText = WinsLabel(line.Wins);
         var winsW = f.Row.MeasureText(winsText);
         var nameX = rect.Left + 92f;
-        canvas.DrawText(XpLeaderboardRenderer.Ellipsize(line.Member.Name, f.Row, rect.Right - nameX - winsW - 30f),
-            nameX, baseline, f.Row, white);
+        var nameW = rect.Right - nameX - winsW - 30f;
+
+        // Engagements go on a second line under the name so the name keeps its width.
+        var nameBaseline = showEngagements ? midY - 3f : baseline;
+        canvas.DrawText(XpLeaderboardRenderer.Ellipsize(line.Member.Name, f.Row, nameW),
+            nameX, nameBaseline, f.Row, white);
+        if (showEngagements)
+        {
+            canvas.DrawText(EngagementsLabel(line.Engagements).ToLowerInvariant(), nameX, midY + 18f, f.Detail, muted);
+        }
         XpLeaderboardRenderer.DrawRightAligned(canvas, winsText, rect.Right - 16f, baseline, f.Row, white);
     }
 
@@ -394,6 +413,7 @@ public sealed class RedsecWinsRenderer
         var randoms = SquadSize - win.Players.Count;
         var detail = $"#{win.Id}";
         if (randoms > 0) detail += $"  ·  +{randoms} non-clan";
+        if (win.SquadEngagements is int e) detail += $"  ·  {EngagementsLabel(e).ToLowerInvariant()}";
         if (!string.IsNullOrWhiteSpace(win.Notes)) detail += $"  ·  {win.Notes}";
         canvas.DrawText(XpLeaderboardRenderer.Ellipsize(detail, f.Small, maxW), textX, rect.Bottom - 16f, f.Small, muted);
     }
@@ -423,6 +443,9 @@ public sealed class RedsecWinsRenderer
 
     private static string WinsLabel(int wins) => wins == 1 ? "1 WIN" : $"{wins:N0} WINS";
 
+    private static string EngagementsLabel(int engagements) =>
+        engagements == 1 ? "1 ENGAGEMENT" : $"{engagements:N0} ENGAGEMENTS";
+
     private static string PlaceHex(int place) => place switch
     {
         1 => GoldHex,
@@ -446,6 +469,7 @@ public sealed class RedsecWinsRenderer
         public SKFont DateDay { get; }
         public SKFont Small { get; }
         public SKFont Tiny { get; }
+        public SKFont Detail { get; }
 
         public Fonts(SKTypeface bold, SKTypeface body)
         {
@@ -460,11 +484,12 @@ public sealed class RedsecWinsRenderer
             DateDay   = new SKFont(bold, 28f);
             Small     = new SKFont(body, 19f);
             Tiny      = new SKFont(bold, 16f);
+            Detail    = new SKFont(body, 16f);
         }
 
         public void Dispose()
         {
-            foreach (var font in new[] { Huge, Title, Subtitle, Section, TileValue, Name, Value, Row, DateDay, Small, Tiny })
+            foreach (var font in new[] { Huge, Title, Subtitle, Section, TileValue, Name, Value, Row, DateDay, Small, Tiny, Detail })
                 font.Dispose();
         }
     }
