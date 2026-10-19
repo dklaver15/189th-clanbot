@@ -19,7 +19,8 @@ namespace ClanGuardBot.Migrations
             // Oversized clips were answered in place under the member's post, so their
             // row's channel is the post's channel and the post is still there: they stay
             // uploadable. Reposts (the member's post was deleted) stay old messages.
-            migrationBuilder.Sql("UPDATE VideoSubmissions SET OriginalChannelId = ChannelId WHERE KeptOriginal = 1;");
+            migrationBuilder.Sql(
+                "UPDATE VideoSubmissions SET OriginalChannelId = ChannelId WHERE KeptOriginal = 1 AND OriginalChannelId IS NULL;");
         }
 
         /// <inheritdoc />

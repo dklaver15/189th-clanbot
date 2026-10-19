@@ -18,13 +18,18 @@ public class VideoSubmissionStoreTests
         FileName = $"clip{index}.mp4", Status = status,
     };
 
-    /// <summary>A row from before forwarding: a repost, or an in-place reply when keptOriginal.</summary>
+    /// <summary>
+    /// A row from before forwarding: a repost, or, when keptOriginal, a reply left in
+    /// place under an oversized clip (the migration set its OriginalChannelId to the
+    /// clip channel, where both messages are).
+    /// </summary>
     private static VideoSubmission Legacy(
         ulong buttonMessageId, ulong originalId, int index, bool keptOriginal,
         VideoSubmissionStatus status = VideoSubmissionStatus.Pending) => new()
     {
         GuildId = 1, ChannelId = ClipChannel, MessageId = buttonMessageId, AttachmentIndex = index,
         KeptOriginal = keptOriginal, OriginalMessageId = originalId,
+        OriginalChannelId = keptOriginal ? ClipChannel : null,
         FileName = $"clip{index}.mp4", Status = status,
     };
 
@@ -133,21 +138,29 @@ public class VideoSubmissionStoreTests
     }
 
     [Fact]
-    public async Task MarkOriginalDeleted_leaves_legacy_rows_alone()
+    public async Task MarkOriginalDeleted_leaves_old_reposts_alone()
     {
         using var test = new TestDb();
-        await SeedAsync(test,
-            Legacy(30, 300, 0, keptOriginal: true),
-            Legacy(31, 301, 0, keptOriginal: false));
+        await SeedAsync(test, Legacy(31, 301, 0, keptOriginal: false));
 
         await using (var db = test.NewContext())
-        {
-            Assert.Empty(await VideoSubmissionStore.MarkOriginalDeletedAsync(db, 300));
             Assert.Empty(await VideoSubmissionStore.MarkOriginalDeletedAsync(db, 301));
-        }
 
-        Assert.Equal(VideoSubmissionStatus.Pending, (await RowAsync(test, 30, 0)).Status);
         Assert.Equal(VideoSubmissionStatus.Pending, (await RowAsync(test, 31, 0)).Status);
+    }
+
+    [Fact]
+    public async Task MarkOriginalDeleted_marks_an_in_place_reply_under_an_oversized_clip()
+    {
+        using var test = new TestDb();
+        await SeedAsync(test, Legacy(30, 300, 0, keptOriginal: true));
+
+        IReadOnlyList<(ulong ChannelId, ulong MessageId)> replies;
+        await using (var db = test.NewContext())
+            replies = await VideoSubmissionStore.MarkOriginalDeletedAsync(db, 300);
+
+        Assert.Equal(new[] { (ClipChannel, 30ul) }, replies);
+        Assert.Equal(VideoSubmissionStatus.OriginalDeleted, (await RowAsync(test, 30, 0)).Status);
     }
 
     [Fact]

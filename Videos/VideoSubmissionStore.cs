@@ -46,9 +46,9 @@ internal static class VideoSubmissionStore
 
     /// <summary>
     /// The member's post <paramref name="originalMessageId"/> is gone: marks its
-    /// forwarded videos that are still Pending as OriginalDeleted. Uploading and
-    /// Uploaded videos, and rows from before forwarding, are left alone. Returns
-    /// the bot replies (channel, message) whose buttons need a redraw.
+    /// videos that are still Pending as OriginalDeleted. Uploading and Uploaded
+    /// videos, and old reposts (no OriginalChannelId), are left alone. Returns the
+    /// bot replies (channel, message) to withdraw or redraw.
     /// </summary>
     public static async Task<IReadOnlyList<(ulong ChannelId, ulong MessageId)>> MarkOriginalDeletedAsync(
         BotDbContext db, ulong originalMessageId)

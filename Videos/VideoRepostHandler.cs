@@ -193,6 +193,16 @@ public sealed partial class VideoRepostHandler
         {
             try
             {
+                // A post deleted while its upload ran wasn't marked (the row was
+                // Uploading then): check it now rather than bring the button back.
+                var row = group.First();
+                if (row.OriginalChannelId is { } originalChannelId
+                    && await OriginalConfirmedGoneAsync(originalChannelId, row.OriginalMessageId))
+                {
+                    await MarkOriginalDeletedAsync(row.OriginalMessageId);
+                    continue;
+                }
+
                 if (_client?.GetChannel(group.Key.ChannelId) is not ITextChannel channel) continue;
                 if (await channel.GetMessageAsync(group.Key.MessageId) is IUserMessage message)
                     await RefreshButtonsAsync(message);
@@ -337,9 +347,13 @@ public sealed partial class VideoRepostHandler
             throw;
         }
 
-        // The member may have deleted the post between the forward and the save,
-        // when the deletion handler still found no rows to mark. Check once now. The
-        // forward itself worked, so a failure here is only a warning.
+        _logger.LogInformation(
+            "Forwarded {Count} video(s) from {User} in #{Channel} to #{UploadChannel} (original {Original} → reply {Reply})",
+            rows.Count, posterName, channel.Name, uploadChannel.Name, msg.Id, reply.Id);
+
+        // The member (or moderation) may have deleted the post between the forward
+        // and the save, when the deletion handler still found no rows to mark. Check
+        // once now. The forward itself worked, so a failure here is only a warning.
         try
         {
             if (await OriginalConfirmedGoneAsync(channel.Id, msg.Id))
@@ -349,10 +363,6 @@ public sealed partial class VideoRepostHandler
         {
             _logger.LogWarning(ex, "Could not re-check whether video post {MessageId} was deleted while it was forwarded", msg.Id);
         }
-
-        _logger.LogInformation(
-            "Forwarded {Count} video(s) from {User} in #{Channel} to #{UploadChannel} (original {Original} → reply {Reply})",
-            rows.Count, posterName, channel.Name, uploadChannel.Name, msg.Id, reply.Id);
     }
 
     /// <summary>
@@ -399,23 +409,38 @@ public sealed partial class VideoRepostHandler
             return;
         }
 
-        // The reply answers the forward. Only a message the bot sent itself is
-        // deleted: a reply left in place under an oversized clip from before
-        // forwarding answers the member's own post.
+        // The reply answers the forward. Only the bot's own forward is deleted: a
+        // reply left in place under an oversized clip from before forwarding answers
+        // the member's post instead. If the forward can't be dealt with now, the reply
+        // stays as it is (its buttons still say Upload), so the next click retries.
+        var forwardRemoved = false;
+        ulong? forwardId = null;
         try
         {
-            if (reply.Reference?.MessageId is { IsSpecified: true } forwardId
-                && await FetchMessageAsync(reply.Channel.Id, forwardId.Value) is { } forward
-                && forward.Author.Id == _client?.CurrentUser.Id)
-                await TryDeleteAsync(forward);
+            if (reply.Reference?.MessageId is { IsSpecified: true } referenced)
+            {
+                forwardId = referenced.Value;
+                if (await FetchMessageAsync(reply.Channel.Id, referenced.Value) is IUserMessage forward
+                    && forward.Author.Id == _client?.CurrentUser.Id
+                    && forward.Reference?.ReferenceType is { IsSpecified: true, Value: MessageReferenceType.Forward })
+                {
+                    if (!await TryDeleteAsync(forward)) return;
+                    forwardRemoved = true;
+                }
+            }
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Could not look up the forward answered by upload reply {Reply}", reply.Id);
+            _logger.LogWarning(ex, "Could not look up forward {Forward} answered by upload reply {Reply}", forwardId, reply.Id);
+            return;
         }
-        await TryDeleteAsync(reply);
-        _logger.LogInformation(
-            "Removed upload reply {Reply} and its forward: the original post is gone and nothing from it was uploaded", reply.Id);
+
+        if (!await TryDeleteAsync(reply)) return;
+        if (forwardRemoved)
+            _logger.LogInformation("Removed upload reply {Reply} and forward {Forward}: nothing from the post was uploaded and its clip is gone",
+                reply.Id, forwardId);
+        else
+            _logger.LogInformation("Removed upload reply {Reply}: nothing from the post was uploaded and its clip is gone", reply.Id);
     }
 
     /// <summary>True only when Discord confirms the message is gone; a failed check counts as still there.</summary>
@@ -432,15 +457,18 @@ public sealed partial class VideoRepostHandler
         }
     }
 
-    private async Task TryDeleteAsync(IMessage message)
+    /// <summary>Deletes a bot message; false (logged) when it couldn't.</summary>
+    private async Task<bool> TryDeleteAsync(IMessage message)
     {
         try
         {
             await message.DeleteAsync();
+            return true;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Could not delete bot message {MessageId}", message.Id);
+            return false;
         }
     }
 
@@ -466,7 +494,7 @@ public sealed partial class VideoRepostHandler
         return Task.CompletedTask;
     }
 
-    /// <summary>A member's post in a clip channel was deleted: mark its forwarded videos that weren't uploaded.</summary>
+    /// <summary>A member's post in a clip channel was deleted: mark its videos that weren't uploaded, then withdraw or redraw their reply.</summary>
     private async Task HandleOriginalDeletedAsync(ulong messageId)
     {
         try

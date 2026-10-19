@@ -9,8 +9,9 @@ public enum VideoSubmissionStatus
     /// <summary>On YouTube; <see cref="VideoSubmission.YouTubeVideoId"/> is set.</summary>
     Uploaded  = 2,
     /// <summary>
-    /// The member deleted their post before this video was uploaded. The forward in
-    /// the upload channel stays, but the video can't be uploaded any more.
+    /// The member's post (or this clip in it) is gone and the video was never
+    /// uploaded. When nothing from the post was uploaded, the bot's reply and the
+    /// forward are deleted; otherwise this video's button is disabled.
     /// </summary>
     OriginalDeleted = 3,
 }

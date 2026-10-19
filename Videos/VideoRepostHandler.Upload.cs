@@ -82,6 +82,9 @@ public sealed partial class VideoRepostHandler
         if (!CanStartUpload(row, component.User.Id, out var refusal))
         {
             await component.RespondAsync(refusal, ephemeral: true);
+            // A live button on a clip whose post is gone means the withdrawal didn't
+            // happen (a Discord error at the time): try again now.
+            if (row is { Status: VideoSubmissionStatus.OriginalDeleted }) await WithdrawOrRedrawAsync(message);
             return;
         }
 
@@ -197,7 +200,11 @@ public sealed partial class VideoRepostHandler
         if (!claimed)
         {
             existing = await LoadAsync(messageId, index);
-            if (reply is not null) await RefreshButtonsAsync(reply);
+            if (reply is not null)
+            {
+                if (existing is { Status: VideoSubmissionStatus.OriginalDeleted }) await WithdrawOrRedrawAsync(reply);
+                else await RefreshButtonsAsync(reply);
+            }
             await modal.FollowupAsync(StatusReply(existing, user.Id), ephemeral: true);
             return;
         }
@@ -322,8 +329,8 @@ public sealed partial class VideoRepostHandler
     }
 
     /// <summary>
-    /// Whether a click can go on to the choice or the form: the clip has a row from
-    /// a forward and is still waiting to be uploaded. Otherwise
+    /// Whether a click can go on to the choice or the form: the clip's row knows its
+    /// original post and is still waiting to be uploaded. Otherwise
     /// <paramref name="refusal"/> is the private reply (an old message, or the clip's
     /// status: already up, going up, original deleted).
     /// </summary>
