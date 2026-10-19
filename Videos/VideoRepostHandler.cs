@@ -398,10 +398,15 @@ public sealed partial class VideoRepostHandler
     private async Task WithdrawOrRedrawAsync(IUserMessage reply)
     {
         bool withdraw;
+        ulong? originalChannelId;
         using (var scope = _services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
             withdraw = await VideoSubmissionStore.NothingLeftToUploadAsync(db, reply.Id);
+            originalChannelId = await db.VideoSubmissions.AsNoTracking()
+                .Where(v => v.MessageId == reply.Id)
+                .Select(v => v.OriginalChannelId)
+                .FirstOrDefaultAsync();
         }
         if (!withdraw)
         {
@@ -409,20 +414,21 @@ public sealed partial class VideoRepostHandler
             return;
         }
 
-        // The reply answers the forward. Only the bot's own forward is deleted: a
-        // reply left in place under an oversized clip from before forwarding answers
-        // the member's post instead. If the forward can't be dealt with now, the reply
-        // stays as it is (its buttons still say Upload), so the next click retries.
+        // A reply in the upload channel answers the bot's forward, which goes too. A
+        // reply left in place under an oversized clip from before forwarding (same
+        // channel as the post) answers the member's own post: there's no forward. If
+        // the forward can't be dealt with now, the reply stays as it is (its buttons
+        // still say Upload), so the next click retries.
+        var forwarded = originalChannelId is { } postChannelId && postChannelId != reply.Channel.Id;
         var forwardRemoved = false;
         ulong? forwardId = null;
         try
         {
-            if (reply.Reference?.MessageId is { IsSpecified: true } referenced)
+            if (forwarded && reply.Reference?.MessageId is { IsSpecified: true } referenced)
             {
                 forwardId = referenced.Value;
                 if (await FetchMessageAsync(reply.Channel.Id, referenced.Value) is IUserMessage forward
-                    && forward.Author.Id == _client?.CurrentUser.Id
-                    && forward.Reference?.ReferenceType is { IsSpecified: true, Value: MessageReferenceType.Forward })
+                    && forward.Author.Id == _client?.CurrentUser.Id)
                 {
                     if (!await TryDeleteAsync(forward)) return;
                     forwardRemoved = true;
