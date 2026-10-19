@@ -223,4 +223,42 @@ public class VideoSubmissionStoreTests
         await using var db = test.NewContext();
         Assert.Equal(2, await VideoSubmissionStore.CountVideosAsync(db, 10));
     }
+
+    // ─── NothingLeftToUploadAsync ────────────────────────────────────
+
+    [Fact]
+    public async Task NothingLeftToUpload_when_every_video_lost_its_original()
+    {
+        using var test = new TestDb();
+        await SeedAsync(test,
+            Forwarded(10, 100, 0, VideoSubmissionStatus.OriginalDeleted),
+            Forwarded(10, 100, 1, VideoSubmissionStatus.OriginalDeleted));
+
+        await using var db = test.NewContext();
+        Assert.True(await VideoSubmissionStore.NothingLeftToUploadAsync(db, 10));
+    }
+
+    [Theory]
+    [InlineData(VideoSubmissionStatus.Uploaded)]   // the reply carries its YouTube link
+    [InlineData(VideoSubmissionStatus.Uploading)]  // it may still reach YouTube
+    [InlineData(VideoSubmissionStatus.Pending)]    // a clip removed from a post that's still up
+    public async Task Something_is_left_while_any_video_has_not_lost_its_original(VideoSubmissionStatus other)
+    {
+        using var test = new TestDb();
+        await SeedAsync(test,
+            Forwarded(10, 100, 0, VideoSubmissionStatus.OriginalDeleted),
+            Forwarded(10, 100, 1, other));
+
+        await using var db = test.NewContext();
+        Assert.False(await VideoSubmissionStore.NothingLeftToUploadAsync(db, 10));
+    }
+
+    [Fact]
+    public async Task Something_is_left_for_a_message_without_rows()
+    {
+        using var test = new TestDb();
+
+        await using var db = test.NewContext();
+        Assert.False(await VideoSubmissionStore.NothingLeftToUploadAsync(db, 10));
+    }
 }

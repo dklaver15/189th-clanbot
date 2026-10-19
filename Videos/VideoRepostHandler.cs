@@ -33,15 +33,19 @@ namespace ClanGuardBot.Handlers;
 /// button is the link.
 ///
 /// ── Original deleted ──
-/// A forward is a snapshot, so it stays when the member deletes their post.
-/// Videos not uploaded yet are marked OriginalDeleted: their buttons are
-/// disabled and the reply says so. A deletion missed while the bot was offline
-/// is caught by the next upload, which finds the post gone.
+/// A forward is a snapshot: it keeps showing the post after the member or
+/// moderation deletes it, and the bot must not resurrect what moderation
+/// removed. Videos not uploaded yet are marked OriginalDeleted. When nothing
+/// from the post was uploaded or is going up, the reply and the forward are
+/// deleted; otherwise the reply stays with its YouTube link and the rest of its
+/// buttons are disabled. A deletion missed while the bot was offline is caught
+/// by the next upload, which finds the post gone.
 ///
 /// ── Older messages ──
-/// Clips the bot reposted (or replied to in place) before forwarding have rows
-/// without an OriginalChannelId. They're no longer supported: their Upload
-/// button only explains why.
+/// Clips the bot reposted before forwarding have rows without an
+/// OriginalChannelId; their Upload button only explains that they can't be
+/// uploaded any more. Oversized clips it answered in place under the member's
+/// post still upload from there (their reply keeps its own text).
 ///
 /// ── Upload state / simultaneous clicks ──
 /// One <see cref="VideoSubmission"/> row per video. When several media-team
@@ -352,8 +356,9 @@ public sealed partial class VideoRepostHandler
     }
 
     /// <summary>
-    /// The member's post is gone: marks its forwarded videos that weren't uploaded
-    /// yet as OriginalDeleted and redraws their reply. Returns how many replies changed.
+    /// The member's post is gone: marks its videos that weren't uploaded yet as
+    /// OriginalDeleted, then withdraws or redraws each reply (see
+    /// <see cref="WithdrawOrRedrawAsync"/>). Returns how many replies changed.
     /// </summary>
     private async Task<int> MarkOriginalDeletedAsync(ulong originalMessageId)
     {
@@ -367,9 +372,50 @@ public sealed partial class VideoRepostHandler
         foreach (var (channelId, messageId) in replies)
         {
             if (await FetchMessageAsync(channelId, messageId) is IUserMessage reply)
-                await RefreshButtonsAsync(reply);
+                await WithdrawOrRedrawAsync(reply);
         }
         return replies.Count;
+    }
+
+    /// <summary>
+    /// After a member's post (or a clip in it) is gone. When nothing from the reply
+    /// was uploaded or is going up, the reply is deleted together with the forward it
+    /// answers: a forward is a snapshot, so it would keep showing a post that the
+    /// member or moderation (invite filter, token-grabber scanner, honeypot,
+    /// /purge-user) removed. Otherwise the reply stays, since it carries the YouTube
+    /// link, and only its buttons are redrawn.
+    /// </summary>
+    private async Task WithdrawOrRedrawAsync(IUserMessage reply)
+    {
+        bool withdraw;
+        using (var scope = _services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+            withdraw = await VideoSubmissionStore.NothingLeftToUploadAsync(db, reply.Id);
+        }
+        if (!withdraw)
+        {
+            await RefreshButtonsAsync(reply);
+            return;
+        }
+
+        // The reply answers the forward. Only a message the bot sent itself is
+        // deleted: a reply left in place under an oversized clip from before
+        // forwarding answers the member's own post.
+        try
+        {
+            if (reply.Reference?.MessageId is { IsSpecified: true } forwardId
+                && await FetchMessageAsync(reply.Channel.Id, forwardId.Value) is { } forward
+                && forward.Author.Id == _client?.CurrentUser.Id)
+                await TryDeleteAsync(forward);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not look up the forward answered by upload reply {Reply}", reply.Id);
+        }
+        await TryDeleteAsync(reply);
+        _logger.LogInformation(
+            "Removed upload reply {Reply} and its forward: the original post is gone and nothing from it was uploaded", reply.Id);
     }
 
     /// <summary>True only when Discord confirms the message is gone; a failed check counts as still there.</summary>
@@ -426,7 +472,7 @@ public sealed partial class VideoRepostHandler
         try
         {
             if (await MarkOriginalDeletedAsync(messageId) > 0)
-                _logger.LogInformation("Original {Original} of a forwarded clip was deleted; marked its Upload button(s)", messageId);
+                _logger.LogInformation("Original {Original} of a forwarded clip was deleted; updated its upload reply", messageId);
         }
         catch (Exception ex)
         {

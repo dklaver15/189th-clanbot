@@ -90,4 +90,15 @@ internal static class VideoSubmissionStore
     /// <summary>How many videos the post behind <paramref name="messageId"/> carries. Drives the "(part N)" title suffix.</summary>
     public static Task<int> CountVideosAsync(BotDbContext db, ulong messageId) =>
         db.VideoSubmissions.CountAsync(v => v.MessageId == messageId);
+
+    /// <summary>
+    /// True when the bot reply <paramref name="messageId"/> has videos and every one
+    /// of them lost its original (none uploaded, going up or still waiting).
+    /// </summary>
+    public static async Task<bool> NothingLeftToUploadAsync(BotDbContext db, ulong messageId)
+    {
+        var videos = db.VideoSubmissions.Where(v => v.MessageId == messageId);
+        return await videos.AnyAsync()
+            && !await videos.AnyAsync(v => v.Status != VideoSubmissionStatus.OriginalDeleted);
+    }
 }

@@ -270,7 +270,11 @@ public sealed partial class VideoRepostHandler
                 await VideoSubmissionStore.ReleaseFailedUploadAsync(db, messageId, index, ex.Message, originalDeleted);
             }
 
-            if (reply is not null) await RefreshButtonsAsync(reply);
+            if (reply is not null)
+            {
+                if (originalDeleted) await WithdrawOrRedrawAsync(reply);
+                else await RefreshButtonsAsync(reply);
+            }
             await TryRemoveWorkingMessageAsync(working);
             await TryFollowupAsync(modal,
                 originalDeleted ? (ex as OriginalDeletedException)?.Message ?? OriginalDeletedMessage
