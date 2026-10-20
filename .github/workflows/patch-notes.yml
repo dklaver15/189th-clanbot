@@ -45,6 +45,7 @@ concurrency:
 permissions:
   contents: read
   actions: read   # list Deploy workflow runs to find the previous live commit
+  pull-requests: read   # find the PR each commit came from, to credit its author
 
 jobs:
   patch-notes:
@@ -114,6 +115,18 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           # Create this one: a webhook URL for the target channel (see setup notes).
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_PATCHNOTES_WEBHOOK }}
+          GH_TOKEN: ${{ github.token }}
+          API: ${{ github.api_url }}
+          # Who pushed the deploy (or ran this manually): credited for commits
+          # that didn't come from a PR.
+          PUSH_ACTOR: ${{ github.event.workflow_run.actor.login || github.actor }}
+          # GitHub login → Discord name shown under "Developed by". Logins not
+          # listed here are shown as-is.
+          DEVELOPER_NAMES: |
+            {
+              "Code-JL": "MrSirSyrup",
+              "dklaver15": "xAP3XRONINx"
+            }
         run: |
           set -euo pipefail
 
@@ -149,10 +162,12 @@ jobs:
           if [ -z "$BEFORE" ] || [ "$BEFORE" = "$ZERO" ] || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
             # New branch / no base given: summarize the most recent commits up to HEAD.
             COMMITS="$(git log --no-merges --reverse -n 30 --pretty=format:'- %s%n%b' "$AFTER")"
+            SHAS="$(git rev-list --no-merges --reverse --max-count=30 "$AFTER")"
             COMMIT_COUNT="$(git rev-list --no-merges --max-count=30 --count "$AFTER")"
             STAT_BASE="$(git rev-parse --verify --quiet "${AFTER}^" || git hash-object -t tree /dev/null)"
           else
             COMMITS="$(git log --no-merges --reverse --pretty=format:'- %s%n%b' "${BEFORE}..${AFTER}")"
+            SHAS="$(git rev-list --no-merges --reverse "${BEFORE}..${AFTER}")"
             COMMIT_COUNT="$(git rev-list --no-merges --count "${BEFORE}..${AFTER}")"
             STAT_BASE="$BEFORE"
           fi
@@ -167,6 +182,30 @@ jobs:
 
           echo "Commits being summarized:"
           printf '%s\n' "$COMMITS"
+
+          # --- Developers: the author of each commit's merged PR, else the pusher -
+          # Not the git author: Claude Code commits are authored as "Claude".
+          # A failed lookup skips that commit rather than crediting the pusher.
+          LOGINS=""
+          for SHA in $SHAS; do
+            if ! PULLS="$(curl -fsS \
+                -H "authorization: Bearer $GH_TOKEN" \
+                -H "accept: application/vnd.github+json" \
+                "${API}/repos/${REPO}/commits/${SHA}/pulls")"; then
+              echo "::warning::Couldn't look up the PR for ${SHA}; it isn't credited."
+              continue
+            fi
+            LOGIN="$(printf '%s' "$PULLS" | jq -r '[.[] | select(.merged_at != null) | .user.login][0] // ""')"
+            LOGINS+="${LOGIN:-$PUSH_ACTOR}"$'\n'
+          done
+
+          DEVELOPERS="$(printf '%s' "$LOGINS" | jq -R -s -r --argjson names "$DEVELOPER_NAMES" '
+            ($names | with_entries(.key |= ascii_downcase)) as $n
+            | split("\n") | map(select(length > 0))
+            | reduce .[] as $l ([]; if any(.[]; ascii_downcase == ($l | ascii_downcase)) then . else . + [$l] end)
+            | map($n[ascii_downcase] // . | gsub("(?<c>[\\\\*_~`|>])"; "\\\(.c)"))
+            | join(", ")')"
+          echo "Developed by: ${DEVELOPERS:-(none found)}"
 
           # --- Quick stats: net diff of the push (endpoint-to-endpoint) -------
           # Line counts come from --shortstat; file A/D/M counts from --name-status
@@ -240,6 +279,7 @@ jobs:
             --arg url "$COMPARE" \
             --arg ts "$TS" \
             --arg footer "$FOOTER" \
+            --arg devs "${DEVELOPERS:0:1024}" \
             '{
                username: "189th Patch Notes",
                allowed_mentions: { parse: [] },
@@ -253,6 +293,7 @@ jobs:
                      footer: { text: $footer }
                    }
                    + (if ($url | length) > 0 then { url: $url } else {} end)
+                   + (if ($devs | length) > 0 then { fields: [{ name: "Developed by", value: $devs }] } else {} end)
                  )
                ]
              }')"

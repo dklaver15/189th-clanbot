@@ -111,7 +111,7 @@ Pushing to `main` deploys automatically (`.github/workflows/deploy.yml`):
 
 Pushes to other branches run the build plus a Docker image check, without deploying.
 
-After a successful deploy, `.github/workflows/patch-notes.yml` summarizes the new commits with Claude and posts them to Discord as patch notes.
+After a successful deploy, `.github/workflows/patch-notes.yml` summarizes the new commits with Claude and posts them to Discord as patch notes. The notes also list who developed the changes: the author of each commit's pull request, or whoever pushed it when there was no pull request, shown by Discord name. To add a developer, add their GitHub login and Discord name to `DEVELOPER_NAMES` in that workflow.
 
 Repository secrets used by the workflows: `DROPLET_HOST`, `DROPLET_SSH_KEY`, `GH_PAT`, `GOOGLE_CREDENTIALS_BASE64`, `ANTHROPIC_API_KEY`, `DISCORD_PATCHNOTES_WEBHOOK` and `SIXLABORS_LICENSE_KEY`.
 
