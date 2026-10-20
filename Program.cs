@@ -518,14 +518,20 @@ try
     builder.Services.AddSingleton<SayCommandHandler>();
 
     // VideoRepostHandler: in BotConfig.VideoRepostChannelIds, a member's post that
-    // carries a video is reposted with a "Posted by" line, the original text and an
-    // "Upload" button, and the original is deleted. The button (VideoUploadRoleId +
-    // Administrators) sends the clip to the clan YouTube channel through
-    // YouTubeUploadService, which signs in with BotConfig.YouTubeClientId/Secret/
-    // RefreshToken. Self-registers MessageReceived + ButtonExecuted + Ready.
+    // carries a video is forwarded to BotConfig.VideoUploadChannelId and the bot
+    // replies there with an "Upload" button; the member's post is left as it is.
+    // Upload (VideoUploadRoleId + Administrators) asks video or Short, then a form
+    // (start, end, title); videos go through VideoUpscaler, Shorts through
+    // ShortRenderer, then YouTubeUploadService (BotConfig.YouTubeClientId/Secret/
+    // RefreshToken). Self-registers MessageReceived + MessageDeleted +
+    // MessagesBulkDeleted + ButtonExecuted + ModalSubmitted + Ready.
     builder.Services.AddSingleton<YouTubeUploadService>();
+    // EncodeGate: one ffmpeg encode at a time (upscales and Short renders share it).
+    builder.Services.AddSingleton<EncodeGate>();
     // VideoUpscaler: ffmpeg upscale to 1440p before upload (BotConfig.VideoUploadUpscale*).
     builder.Services.AddSingleton<VideoUpscaler>();
+    // ShortRenderer: 9:16 YouTube Shorts from clips (BotConfig.VideoShorts*).
+    builder.Services.AddSingleton<ShortRenderer>();
     builder.Services.AddSingleton<VideoRepostHandler>();
 
     // /qotd — Question of the Day. Self-contained handler: gated SGT+, opens a

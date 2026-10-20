@@ -5,7 +5,14 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>ClanGuardBot</RootNamespace>
+    <!-- The SDK compiles every **/*.cs under the project folder; the test project
+         lives in Tests/ and builds on its own. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);Tests/**</DefaultItemExcludes>
   </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="ClanGuardBot.Tests" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="AWSSDK.S3" Version="3.7.412.0" />
