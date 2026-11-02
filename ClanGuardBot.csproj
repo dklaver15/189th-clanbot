@@ -67,6 +67,10 @@
     <!-- Waving 189th flag banner: the default image attached to /poll embeds
          (PollImage). Per-poll custom images/GIFs/Giphy links override it. -->
     <Content Include="Assets\189th_banner.gif" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Shorts outro (189th_outro.webm, from Tools/outro) and its optional sound
+         effect (189th_outro_sfx.wav), overlaid by ShortRenderer. A glob, so a
+         file that doesn't exist yet is simply skipped. -->
+    <Content Include="Assets\189th_outro*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="Recorder\src\" />

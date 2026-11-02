@@ -71,6 +71,7 @@ jobs:
             dotnet --list-runtimes
             sqlite3 --version
             ffmpeg -hide_banner -encoders | grep libx264
+            ffmpeg -hide_banner -decoders | grep libvpx-vp9
             ffprobe -version | head -1
             fc-list | grep -i dejavu | head -1
           '

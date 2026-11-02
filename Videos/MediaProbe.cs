@@ -75,6 +75,20 @@ public static class MediaProbe
     }
 
     /// <summary>
+    /// The first audio track's channel layout ("stereo", "mono", …): "" when the
+    /// file doesn't say, null when there is no audio track.
+    /// </summary>
+    public static async Task<string?> AudioLayoutAsync(string ffprobePath, string path, ILogger logger, CancellationToken ct = default)
+    {
+        var (exitCode, stdout, _) = await FfmpegProcess.RunAsync(
+            ffprobePath, ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_type,channel_layout", "-of", "csv=p=0", path],
+            TimeSpan.FromMinutes(1), lowPriority: false, captureStdout: true, logger, ct);
+        var parts = stdout.Trim().Split(',');
+        if (exitCode != 0 || parts[0] != "audio") return null;
+        return parts.Length > 1 ? parts[1].Trim() : "";
+    }
+
+    /// <summary>
     /// A clip's length from the end of its last video packet, for files whose
     /// container doesn't say (some WebMs). Reads the packets without decoding them;
     /// 0 when there are none.
