@@ -49,6 +49,13 @@ jobs:
       - name: Check transcriber syntax
         run: python3 -m py_compile Transcriber/app.py
 
+      # A venv: the runner's system Python refuses pip installs (PEP 668).
+      - name: Test outro generator
+        run: |
+          python3 -m venv /tmp/outro-venv
+          /tmp/outro-venv/bin/pip install -q -r Tools/outro/requirements.txt
+          /tmp/outro-venv/bin/python -m unittest discover -s Tools/outro -v
+
   # Builds the bot image and checks the tools the bot shells out to. Skipped
   # when the deploy calls this workflow; the droplet builds the image itself.
   docker:

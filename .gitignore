@@ -6,6 +6,10 @@ obj/
 .DS_Store
 .idea/
 .claude/
+# Outro generator: its Python environment and rendered variations
+Tools/outro/.venv/
+Tools/outro/out/
+__pycache__/
 obj copy/
 logs/
 Recorder/node_modules/
