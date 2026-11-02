@@ -59,6 +59,18 @@ public class UploadRequestTests
         Assert.Equal(180, Ok("0:00", "3:00").EndSeconds);
 
     [Fact]
+    public void A_short_under_five_seconds_is_refused() =>
+        Assert.Equal("A Short must be at least 0:05 long, and 0:01 to 0:03 is 0:02.", Fails("0:01", "0:03"));
+
+    [Fact]
+    public void A_short_of_exactly_five_seconds_is_allowed() =>
+        Assert.Equal(5, Ok("0:00", "0:05").EndSeconds);
+
+    [Fact]
+    public void A_video_can_be_shorter_than_five_seconds() =>
+        Assert.Equal(2, Ok("0:00", "0:02", kind: VideoSubmissionKind.Video).EndSeconds);
+
+    [Fact]
     public void A_video_can_run_past_three_minutes() =>
         Assert.Equal(600, Ok("0:00", "10:00", kind: VideoSubmissionKind.Video).EndSeconds);
 

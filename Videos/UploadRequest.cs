@@ -8,12 +8,15 @@ namespace ClanGuardBot.Services;
 /// <summary>
 /// Reads the upload form (start, end, title) for a video or a Short. Times are
 /// <c>m:ss</c>, <c>mm:ss</c> or whole seconds, ASCII digits only; an empty end
-/// means the end of the clip. A Short is at most <see cref="MaxShortSeconds"/>
-/// long (YouTube's Shorts limit); a video has no limit here.
+/// means the end of the clip. A Short is <see cref="MinShortSeconds"/> to
+/// <see cref="MaxShortSeconds"/> long (YouTube's Shorts limit); a video has no limit here.
 /// </summary>
 public static partial class UploadRequest
 {
     public const int MaxShortSeconds = 180;
+
+    /// <summary>Shortest Short: the outro covers up to 3 s, so at least 2 s of clip play before it.</summary>
+    public const int MinShortSeconds = 5;
 
     // [0-9], not \d: \d also matches non-ASCII digits (e.g. full-width), which
     // int.Parse with the invariant culture then rejects.
@@ -51,6 +54,11 @@ public static partial class UploadRequest
             if (kind == VideoSubmissionKind.Short && parsedEnd - from > MaxShortSeconds)
             {
                 error = $"A Short can be at most {ClipTime.Format(MaxShortSeconds)} long, and {ClipTime.Format(from)} to {ClipTime.Format(parsedEnd)} is {ClipTime.Format(parsedEnd - from)}.";
+                return false;
+            }
+            if (kind == VideoSubmissionKind.Short && parsedEnd - from < MinShortSeconds)
+            {
+                error = $"A Short must be at least {ClipTime.Format(MinShortSeconds)} long, and {ClipTime.Format(from)} to {ClipTime.Format(parsedEnd)} is {ClipTime.Format(parsedEnd - from)}.";
                 return false;
             }
             to = parsedEnd;
