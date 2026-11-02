@@ -35,11 +35,22 @@ internal static class Ffmpeg
     /// A WebM written in live mode: it carries no duration at all, so ffprobe
     /// can't say how long it is (some real clips are like this).
     /// </summary>
-    public static void MakeClipWithoutDuration(string path, double seconds)
+    public static void MakeClipWithoutDuration(string path, double seconds, double startOffset = 0)
     {
         var made = Run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30",
                        "-f", "lavfi", "-i", "sine", "-t", seconds.ToString(CultureInfo.InvariantCulture),
+                       "-output_ts_offset", startOffset.ToString(CultureInfo.InvariantCulture),
                        "-c:v", "libvpx", "-deadline", "realtime", "-c:a", "libopus", "-f", "webm", "-live", "1", path);
+        if (made.ExitCode != 0) throw new InvalidOperationException(made.Stderr);
+    }
+
+    /// <summary>A solid blue clip whose 440 Hz audio runs on past the end of its video.</summary>
+    public static void MakeClipWithLongerAudio(string path, double videoSeconds, double audioSeconds)
+    {
+        var made = Run("ffmpeg", "-v", "error", "-y",
+                       "-f", "lavfi", "-i", $"color=c=blue:s=1280x720:r=30:d={videoSeconds.ToString(CultureInfo.InvariantCulture)}",
+                       "-f", "lavfi", "-i", $"sine=frequency=440:sample_rate=48000:d={audioSeconds.ToString(CultureInfo.InvariantCulture)}",
+                       "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", path);
         if (made.ExitCode != 0) throw new InvalidOperationException(made.Stderr);
     }
 

@@ -71,6 +71,20 @@ public class ShortOutroRenderTests : IDisposable
     }
 
     [SkippableFact]
+    public async Task A_clip_whose_audio_runs_past_its_video_still_ends_on_the_outro()
+    {
+        Skip.IfNot(Ffmpeg.Available, "ffmpeg isn't on PATH");
+        // 6 s of video, 8 s of audio: the Short is the video's 6 s, so the outro starts at 3.5 s.
+        var clip = Path.Combine(_dir, "long-audio.mp4");
+        Ffmpeg.MakeClipWithLongerAudio(clip, 6, 8);
+
+        var output = await Renderer().RenderAsync(clip, _dir, Short());
+
+        Assert.InRange(Ffmpeg.Probe(output).Duration, 5.8, 6.3);
+        AssertNear(Red, Ffmpeg.PixelAt(output, 4.0, 540, 960));
+    }
+
+    [SkippableFact]
     public async Task A_square_short_keeps_the_bottom_of_the_pill_in_view()
     {
         Skip.IfNot(Ffmpeg.Available, "ffmpeg isn't on PATH");

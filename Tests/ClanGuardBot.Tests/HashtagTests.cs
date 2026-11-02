@@ -12,6 +12,7 @@ public class HashtagTests
     [InlineData("#Battle-field! #😀 # ##", new[] { "Battlefield" })]
     [InlineData("#Clutch #clutch #CLUTCH", new[] { "Clutch" })]
     [InlineData("#Überclutch #189th_clan", new[] { "Überclutch", "189th_clan" })]
+    [InlineData("#Battlefield#clutch;sniper #WARDOGS", new[] { "Battlefield", "clutch", "sniper", "WARDOGS" })]
     [InlineData(null, new string[0])]
     [InlineData("   ", new string[0])]
     public void Typed_hashtags_are_cleaned(string? typed, string[] expected) =>

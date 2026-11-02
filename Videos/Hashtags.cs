@@ -1,13 +1,18 @@
+using System.Text.RegularExpressions;
+
 namespace ClanGuardBot.Services;
 
 /// <summary>
 /// Hashtags from the upload form's Hashtags box. Whatever is typed is cleaned,
-/// never refused: words split on spaces and commas, the <c>#</c> optional, only
+/// never refused: words split on spaces, commas, semicolons and <c>#</c>, the <c>#</c> optional, only
 /// letters, digits and <c>_</c> kept, repeats dropped (any case, the first spelling
 /// wins), at most <see cref="MaxCount"/>. Words are kept without the <c>#</c>.
 /// </summary>
-public static class Hashtags
+public static partial class Hashtags
 {
+    [GeneratedRegex(@"[\s,;#]+")]
+    private static partial Regex Separators();
+
     /// <summary>YouTube ignores every hashtag on a video that has over 60; 15 keeps well clear.</summary>
     public const int MaxCount = 15;
 
@@ -17,7 +22,8 @@ public static class Hashtags
     {
         var tags = new List<string>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var word in (text ?? "").Split([' ', ',', '\t', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        // Any space, comma, semicolon or # ends a tag: "#Battlefield#clutch" is two.
+        foreach (var word in Separators().Split(text ?? ""))
         {
             var tag = new string(word.Where(c => char.IsLetterOrDigit(c) || c == '_').ToArray());
             if (tag.Length == 0 || !seen.Add(tag)) continue;

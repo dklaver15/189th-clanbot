@@ -92,10 +92,9 @@ public sealed class ShortRenderer
             throw new ClipRejectedException("This clip is HDR, so it can't be made into a Short.");
 
         // The Short's length has to be known before the encode: the 5 s minimum and
-        // the outro's start both need it. Some WebMs don't store one; measure those.
-        var duration = info.Duration > 0
-            ? info.Duration
-            : await MediaProbe.PacketDurationAsync(_config.FfprobePath, inputPath, _logger, ct);
+        // the outro's start both need it. It's the picture's length, not the file's:
+        // audio that runs on past the video would otherwise cut the outro short.
+        var duration = await MediaProbe.VideoDurationAsync(_config.FfprobePath, inputPath, _logger, ct);
         if (duration <= 0)
             throw ClipRejectedException.UnknownLength();
         if (settings.StartSeconds >= duration)

@@ -89,9 +89,23 @@ public static class MediaProbe
     }
 
     /// <summary>
-    /// A clip's length from the end of its last video packet, for files whose
-    /// container doesn't say (some WebMs). Reads the packets without decoding them;
-    /// 0 when there are none.
+    /// How long the first video track runs: its own stored length, else measured
+    /// from its packets. Not the file's length, which also covers audio that runs
+    /// on past the picture. 0 when neither can be read.
+    /// </summary>
+    public static async Task<double> VideoDurationAsync(string ffprobePath, string path, ILogger logger, CancellationToken ct = default)
+    {
+        var (exitCode, stdout, _) = await FfmpegProcess.RunAsync(
+            ffprobePath, ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=duration", "-of", "csv=p=0", path],
+            TimeSpan.FromMinutes(1), lowPriority: false, captureStdout: true, logger, ct);
+        var stored = exitCode == 0 ? ParseSeconds(stdout.Trim()) : 0;
+        return stored > 0 ? stored : await PacketDurationAsync(ffprobePath, path, logger, ct);
+    }
+
+    /// <summary>
+    /// The first video track's length from its packets, first to last (a late first
+    /// packet doesn't count), for files that don't store one (some WebMs). Reads the
+    /// packets without decoding them; 0 when there are none.
     /// </summary>
     public static async Task<double> PacketDurationAsync(string ffprobePath, string path, ILogger logger, CancellationToken ct = default)
     {
@@ -101,14 +115,16 @@ public static class MediaProbe
             TimeSpan.FromMinutes(1), lowPriority: false, captureStdout: true, logger, ct);
         if (exitCode != 0) return 0;
 
+        double? first = null;
         var end = 0.0;
         foreach (var line in stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
             var parts = line.Split(',');
-            if (double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var pts))
-                end = Math.Max(end, pts + (parts.Length > 1 ? ParseSeconds(parts[1]) : 0));
+            if (!double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var pts)) continue;
+            first = Math.Min(first ?? pts, pts);
+            end = Math.Max(end, pts + (parts.Length > 1 ? ParseSeconds(parts[1]) : 0));
         }
-        return end;
+        return first is { } start ? Math.Max(0, end - start) : 0;
     }
 
     private static JsonDocument ParseJson(string json)
