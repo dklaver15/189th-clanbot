@@ -21,8 +21,16 @@ internal static class BriefingPrompts
         - This is the HQ briefing. Recruitment is handled in a SEPARATE recruitment briefing.
         - The snapshot includes `recruitment_sources`, `top_referrers`, and `reddit_leads` fields.
           IGNORE them entirely — do NOT produce a Recruitment Sources or Recruit Leads section here.
-        - `new_recruits` and `week_over_week.new_recruits_delta` MAY be mentioned in the bottom line as a
-          clan-health metric (headcount is growing/shrinking), but do not break down where recruits came from.
+        - `total_joins`, `new_recruits` and their `week_over_week` deltas MAY be mentioned in the bottom line
+          as clan-health metrics, but do not break down where joins came from.
+
+        ## What the numbers mean
+        - `active_member_count` = ranked members who are not AWOL and not exempt (Reserve etc.). That is
+          "the roster". `total_members` is everyone in the server; `guest_count` = no rank yet; `awol_count`
+          = holding the AWOL role now. Never call `total_members` "active members".
+        - `average_attendance_percent` = average attendees per counted event ÷ `active_member_count`.
+        - `total_joins` = people who joined the server this week. `new_recruits` = members given the RCT rank
+          this week (onboarded). They are different things — never present one as the other.
 
         ## Output rules
         - Discord-flavored markdown. ### for section headers, ** for emphasis, - for bullets.
@@ -45,19 +53,33 @@ internal static class BriefingPrompts
         - Tone is military/operational, not party-store. No 🎉, 🔥, 💯, hearts, or sparkles.
 
         ## Structure (in this order, with blank lines between)
-        1. **Bottom line** — one or two sentences on how the week went. Lean on `week_over_week` deltas if present
-           (e.g. "Events down from 4 to 2 this week, attendance steady at 68%."). No header above this.
+        1. **Bottom line** — one or two sentences on how the week went. Anchor on the roster
+           (`active_member_count` active, `awol_count` AWOL) and lean on `week_over_week` deltas if present
+           (e.g. "Events down from 4 to 2 this week, attendance steady at 68% of 112 active."). No header above this.
         2. ### 🎖️ Spotlight — one sentence calling out the `spotlight` member if present, with their numbers.
            Skip entirely if `spotlight` is null.
-        3. ### 🚨 AWOL Risks — one bullet per item. Lead with **gamertag** in bold, then current rank,
-           then the trend note. Use `messages_14d` and `voice_hours_14d` to add a fragment when meaningful:
-           "0 msgs / 0.0h — fully checked out" vs "12 msgs / 4.2h — borderline, may bounce back".
-        4. ### 📈 Promotion Candidates — one bullet per item. Lead with **gamertag**, then current → proposed rank,
-           then days in rank and the activity context. For event-based tiers (CPL+) lead with `events_attended_at_rank`.
-           For lower tiers lead with `messages_at_rank` and `voice_hours_at_rank`. Distinguish "ready and active"
-           from "ready by time only" when the activity numbers tell that story.
-        5. ### ⚠️ Risk Watch — members trending toward AWOL but not yet flagged. One bullet each:
-           **gamertag** (rank): X/Y msgs, Z/W hours over Nd window. Skip the section if empty.
+        3. ### 🚨 AWOL Risks — members holding the AWOL role right now. Lead with one line:
+           "`awol_count` currently AWOL (`awol_flagged_this_week` newly flagged this week)." Then one bullet per
+           `awol_risks` item: **gamertag** in bold, current rank, then the trend note. Use `messages_14d` and
+           `voice_hours_14d` to add a fragment when meaningful: "0 msgs / 0.0h — fully checked out" vs
+           "12 msgs / 4.2h — borderline, may bounce back". If `awol_count` is larger than the list, end with
+           "+N more" (N = `awol_count` minus the number listed). If `awol_count` is 0, write "None this week."
+        4. ### 📈 Promotion Candidates — members past their tier's time-in-rank. If
+           `promotion_candidates_total` exceeds the list, say "N past time-in-rank; top M:" first. One bullet per
+           item: **gamertag**, current → proposed rank, days in rank, then status:
+           - `meets_activity` true and `auto_promote_enabled` true → "clears the bar — nightly auto-promo will pick
+             them up". Not an officer action.
+           - `meets_activity` true and `auto_promote_enabled` false → "clears the bar but the tier is in dry run —
+             needs a manual /promote". This IS an officer action.
+           - `meets_activity` false → "time met, activity short" with the gap. Event tiers (`required_events` > 0):
+             "`events_attended_at_rank`/`required_events` events". Other tiers: "`messages_at_rank`/`required_messages`
+             msgs or `voice_hours_at_rank`/`required_voice_hours` h" (either one clears it).
+        5. ### ⚠️ Risk Watch — members not AWOL today who WILL be flagged within 7 days if they stay quiet: the
+           activity still inside their window after the oldest week rolls off is under the bar. If `risk_watch_total`
+           exceeds the list, say "N will flag within a week; top M:" first. One bullet each:
+           **gamertag** (rank): `messages` msgs / `voice_hours` h over `window_days`d, only
+           `retained_messages` msgs / `retained_voice_hours` h still counting next week (needs `required_messages`
+           msgs or `required_voice_hours` h). Skip the section if empty.
         6. ### 📋 Notable — events that happened, anomalies, anything else worth a glance.
            If `anomalies` is non-empty, lead the section with one bullet per anomaly — these are
            pre-computed factual signals (events drops, attendance swings, recruit surges/droughts,
@@ -67,7 +89,8 @@ internal static class BriefingPrompts
            below. If `anomalies` is empty, just lead with the biggest-attendance event.
         7. ### 🔻 Retention — member departures this week. Skip entirely if `retention` is absent.
            Lead with the flow line: "N left this week (V voluntary, K kicked, B banned); net membership X."
-           Use `net_membership_change` WITH its sign — a negative number is the headline on a bad week.
+           Use `net_membership_change` WITH its sign — a negative number is the headline on a bad week. It is
+           server joins minus departures (`total_joins` − `total_departures`).
            If `median_tenure_days` is present, add tenure context and coverage: "median tenure 11d
            (Y of N had known join dates)." Read the split that matters; don't just echo counts:
            - If `guest_churn` dominates, that's onboarding leakage, not member loss — say so.
@@ -95,8 +118,9 @@ internal static class BriefingPrompts
            (`native_count` / `anonymous_count`) to a brief aside, only if notable.
         9. ### 🎯 Recommended officer focus this week — one line. Pick the single highest-leverage action
            based on the snapshot (e.g. "Re-engage the 3 risk-watch members before next AWOL sweep,"
-           "Review the 4 SGT+ promotion candidates — auto-promo can't handle those tiers," or on a
+           "Promote the 2 candidates who clear the bar in dry-run tiers — auto-promo won't," or on a
            high-churn week "Net membership -4 — prioritize re-engaging the 2 ranked members who left.").
+           Never recommend reviewing candidates the nightly auto-promo will already handle.
 
         ## Tips
         - Bullets stay under two lines each. If a member has notable context, weave it in; don't pad.
@@ -146,19 +170,32 @@ internal static class BriefingPrompts
         - Inline emojis sparingly — at most one or two per section, only when they add a status signal.
           Never decorative. Tone is military/operational. No 🎉, 🔥, 💯, hearts, or sparkles.
 
+        ## What the numbers mean
+        - `total_joins` = server joins this week (every join, same count /invite stats shows). This is the top
+          of the funnel.
+        - `intake` = where this week's joiners stand NOW: `unique_joiners` people, `still_in_server` of them
+          still here, `now_ranked` of those onboarded to a rank.
+        - `new_recruits` = members who received the RCT rank this week as their first rank (an RCT role taken
+          off and put back doesn't count). Some joined in earlier weeks, so it is NOT a subset of
+          `total_joins` — never present it as the join count, or the join count as recruits.
+
         ## Structure (in this order, with blank lines between)
-        1. **Bottom line** — one or two sentences on the week's intake. Lead with `new_recruits` and, if
-           `week_over_week.new_recruits_delta` is present, the trend ("5 new recruits this week, up from 3.").
+        1. **Bottom line** — one or two sentences on the week's intake, as a funnel. Lead with `total_joins`
+           (and `week_over_week.total_joins_delta` if present), then how many of those people are still here and
+           ranked (from `intake`), then `new_recruits` with `week_over_week.new_recruits_delta`.
+           E.g. "44 joins this week (up from 31); 18 still in the server, 6 ranked. 7 new RCTs, up from 4."
            No header above this.
         2. ### 📨 Recruitment Sources — joins this week, broken down by labeled invite. One bullet
-           per `recruitment_sources` entry: **label** — N joins. After the labels, if `top_referrers`
+           per `recruitment_sources` entry: **label** — N joins. The list is the top labels only, so it can sum
+           to less than `total_joins`; don't present the sum as the total. After the labels, if `top_referrers`
            is non-empty, add a short line: "Top referrers: **gamertag** (N), **gamertag** (N)." A
            large "Unknown" or "Unattributed" count is worth flagging as an aside ("4 joins via
            Unknown — likely invites created in Discord UI; consider /invite assign"). If
            `recruitment_sources` is empty, write "None this week."
         3. ### 📡 Recruit Leads — Reddit-sourced recruit leads from the past week. Lead with the
            funnel: "N surfaced → C claimed → J joined." Use `total_surfaced`, `claimed` + `contacted`
-           + `joined` (anything past New) for the claimed count, and `joined` directly. If
+           + `joined` + `declined` + `no_response` (every lead an officer picked up) for the claimed count,
+           and `joined` directly. If
            `by_subreddit` has a clear leader, call it out ("r/X led with N posts."). If
            `stale_claimed_all_time` > 0, flag it as a follow-up nudge: "N claimed leads not yet
            contacted — officers may have lost the thread." If `skipped` is more than half of
@@ -166,7 +203,7 @@ internal static class BriefingPrompts
            too loose"). If `reddit_leads` is absent, write "None this week."
         4. ### 🔻 Retention — departure NUMBERS this week (no names). Skip entirely if `retention` is absent.
            Lead with the flow line: "N left this week (V voluntary, K kicked, B banned); net membership X."
-           Use `net_membership_change` WITH its sign. If `median_tenure_days` is present, add tenure
+           Use `net_membership_change` WITH its sign; it is `total_joins` minus departures. If `median_tenure_days` is present, add tenure
            context and coverage ("median tenure 11d, Y of N with known join dates"). Read the split that
            matters, as aggregates only:
            - If `guest_churn` dominates, that's onboarding leakage, not member loss — say so.
@@ -184,7 +221,7 @@ internal static class BriefingPrompts
 
         ## Tips
         - Bullets stay under two lines each. Don't pad.
-        - Use deltas to add depth: "recruits up 67% WoW" beats "5 recruits."
+        - Use deltas to add depth: "joins up 42% WoW" beats "44 joins."
         - Lead each section with what worked (the largest real source/subreddit), then call out what's
           worth recruiter attention (sentinels, stale leads, churn concentration).
         """;

@@ -94,11 +94,15 @@ public sealed class WeeklyOfficerBriefingService(
     private static readonly TimeZoneInfo EasternTz =
         TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
+    // WhenWritingNull, not WhenWritingDefault: the latter also strips every 0
+    // and false, so "new_recruits: 0" or "voluntary: 0" never reached the model
+    // and it had to guess at fields that were really zero. Null still means
+    // "skip this section" (spotlight, retention, polls, ...), as the prompts expect.
     private static readonly JsonSerializerOptions PromptJson = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
         WriteIndented = false,
-        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
     };
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)

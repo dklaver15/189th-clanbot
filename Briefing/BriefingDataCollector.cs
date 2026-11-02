@@ -28,8 +28,8 @@ public interface IBriefingDataCollector
 /// from "borderline" and "ready and active" from "ready by time only".
 ///
 /// New sections:
-///   • RiskWatch — members 50–99% of activity threshold (not yet AWOL).
-///     Lets officers re-engage proactively before AwolCheckService flags them.
+///   • RiskWatch — members who'll be flagged AWOL within a week if they go
+///     quiet. Lets officers re-engage proactively before AwolCheckService flags them.
 ///   • Spotlight — single most-active member of the week by weighted score.
 ///   • WeekOverWeek — deltas vs the prior 7-day window for top-line numbers.
 ///
@@ -38,6 +38,13 @@ public interface IBriefingDataCollector
 ///     labeled invite source, plus top member referrers. Sourced from
 ///     InviteJoin via BriefingInviteSection. Independent of all other
 ///     sections; lives in its own helper class for clarity.
+///
+/// ── Sources of truth ──
+/// Every number here should match what the bot itself acts on, so each one
+/// reads the same table/role the owning feature does: AWOL = who holds the
+/// AWOL role, recruits = the append-only RankChange log, joins = InviteJoin
+/// (what /invite stats counts), promotion thresholds = AutoPromotionService's
+/// own ladder, Risk Watch = AwolCheckService's window, thresholds and guards.
 ///
 /// ── Performance: batch activity loading ──
 /// Per-member message/voice queries scale with roster size (126+ active
@@ -54,25 +61,11 @@ public interface IBriefingDataCollector
 /// </summary>
 public sealed class BriefingDataCollector : IBriefingDataCollector
 {
-    /// <summary>
-    /// Time-in-rank thresholds, kept in sync with AutoPromotionService.DefaultTiers.
-    /// Briefing only checks the time gate; activity is enforced at promotion time.
-    /// </summary>
-    private static readonly Dictionary<string, (string ToRank, int DaysInRank)> PromotionTiers =
-        new(StringComparer.OrdinalIgnoreCase)
-        {
-            ["RCT"] = ("PVT", 7),
-            ["PVT"] = ("PFC", 7),
-            ["PFC"] = ("SPC", 7),
-            ["SPC"] = ("CPL", 14),
-            ["CPL"] = ("SGT", 14),
-            ["SGT"] = ("SSG", 21),
-            ["SSG"] = ("SFC", 28),
-            ["SFC"] = ("MSG", 35),
-            ["MSG"] = ("1SG", 35),
-            ["1SG"] = ("SGM", 42),
-            ["SGM"] = ("CSM", 49),
-        };
+    /// <summary>The entry rank. Receiving it (see CountNewRecruitsAsync) is what makes someone a "new recruit".</summary>
+    private const string RecruitRankName = "RCT";
+
+    /// <summary>How far past an RCT row a matching rejoin timestamp may land. See CountNewRecruitsAsync.</summary>
+    private static readonly TimeSpan RejoinMatchSlack = TimeSpan.FromMinutes(5);
 
     // Caps — these bound input token cost. Each bullet is roughly 30–70 input tokens.
     private const int MaxAwolRisks = 8;
@@ -82,7 +75,6 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
 
     // Activity windows
     private const int ActivityContextWindowDays = 14;  // window for AWOL-item context
-    private const int SpotlightWindowDays = 7;          // "this week" for the spotlight pick
 
     // Spotlight scoring weights — tune to taste. Events are weighted highest
     // because they're scarce and high-effort; voice is mid (sustained presence);
@@ -91,11 +83,13 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
     private const int ScorePerVoiceHour  = 5;
     private const int ScorePerEvent      = 10;
 
-    // Risk watch threshold band — members at [Lower, Upper) of the activity
-    // threshold on at least one axis surface here. Below Lower they're about
-    // to be flagged AWOL anyway; at/above Upper they're safe.
-    private const double RiskWatchLowerRatio = 0.50;
-    private const double RiskWatchUpperRatio = 1.00;
+    /// <summary>
+    /// How far ahead Risk Watch looks: a member surfaces if, with no new
+    /// activity, AwolCheckService would flag them within this many days.
+    /// One week lines up with the briefing cadence — everyone listed will be
+    /// flagged before the next briefing unless an officer reaches them first.
+    /// </summary>
+    private const int RiskWatchLookaheadDays = 7;
 
     private readonly IServiceProvider _services;
     private readonly DiscordSocketClient _client;
@@ -146,7 +140,12 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
         // ── Batch-load activity for the windows we need ──
         // Two queries each — GROUP BY messages, raw voice sessions for in-memory aggregation.
         var ctx14d = await LoadBatchActivityAsync(db, guild.Id, now.AddDays(-ActivityContextWindowDays), now, ct);
-        var ctx7d  = await LoadBatchActivityAsync(db, guild.Id, now.AddDays(-SpotlightWindowDays), now, ct);
+
+        // Spotlight is the standout of the briefing week, so it reads exactly
+        // [weekStart, weekEnd) — not "the 7 days before now", which drifts from
+        // the week being reported on for a catch-up run that fires late or a
+        // /briefing-now with explicit dates.
+        var weekActivity = await LoadBatchActivityAsync(db, guild.Id, weekStart, weekEnd, ct);
 
         // Risk Watch must measure each member over their *own* AWOL window
         // (WindowDays for ranked members, ShortWindowDays for Guest, RCT and
@@ -155,46 +154,70 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
         // window here previously produced lines like "4/5 msgs over 28d" that
         // were actually 14d counts — a member with 300+ messages spread across
         // the month could surface as at-risk. GetWindowDaysForRoles only ever
-        // returns one of these two values, so this is at most two extra loads.
-        var riskActivityByWindow = new Dictionary<int, BatchActivity>();
+        // returns one of these two values. Each window is loaded twice: as it
+        // stands today, and the part of it that will still be inside the window
+        // RiskWatchLookaheadDays from now (see GetRiskWatchAsync).
+        var riskCurrentByWindow = new Dictionary<int, BatchActivity>();
+        var riskRetainedByWindow = new Dictionary<int, BatchActivity>();
         foreach (var days in new[] { _config.WindowDays, _config.ShortWindowDays }
                      .Where(d => d > 0)
                      .Distinct())
         {
-            riskActivityByWindow[days] =
+            riskCurrentByWindow[days] =
                 await LoadBatchActivityAsync(db, guild.Id, now.AddDays(-days), now, ct);
+            riskRetainedByWindow[days] = await LoadBatchActivityAsync(
+                db, guild.Id, now.AddDays(-Math.Max(0, days - RiskWatchLookaheadDays)), now, ct);
         }
 
-        // ── Run independent fetches concurrently, each isolated from failures ──
-        var awolTask     = SafeAsync(() => GetAwolRisksAsync(guild, db, ctx14d, ct), "AWOL risks", []);
-        var promoTask    = SafeAsync(() => GetPromotionCandidatesAsync(guild, db, ct), "promotion candidates", []);
-        var eventsTask   = SafeAsync(() => GetNotableEventsAsync(guild, db, weekStart, weekEnd, ct), "notable events", []);
-        var topLineTask  = SafeAsync(
-            () => GetTopLineNumbersAsync(guild, db, weekStart, weekEnd, ct),
+        var roster = GetRosterCounts(guild);
+
+        // ── Sections, one at a time, each isolated from failures ──
+        // Deliberately sequential. Every section shares the one BotDbContext
+        // above, and EF Core does not allow overlapping operations on a
+        // context: an overlap throws, SafeAsync swallows it, and that section
+        // ships as its empty fallback — which the briefing then reports as a
+        // real zero. Starting them all and awaiting Task.WhenAll only worked
+        // as long as the SQLite provider happened to complete every query
+        // synchronously. A weekly job loses nothing by not overlapping.
+        var (awolItems, awolFlaggedThisWeek) = await SafeAsync(
+            () => GetAwolRisksAsync(guild, db, ctx14d, weekStart, weekEnd, ct),
+            "AWOL risks",
+            (Items: new List<AwolRiskItem>(), FlaggedInWindow: 0));
+        var promoAll  = await SafeAsync(() => GetPromotionCandidatesAsync(guild, db, ct), "promotion candidates", []);
+        var eventsAll = await SafeAsync(() => GetNotableEventsAsync(guild, db, weekStart, weekEnd, ct), "notable events", []);
+        var topLine = await SafeAsync(
+            () => GetWindowNumbersAsync(guild, db, weekStart, weekEnd, roster.ActiveMembers, ct),
             "top-line numbers",
-            new TopLineNumbers(0, 0, 0d, 0));
-        var priorTopLineTask = SafeAsync(
-            () => GetTopLineNumbersAsync(guild, db, weekStart.AddDays(-7), weekStart, ct),
+            new WindowNumbers(0, 0d, 0, 0));
+        // Null on failure so the deltas below are dropped rather than computed
+        // against zeros — "events up 4 WoW" against a prior week we failed to
+        // read would be invented.
+        var priorTopLine = await SafeAsync<WindowNumbers?>(
+            async () => await GetWindowNumbersAsync(guild, db, weekStart.AddDays(-7), weekStart, roster.ActiveMembers, ct),
             "prior-week top-line",
-            new TopLineNumbers(0, 0, 0d, 0));
-        var spotlightTask = SafeAsync(() => GetSpotlightAsync(guild, db, ctx7d, ct), "spotlight", null);
-        var riskTask      = SafeAsync(() => GetRiskWatchAsync(guild, riskActivityByWindow, ct), "risk watch", []);
+            null);
+        var intake    = await SafeAsync(() => GetIntakeAsync(guild, db, weekStart, weekEnd, ct), "intake", null);
+        var spotlight = await SafeAsync(() => GetSpotlightAsync(guild, db, weekActivity, weekStart, weekEnd, ct), "spotlight", null);
+        var riskAll   = await SafeAsync(
+            () => GetRiskWatchAsync(guild, db, riskCurrentByWindow, riskRetainedByWindow, now, ct),
+            "risk watch",
+            []);
 
         // ── v3: Recruitment sources + top referrers ──
         // Lives in BriefingInviteSection so the new section doesn't tangle
         // with the existing collector logic. Empty fallback covers both
-        // sub-results in one shot — same pattern as the topLine fallback above.
-        var inviteTask = SafeAsync(
+        // sub-results in one shot.
+        var (recruitmentSources, topReferrers) = await SafeAsync(
             () => BriefingInviteSection.CollectAsync(guild, db, weekStart, weekEnd, ct),
             "recruitment sources",
             (Sources: (IReadOnlyList<RecruitmentSourceItem>)Array.Empty<RecruitmentSourceItem>(),
              Referrers: (IReadOnlyList<TopReferrerItem>)Array.Empty<TopReferrerItem>()));
 
         // ── Recruit leads (Reddit RSS-sourced funnel) ──
-        // Same external-helper pattern as inviteTask. Returns null when the
-        // briefing window saw zero leads — the prompt treats null as "skip
+        // Same external-helper pattern as the invite section. Returns null when
+        // the briefing window saw zero leads — the prompt treats null as "skip
         // the section" so disabled-feature and quiet-week look identical.
-        var redditLeadsTask = SafeAsync<RedditLeadsSnapshot?>(
+        var redditLeads = await SafeAsync<RedditLeadsSnapshot?>(
             () => BriefingRedditLeadsSection.CollectAsync(db, weekStart, weekEnd, ct),
             "recruit leads",
             null);
@@ -202,73 +225,60 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
         // ── Retention (member departures) ──
         // Same external-helper + null-means-skip pattern. Gated on the feature
         // flag so the section can be hidden while the prompt is tuned without
-        // affecting capture. NewRecruits isn't known until topLine resolves, so
-        // we pass 0 here and correct NetMembershipChange after the WhenAll.
-        var retentionTask = _config.RetentionSectionEnabled
-            ? SafeAsync<RetentionSnapshot?>(
+        // affecting capture.
+        var retention = _config.RetentionSectionEnabled
+            ? await SafeAsync<RetentionSnapshot?>(
                 () => BriefingRetentionSection.CollectAsync(
-                    db, guild.Id, weekStart, weekEnd, newRecruitsThisWeek: 0, ct),
+                    db, guild.Id, weekStart, weekEnd,
+                    joinsThisWeek: topLine.TotalJoins, _config.GetRankRolesList(), ct),
                 "retention",
                 null)
-            : Task.FromResult<RetentionSnapshot?>(null);
+            : null;
 
         // ── Poll participation ──
         // Same external-helper + null-means-skip pattern. Null when no polls were
         // created this week and none are open.
-        var pollsTask = SafeAsync<PollsSnapshot?>(
+        var polls = await SafeAsync<PollsSnapshot?>(
             () => BriefingPollSection.CollectAsync(
                 db, guild, weekStart, weekEnd, _config.GetExemptRolesList(), _config.AwolRoleName, ct),
             "polls",
             null);
 
-        await Task.WhenAll(
-            awolTask, promoTask, eventsTask, topLineTask,
-            priorTopLineTask, spotlightTask, riskTask,
-            inviteTask, redditLeadsTask, retentionTask, pollsTask);
-
-        var awolRisks = (await awolTask)
-            .OrderByDescending(r => r.DaysSinceAwolAssigned)
+        // Longest-flagged first; a hand-applied role with no record sorts last.
+        var awolRisks = awolItems
+            .OrderByDescending(r => r.DaysSinceAwolAssigned ?? -1)
             .Take(MaxAwolRisks)
             .ToList();
 
-        var promotionCandidates = (await promoTask)
-            .OrderByDescending(c => c.DaysInRank)
+        // Members who already clear the activity bar first — they're the ones
+        // an officer can act on (or that a dry-run tier is holding back).
+        var promotionCandidates = promoAll
+            .OrderByDescending(c => c.MeetsActivity)
+            .ThenByDescending(c => c.DaysInRank)
             .Take(MaxPromotionCandidates)
             .ToList();
 
-        var notableEvents = (await eventsTask)
+        var notableEvents = eventsAll
             .OrderByDescending(e => e.Attendance)
             .Take(MaxNotableEvents)
             .ToList();
 
-        var riskWatch = (await riskTask)
-            .OrderByDescending(r => r.ClosestThresholdRatio)
+        // Ranked members before Guests (losing a member outweighs losing a
+        // tire-kicker), then the most engaged first — they're the easiest saves.
+        var riskWatch = riskAll
+            .OrderByDescending(r => r.CurrentRank != NoRankLabel)
+            .ThenByDescending(r => r.ClosestThresholdRatio)
             .Take(MaxRiskWatch)
             .ToList();
 
-        var topLine = await topLineTask;
-        var priorTopLine = await priorTopLineTask;
-        var spotlight = await spotlightTask;
-        var (recruitmentSources, topReferrers) = await inviteTask;
-        var redditLeads = await redditLeadsTask;
-        var polls = await pollsTask;
-
-        // NetMembershipChange needs the week's NewRecruits, only known now that
-        // topLine has resolved. Correct the placeholder via a record `with`.
-        var retention = await retentionTask;
-        if (retention is not null)
-        {
-            retention = retention with
-            {
-                NetMembershipChange = topLine.NewRecruits - retention.TotalDepartures
-            };
-        }
-
-        var deltas = new WeekOverWeekDeltas(
-            EventsHeldDelta: topLine.EventsHeld - priorTopLine.EventsHeld,
-            AverageAttendancePercentDelta: Math.Round(
-                topLine.AverageAttendancePercent - priorTopLine.AverageAttendancePercent, 1),
-            NewRecruitsDelta: topLine.NewRecruits - priorTopLine.NewRecruits);
+        var deltas = priorTopLine is null
+            ? null
+            : new WeekOverWeekDeltas(
+                EventsHeldDelta: topLine.EventsHeld - priorTopLine.EventsHeld,
+                AverageAttendancePercentDelta: Math.Round(
+                    topLine.AverageAttendancePercent - priorTopLine.AverageAttendancePercent, 1),
+                NewRecruitsDelta: topLine.NewRecruits - priorTopLine.NewRecruits,
+                TotalJoinsDelta: topLine.TotalJoins - priorTopLine.TotalJoins);
 
         // ── Anomaly detection ──
         // Pre-computes factual signals (events drop, attendance swing, recruit
@@ -304,15 +314,23 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
         {
             WeekStart = weekStart,
             WeekEnd = weekEnd,
-            ActiveMemberCount = topLine.ActiveMemberCount,
+            TotalMembers = roster.TotalMembers,
+            ActiveMemberCount = roster.ActiveMembers,
+            GuestCount = roster.Guests,
+            AwolCount = roster.Awol,
             EventsHeld = topLine.EventsHeld,
             AverageAttendancePercent = topLine.AverageAttendancePercent,
             NewRecruits = topLine.NewRecruits,
+            TotalJoins = topLine.TotalJoins,
+            Intake = intake,
             WeekOverWeek = deltas,
             AwolRisks = awolRisks,
+            AwolFlaggedThisWeek = awolFlaggedThisWeek,
             PromotionCandidates = promotionCandidates,
+            PromotionCandidatesTotal = promoAll.Count,
             NotableEvents = notableEvents,
             RiskWatch = riskWatch,
+            RiskWatchTotal = riskAll.Count,
             Spotlight = spotlight,
             RecruitmentSources = recruitmentSources,
             TopReferrers = topReferrers,
@@ -323,20 +341,22 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
         };
 
         _logger.LogInformation(
-            "Briefing context: {Awol} AWOL risks, {Promo} promo candidates, {Events} events, " +
-            "{Risk} risk-watch, {Sources} sources, {Referrers} referrers, " +
+            "Briefing context: {Awol} AWOL ({AwolNew} flagged this week), {Promo} promo candidates, " +
+            "{Events} events, {Risk} risk-watch, {Joins} joins → {Recruits} new RCTs, " +
+            "{Sources} sources, {Referrers} referrers, " +
             "{Leads} recruit leads (stale claimed: {Stale}), " +
             "{Departures} departures (net {Net}), " +
-            "spotlight={Spot}, {Members} active members, " +
+            "spotlight={Spot}, {Members} active of {Total} members ({Guests} guests), " +
             "WoW: events Δ{EventsDelta}, attendance Δ{AttendanceDelta}pp, recruits Δ{RecruitsDelta}, " +
-            "{Anomalies} anomalies",
-            awolRisks.Count, promotionCandidates.Count, notableEvents.Count,
-            riskWatch.Count, recruitmentSources.Count, topReferrers.Count,
+            "joins Δ{JoinsDelta}, {Anomalies} anomalies",
+            roster.Awol, awolFlaggedThisWeek, promoAll.Count,
+            notableEvents.Count, riskAll.Count, topLine.TotalJoins, topLine.NewRecruits,
+            recruitmentSources.Count, topReferrers.Count,
             redditLeads?.TotalSurfaced ?? 0, redditLeads?.StaleClaimedAllTime ?? 0,
             retention?.TotalDepartures ?? 0, retention?.NetMembershipChange ?? 0,
-            spotlight?.Gamertag ?? "—", topLine.ActiveMemberCount,
-            deltas.EventsHeldDelta, deltas.AverageAttendancePercentDelta, deltas.NewRecruitsDelta,
-            anomalies.Count);
+            spotlight?.Gamertag ?? "—", roster.ActiveMembers, roster.TotalMembers, roster.Guests,
+            deltas?.EventsHeldDelta, deltas?.AverageAttendancePercentDelta, deltas?.NewRecruitsDelta,
+            deltas?.TotalJoinsDelta, anomalies.Count);
 
         return context;
     }
@@ -387,73 +407,92 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
     }
 
     // ── AWOL Risks ──────────────────────────────────────────────────────
-    private Task<List<AwolRiskItem>> GetAwolRisksAsync(
+    // Built from who holds the AWOL role right now. This used to list pending
+    // AwolRecords (NotificationSent == false), but AwolCheckService marks a
+    // record sent as soon as it posts the HQ notice, AwolGraceDays after the
+    // flag. So only members flagged in the last couple of days ever showed up,
+    // and everyone who had been AWOL longer — the ones officers act on — was
+    // missing. The records are still used, for when each AWOL spell started.
+    private async Task<(List<AwolRiskItem> Items, int FlaggedInWindow)> GetAwolRisksAsync(
         SocketGuild guild,
         BotDbContext db,
         BatchActivity ctx14d,
-        CancellationToken ct) =>
-        GetAwolRisksImplAsync(guild, db, ctx14d, ct);
-
-    private async Task<List<AwolRiskItem>> GetAwolRisksImplAsync(
-        SocketGuild guild,
-        BotDbContext db,
-        BatchActivity ctx14d,
+        DateTime weekStart,
+        DateTime weekEnd,
         CancellationToken ct)
     {
-        var pending = await db.AwolRecords
-            .Where(r => r.GuildId == guild.Id && !r.NotificationSent)
-            .OrderBy(r => r.AssignedAt)
+        // Aggregated in memory — a few hundred rows at most, and it avoids
+        // leaning on EF Core's SQLite translation of MAX over a DateTime.
+        var records = await db.AwolRecords
+            .Where(r => r.GuildId == guild.Id)
+            .Select(r => new { r.UserId, r.AssignedAt })
             .ToListAsync(ct);
+
+        var flaggedInWindow = records
+            .Where(r => r.AssignedAt >= weekStart && r.AssignedAt < weekEnd)
+            .Select(r => r.UserId)
+            .Distinct()
+            .Count();
+
+        var awolRole = FindAwolRole(guild);
+        if (awolRole is null) return ([], flaggedInWindow);
+
+        // Latest flag per member = the start of their current AWOL spell.
+        var lastFlagged = records
+            .GroupBy(r => r.UserId)
+            .ToDictionary(g => g.Key, g => g.Max(r => r.AssignedAt));
 
         var rankRoles = _config.GetRankRolesList();
         var now = DateTime.UtcNow;
 
         var risks = new List<AwolRiskItem>();
-        foreach (var record in pending)
+        foreach (var member in guild.Users)
         {
-            var member = guild.GetUser(record.UserId);
-            var daysSince = (int)(now - record.AssignedAt).TotalDays;
+            if (member.IsBot || !IsAwol(member, awolRole)) continue;
 
-            var msgs14d = ctx14d.MessageCounts.GetValueOrDefault(record.UserId, 0);
-            var voice14d = ctx14d.VoiceSeconds.GetValueOrDefault(record.UserId, 0d) / 3600.0;
+            int? daysSince = lastFlagged.TryGetValue(member.Id, out var assignedAt)
+                ? (int)(now - assignedAt).TotalDays
+                : null;
 
-            string currentRank;
-            string trendNote;
+            var msgs14d = ctx14d.MessageCounts.GetValueOrDefault(member.Id, 0);
+            var voice14d = ctx14d.VoiceSeconds.GetValueOrDefault(member.Id, 0d) / 3600.0;
 
-            if (member is null)
+            var trendNote = daysSince switch
             {
-                currentRank = "Left Server";
-                trendNote = $"flagged {daysSince}d ago — no longer in guild";
-            }
-            else
-            {
-                currentRank = GetCurrentRank(member, rankRoles) ?? "No Rank";
-                trendNote = daysSince >= _config.AwolGraceDays
-                    ? $"flagged {daysSince}d ago, grace period elapsed — ready for officer review"
-                    : $"flagged {daysSince}d ago, in {_config.AwolGraceDays}-day grace period";
-            }
+                null => "holds the AWOL role with no AWOL record on file — likely applied by hand",
+                var d when d >= _config.AwolGraceDays =>
+                    $"flagged {d}d ago, grace period elapsed — ready for officer review",
+                var d => $"flagged {d}d ago, in {_config.AwolGraceDays}-day grace period",
+            };
 
             risks.Add(new AwolRiskItem(
-                Gamertag: member?.DisplayName ?? record.Username,
-                CurrentRank: currentRank,
+                Gamertag: member.DisplayName,
+                CurrentRank: GetCurrentRank(member, rankRoles) ?? NoRankLabel,
                 DaysSinceAwolAssigned: daysSince,
                 Messages14d: msgs14d,
                 VoiceHours14d: Math.Round(voice14d, 1),
                 TrendNote: trendNote));
         }
 
-        return risks;
+        return (risks, flaggedInWindow);
     }
 
     // ── Promotion Candidates ────────────────────────────────────────────
+    // Members who've served their tier's time-in-rank, judged the way the
+    // nightly AutoPromotionService judges them: its own tier table (via
+    // GetTierForRank, not a copy that can drift), its effective rank date
+    // (PromotionService.GetRankInfoAsync's rejoin rule, mirrored below), and
+    // its activity bar. Since that job promotes anyone who clears both gates,
+    // most entries here are members held back by activity — MeetsActivity
+    // says which, so the briefing no longer has to guess.
     private async Task<List<PromotionCandidate>> GetPromotionCandidatesAsync(
         SocketGuild guild,
         BotDbContext db,
         CancellationToken ct)
     {
-        var awolRole = guild.Roles.FirstOrDefault(r =>
-            r.Name.Equals(_config.AwolRoleName, StringComparison.OrdinalIgnoreCase));
+        var awolRole = FindAwolRole(guild);
         var rankRoles = _config.GetRankRolesList();
+        var dryRunRanks = _config.GetAutoPromotionDryRunRanksList();
         var now = DateTime.UtcNow;
 
         var rankHistories = await db.RankHistories
@@ -465,46 +504,58 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
         foreach (var member in guild.Users)
         {
             if (member.IsBot) continue;
-            if (awolRole is not null && member.Roles.Any(r => r.Id == awolRole.Id)) continue;
+            if (IsAwol(member, awolRole)) continue;
 
             var currentRank = GetCurrentRank(member, rankRoles);
             if (currentRank is null) continue;
-            if (!PromotionTiers.TryGetValue(currentRank, out var tier)) continue;
+            var tier = AutoPromotionService.GetTierForRank(currentRank);
+            if (tier is null) continue;
 
-            DateTime assignedAt;
-            RankHistory? rh = null;
-            if (rankHistories.TryGetValue(member.Id, out rh))
+            // Effective rank start + seed, same rules as GetRankInfoAsync: a
+            // RankHistory row older than the member's latest join is left over
+            // from a previous membership, so the clock restarts at the join and
+            // the seed credit doesn't carry over.
+            var joinedAt = member.JoinedAt?.UtcDateTime;
+            DateTime? assignedAt = joinedAt;
+            DateTime? seedAppliedAt = null;
+            var seedEvents = 0;
+            if (rankHistories.TryGetValue(member.Id, out var rh)
+                && !(joinedAt.HasValue && joinedAt.Value > rh.AssignedAt))
+            {
                 assignedAt = rh.AssignedAt;
-            else if (member.JoinedAt.HasValue)
-                assignedAt = member.JoinedAt.Value.UtcDateTime;
-            else
-                continue;
+                seedAppliedAt = rh.SeedAppliedAt;
+                seedEvents = rh.EventsAttendedAtRankBeforeBot;
+            }
+            if (assignedAt is null) continue;
 
-            var daysInRank = (int)(now - assignedAt).TotalDays;
+            var daysInRank = (int)(now - assignedAt.Value).TotalDays;
             if (daysInRank < tier.DaysInRank) continue;
 
             // Cumulative events at rank — same helper AutoPromotionService uses
-            int eventsAttended = 0;
-            if (rh is not null)
-            {
-                eventsAttended = await EventAttendanceHelper.CountEventsAttendedAsync(
-                    db, guild.Id, member.Id,
-                    rh.AssignedAt,
-                    rh.SeedAppliedAt,
-                    rh.EventsAttendedAtRankBeforeBot,
-                    ct);
-            }
+            var eventsAttended = await EventAttendanceHelper.CountEventsAttendedAsync(
+                db, guild.Id, member.Id,
+                assignedAt.Value,
+                seedAppliedAt,
+                seedEvents,
+                ct);
 
             // Activity since rank-assigned: per-user query (small N — only members
-            // who've already passed the time gate, capped at MaxPromotionCandidates)
+            // who've already passed the time gate)
             var msgsAtRank = await db.MessageEvents
                 .CountAsync(m => m.GuildId == guild.Id
                               && m.UserId == member.Id
-                              && m.Timestamp >= assignedAt, ct);
+                              && m.Timestamp >= assignedAt.Value, ct);
 
-            var voiceSecsAtRank = await VoiceActivityHelper.GetVoiceSecondsAsync(
-                db, guild.Id, member.Id, assignedAt,
-                _config.MaxSingleSessionHours, ct);
+            var voiceHoursAtRank = await VoiceActivityHelper.GetVoiceSecondsAsync(
+                db, guild.Id, member.Id, assignedAt.Value,
+                _config.MaxSingleSessionHours, ct) / 3600.0;
+
+            var meetsActivity = tier.MinEvents > 0
+                ? eventsAttended >= tier.MinEvents
+                : msgsAtRank >= tier.MinMessages || voiceHoursAtRank >= tier.MinVoiceHours;
+
+            var autoPromoteEnabled = !_config.AutoPromotionDryRun
+                && !dryRunRanks.Any(r => r.Equals(tier.FromRank, StringComparison.OrdinalIgnoreCase));
 
             candidates.Add(new PromotionCandidate(
                 Gamertag: member.DisplayName,
@@ -512,8 +563,13 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
                 ProposedRank: tier.ToRank.ToUpperInvariant(),
                 EventsAttendedAtRank: eventsAttended,
                 MessagesAtRank: msgsAtRank,
-                VoiceHoursAtRank: Math.Round(voiceSecsAtRank / 3600.0, 1),
-                DaysInRank: daysInRank));
+                VoiceHoursAtRank: Math.Round(voiceHoursAtRank, 1),
+                DaysInRank: daysInRank,
+                RequiredEvents: tier.MinEvents,
+                RequiredMessages: tier.MinMessages,
+                RequiredVoiceHours: tier.MinVoiceHours,
+                MeetsActivity: meetsActivity,
+                AutoPromoteEnabled: autoPromoteEnabled));
         }
 
         return candidates;
@@ -530,7 +586,7 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
         var events = await db.CalendarEvents
             .Where(c => c.GuildId == guild.Id
                      && c.EndUtc >= weekStart
-                     && c.EndUtc <= weekEnd)
+                     && c.EndUtc < weekEnd)
             .ToListAsync(ct);
 
         var notable = new List<NotableEvent>();
@@ -556,36 +612,65 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
     }
 
     // ── Risk Watch ──────────────────────────────────────────────────────
-    // Members at [50%, 100%) of activity threshold on the closest axis.
-    // Below 50% → about to be flagged AWOL anyway; ≥100% → safe.
-    private Task<List<RiskWatchItem>> GetRiskWatchAsync(
+    // Who will AwolCheckService flag within RiskWatchLookaheadDays if they go
+    // quiet? That sweep flags anyone below threshold on BOTH axes as soon as
+    // its join/reset guards allow, so the old definition — "50–99% of
+    // threshold but not flagged yet" — only ever caught members a guard was
+    // still protecting, mostly brand-new joiners, and never the established
+    // members whose activity was about to age out. Instead, project a week
+    // ahead assuming no new activity: re-check the same guards against the
+    // window as it will stand then, and test the activity that will still be
+    // inside it, which is whatever's in the last (window − lookahead) days.
+    private async Task<List<RiskWatchItem>> GetRiskWatchAsync(
         SocketGuild guild,
-        IReadOnlyDictionary<int, BatchActivity> activityByWindow,
+        BotDbContext db,
+        IReadOnlyDictionary<int, BatchActivity> currentByWindow,
+        IReadOnlyDictionary<int, BatchActivity> retainedByWindow,
+        DateTime now,
         CancellationToken ct)
     {
-        var awolRole = guild.Roles.FirstOrDefault(r =>
-            r.Name.Equals(_config.AwolRoleName, StringComparison.OrdinalIgnoreCase));
+        var awolRole = FindAwolRole(guild);
         var exemptRoles = _config.GetExemptRolesList();
         var rankRoles = _config.GetRankRolesList();
+        var minVoiceSeconds = _config.MinVoiceHours * 3600;
+
+        // Same per-member reset stamps AwolCheckService's window-reset guard reads.
+        var windowResetByUser = (await db.UserActivities
+                .Where(a => a.GuildId == guild.Id && a.WindowResetAt != null)
+                .Select(a => new { a.UserId, a.WindowResetAt })
+                .ToListAsync(ct))
+            .ToDictionary(a => a.UserId, a => a.WindowResetAt!.Value);
 
         var watch = new List<RiskWatchItem>();
 
         foreach (var member in guild.Users)
         {
             if (member.IsBot) continue;
-            if (member.Roles.Any(r =>
-                    exemptRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase))) continue;
-            if (awolRole is not null && member.Roles.Any(r => r.Id == awolRole.Id)) continue;
+            if (IsExempt(member, exemptRoles)) continue;
+            if (IsAwol(member, awolRole)) continue;
 
             // Use the role-aware window so every member is measured against the
             // exact window AwolCheckService will judge them on.
             var windowDays = _config.GetWindowDaysForRoles(member.Roles.Select(r => r.Name));
 
-            var ctx = ResolveWindowActivity(activityByWindow, windowDays);
-            if (ctx is null) continue;   // no activity loaded for this window — nothing to say
+            // Start of the window the sweep will use a lookahead from now. If
+            // either of its guards still applies then (joined too recently, or
+            // window reset too recently), they can't be flagged this week.
+            var futureWindowStart = now.AddDays(RiskWatchLookaheadDays - windowDays);
+            if (member.JoinedAt.HasValue && member.JoinedAt.Value.UtcDateTime > futureWindowStart) continue;
+            if (windowResetByUser.TryGetValue(member.Id, out var resetAt) && resetAt > futureWindowStart) continue;
 
-            var msgs = ctx.MessageCounts.GetValueOrDefault(member.Id, 0);
-            var voiceHours = ctx.VoiceSeconds.GetValueOrDefault(member.Id, 0d) / 3600.0;
+            var current = ResolveWindowActivity(currentByWindow, windowDays);
+            var retained = ResolveWindowActivity(retainedByWindow, windowDays);
+            if (current is null || retained is null) continue;   // nothing loaded for this window
+
+            // Already banked enough to clear next week's sweep without doing anything.
+            var retainedMsgs = retained.MessageCounts.GetValueOrDefault(member.Id, 0);
+            var retainedVoiceSeconds = retained.VoiceSeconds.GetValueOrDefault(member.Id, 0d);
+            if (retainedMsgs >= _config.MinMessages || retainedVoiceSeconds >= minVoiceSeconds) continue;
+
+            var msgs = current.MessageCounts.GetValueOrDefault(member.Id, 0);
+            var voiceHours = current.VoiceSeconds.GetValueOrDefault(member.Id, 0d) / 3600.0;
 
             var msgRatio = _config.MinMessages > 0
                 ? (double)msgs / _config.MinMessages
@@ -593,25 +678,21 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
             var voiceRatio = _config.MinVoiceHours > 0
                 ? voiceHours / _config.MinVoiceHours
                 : 1.0;
-            var closestRatio = Math.Max(msgRatio, voiceRatio);
-
-            // Already meeting threshold on either axis = safe
-            if (closestRatio >= RiskWatchUpperRatio) continue;
-            // Way below = will be AWOL'd next cycle, not "trending"
-            if (closestRatio < RiskWatchLowerRatio) continue;
 
             watch.Add(new RiskWatchItem(
                 Gamertag: member.DisplayName,
-                CurrentRank: GetCurrentRank(member, rankRoles) ?? "No Rank",
+                CurrentRank: GetCurrentRank(member, rankRoles) ?? NoRankLabel,
                 Messages: msgs,
                 VoiceHours: Math.Round(voiceHours, 1),
+                RetainedMessages: retainedMsgs,
+                RetainedVoiceHours: Math.Round(retainedVoiceSeconds / 3600.0, 1),
                 RequiredMessages: _config.MinMessages,
                 RequiredVoiceHours: _config.MinVoiceHours,
                 WindowDays: windowDays,
-                ClosestThresholdRatio: Math.Round(closestRatio, 2)));
+                ClosestThresholdRatio: Math.Round(Math.Max(msgRatio, voiceRatio), 2)));
         }
 
-        return Task.FromResult(watch);
+        return watch;
     }
 
     // Picks the loaded BatchActivity for a member's window. Exact hit is the
@@ -633,12 +714,14 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
     }
 
     // ── Spotlight ───────────────────────────────────────────────────────
-    // Top-scored member of the past 7 days using the weighted score above.
+    // Top-scored member of the briefing week using the weighted score above.
     // Returns null if nobody scored above zero (very quiet week).
     private async Task<MemberSpotlight?> GetSpotlightAsync(
         SocketGuild guild,
         BotDbContext db,
-        BatchActivity ctx7d,
+        BatchActivity weekActivity,
+        DateTime weekStart,
+        DateTime weekEnd,
         CancellationToken ct)
     {
         var rankRoles = _config.GetRankRolesList();
@@ -650,19 +733,18 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
         // case no one is excluded on this basis.
         var hqRoleId = _config.OfficerAppHqRoleId;
 
-        // Events attended in the 7-day window — single GROUP BY per table.
+        // Events attended in the briefing week — single GROUP BY per table.
         // EventAttendance and MeetingAttendance are merged client-side because
         // the spotlight scores per-member and we need a unified count keyed by
         // UserId regardless of which pipeline credited them.
-        var since = DateTime.UtcNow.AddDays(-SpotlightWindowDays);
         var eventCounts = await db.EventAttendances
-            .Where(a => a.GuildId == guild.Id && a.EventEndUtc >= since)
+            .Where(a => a.GuildId == guild.Id && a.EventEndUtc >= weekStart && a.EventEndUtc < weekEnd)
             .GroupBy(a => a.UserId)
             .Select(g => new { UserId = g.Key, Count = g.Count() })
             .ToDictionaryAsync(x => x.UserId, x => x.Count, ct);
 
         var meetingCounts = await db.MeetingAttendances
-            .Where(a => a.GuildId == guild.Id && a.EventEndUtc >= since)
+            .Where(a => a.GuildId == guild.Id && a.EventEndUtc >= weekStart && a.EventEndUtc < weekEnd)
             .GroupBy(a => a.UserId)
             .Select(g => new { UserId = g.Key, Count = g.Count() })
             .ToDictionaryAsync(x => x.UserId, x => x.Count, ct);
@@ -682,8 +764,8 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
                     exemptRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase))) continue;
             if (hqRoleId != 0 && member.Roles.Any(r => r.Id == hqRoleId)) continue;
 
-            var msgs = ctx7d.MessageCounts.GetValueOrDefault(member.Id, 0);
-            var voiceHours = ctx7d.VoiceSeconds.GetValueOrDefault(member.Id, 0d) / 3600.0;
+            var msgs = weekActivity.MessageCounts.GetValueOrDefault(member.Id, 0);
+            var voiceHours = weekActivity.VoiceSeconds.GetValueOrDefault(member.Id, 0d) / 3600.0;
             var events = eventCounts.GetValueOrDefault(member.Id, 0);
 
             var score = msgs * ScorePerMessage
@@ -695,7 +777,7 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
             bestScore = score;
             best = new MemberSpotlight(
                 Gamertag: member.DisplayName,
-                CurrentRank: GetCurrentRank(member, rankRoles) ?? "No Rank",
+                CurrentRank: GetCurrentRank(member, rankRoles) ?? NoRankLabel,
                 Messages: msgs,
                 VoiceHours: Math.Round(voiceHours, 1),
                 EventsAttended: events);
@@ -704,28 +786,51 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
         return bestScore > 0 ? best : null;
     }
 
-    // ── Top-Line Numbers ────────────────────────────────────────────────
-    private async Task<TopLineNumbers> GetTopLineNumbersAsync(
+    // ── Roster Counts ───────────────────────────────────────────────────
+    // Live headcount, not windowed. "Active" used to be every non-bot,
+    // non-exempt account in the server — Guests who never onboarded and AWOL
+    // members included — which overstated the roster and, as the attendance
+    // denominator, understated attendance. It's now the ranked, non-AWOL
+    // roster, with Guests and AWOL reported alongside.
+    private RosterCounts GetRosterCounts(SocketGuild guild)
+    {
+        var exemptRoles = _config.GetExemptRolesList();
+        var rankRoles = _config.GetRankRolesList();
+        var awolRole = FindAwolRole(guild);
+
+        var humans = guild.Users.Where(u => !u.IsBot).ToList();
+        var nonExempt = humans.Where(u => !IsExempt(u, exemptRoles)).ToList();
+
+        return new RosterCounts(
+            TotalMembers: humans.Count,
+            ActiveMembers: nonExempt.Count(u => GetCurrentRank(u, rankRoles) is not null && !IsAwol(u, awolRole)),
+            Guests: nonExempt.Count(u => GetCurrentRank(u, rankRoles) is null),
+            Awol: humans.Count(u => IsAwol(u, awolRole)));
+    }
+
+    // ── Window Numbers ──────────────────────────────────────────────────
+    // Computed for the briefing week and again for the week before it (for
+    // the WoW deltas), so everything here must be answerable for a PAST
+    // window — i.e. read from append-only logs, never from current state.
+    private async Task<WindowNumbers> GetWindowNumbersAsync(
         SocketGuild guild,
         BotDbContext db,
         DateTime weekStart,
         DateTime weekEnd,
+        int activeMembers,
         CancellationToken ct)
     {
-        var exemptRoles = _config.GetExemptRolesList();
-
-        var activeMembers = guild.Users.Count(u =>
-            !u.IsBot &&
-            !u.Roles.Any(r => exemptRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase)));
-
         var attendanceSources = _config.AttendanceCountingSources
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
+        // Half-open like every other window here. This was inclusive at both
+        // ends, so an event ending exactly on the boundary counted in both the
+        // briefing week and the prior week.
         var weeklyEvents = await db.CalendarEvents
             .Where(c => c.GuildId == guild.Id
                      && c.EndUtc >= weekStart
-                     && c.EndUtc <= weekEnd)
+                     && c.EndUtc < weekEnd)
             .ToListAsync(ct);
 
         var countingEvents = weeklyEvents
@@ -751,18 +856,152 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
             averageAttendancePercent = Math.Round((avgPerEvent / activeMembers) * 100, 1);
         }
 
-        var windowAssignments = await db.RankHistories
-            .Where(r => r.GuildId == guild.Id
-                     && r.AssignedAt >= weekStart
-                     && r.AssignedAt <= weekEnd)
-            .ToListAsync(ct);
-        var newRecruits = windowAssignments.Count(r =>
-            r.RankName.Equals("RCT", StringComparison.OrdinalIgnoreCase));
+        // Recruits come from the append-only RankChange log. This used to read
+        // RankHistory, which holds only each CURRENT member's CURRENT rank: a
+        // recruit who'd since been promoted RCT → PVT (7 days, automatic) or
+        // had left the server simply vanished from the count. That made this
+        // week's number an undercount and the prior week's — a full round of
+        // RCT → PVT promotions later — close to zero every time.
+        var newRecruits = await CountNewRecruitsAsync(
+            db, guild.Id, id => guild.GetUser(id)?.JoinedAt?.UtcDateTime, weekStart, weekEnd, ct);
 
-        return new TopLineNumbers(activeMembers, eventsHeld, averageAttendancePercent, newRecruits);
+        // Every server join, the same rows /invite stats counts.
+        var totalJoins = await db.InviteJoins
+            .CountAsync(j => j.GuildId == guild.Id
+                          && j.JoinedAt >= weekStart
+                          && j.JoinedAt < weekEnd, ct);
+
+        return new WindowNumbers(eventsHeld, averageAttendancePercent, newRecruits, totalJoins);
+    }
+
+    // ── New Recruits ────────────────────────────────────────────────────
+    // Distinct members given RCT in the window for the first time in their
+    // current stay in the server. Being handed RCT isn't enough on its own:
+    // when the role comes off and goes back on, the log records a removal and
+    // then a fresh "Initial" RCT row — identical to a brand-new arrival — and
+    // a demotion back to RCT is an RCT row too. So an RCT row only counts if
+    // the member has no earlier rank in the log, or left and came back since
+    // that earlier row (a rejoiner is re-recruited, and shows up in joins too).
+    //
+    // "Left and came back" accepts any of three signals between the earlier
+    // row and the RCT row: Discord's join date for a current member (the same
+    // test RankRestoreHelper uses to refuse carrying a rank across a leave), a
+    // MemberDeparture, or an InviteJoin. The last two cover members who have
+    // since left again, and rejoins from before departure tracking existed.
+    //
+    // currentJoinedAtUtc is the member's live guild join date, or null if
+    // they're no longer in the server. Passed in rather than read off the
+    // guild so this can be exercised without a gateway connection.
+    private static async Task<int> CountNewRecruitsAsync(
+        BotDbContext db,
+        ulong guildId,
+        Func<ulong, DateTime?> currentJoinedAtUtc,
+        DateTime weekStart,
+        DateTime weekEnd,
+        CancellationToken ct)
+    {
+        var rctRows = await db.RankChanges
+            .Where(c => c.GuildId == guildId
+                     && c.ToRank != null
+                     && c.ToRank.ToUpper() == RecruitRankName
+                     && c.ChangedAt >= weekStart
+                     && c.ChangedAt < weekEnd)
+            .Select(c => new { c.UserId, c.ChangedAt })
+            .ToListAsync(ct);
+
+        if (rctRows.Count == 0) return 0;
+
+        var userIds = rctRows.Select(r => r.UserId).Distinct().ToList();
+
+        // Only these members' rows — dozens at most — matched up in memory.
+        var rankHistory = (await db.RankChanges
+                .Where(c => c.GuildId == guildId && userIds.Contains(c.UserId) && c.ChangedAt < weekEnd)
+                .Select(c => new { c.UserId, c.ChangedAt })
+                .ToListAsync(ct))
+            .ToLookup(c => c.UserId, c => c.ChangedAt);
+
+        var departures = (await db.MemberDepartures
+                .Where(d => d.GuildId == guildId && userIds.Contains(d.UserId))
+                .Select(d => new { d.UserId, d.DepartedAt })
+                .ToListAsync(ct))
+            .ToLookup(d => d.UserId, d => d.DepartedAt);
+
+        var joins = (await db.InviteJoins
+                .Where(j => j.GuildId == guildId && userIds.Contains(j.UserDiscordId))
+                .Select(j => new { j.UserDiscordId, j.JoinedAt })
+                .ToListAsync(ct))
+            .ToLookup(j => j.UserDiscordId, j => j.JoinedAt);
+
+        bool IsFirstRankThisStay(ulong userId, DateTime rctAt)
+        {
+            var earlier = rankHistory[userId].Where(t => t < rctAt).ToList();
+            if (earlier.Count == 0) return true;
+
+            // A rejoin lands just before the RCT row it produces, but the RCT row
+            // can be dated to Discord's join time while InviteJoin is stamped when
+            // the bot handled it, a moment later — hence the slack on the end.
+            var lastRanked = earlier.Max();
+            var rejoinBy = rctAt + RejoinMatchSlack;
+            bool Between(DateTime t) => t > lastRanked && t <= rejoinBy;
+
+            return currentJoinedAtUtc(userId) is { } joinedAt && Between(joinedAt)
+                || departures[userId].Any(Between)
+                || joins[userId].Any(Between);
+        }
+
+        return rctRows
+            .Where(r => IsFirstRankThisStay(r.UserId, r.ChangedAt))
+            .Select(r => r.UserId)
+            .Distinct()
+            .Count();
+    }
+
+    // ── Intake ──────────────────────────────────────────────────────────
+    // Where the week's joiners stand now: still here, and onboarded to a
+    // rank. Current state, so this is briefing-week only (no WoW delta).
+    private async Task<IntakeSnapshot?> GetIntakeAsync(
+        SocketGuild guild,
+        BotDbContext db,
+        DateTime weekStart,
+        DateTime weekEnd,
+        CancellationToken ct)
+    {
+        var joinerIds = await db.InviteJoins
+            .Where(j => j.GuildId == guild.Id
+                     && j.JoinedAt >= weekStart
+                     && j.JoinedAt < weekEnd)
+            .Select(j => j.UserDiscordId)
+            .Distinct()
+            .ToListAsync(ct);
+
+        if (joinerIds.Count == 0) return null;
+
+        var rankRoles = _config.GetRankRolesList();
+        var stillHere = joinerIds
+            .Select(id => guild.GetUser(id))
+            .Where(m => m is not null)
+            .ToList();
+
+        return new IntakeSnapshot(
+            UniqueJoiners: joinerIds.Count,
+            StillInServer: stillHere.Count,
+            NowRanked: stillHere.Count(m => GetCurrentRank(m!, rankRoles) is not null));
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────
+
+    /// <summary>CurrentRank shown for a member holding no rank role.</summary>
+    private const string NoRankLabel = "No Rank";
+
+    private SocketRole? FindAwolRole(SocketGuild guild) =>
+        guild.Roles.FirstOrDefault(r =>
+            r.Name.Equals(_config.AwolRoleName, StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsAwol(SocketGuildUser member, SocketRole? awolRole) =>
+        awolRole is not null && member.Roles.Any(r => r.Id == awolRole.Id);
+
+    private static bool IsExempt(SocketGuildUser member, List<string> exemptRoles) =>
+        member.Roles.Any(r => exemptRoles.Contains(r.Name, StringComparer.OrdinalIgnoreCase));
 
     private static string? GetCurrentRank(SocketGuildUser member, List<string> rankRoles)
     {
@@ -799,11 +1038,17 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
         NewRecruits = 0
     };
 
-    private sealed record TopLineNumbers(
-        int ActiveMemberCount,
+    private sealed record RosterCounts(
+        int TotalMembers,
+        int ActiveMembers,
+        int Guests,
+        int Awol);
+
+    private sealed record WindowNumbers(
         int EventsHeld,
         double AverageAttendancePercent,
-        int NewRecruits);
+        int NewRecruits,
+        int TotalJoins);
 
     private sealed record BatchActivity(
         IReadOnlyDictionary<ulong, int> MessageCounts,

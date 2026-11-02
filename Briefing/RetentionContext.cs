@@ -16,7 +16,7 @@ namespace ClanGuardBot.Briefing;
 /// <param name="KickedManual">Classification == "Kicked" (officer kick).</param>
 /// <param name="KickedByBot">"KickedAwol" + "KickedAccountAge" — automated removals, not member loss.</param>
 /// <param name="Banned">Classification == "Banned".</param>
-/// <param name="NetMembershipChange">NewRecruits - TotalDepartures for the week. Negative = the server shrank.</param>
+/// <param name="NetMembershipChange">Server joins (InviteJoin rows) − TotalDepartures for the week. Negative = the server shrank.</param>
 /// <param name="DeparturesWithKnownTenure">How many of TotalDepartures had a resolvable join date.</param>
 /// <param name="MedianTenureDays">Median tenure over known-tenure departures. Null if none had a known join date.</param>
 /// <param name="TenureBuckets">Distribution across fixed buckets, over known-tenure departures.</param>

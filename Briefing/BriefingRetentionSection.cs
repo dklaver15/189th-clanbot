@@ -27,12 +27,24 @@ internal static class BriefingRetentionSection
     /// <summary>Top N invite-source labels surfaced for churn-by-source.</summary>
     public const int MaxChurnBySource = 6;
 
+    /// <summary>The lowest rank whose departure is notable on rank alone — the first event-tracked tier.</summary>
+    private const string NotableRankFloor = "CPL";
+
+    /// <param name="joinsThisWeek">
+    /// Server joins in the same window (InviteJoin rows). Net membership is
+    /// joins minus departures — both sides counting people entering/leaving the
+    /// server. It used to subtract departures from new RCTs, so every Guest who
+    /// joined and never onboarded was missing from the plus side while every
+    /// Guest who left was on the minus side, and a growing week read as a loss.
+    /// </param>
+    /// <param name="rankRoles">Configured rank ladder, low → high (BotConfig.GetRankRolesList).</param>
     public static async Task<RetentionSnapshot?> CollectAsync(
         BotDbContext db,
         ulong guildId,
         DateTime weekStart,
         DateTime weekEnd,
-        int newRecruitsThisWeek,
+        int joinsThisWeek,
+        IReadOnlyList<string> rankRoles,
         CancellationToken ct = default)
     {
         var rows = await db.MemberDepartures
@@ -82,13 +94,13 @@ internal static class BriefingRetentionSection
 
         // ── Notable departures: rank >= CPL, OR tenure >= 90d, OR any events attended ──
         // (CPL is the first event-tracked tier; see spec §11 Q4 to adjust the floor.)
-        var notableRanks = new[]
-        {
-            "CPL","SGT","SSG","SFC","MSG","1SG","SGM","CSM","SMA",
-            "2ndLT","1stLT","CPT","MAJ","LTC","COL","BG","MG","LTG","GEN","GA"
-        };
+        // "Rank >= CPL" is read off the configured ladder rather than a copied
+        // list: the copy had drifted ("LTC" where the server's role is "LTCOL"),
+        // so a departing lieutenant colonel didn't count as notable on rank.
+        // RankAtDeparture is written from the same config list, so names match.
+        var floorIndex = IndexOfRank(rankRoles, NotableRankFloor);
         bool IsNotable(MemberDeparture r) =>
-            notableRanks.Contains(r.RankAtDeparture, StringComparer.OrdinalIgnoreCase)
+            (floorIndex >= 0 && IndexOfRank(rankRoles, r.RankAtDeparture) >= floorIndex)
             || (r.TenureDays is not null && r.TenureDays.Value >= 90)
             || r.EventsAttendedLifetime > 0;
 
@@ -120,7 +132,7 @@ internal static class BriefingRetentionSection
             KickedManual: kickedManual,
             KickedByBot: kickedByBot,
             Banned: banned,
-            NetMembershipChange: newRecruitsThisWeek - rows.Count,
+            NetMembershipChange: joinsThisWeek - rows.Count,
             DeparturesWithKnownTenure: withTenure.Count,
             MedianTenureDays: medianTenure,
             TenureBuckets: buckets,
@@ -131,6 +143,16 @@ internal static class BriefingRetentionSection
             ReconciledDepartures: reconciled,
             NotableDepartures: notable,
             ChurnBySource: churnBySource);
+    }
+
+    private static int IndexOfRank(IReadOnlyList<string> rankRoles, string rank)
+    {
+        for (var i = 0; i < rankRoles.Count; i++)
+        {
+            if (rankRoles[i].Equals(rank, StringComparison.OrdinalIgnoreCase))
+                return i;
+        }
+        return -1;
     }
 
     private static double Median(IReadOnlyList<double> sorted)

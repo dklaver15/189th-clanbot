@@ -21,25 +21,78 @@ public sealed record BriefingContext
     public required DateTime WeekEnd { get; init; }
 
     // Top-line numbers — cheap to include, anchor the briefing
+
+    /// <summary>Every non-bot guild member right now, Guests and exempt roles included.</summary>
+    public int TotalMembers { get; init; }
+
+    /// <summary>
+    /// Non-bot, non-exempt members who hold a rank role and are not AWOL — the
+    /// roster that is actually expected to show up. Also the denominator for
+    /// <see cref="AverageAttendancePercent"/>.
+    /// </summary>
     public required int ActiveMemberCount { get; init; }
+
+    /// <summary>Non-bot, non-exempt members holding no rank role (Guests / not yet onboarded).</summary>
+    public int GuestCount { get; init; }
+
+    /// <summary>Members holding the AWOL role right now.</summary>
+    public int AwolCount { get; init; }
+
     public required int EventsHeld { get; init; }
     public required double AverageAttendancePercent { get; init; }
+
+    /// <summary>
+    /// Distinct members given the RCT rank during the window as their first
+    /// rank in their current stay in the server, read from the append-only
+    /// RankChange log. Counts recruits who have since been promoted or have
+    /// left — the log keeps them, unlike RankHistory, which only holds each
+    /// current member's current rank. An RCT role removed and re-added, or a
+    /// demotion back to RCT, doesn't count; a member who left and rejoined does.
+    /// </summary>
     public required int NewRecruits { get; init; }
+
+    /// <summary>
+    /// Server joins in the window (InviteJoin rows). Same count /invite stats
+    /// reports. This is the top of the funnel; <see cref="NewRecruits"/> is the
+    /// subset that went on to take the RCT rank.
+    /// </summary>
+    public int TotalJoins { get; init; }
+
+    /// <summary>Where this week's joiners stand now. Null when nobody joined.</summary>
+    public IntakeSnapshot? Intake { get; init; }
 
     /// <summary>Week-over-week deltas vs the prior 7-day window. Null if prior-week data couldn't be computed.</summary>
     public WeekOverWeekDeltas? WeekOverWeek { get; init; }
 
     // Attention items — pre-filtered to top N each, capped in the collector
+
+    /// <summary>
+    /// Members currently holding the AWOL role, longest-flagged first. Capped;
+    /// <see cref="AwolCount"/> is the uncapped total.
+    /// </summary>
     public IReadOnlyList<AwolRiskItem> AwolRisks { get; init; } = [];
+
+    /// <summary>Distinct members newly flagged AWOL during the window, whether or not they've since recovered.</summary>
+    public int AwolFlaggedThisWeek { get; init; }
+
     public IReadOnlyList<PromotionCandidate> PromotionCandidates { get; init; } = [];
+
+    /// <summary>Uncapped count behind <see cref="PromotionCandidates"/>.</summary>
+    public int PromotionCandidatesTotal { get; init; }
+
     public IReadOnlyList<NotableEvent> NotableEvents { get; init; } = [];
 
     /// <summary>
-    /// Members trending toward AWOL (50–99% of activity threshold, not yet
-    /// flagged). Officers can re-engage them BEFORE the AwolCheckService
-    /// flags them. Empty if nobody is in the danger zone.
+    /// Members who are not AWOL today but WILL be flagged by AwolCheckService
+    /// within the next 7 days if they post nothing and stay out of voice: the
+    /// activity that remains in their window once the oldest week rolls off is
+    /// below threshold. Officers can re-engage them before the sweep catches
+    /// them. Empty if nobody is in that position.
     /// </summary>
     public IReadOnlyList<RiskWatchItem> RiskWatch { get; init; } = [];
+
+    /// <summary>Uncapped count behind <see cref="RiskWatch"/>.</summary>
+    public int RiskWatchTotal { get; init; }
 
     /// <summary>
     /// Most-active member of the week by combined score (messages + voice + events).
@@ -95,21 +148,44 @@ public sealed record BriefingContext
     public IReadOnlyList<string> Anomalies { get; init; } = [];
 }
 
-/// <param name="DaysSinceAwolAssigned">Days since the AWOL role was assigned.</param>
+/// <summary>
+/// Where the window's joiners stand at briefing time. Unique joiners can be
+/// lower than <see cref="BriefingContext.TotalJoins"/> when someone joined,
+/// left and rejoined inside the window.
+/// </summary>
+/// <param name="UniqueJoiners">Distinct people behind the window's joins.</param>
+/// <param name="StillInServer">Of those, how many are still in the server now.</param>
+/// <param name="NowRanked">Of those still here, how many hold a rank role (onboarded).</param>
+public sealed record IntakeSnapshot(
+    int UniqueJoiners,
+    int StillInServer,
+    int NowRanked);
+
+/// <param name="DaysSinceAwolAssigned">Days since the current AWOL flag was raised. Null when the role is held but no AwolRecord exists (applied by hand).</param>
 /// <param name="Messages14d">Messages sent in the last 14 days. 0 = fully checked out.</param>
 /// <param name="VoiceHours14d">Voice hours in the last 14 days. Capped per session per BotConfig.MaxSingleSessionHours.</param>
 /// <param name="TrendNote">One-line context, e.g. "flagged 5d ago, grace period elapsed".</param>
 public sealed record AwolRiskItem(
     string Gamertag,
     string CurrentRank,
-    int DaysSinceAwolAssigned,
+    int? DaysSinceAwolAssigned,
     int Messages14d,
     double VoiceHours14d,
     string TrendNote);
 
+/// <summary>
+/// A member who has served the time-in-rank for their next auto-promotion
+/// tier. Thresholds come from AutoPromotionService's own ladder, so this is
+/// judged exactly the way the nightly job judges it.
+/// </summary>
 /// <param name="EventsAttendedAtRank">Cumulative events at current rank (bot-tracked + seed). Used by promotion math directly.</param>
 /// <param name="MessagesAtRank">Messages sent since rank was assigned.</param>
 /// <param name="VoiceHoursAtRank">Voice hours since rank was assigned (capped per session).</param>
+/// <param name="RequiredEvents">Events the tier needs. 0 = message/voice tier (RCT → CPL).</param>
+/// <param name="RequiredMessages">Messages the tier needs (OR voice). 0 on event tiers.</param>
+/// <param name="RequiredVoiceHours">Voice hours the tier needs (OR messages). 0 on event tiers.</param>
+/// <param name="MeetsActivity">True when the activity bar is met too, not just the time gate.</param>
+/// <param name="AutoPromoteEnabled">False when the tier (or auto-promotion as a whole) is in dry run, so a human has to promote.</param>
 public sealed record PromotionCandidate(
     string Gamertag,
     string CurrentRank,
@@ -117,7 +193,12 @@ public sealed record PromotionCandidate(
     int EventsAttendedAtRank,
     int MessagesAtRank,
     double VoiceHoursAtRank,
-    int DaysInRank);
+    int DaysInRank,
+    int RequiredEvents,
+    int RequiredMessages,
+    double RequiredVoiceHours,
+    bool MeetsActivity,
+    bool AutoPromoteEnabled);
 
 /// <param name="Source">"Clan" or "CompDiv" — matches the existing event source filter.</param>
 public sealed record NotableEvent(
@@ -127,17 +208,22 @@ public sealed record NotableEvent(
     string Source);
 
 /// <summary>
-/// Member trending toward AWOL: not yet flagged, but below the activity
-/// threshold on at least one axis with the closest ratio between 50% and 100%.
-/// "Below 50%" is excluded as those members are about to be flagged AWOL by
-/// AwolCheckService anyway and would clutter this section.
+/// Member who will be flagged AWOL within the next 7 days unless they're
+/// active: not AWOL today, but the part of their activity that will still be
+/// inside their window a week from now is below threshold on both axes.
 /// </summary>
-/// <param name="ClosestThresholdRatio">Closest threshold ratio reached (0.5–1.0). Higher = closer to safe.</param>
+/// <param name="Messages">Messages in their full window today.</param>
+/// <param name="VoiceHours">Voice hours in their full window today.</param>
+/// <param name="RetainedMessages">Of <paramref name="Messages"/>, how many will still count a week from now.</param>
+/// <param name="RetainedVoiceHours">Of <paramref name="VoiceHours"/>, how much will still count a week from now.</param>
+/// <param name="ClosestThresholdRatio">Today's best axis as a fraction of the threshold. ≥ 1.0 means safe today; below 1.0 means a join/reset guard is all that's holding the flag off.</param>
 public sealed record RiskWatchItem(
     string Gamertag,
     string CurrentRank,
     int Messages,
     double VoiceHours,
+    int RetainedMessages,
+    double RetainedVoiceHours,
     int RequiredMessages,
     double RequiredVoiceHours,
     int WindowDays,
@@ -165,7 +251,8 @@ public sealed record MemberSpotlight(
 public sealed record WeekOverWeekDeltas(
     int EventsHeldDelta,
     double AverageAttendancePercentDelta,
-    int NewRecruitsDelta);
+    int NewRecruitsDelta,
+    int TotalJoinsDelta);
 
 /// <summary>
 /// Single label's recruitment count for the briefing week.

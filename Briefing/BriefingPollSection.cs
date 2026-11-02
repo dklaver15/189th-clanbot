@@ -65,6 +65,14 @@ internal static class BriefingPollSection
         var openNow = await db.Polls
             .CountAsync(p => p.GuildId == guildId && p.Status == PollStatus.Open, ct);
 
+        // Any poll that closed in the window, whenever it was created — a poll
+        // started last Saturday and closed on Monday closed THIS week. (Counting
+        // only this week's polls missed every poll that ran across the boundary.)
+        var pollsClosed = await db.Polls
+            .CountAsync(p => p.GuildId == guildId
+                          && p.ClosedAtUtc >= weekStart
+                          && p.ClosedAtUtc < weekEnd, ct);
+
         var chronic = await ComputeChronicAsync(db, guild, exemptRoleNames, awolRoleName, ct);
 
         if (weekPolls.Count == 0 && openNow == 0 && chronic is null) return null;
@@ -72,7 +80,6 @@ internal static class BriefingPollSection
         var pollsCreated = weekPolls.Count;
         var nativeCount = weekPolls.Count(p => p.Kind == PollKind.Native);
         var anonymousCount = weekPolls.Count(p => p.Kind == PollKind.Anonymous);
-        var pollsClosed = weekPolls.Count(p => p.ClosedAtUtc >= weekStart && p.ClosedAtUtc < weekEnd);
 
         // Votes on this week's polls — one query, aggregated in memory.
         var weekPollIds = weekPolls.Select(p => p.Id).ToHashSet();
