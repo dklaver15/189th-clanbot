@@ -74,6 +74,29 @@ public static class MediaProbe
         return exitCode == 0 ? ParseSeconds(stdout.Trim()) : 0;
     }
 
+    /// <summary>
+    /// A clip's length from the end of its last video packet, for files whose
+    /// container doesn't say (some WebMs). Reads the packets without decoding them;
+    /// 0 when there are none.
+    /// </summary>
+    public static async Task<double> PacketDurationAsync(string ffprobePath, string path, ILogger logger, CancellationToken ct = default)
+    {
+        var (exitCode, stdout, _) = await FfmpegProcess.RunAsync(
+            ffprobePath,
+            ["-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time,duration_time", "-of", "csv=p=0", path],
+            TimeSpan.FromMinutes(1), lowPriority: false, captureStdout: true, logger, ct);
+        if (exitCode != 0) return 0;
+
+        var end = 0.0;
+        foreach (var line in stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var parts = line.Split(',');
+            if (double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var pts))
+                end = Math.Max(end, pts + (parts.Length > 1 ? ParseSeconds(parts[1]) : 0));
+        }
+        return end;
+    }
+
     private static JsonDocument ParseJson(string json)
     {
         try

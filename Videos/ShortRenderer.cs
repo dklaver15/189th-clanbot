@@ -81,10 +81,20 @@ public sealed class ShortRenderer
         var info = await MediaProbe.ProbeAsync(_config.FfprobePath, inputPath, _logger, ct);
         if (info.IsHdr)
             throw new ClipRejectedException("This clip is HDR, so it can't be made into a Short.");
-        if (info.Duration > 0 && settings.StartSeconds >= info.Duration)
-            throw ClipRejectedException.StartPastEnd(settings.StartSeconds, info.Duration);
 
-        var length = RenderSeconds(settings.StartSeconds, settings.EndSeconds, info.Duration);
+        // The Short's length has to be known before the encode: the 5 s minimum and
+        // the outro's start both need it. Some WebMs don't store one; measure those.
+        var duration = info.Duration > 0
+            ? info.Duration
+            : await MediaProbe.PacketDurationAsync(_config.FfprobePath, inputPath, _logger, ct);
+        if (duration <= 0)
+            throw ClipRejectedException.UnknownLength();
+        if (settings.StartSeconds >= duration)
+            throw ClipRejectedException.StartPastEnd(settings.StartSeconds, duration);
+
+        var length = RenderSeconds(settings.StartSeconds, settings.EndSeconds, duration);
+        if (length < UploadRequest.MinShortSeconds)
+            throw ClipRejectedException.TooShortForShort(length);
 
         var frame = BuildFilter(settings.Layout, info.Width, info.Height);
         // Drop frames before both scale branches run, not after.

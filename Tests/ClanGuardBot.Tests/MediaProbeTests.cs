@@ -47,6 +47,16 @@ public class MediaProbeTests : IDisposable
         Assert.Equal(0, (await Probe(path)).Duration);
     }
 
+    [SkippableFact]
+    public async Task A_clip_without_a_stored_length_is_measured_from_its_packets()
+    {
+        Skip.IfNot(Ffmpeg.Available, "ffmpeg isn't on PATH");
+        var path = File("live.webm");
+        Ffmpeg.MakeClipWithoutDuration(path, 2);
+
+        Assert.InRange(await MediaProbe.PacketDurationAsync("ffprobe", path, NullLogger.Instance), 1.9, 2.1);
+    }
+
     [SkippableTheory]
     [InlineData(true)]
     [InlineData(false)]
