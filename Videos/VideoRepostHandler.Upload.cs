@@ -242,7 +242,7 @@ public sealed partial class VideoRepostHandler
                 fileToUpload = await _upscaler.PrepareAsync(path, tempDir, settings.StartSeconds, settings.EndSeconds);
             }
 
-            youtubeId = await _youtube.UploadAsync(fileToUpload, settings.Title, description);
+            youtubeId = await _youtube.UploadAsync(fileToUpload, settings.Title, description, []);
             await MarkUploadedAsync(submission.Id, youtubeId);
             if (reply is not null) await RefreshButtonsAsync(reply);
             await TryRemoveWorkingMessageAsync(working);

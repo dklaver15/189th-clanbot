@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Text;
 using ClanGuardBot.Models;
 using Google.Apis.Auth.OAuth2;
 using Google.Apis.Auth.OAuth2.Flows;
@@ -33,9 +35,11 @@ public sealed class YouTubeUploadService
     private const string ApplicationName = "ClanGuardBot";
 
     // YouTube rejects titles over 100 characters and any title or description
-    // containing '<' or '>'. Descriptions are capped at 5,000 bytes.
+    // containing '<' or '>'. Descriptions are capped at 5,000 bytes, and tags at
+    // 500 characters counting a comma between each.
     private const int MaxTitleLength = 100;
     private const int MaxDescriptionBytes = 5000;
+    private const int MaxTagsLength = 500;
 
     private readonly BotConfig _config;
     private readonly ILogger<YouTubeUploadService> _logger;
@@ -48,11 +52,16 @@ public sealed class YouTubeUploadService
 
     public bool IsConfigured => _config.IsYouTubeConfigured;
 
-    /// <summary>Uploads the file and returns the new YouTube video id.</summary>
+    /// <summary>
+    /// Uploads the file and returns the new YouTube video id. The
+    /// <paramref name="hashtags"/> (no <c>#</c>) end the description on their own
+    /// line and are also sent as the video's tags.
+    /// </summary>
     public async Task<string> UploadAsync(
         string localPath,
         string title,
         string description,
+        IReadOnlyList<string> hashtags,
         CancellationToken ct = default)
     {
         if (!IsConfigured)
@@ -65,7 +74,8 @@ public sealed class YouTubeUploadService
             Snippet = new VideoSnippet
             {
                 Title       = SanitizeTitle(title),
-                Description = SanitizeDescription(description),
+                Description = ComposeDescription(description, hashtags),
+                Tags        = BuildTags(hashtags),
                 CategoryId  = _config.YouTubeCategoryId,
             },
             Status = new VideoStatus
@@ -127,12 +137,48 @@ public sealed class YouTubeUploadService
         return t.Length <= MaxTitleLength ? t : t[..(MaxTitleLength - 1)].TrimEnd() + "…";
     }
 
-    private static string SanitizeDescription(string description)
+    /// <summary>
+    /// The description as sent: angle brackets stripped, then the hashtags on
+    /// their own last line. A description too long for YouTube's byte cap is cut
+    /// above that line, so the hashtags always survive.
+    /// </summary>
+    internal static string ComposeDescription(string description, IReadOnlyList<string> hashtags)
     {
-        var d = StripAngles(description).Trim();
-        // Byte cap, not char cap: trim a character at a time until it fits.
-        while (System.Text.Encoding.UTF8.GetByteCount(d) > MaxDescriptionBytes)
-            d = d[..^1];
-        return d;
+        var body = StripAngles(description).Trim();
+        var line = Hashtags.Format(hashtags);
+        var tail = line.Length == 0 ? "" : body.Length == 0 ? line : "\n\n" + line;
+
+        // Byte cap, not char cap: cut a text element at a time, so an emoji is never split.
+        var budget = MaxDescriptionBytes - Encoding.UTF8.GetByteCount(tail);
+        if (Encoding.UTF8.GetByteCount(body) > budget)
+        {
+            var cut = 0;
+            var used = 0;
+            var elements = StringInfo.GetTextElementEnumerator(body);
+            while (elements.MoveNext())
+            {
+                var element = elements.GetTextElement();
+                used += Encoding.UTF8.GetByteCount(element);
+                if (used > budget) break;
+                cut = elements.ElementIndex + element.Length;
+            }
+            body = body[..cut].TrimEnd();
+        }
+        return body + tail;
+    }
+
+    /// <summary>The hashtags as YouTube tags, in order, as many as fit the 500-character cap.</summary>
+    internal static List<string> BuildTags(IReadOnlyList<string> hashtags)
+    {
+        var tags = new List<string>();
+        var length = 0;
+        foreach (var tag in hashtags)
+        {
+            var next = length + tag.Length + (tags.Count > 0 ? 1 : 0);
+            if (next > MaxTagsLength) break;
+            tags.Add(tag);
+            length = next;
+        }
+        return tags;
     }
 }
