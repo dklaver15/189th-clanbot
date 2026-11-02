@@ -2993,6 +2993,18 @@ public class BotConfig
     /// <summary>Give up on a Short render after this many minutes. Default 20.</summary>
     public int VideoShortRenderTimeoutMinutes { get; set; } = 20;
 
+    /// <summary>
+    /// Hashtags the upload form pre-fills, by the clip's channel id (a string:
+    /// config keys are strings). The uploader can edit them before sending; see
+    /// <see cref="Services.Hashtags"/>. A channel not listed, or set to "",
+    /// pre-fills nothing.
+    /// </summary>
+    public Dictionary<string, string> VideoHashtagsByChannel { get; set; } = new()
+    {
+        ["1408199889879564539"] = "#Battlefield",
+        ["1549891740993982504"] = "#WARDOGS",
+    };
+
     public bool IsYouTubeConfigured =>
         !string.IsNullOrWhiteSpace(YouTubeClientId)
         && !string.IsNullOrWhiteSpace(YouTubeClientSecret)
