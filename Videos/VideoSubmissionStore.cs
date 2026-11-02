@@ -16,8 +16,8 @@ internal static class VideoSubmissionStore
 
     /// <summary>
     /// Moves one video from Pending to Uploading for this uploader and records the
-    /// form (video or Short, framing, trim, title) in the same UPDATE. Of any
-    /// number of simultaneous submits, exactly one returns true.
+    /// form (video or Short, framing, trim, title, hashtags) in the same UPDATE. Of
+    /// any number of simultaneous submits, exactly one returns true.
     /// </summary>
     public static async Task<bool> TryClaimAsync(
         BotDbContext db, ulong messageId, int index, ulong userId, string userName, DateTime now, UploadSettings settings)
@@ -27,6 +27,7 @@ internal static class VideoSubmissionStore
         double? start = settings.StartSeconds;
         var end   = settings.EndSeconds;
         var title = settings.Title;
+        var tags  = settings.Hashtags.Count == 0 ? null : Hashtags.Format(settings.Hashtags);
 
         var rows = await db.VideoSubmissions
             .Where(v => v.MessageId == messageId && v.AttachmentIndex == index
@@ -40,7 +41,8 @@ internal static class VideoSubmissionStore
                 .SetProperty(v => v.ShortLayout,      layout)
                 .SetProperty(v => v.TrimStartSeconds, start)
                 .SetProperty(v => v.TrimEndSeconds,   end)
-                .SetProperty(v => v.Title,            title));
+                .SetProperty(v => v.Title,            title)
+                .SetProperty(v => v.Hashtags,         tags));
         return rows == 1;
     }
 
