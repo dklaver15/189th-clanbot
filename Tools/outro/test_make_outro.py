@@ -43,10 +43,14 @@ class OutroTests(unittest.TestCase):
                              self.logo.getpixel((m.LOGO_WIDTH // 2, m.LOGO_WIDTH // 2))[3], name)
             self.assertGreater(last.getpixel(self.pill_middle())[3], 150, name)     # pill shown
 
-    def test_pill_is_hidden_until_after_the_logo_settles(self):
+    def test_pill_is_hidden_until_the_logo_settles(self):
         for name, v in m.VARIANTS.items():
-            frame = m.render_frame(v, 1.0, self.logo, self.pill)
+            frame = m.render_frame(v, v.logo_in, self.logo, self.pill)
             self.assertEqual(frame.getpixel(self.pill_middle())[3], 0, name)
+
+    def test_the_shipped_outro_shows_the_link_for_its_last_1_4_seconds(self):
+        frame = m.render_frame(m.VARIANTS["fade-rise-glint"], m.DURATION - 1.4, self.logo, self.pill)
+        self.assertGreater(frame.getpixel(self.pill_middle())[3], 150)
 
     def test_there_are_six_to_eight_variants(self):
         self.assertTrue(6 <= len(m.VARIANTS) <= 8)
@@ -64,7 +68,7 @@ class OutroTests(unittest.TestCase):
             stream = info["streams"][0]
             self.assertEqual((stream["width"], stream["height"]), (m.W, m.H))
             self.assertEqual(stream["tags"]["alpha_mode"], "1")
-            self.assertTrue(2.4 <= float(info["format"]["duration"]) <= 2.6)
+            self.assertTrue(2.9 <= float(info["format"]["duration"]) <= 3.1)
 
 
 if __name__ == "__main__":

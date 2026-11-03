@@ -1,8 +1,8 @@
 # Shorts outro
 
-`make_outro.py` renders `Assets/189th_outro.webm`, the 2.5 s outro the bot lays over
+`make_outro.py` renders `Assets/189th_outro.webm`, the 3 s outro the bot lays over
 the end of every Short (`ShortRenderer`): the 189th logo easing in at the centre,
-then a dark pill with "SQUAD UP WITH US" over `discord.gg/189th`. It is a 1080x1920
+then a dark pill with "JOIN US ON DISCORD!" over `discord.gg/189th`. It is a 1080x1920
 VP9 WebM with real transparency, made from `Assets/189th_logo.png` itself, so the
 lettering is always exact.
 

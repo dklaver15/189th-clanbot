@@ -1,5 +1,5 @@
 """Renders the Shorts outro: the 189th logo easing in at the centre of a
-transparent 1080x1920 frame, then a dark pill with "SQUAD UP WITH US" over the
+transparent 1080x1920 frame, then a dark pill with "JOIN US ON DISCORD!" over the
 Discord link popping in below it. Saved as a VP9 WebM with alpha, which the bot
 (ShortRenderer) lays over the last seconds of every Short.
 
@@ -33,7 +33,7 @@ FONT_PATH = HERE / "fonts" / "Oswald[wght].ttf"
 
 W, H = 1080, 1920
 FPS = 30
-DURATION = 2.5
+DURATION = 3.0
 
 LOGO_WIDTH = 720
 LOGO_CENTER = (540, 960)
@@ -45,7 +45,7 @@ PILL_TOP = 1363
 KEEP_BAND_TOP = 600
 KEEP_BAND_BOTTOM = 1600
 
-CTA = "SQUAD UP WITH US"
+CTA = "JOIN US ON DISCORD!"
 LINK = "discord.gg/189th"
 
 PILL_FILL = (10, 8, 4, 184)        # near-black at 72 %
@@ -103,8 +103,8 @@ VARIANTS: dict[str, Variant] = {
         "Logo fades in while growing slightly; the link fades in.",
         pill_entrance="fade"),
     "fade-rise-glint": Variant(
-        "Fade and slight grow, a soft glint sweeps the gold, the link pops in.",
-        glint=Glint()),
+        "Fade and slight grow, a soft glint sweeps the gold, the link pops in as the logo settles.",
+        glint=Glint(), pill_delay=0.0),
     "soft-settle": Variant(
         "Slower settle from a little smaller, a faint glint, the link slides up.",
         easing="out-quint", scale_from=0.88, pill_entrance="slide",
