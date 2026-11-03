@@ -744,7 +744,7 @@ public class CommandsCommandHandler
             new("fix-rank-date", "Restore a rank-assigned date reset by a rank role being removed and re-added",
                 eventCreditLbl, MinRank("CPT")),   // SyncWithHandlers: FixRankDateCommandHandler.MinRankFloor
 
-            new("attendance", "Show today's clan event attendance, grouped by event",
+            new("attendance", "Show recent clan event attendance by event, or every event one member was credited for",
                 attendanceLbl, MinRank("MAJ")),
             new("leads", "Reddit recruitment lead stats and recent feed",
                 attendanceLbl, MinRank("MAJ")),

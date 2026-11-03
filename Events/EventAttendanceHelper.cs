@@ -99,4 +99,45 @@ public static class EventAttendanceHelper
 
         return seedEvents + botTrackedCount + meetingCount;
     }
+
+    /// <summary>
+    /// Looks up event titles for attendance rows, keyed by CalendarEventId.
+    /// Attendance rows only carry the id (deliberately not a FK), so the
+    /// name has to come from elsewhere: the CalendarEvent row first, then the
+    /// ClanEvent that drove it, since cancelling a ClanEvent deletes its
+    /// CalendarEvent. Ids with no surviving title (Apollo-era rows cleaned
+    /// up from #events) are simply absent from the result.
+    /// </summary>
+    public static async Task<Dictionary<int, string>> GetEventTitlesAsync(
+        BotDbContext db,
+        ulong guildId,
+        IEnumerable<int> calendarEventIds,
+        CancellationToken ct = default)
+    {
+        var ids = calendarEventIds.Distinct().ToList();
+        if (ids.Count == 0) return new Dictionary<int, string>();
+
+        var titles = await db.CalendarEvents
+            .AsNoTracking()
+            .Where(c => c.GuildId == guildId && ids.Contains(c.Id))
+            .ToDictionaryAsync(c => c.Id, c => c.Title, ct);
+
+        var untitledIds = ids.Where(id => !titles.ContainsKey(id)).ToList();
+        if (untitledIds.Count > 0)
+        {
+            var clanEventTitles = await db.ClanEvents
+                .AsNoTracking()
+                .Where(c => c.GuildId == guildId && untitledIds.Contains(c.CalendarEventId))
+                .Select(c => new { c.CalendarEventId, c.Title })
+                .ToListAsync(ct);
+            foreach (var c in clanEventTitles)
+                titles.TryAdd(c.CalendarEventId, c.Title);
+        }
+
+        // Blank titles count as missing so callers have one case to handle.
+        foreach (var id in titles.Where(kvp => string.IsNullOrWhiteSpace(kvp.Value)).Select(kvp => kvp.Key).ToList())
+            titles.Remove(id);
+
+        return titles;
+    }
 }

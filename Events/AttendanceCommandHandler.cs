@@ -1,5 +1,6 @@
 using ClanGuardBot.Data;
 using ClanGuardBot.Models;
+using ClanGuardBot.Services;
 using Discord;
 using Discord.WebSocket;
 using Microsoft.EntityFrameworkCore;
@@ -57,6 +58,11 @@ namespace ClanGuardBot.Handlers;
 /// those rows fudge their event times to "now at insert time." Manual rows
 /// only exist on the EventAttendance side — there is no parallel manual
 /// flow for meetings.
+///
+/// ── Member history ──
+/// With the optional `member` option the command lists that one member's
+/// event credits instead, newest first and named, over all history unless
+/// `days` is also given. See HandleMemberHistoryAsync.
 ///
 /// ── User name rendering ──
 /// We can't fully trust Discord's &lt;@id&gt; mention resolution — it sometimes
@@ -135,6 +141,19 @@ public class AttendanceCommandHandler
     /// </summary>
     private const int TruncationSummaryReserve = 200;
 
+    /// <summary>
+    /// Description length per page of the member-history view. Under
+    /// Discord's 4096-char description limit, and with the author, title
+    /// and footer still well inside the 6000-char embed total.
+    /// </summary>
+    private const int MemberHistoryPageBudget = 4000;
+
+    /// <summary>
+    /// Cap on follow-up messages for one member-history request — roughly
+    /// 250-300 credits. Anything older is counted in the last page's footer.
+    /// </summary>
+    private const int MemberHistoryMaxPages = 5;
+
     private readonly IServiceProvider _services;
     private readonly ILogger<AttendanceCommandHandler> _logger;
     private readonly BotConfig _config;
@@ -210,7 +229,17 @@ public class AttendanceCommandHandler
         // option builder, but we clamp defensively in case the command is
         // re-registered without them or invoked via a stale client.
         var daysRaw = command.Data.Options.FirstOrDefault(o => o.Name == "days")?.Value;
-        var days = daysRaw is long daysVal ? (int)Math.Clamp(daysVal, 1, 30) : 1;
+        int? daysOption = daysRaw is long daysVal ? (int)Math.Clamp(daysVal, 1, 30) : null;
+
+        // Optional "member" option switches to that member's own credit
+        // history. SocketUser, not SocketGuildUser, so ex-members resolve.
+        if (command.Data.Options.FirstOrDefault(o => o.Name == "member")?.Value is SocketUser member)
+        {
+            await HandleMemberHistoryAsync(command, caller, guild, member, daysOption, now);
+            return;
+        }
+
+        var days = daysOption ?? 1;
 
         // Rolling window of `days * 24` hours ending at "now". Avoids the
         // surprise of a UTC day-rollover dropping the evening's events from
@@ -311,6 +340,158 @@ public class AttendanceCommandHandler
             caller.Username, windowEvents.Count, windowEventAttendance.Count, windowMeetingAttendance.Count, windowManualCredits.Count);
 
         await command.FollowupAsync(embed: embed, ephemeral: true);
+    }
+
+    /// <summary>
+    /// /attendance member:@user — every event credit on file for one member,
+    /// newest first, each with the event's name. /timeline only shows the
+    /// latest five, and the default view is grouped by event rather than by
+    /// member, so neither answers "which events is this person being
+    /// credited for?"
+    ///
+    /// Each credit row is listed the way promotion math counts it:
+    /// events-VC rows (🎯), meetings-VC rows (🗣️) and manual
+    /// /add-event-credit rows (✏️). Unlike the per-event view this does not
+    /// dedupe an event credited through both VCs, because
+    /// EventAttendanceHelper counts it twice — so it shows twice here.
+    ///
+    /// Covers all history unless `days` is given. Long histories are split
+    /// across up to <see cref="MemberHistoryMaxPages"/> ephemeral messages.
+    /// </summary>
+    private async Task HandleMemberHistoryAsync(
+        SocketSlashCommand command,
+        SocketGuildUser caller,
+        SocketGuild guild,
+        SocketUser member,
+        int? days,
+        DateTime now)
+    {
+        var guildId = guild.Id;
+        var windowStart = days is int d ? now.AddDays(-d) : DateTime.MinValue;
+
+        using var scope = _services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<BotDbContext>();
+
+        // Both tables are indexed on (GuildId, UserId, CalendarEventId), so
+        // these are just the member's own rows. The window is applied in
+        // memory because manual credits are dated by RecordedAt, not by
+        // their (fudged) event times.
+        var eventRows = await db.EventAttendances
+            .AsNoTracking()
+            .Where(a => a.GuildId == guildId && a.UserId == member.Id)
+            .ToListAsync();
+
+        var meetingRows = await db.MeetingAttendances
+            .AsNoTracking()
+            .Where(a => a.GuildId == guildId && a.UserId == member.Id)
+            .ToListAsync();
+
+        var credits = eventRows
+            .Select(a => a.CalendarEventId == ManualAdjustmentCalendarEventId
+                ? new MemberCredit(a.RecordedAt, MemberCreditKind.Manual, a.CalendarEventId, a.AttendedMinutes)
+                : new MemberCredit(a.EventStartUtc, MemberCreditKind.EventVc, a.CalendarEventId, a.AttendedMinutes))
+            .Concat(meetingRows.Select(a =>
+                new MemberCredit(a.EventStartUtc, MemberCreditKind.MeetingVc, a.CalendarEventId, a.AttendedMinutes)))
+            .Where(c => c.WhenUtc >= windowStart && c.WhenUtc <= now)
+            .OrderByDescending(c => c.WhenUtc)
+            .ToList();
+
+        var titles = await EventAttendanceHelper.GetEventTitlesAsync(
+            db, guildId,
+            credits.Where(c => c.Kind != MemberCreditKind.Manual).Select(c => c.CalendarEventId));
+
+        var lines = credits.Select(c =>
+        {
+            var when = $"<t:{new DateTimeOffset(DateTime.SpecifyKind(c.WhenUtc, DateTimeKind.Utc)).ToUnixTimeSeconds()}:f>";
+            if (c.Kind == MemberCreditKind.Manual)
+                return $"{when} ✏️ Manual credit (/add-event-credit)";
+
+            var icon = c.Kind == MemberCreditKind.MeetingVc ? "🗣️" : "🎯";
+            var name = titles.TryGetValue(c.CalendarEventId, out var title)
+                ? $"**{EscapeMarkdown(title)}**"
+                : $"_event #{c.CalendarEventId} (no longer on file)_";
+            return $"{when} {icon} {name} — {c.Minutes} min";
+        }).ToList();
+
+        // ── Summary line ──
+        var eventCount   = credits.Count(c => c.Kind == MemberCreditKind.EventVc);
+        var meetingCount = credits.Count(c => c.Kind == MemberCreditKind.MeetingVc);
+        var manualCount  = credits.Count(c => c.Kind == MemberCreditKind.Manual);
+        var summary = credits.Count == 0
+            ? "_No event credits on file for this member in this window._"
+            : $"**{credits.Count}** credit(s): 🎯 {eventCount} event · 🗣️ {meetingCount} meeting · ✏️ {manualCount} manual";
+
+        // ── Paginate ──
+        // Each page fills one embed description. The first page carries the
+        // summary; pages past the cap are dropped (oldest entries, since
+        // we sorted newest-first) and counted in the last page's footer.
+        var pages = new List<StringBuilder> { new StringBuilder(summary).AppendLine().AppendLine() };
+        var shown = 0;
+        foreach (var line in lines)
+        {
+            if (pages[^1].Length + line.Length + 1 > MemberHistoryPageBudget)
+            {
+                if (pages.Count == MemberHistoryMaxPages) break;
+                pages.Add(new StringBuilder());
+            }
+            pages[^1].Append(line).Append('\n');
+            shown++;
+        }
+
+        var guildMember = guild.GetUser(member.Id);
+        var displayName = guildMember?.DisplayName ?? member.GlobalName ?? member.Username;
+        var leftSuffix = guildMember is null ? " (no longer in server)" : string.Empty;
+        var windowLabel = days switch
+        {
+            null => "All Time",
+            1    => "Last 24 Hours",
+            _    => $"Last {days} Days",
+        };
+        var windowFooter = days is null
+            ? "All credits on file, newest first"
+            : $"Window: {windowStart:yyyy-MM-dd HH:mm} UTC → {now:yyyy-MM-dd HH:mm} UTC";
+        var hidden = lines.Count - shown;
+
+        for (var i = 0; i < pages.Count; i++)
+        {
+            var footer = windowFooter;
+            if (pages.Count > 1) footer += $" · page {i + 1}/{pages.Count}";
+            if (i == pages.Count - 1 && hidden > 0) footer += $" · +{hidden} older not shown";
+
+            var embed = new EmbedBuilder()
+                .WithAuthor($"{displayName}{leftSuffix}", member.GetDisplayAvatarUrl())
+                .WithTitle($"📋 Event Attendance — {windowLabel}")
+                .WithColor(Color.Blue)
+                .WithDescription(pages[i].ToString())
+                .WithFooter(footer)
+                .Build();
+            await command.FollowupAsync(embed: embed, ephemeral: true);
+        }
+
+        _logger.LogInformation(
+            "/attendance member history for {TargetId} invoked by {Caller}: {EventCount} event, {MeetingCount} meeting, {ManualCount} manual credit(s), {Hidden} not shown",
+            member.Id, caller.Username, eventCount, meetingCount, manualCount, hidden);
+    }
+
+    private enum MemberCreditKind { EventVc, MeetingVc, Manual }
+
+    /// <summary>One credit row in a member's history, from either attendance table.</summary>
+    private sealed record MemberCredit(DateTime WhenUtc, MemberCreditKind Kind, int CalendarEventId, int Minutes);
+
+    /// <summary>
+    /// Escapes Discord markdown in an event title so asterisks or underscores
+    /// don't break the surrounding bold. Mirrors TimelineCommandHandler.EscapeMarkdown.
+    /// </summary>
+    private static string EscapeMarkdown(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return s;
+        var sb = new StringBuilder(s.Length);
+        foreach (var c in s)
+        {
+            if (c is '*' or '_' or '`' or '~' or '\\' or '|' or '>') sb.Append('\\');
+            sb.Append(c);
+        }
+        return sb.ToString();
     }
 
     /// <summary>

@@ -697,18 +697,21 @@ public class DiscordBotService : IHostedService
                 // event. Pulls from CalendarEvents + EventAttendance and
                 // distinguishes "snapshot pending" from "0 qualifying" using
                 // CalendarEvent.LastSnapshotAttemptUtc. Manual credits added
-                // today appear in a separate section. Ephemeral, MAJ+ gated.
+                // today appear in a separate section. With `member`, lists
+                // that member's own event credits instead. Ephemeral, MAJ+ gated.
                 new SlashCommandBuilder()
                     .WithName("attendance")
                     .WithDescription("Show recent clan event attendance, grouped by event (MAJ+ only)")
                     .AddOption(
                         new SlashCommandOptionBuilder()
                             .WithName("days")
-                            .WithDescription("How many days back to include (default 1, max 30)")
+                            .WithDescription("How many days back to include (max 30). Default 1, or all history with member")
                             .WithType(ApplicationCommandOptionType.Integer)
                             .WithRequired(false)
                             .WithMinValue(1)
                             .WithMaxValue(30))
+                    .AddOption("member", ApplicationCommandOptionType.User,
+                        "List every event this member was credited for", isRequired: false)
                     .Build(),
 
                 // /squads — randomize everyone currently in the events VC into

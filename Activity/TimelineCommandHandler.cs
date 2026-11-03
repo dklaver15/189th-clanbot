@@ -54,7 +54,9 @@ namespace ClanGuardBot.Handlers;
 /// "lifetime events" counter so the displayed counts reflect real
 /// events only. The "Events at &lt;rank&gt;" summary still includes
 /// them (via EventAttendanceHelper) because they legitimately count
-/// toward promotion math.
+/// toward promotion math. Only the 5 most recent events are listed, named
+/// via EventAttendanceHelper.GetEventTitlesAsync; `/attendance member:`
+/// lists a member's full event history.
 ///
 /// ── Dry-run AWOL kicks ──
 /// AwolKickAuditRecord rows with WasDryRun=true are skipped. Those are
@@ -371,6 +373,10 @@ public class TimelineCommandHandler
             .Take(RecentEventsLimit)
             .ToListAsync();
 
+        // Names for those events — attendance rows only carry the id.
+        var eventTitles = await EventAttendanceHelper.GetEventTitlesAsync(
+            db, guildId, recentEvents.Select(e => e.CalendarEventId));
+
         // ── Activity snapshot (rolling window) ──────────────────────────
         var windowStart = DateTime.UtcNow.AddDays(-ActivityWindowDays);
 
@@ -518,13 +524,17 @@ public class TimelineCommandHandler
                 $"Security: {EscapeMarkdown(hit.Feature)} — {EscapeMarkdown(hit.Action)}"));
         }
 
-        // Recent real events.
+        // Recent real events. The id stands in for a name that can no longer
+        // be found, so the row can still be traced in the database.
         foreach (var ev in recentEvents)
         {
+            var eventName = eventTitles.TryGetValue(ev.CalendarEventId, out var title)
+                ? $"**{EscapeMarkdown(title)}**"
+                : $"event #{ev.CalendarEventId}";
             entries.Add(new TimelineEntry(
                 ev.EventEndUtc,
                 "🎯",
-                $"Attended event ({ev.AttendedMinutes} min)"));
+                $"Attended {eventName} ({ev.AttendedMinutes} min)"));
         }
 
         // ── Role changes from Discord's own audit log (opt-in) ──────────
