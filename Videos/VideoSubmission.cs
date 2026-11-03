@@ -42,8 +42,12 @@ public enum ShortLayout
 public sealed record UploadSettings(
     VideoSubmissionKind Kind, ShortLayout Layout, double StartSeconds, double? EndSeconds, string Title)
 {
-    /// <summary>Cleaned hashtags from the form, without <c>#</c> (see <c>Services.Hashtags</c>); <c>#Shorts</c> is added at upload.</summary>
+    /// <summary>Cleaned hashtags from the form, without <c>#</c> (see <c>Services.Hashtags</c>).</summary>
     public IReadOnlyList<string> Hashtags { get; init; } = [];
+
+    /// <summary>The hashtags as uploaded: a Short's always end with <c>#Shorts</c>.</summary>
+    public IReadOnlyList<string> YouTubeHashtags =>
+        Kind == VideoSubmissionKind.Short ? Services.Hashtags.WithShorts(Hashtags) : Hashtags;
 }
 
 /// <summary>

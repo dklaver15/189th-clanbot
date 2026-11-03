@@ -24,7 +24,7 @@ Tools/outro/.venv/Scripts/python Tools/outro/make_outro.py --all --background so
 
 Files land in `Tools/outro/out/` (git-ignored): `NAME.webm` per variant and, with
 `--background`, `NAME-preview.mp4` showing it over that image. To ship one, copy
-it to `Assets/189th_outro.webm` and commit.
+it to `Assets/189th_outro.webm`, set `SHIPPED_VARIANT` to its name, and commit.
 
 The layout (logo size and position, pill position) is fixed: `KEEP_BAND_TOP` /
 `KEEP_BAND_BOTTOM` must match `ShortOutro` in the bot, which uses them to keep the

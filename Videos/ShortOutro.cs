@@ -23,15 +23,12 @@ internal static class ShortOutro
 
     /// <summary>
     /// Top-left of a <paramref name="frameWidth"/>x<paramref name="frameHeight"/>
-    /// crop of the outro scaled to 1080x1920. Every frame
+    /// crop of the outro scaled to 1080x1920: centred, or lower down when that's
+    /// what brings the band's bottom into view. Every frame
     /// <see cref="ShortRenderer.BuildFilter"/> makes fits inside 1080x1920, so that
-    /// is always the size that covers it.
+    /// is always the size that covers it, and the crop never leaves the outro.
     /// </summary>
-    public static (int X, int Y) CropOrigin(int frameWidth, int frameHeight)
-    {
-        var x = (ShortRenderer.OutputWidth - frameWidth) / 2;
-        var y = (ShortRenderer.OutputHeight - frameHeight) / 2;
-        if (KeepBandBottom > y + frameHeight) y = KeepBandBottom - frameHeight;
-        return (x, Math.Clamp(y, 0, ShortRenderer.OutputHeight - frameHeight));
-    }
+    public static (int X, int Y) CropOrigin(int frameWidth, int frameHeight) =>
+        ((ShortRenderer.OutputWidth - frameWidth) / 2,
+         Math.Max((ShortRenderer.OutputHeight - frameHeight) / 2, KeepBandBottom - frameHeight));
 }

@@ -49,8 +49,14 @@ class OutroTests(unittest.TestCase):
             self.assertEqual(frame.getpixel(self.pill_middle())[3], 0, name)
 
     def test_the_shipped_outro_shows_the_link_for_its_last_1_4_seconds(self):
-        frame = m.render_frame(m.VARIANTS["fade-rise-glint"], m.DURATION - 1.4, self.logo, self.pill)
+        frame = m.render_frame(m.VARIANTS[m.SHIPPED_VARIANT], m.DURATION - 1.4, self.logo, self.pill)
         self.assertGreater(frame.getpixel(self.pill_middle())[3], 150)
+
+    def test_the_bot_crops_with_the_same_keep_band(self):
+        # ShortOutro in the bot keeps this band in view on square Shorts.
+        source = (m.HERE.parent.parent / "Videos" / "ShortOutro.cs").read_text(encoding="utf-8")
+        self.assertIn(f"KeepBandTop = {m.KEEP_BAND_TOP};", source)
+        self.assertIn(f"KeepBandBottom = {m.KEEP_BAND_BOTTOM};", source)
 
     def test_there_are_six_to_eight_variants(self):
         self.assertTrue(6 <= len(m.VARIANTS) <= 8)

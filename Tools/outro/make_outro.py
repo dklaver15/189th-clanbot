@@ -121,6 +121,9 @@ VARIANTS: dict[str, Variant] = {
         pill_entrance="slide", glint=Glint(start=1.6, length=0.7, strength=0.5)),
 }
 
+# The variant committed as Assets/189th_outro.webm.
+SHIPPED_VARIANT = "fade-rise-glint"
+
 
 # ─── Layers ──────────────────────────────────────────────────────────────
 

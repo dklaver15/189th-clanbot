@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text;
 using ClanGuardBot.Models;
 using Google.Apis.Auth.OAuth2;
@@ -151,19 +150,7 @@ public sealed class YouTubeUploadService
         // Byte cap, not char cap: cut a text element at a time, so an emoji is never split.
         var budget = MaxDescriptionBytes - Encoding.UTF8.GetByteCount(tail);
         if (Encoding.UTF8.GetByteCount(body) > budget)
-        {
-            var cut = 0;
-            var used = 0;
-            var elements = StringInfo.GetTextElementEnumerator(body);
-            while (elements.MoveNext())
-            {
-                var element = elements.GetTextElement();
-                used += Encoding.UTF8.GetByteCount(element);
-                if (used > budget) break;
-                cut = elements.ElementIndex + element.Length;
-            }
-            body = body[..cut].TrimEnd();
-        }
+            body = body[..TextElements.FittingLength(body, budget, Encoding.UTF8.GetByteCount)].TrimEnd();
         return body + tail;
     }
 

@@ -3016,8 +3016,9 @@ public class BotConfig
     /// <summary>
     /// Hashtags the upload form pre-fills, by the clip's channel id (a string:
     /// config keys are strings). The uploader can edit them before sending; see
-    /// <see cref="Services.Hashtags"/>. A channel not listed, or set to "",
-    /// pre-fills nothing.
+    /// <see cref="Services.Hashtags"/>. A channel not listed pre-fills nothing.
+    /// appsettings.json entries are merged into these defaults, not swapped for
+    /// them: add a channel there, or set one to "" to stop it pre-filling.
     /// </summary>
     public Dictionary<string, string> VideoHashtagsByChannel { get; set; } = new()
     {

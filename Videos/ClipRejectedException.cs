@@ -1,9 +1,9 @@
 namespace ClanGuardBot.Services;
 
 /// <summary>
-/// The clip can't be processed as asked (HDR, Start past the end, an empty result,
-/// not a video). The message is what the uploader is told; the Upload button goes
-/// live again.
+/// The clip can't be processed as asked (e.g. HDR, Start past the end, too short for
+/// a Short, not a video). The message is what the uploader is told; the Upload
+/// button goes live again.
 /// </summary>
 public sealed class ClipRejectedException(string message) : Exception(message)
 {

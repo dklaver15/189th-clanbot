@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Globalization;
 using ClanGuardBot.Data;
 using ClanGuardBot.Models;
 using ClanGuardBot.Services;
@@ -645,14 +644,7 @@ public sealed partial class VideoRepostHandler
         if (title.Length + suffix.Length <= MaxTitleLength) return title + suffix;
 
         var budget = MaxTitleLength - suffix.Length - 1; // room for the "…"
-        var cut = 0;
-        var elements = StringInfo.GetTextElementEnumerator(title);
-        while (elements.MoveNext())
-        {
-            var end = elements.ElementIndex + elements.GetTextElement().Length;
-            if (end > budget) break;
-            cut = end;
-        }
+        var cut = TextElements.FittingLength(title, budget, e => e.Length);
         return title[..cut].TrimEnd() + "…" + suffix;
     }
 

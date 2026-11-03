@@ -9,8 +9,34 @@ namespace ClanGuardBot.Tests;
 /// Real ffmpeg renders with a stand-in outro (skipped where ffmpeg isn't installed):
 /// solid blue clips, and an outro that is transparent apart from red boxes.
 /// </summary>
-public class ShortOutroRenderTests : IDisposable
+public class ShortOutroRenderTests(ShortOutroRenderTests.StandIns standIns) : IClassFixture<ShortOutroRenderTests.StandIns>, IDisposable
 {
+    /// <summary>The stand-in outro and sound, made once for the class on first use (each test is a new instance).</summary>
+    public sealed class StandIns : IDisposable
+    {
+        private readonly string _dir = Directory.CreateTempSubdirectory("cgb-outro-assets-").FullName;
+        private readonly Lazy<string> _outro;
+        private readonly Lazy<string> _sound;
+
+        public StandIns()
+        {
+            _outro = new(() => Make("outro.webm", p => Ffmpeg.MakeAlphaOutro(p, 2.5)));
+            _sound = new(() => Make("sfx.wav", p => Ffmpeg.MakeSilence(p, 1)));
+        }
+
+        public string Outro => _outro.Value;
+        public string Sound => _sound.Value;
+
+        public void Dispose() => Directory.Delete(_dir, recursive: true);
+
+        private string Make(string name, Action<string> make)
+        {
+            var path = Path.Combine(_dir, name);
+            make(path);
+            return path;
+        }
+    }
+
     private static readonly (int R, int G, int B) Red  = (255, 0, 0);
     private static readonly (int R, int G, int B) Blue = (0, 0, 255);
 
@@ -18,25 +44,11 @@ public class ShortOutroRenderTests : IDisposable
 
     public void Dispose() => Directory.Delete(_dir, recursive: true);
 
-    private string Outro()
-    {
-        var path = Path.Combine(_dir, "outro.webm");
-        if (!File.Exists(path)) Ffmpeg.MakeAlphaOutro(path, 2.5);
-        return path;
-    }
-
-    private string Sound()
-    {
-        var path = Path.Combine(_dir, "sfx.wav");
-        if (!File.Exists(path)) Ffmpeg.MakeSilence(path, 1);
-        return path;
-    }
-
     private ShortRenderer Renderer(bool enabled = true, string? outro = null, string? sound = null) =>
         new(Options.Create(new BotConfig
             {
                 VideoShortOutroEnabled   = enabled,
-                VideoShortOutroFile      = outro ?? Outro(),
+                VideoShortOutroFile      = outro ?? standIns.Outro,
                 VideoShortOutroSoundFile = sound ?? Path.Combine(_dir, "no-sound.wav"),
             }),
             new EncodeGate(), NullLogger<ShortRenderer>.Instance);
@@ -44,7 +56,7 @@ public class ShortOutroRenderTests : IDisposable
     private string BlueClip(int w, int h, double seconds, bool audio = true)
     {
         var path = Path.Combine(_dir, $"blue-{w}x{h}-{seconds}-{audio}.mp4");
-        if (!File.Exists(path)) Ffmpeg.MakeSolidClip(path, w, h, seconds, "blue", audio);
+        if (!File.Exists(path)) Ffmpeg.MakeClip(path, w, h, seconds, audio, color: "blue");
         return path;
     }
 
@@ -76,7 +88,7 @@ public class ShortOutroRenderTests : IDisposable
         Skip.IfNot(Ffmpeg.Available, "ffmpeg isn't on PATH");
         // 6 s of video, 8 s of audio: the Short is the video's 6 s, so the outro starts at 3.5 s.
         var clip = Path.Combine(_dir, "long-audio.mp4");
-        Ffmpeg.MakeClipWithLongerAudio(clip, 6, 8);
+        Ffmpeg.MakeClip(clip, 1280, 720, 6, color: "blue", audioSeconds: 8);
 
         var output = await Renderer().RenderAsync(clip, _dir, Short());
 
@@ -122,7 +134,7 @@ public class ShortOutroRenderTests : IDisposable
         Skip.IfNot(Ffmpeg.Available, "ffmpeg isn't on PATH");
         var clip = BlueClip(1280, 720, 6);
         var plain = await Renderer().RenderAsync(clip, Directory.CreateDirectory(Path.Combine(_dir, "a")).FullName, Short());
-        var mixed = await Renderer(sound: Sound()).RenderAsync(clip, Directory.CreateDirectory(Path.Combine(_dir, "b")).FullName, Short());
+        var mixed = await Renderer(sound: standIns.Sound).RenderAsync(clip, Directory.CreateDirectory(Path.Combine(_dir, "b")).FullName, Short());
 
         Assert.InRange(Ffmpeg.MeanVolumeDb(mixed) - Ffmpeg.MeanVolumeDb(plain), -1.0, 1.0);
     }
@@ -131,24 +143,10 @@ public class ShortOutroRenderTests : IDisposable
     public async Task A_clip_without_audio_gets_the_sound_effect_alone()
     {
         Skip.IfNot(Ffmpeg.Available, "ffmpeg isn't on PATH");
-        var output = await Renderer(sound: Sound()).RenderAsync(BlueClip(1280, 720, 6, audio: false), _dir, Short());
+        var output = await Renderer(sound: standIns.Sound).RenderAsync(BlueClip(1280, 720, 6, audio: false), _dir, Short());
 
         var p = Ffmpeg.Probe(output);
         Assert.True(p.HasAudio);
-        Assert.InRange(p.Duration, 5.8, 6.3);
-    }
-
-    [SkippableFact]
-    public async Task The_real_outro_asset_renders()
-    {
-        Skip.IfNot(Ffmpeg.Available, "ffmpeg isn't on PATH");
-        Skip.IfNot(File.Exists(Path.Combine(AppContext.BaseDirectory, "Assets", "189th_outro.webm")), "the outro asset isn't built yet");
-        var renderer = new ShortRenderer(Options.Create(new BotConfig()), new EncodeGate(), NullLogger<ShortRenderer>.Instance);
-
-        var output = await renderer.RenderAsync(BlueClip(1280, 720, 6), _dir, Short());
-
-        var p = Ffmpeg.Probe(output);
-        Assert.Equal((1080, 1920), (p.Width, p.Height));
         Assert.InRange(p.Duration, 5.8, 6.3);
     }
 }

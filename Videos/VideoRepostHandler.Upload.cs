@@ -175,12 +175,12 @@ public sealed partial class VideoRepostHandler
         var fields = modal.Data.Components.ToDictionary(c => c.CustomId, c => c.Value ?? string.Empty);
         if (!UploadRequest.TryParse(
                 fields.GetValueOrDefault(StartInputId, string.Empty), fields.GetValueOrDefault(EndInputId),
-                fields.GetValueOrDefault(TitleInputId, string.Empty), kind, layout, out var settings, out var error))
+                fields.GetValueOrDefault(TitleInputId, string.Empty), fields.GetValueOrDefault(HashtagsInputId),
+                kind, layout, out var settings, out var error))
         {
             await modal.RespondAsync($"{error} The Upload button is still live, so you can try again.", ephemeral: true);
             return;
         }
-        settings = settings with { Hashtags = Hashtags.Parse(fields.GetValueOrDefault(HashtagsInputId)) };
 
         await modal.DeferAsync(ephemeral: true);
 
@@ -237,18 +237,11 @@ public sealed partial class VideoRepostHandler
 
             var guildName   = _client?.GetGuild(submission.GuildId)?.Name ?? "clan";
             var description = BuildDescription(submission, guildName);
-            string fileToUpload;
-            if (isShort)
-            {
-                fileToUpload = await _shorts.RenderAsync(path, tempDir, settings);
-            }
-            else
-            {
-                fileToUpload = await _upscaler.PrepareAsync(path, tempDir, settings.StartSeconds, settings.EndSeconds);
-            }
+            var fileToUpload = isShort
+                ? await _shorts.RenderAsync(path, tempDir, settings)
+                : await _upscaler.PrepareAsync(path, tempDir, settings.StartSeconds, settings.EndSeconds);
 
-            var hashtags = isShort ? Hashtags.WithShorts(settings.Hashtags) : settings.Hashtags;
-            youtubeId = await _youtube.UploadAsync(fileToUpload, settings.Title, description, hashtags);
+            youtubeId = await _youtube.UploadAsync(fileToUpload, settings.Title, description, settings.YouTubeHashtags);
             await MarkUploadedAsync(submission.Id, youtubeId);
             if (reply is not null) await RefreshButtonsAsync(reply);
             await TryRemoveWorkingMessageAsync(working);

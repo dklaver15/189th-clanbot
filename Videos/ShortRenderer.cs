@@ -94,7 +94,9 @@ public sealed class ShortRenderer
         // The Short's length has to be known before the encode: the 5 s minimum and
         // the outro's start both need it. It's the picture's length, not the file's:
         // audio that runs on past the video would otherwise cut the outro short.
-        var duration = await MediaProbe.VideoDurationAsync(_config.FfprobePath, inputPath, _logger, ct);
+        var duration = info.VideoDuration > 0
+            ? info.VideoDuration
+            : await MediaProbe.PacketDurationAsync(_config.FfprobePath, inputPath, _logger, ct);
         if (duration <= 0)
             throw ClipRejectedException.UnknownLength();
         if (settings.StartSeconds >= duration)
@@ -221,16 +223,11 @@ public sealed class ShortRenderer
 
     /// <summary>
     /// Seconds of the clip to render from <paramref name="start"/>: up to
-    /// <paramref name="end"/> (null = the end of the clip), never past the clip's end
-    /// when its <paramref name="duration"/> is known (0 = unknown), and at most
-    /// <see cref="MaxRenderSeconds"/>.
+    /// <paramref name="end"/> (null = the end of the clip), never past the clip's
+    /// <paramref name="duration"/>, and at most <see cref="MaxRenderSeconds"/>.
     /// </summary>
-    internal static double RenderSeconds(double start, double? end, double duration)
-    {
-        var stop = end ?? double.MaxValue;
-        if (duration > 0) stop = Math.Min(stop, duration);
-        return Math.Min(stop - start, MaxRenderSeconds);
-    }
+    internal static double RenderSeconds(double start, double? end, double duration) =>
+        Math.Min(Math.Min(end ?? duration, duration) - start, MaxRenderSeconds);
 
     private static string Seconds(double s) => s.ToString("0.###", CultureInfo.InvariantCulture);
 

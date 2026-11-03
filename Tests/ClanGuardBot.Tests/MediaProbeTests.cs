@@ -34,7 +34,19 @@ public class MediaProbeTests : IDisposable
 
         var info = await Probe(path);
         Assert.InRange(info.Duration, 1.9, 2.2);
+        Assert.InRange(info.VideoDuration, 1.9, 2.2);
         Assert.Equal(30, info.Fps, precision: 1);
+    }
+
+    [SkippableFact]
+    public async Task A_matroska_clip_reports_its_video_length_from_its_tag()
+    {
+        Skip.IfNot(Ffmpeg.Available, "ffmpeg isn't on PATH");
+        // MKV and WebM keep the stream's length only in a DURATION tag ("00:00:03.000000000").
+        var path = File("plain.mkv");
+        Ffmpeg.MakeClip(path, 640, 360, 3);
+
+        Assert.InRange((await Probe(path)).VideoDuration, 2.9, 3.1);
     }
 
     [SkippableFact]
@@ -44,7 +56,9 @@ public class MediaProbeTests : IDisposable
         var path = File("live.webm");
         Ffmpeg.MakeClipWithoutDuration(path, 2);
 
-        Assert.Equal(0, (await Probe(path)).Duration);
+        var info = await Probe(path);
+        Assert.Equal(0, info.Duration);
+        Assert.Equal(0, info.VideoDuration);
     }
 
     [SkippableFact]
