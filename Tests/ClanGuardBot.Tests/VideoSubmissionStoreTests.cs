@@ -70,6 +70,23 @@ public class VideoSubmissionStoreTests
     }
 
     [Fact]
+    public async Task TryClaim_records_the_hashtags()
+    {
+        using var test = new TestDb();
+        await SeedAsync(test, Forwarded(10, 100, 0), Forwarded(10, 100, 1));
+        var tagged = AsVideo() with { Hashtags = ["Battlefield", "clutch"] };
+
+        await using (var db = test.NewContext())
+        {
+            Assert.True(await VideoSubmissionStore.TryClaimAsync(db, 10, 0, 7, "Alice", DateTime.UtcNow, tagged));
+            Assert.True(await VideoSubmissionStore.TryClaimAsync(db, 10, 1, 7, "Alice", DateTime.UtcNow, AsVideo()));
+        }
+
+        Assert.Equal("#Battlefield #clutch", (await RowAsync(test, 10, 0)).Hashtags);
+        Assert.Null((await RowAsync(test, 10, 1)).Hashtags);
+    }
+
+    [Fact]
     public async Task TryClaim_refuses_a_video_whose_original_was_deleted()
     {
         using var test = new TestDb();

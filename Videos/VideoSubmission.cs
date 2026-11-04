@@ -36,11 +36,19 @@ public enum ShortLayout
     AsIs = 2,
 }
 
-/// <summary>What the uploader chose: video or Short, the Short's framing, the trim and the title.</summary>
+/// <summary>What the uploader chose: video or Short, the Short's framing, the trim, the title and the hashtags.</summary>
 /// <param name="Layout">The Short's framing; ignored for a video.</param>
 /// <param name="EndSeconds">Null = to the end of the clip (a Short stops just under <c>UploadRequest.MaxShortSeconds</c> after the start).</param>
 public sealed record UploadSettings(
-    VideoSubmissionKind Kind, ShortLayout Layout, double StartSeconds, double? EndSeconds, string Title);
+    VideoSubmissionKind Kind, ShortLayout Layout, double StartSeconds, double? EndSeconds, string Title)
+{
+    /// <summary>Cleaned hashtags from the form, without <c>#</c> (see <c>Services.Hashtags</c>).</summary>
+    public IReadOnlyList<string> Hashtags { get; init; } = [];
+
+    /// <summary>The hashtags as uploaded: a Short's always end with <c>#Shorts</c>.</summary>
+    public IReadOnlyList<string> YouTubeHashtags =>
+        Kind == VideoSubmissionKind.Short ? Services.Hashtags.WithShorts(Hashtags) : Hashtags;
+}
 
 /// <summary>
 /// One video from a clip post in a watched channel (see
@@ -118,6 +126,9 @@ public class VideoSubmission
 
     /// <summary>The YouTube title from the form.</summary>
     public string? Title { get; set; }
+
+    /// <summary>The hashtags from the form, as <c>#a #b</c> (without <c>#Shorts</c>); null when none.</summary>
+    public string? Hashtags { get; set; }
 
     public ulong PosterUserId { get; set; }
 

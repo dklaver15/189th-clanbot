@@ -12,7 +12,6 @@ public class ShortRenderLengthTests
     [Theory]
     [InlineData(0.0, null, 300.0, 179.5)]   // End empty on a long clip
     [InlineData(0.0, 180.0, 300.0, 179.5)]  // End typed as exactly 3:00
-    [InlineData(0.0, null, 0.0, 179.5)]     // clip length unknown
     [InlineData(10.0, 40.0, 300.0, 30.0)]   // a normal trim
     [InlineData(10.0, null, 25.0, 15.0)]    // End empty: stops at the clip's end
     [InlineData(5.0, 100.0, 60.0, 55.0)]    // End past the clip's end

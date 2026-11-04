@@ -28,11 +28,11 @@ public class ShortRendererRenderTests : IDisposable
     public async Task A_landscape_clip_becomes_a_trimmed_1080x1920_short(ShortLayout layout)
     {
         Skip.IfNot(Ffmpeg.Available, "ffmpeg isn't on PATH");
-        var output = await NewRenderer().RenderAsync(Clip(1280, 720, 3), _dir, new UploadSettings(VideoSubmissionKind.Short, layout, 1, 3, "t"));
+        var output = await NewRenderer().RenderAsync(Clip(1280, 720, 7), _dir, new UploadSettings(VideoSubmissionKind.Short, layout, 1, 7, "t"));
 
         var p = Ffmpeg.Probe(output);
         Assert.Equal((1080, 1920), (p.Width, p.Height));
-        Assert.InRange(p.Duration, 1.8, 2.3);
+        Assert.InRange(p.Duration, 5.8, 6.3);
         Assert.True(p.HasAudio);
     }
 
@@ -40,7 +40,7 @@ public class ShortRendererRenderTests : IDisposable
     public async Task A_clip_without_audio_still_renders()
     {
         Skip.IfNot(Ffmpeg.Available, "ffmpeg isn't on PATH");
-        var output = await NewRenderer().RenderAsync(Clip(1280, 720, 2, audio: false), _dir,
+        var output = await NewRenderer().RenderAsync(Clip(1280, 720, 6, audio: false), _dir,
             new UploadSettings(VideoSubmissionKind.Short, ShortLayout.FullViewZoom, 0, null, "t"));
 
         var p = Ffmpeg.Probe(output);
@@ -55,7 +55,7 @@ public class ShortRendererRenderTests : IDisposable
         // Stored 1600x720 with a 90° display rotation: 720x1600 on screen, taller
         // than 9:16, so it fits by height (864x1920). Were the rotation missed, the
         // landscape full-view + zoom path would give 1080x1920 instead.
-        var output = await NewRenderer().RenderAsync(Clip(1600, 720, 1, rotation: 90), _dir,
+        var output = await NewRenderer().RenderAsync(Clip(1600, 720, 6, rotation: 90), _dir,
             new UploadSettings(VideoSubmissionKind.Short, ShortLayout.AsIs, 0, null, "t"));
 
         var p = Ffmpeg.Probe(output);
@@ -66,14 +66,34 @@ public class ShortRendererRenderTests : IDisposable
     public async Task A_start_past_the_end_of_a_clip_with_unknown_length_is_refused()
     {
         Skip.IfNot(Ffmpeg.Available, "ffmpeg isn't on PATH");
-        // ffprobe reports no duration for this file, so only the rendered output can
-        // show that nothing was left after Start; it must never reach YouTube.
+        // ffprobe reports no duration for this file, so its length is measured from
+        // its packets before anything is encoded.
         var input = Path.Combine(_dir, "live.webm");
         Ffmpeg.MakeClipWithoutDuration(input, 2);
 
         var ex = await Assert.ThrowsAsync<ClipRejectedException>(() =>
             NewRenderer().RenderAsync(input, _dir, new UploadSettings(VideoSubmissionKind.Short, ShortLayout.FullViewZoom, 5, null, "t")));
-        Assert.Equal("The clip came out empty. Is Start past the end of the clip?", ex.Message);
+        Assert.Equal("Start (0:05) is past the end of the clip (0:02).", ex.Message);
+    }
+
+    [SkippableFact]
+    public async Task A_clip_with_unknown_length_is_measured_and_rendered()
+    {
+        Skip.IfNot(Ffmpeg.Available, "ffmpeg isn't on PATH");
+        var input = Path.Combine(_dir, "live.webm");
+        Ffmpeg.MakeClipWithoutDuration(input, 6);
+
+        var output = await NewRenderer().RenderAsync(input, _dir, new UploadSettings(VideoSubmissionKind.Short, ShortLayout.FullViewZoom, 0, null, "t"));
+        Assert.InRange(Ffmpeg.Probe(output).Duration, 5.8, 6.3);
+    }
+
+    [SkippableFact]
+    public async Task A_short_under_five_seconds_is_refused()
+    {
+        Skip.IfNot(Ffmpeg.Available, "ffmpeg isn't on PATH");
+        var ex = await Assert.ThrowsAsync<ClipRejectedException>(() =>
+            NewRenderer().RenderAsync(Clip(1280, 720, 4), _dir, new UploadSettings(VideoSubmissionKind.Short, ShortLayout.FullViewZoom, 0, null, "t")));
+        Assert.Equal("A Short must be at least 0:05 long, and this one would only be 0:04.", ex.Message);
     }
 
     [SkippableFact]

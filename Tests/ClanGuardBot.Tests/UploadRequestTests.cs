@@ -6,16 +6,16 @@ namespace ClanGuardBot.Tests;
 public class UploadRequestTests
 {
     private static UploadSettings Ok(string start, string? end, string title = "Clip",
-        VideoSubmissionKind kind = VideoSubmissionKind.Short)
+        VideoSubmissionKind kind = VideoSubmissionKind.Short, string? hashtags = null)
     {
-        Assert.True(UploadRequest.TryParse(start, end, title, kind, ShortLayout.CenterCrop, out var s, out var error), error);
+        Assert.True(UploadRequest.TryParse(start, end, title, hashtags, kind, ShortLayout.CenterCrop, out var s, out var error), error);
         return s;
     }
 
     private static string Fails(string start, string? end, string title = "Clip",
         VideoSubmissionKind kind = VideoSubmissionKind.Short)
     {
-        Assert.False(UploadRequest.TryParse(start, end, title, kind, ShortLayout.CenterCrop, out _, out var error));
+        Assert.False(UploadRequest.TryParse(start, end, title, null, kind, ShortLayout.CenterCrop, out _, out var error));
         return error;
     }
 
@@ -59,6 +59,18 @@ public class UploadRequestTests
         Assert.Equal(180, Ok("0:00", "3:00").EndSeconds);
 
     [Fact]
+    public void A_short_under_five_seconds_is_refused() =>
+        Assert.Equal("A Short must be at least 0:05 long, and 0:01 to 0:03 is 0:02.", Fails("0:01", "0:03"));
+
+    [Fact]
+    public void A_short_of_exactly_five_seconds_is_allowed() =>
+        Assert.Equal(5, Ok("0:00", "0:05").EndSeconds);
+
+    [Fact]
+    public void A_video_can_be_shorter_than_five_seconds() =>
+        Assert.Equal(2, Ok("0:00", "0:02", kind: VideoSubmissionKind.Video).EndSeconds);
+
+    [Fact]
     public void A_video_can_run_past_three_minutes() =>
         Assert.Equal(600, Ok("0:00", "10:00", kind: VideoSubmissionKind.Video).EndSeconds);
 
@@ -82,4 +94,16 @@ public class UploadRequestTests
     [Fact]
     public void An_empty_title_is_refused() =>
         Assert.Equal("Title can't be empty.", Fails("0:00", null, "   "));
+
+    [Fact]
+    public void Typed_hashtags_are_cleaned_onto_the_settings() =>
+        Assert.Equal(new[] { "Battlefield", "clutch" }, Ok("0:00", null, hashtags: "#Battlefield, #clutch #battlefield").Hashtags);
+
+    [Fact]
+    public void A_short_goes_to_youtube_with_Shorts_last() =>
+        Assert.Equal(new[] { "Battlefield", "Shorts" }, Ok("0:00", null, hashtags: "#Shorts #Battlefield").YouTubeHashtags);
+
+    [Fact]
+    public void A_video_goes_to_youtube_with_its_hashtags_as_typed() =>
+        Assert.Equal(new[] { "Battlefield" }, Ok("0:00", null, kind: VideoSubmissionKind.Video, hashtags: "#Battlefield").YouTubeHashtags);
 }

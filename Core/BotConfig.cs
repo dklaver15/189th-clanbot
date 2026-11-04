@@ -2993,6 +2993,39 @@ public class BotConfig
     /// <summary>Give up on a Short render after this many minutes. Default 20.</summary>
     public int VideoShortRenderTimeoutMinutes { get; set; } = 20;
 
+    /// <summary>
+    /// Overlay the 189th outro (logo + Discord link) on the last seconds of every
+    /// Short. A missing outro file only logs a warning. Default true.
+    /// </summary>
+    public bool VideoShortOutroEnabled { get; set; } = true;
+
+    /// <summary>
+    /// The outro: 1080x1920 VP9 WebM with alpha, made by Tools/outro/make_outro.py.
+    /// Covers its own length at the end of the Short. Relative paths are next to
+    /// the bot binary.
+    /// </summary>
+    public string VideoShortOutroFile { get; set; } = "Assets/189th_outro.webm";
+
+    /// <summary>
+    /// Optional sound effect played where the outro starts, mixed in without
+    /// lowering the clip's audio. No file, no sound. Relative paths are next to
+    /// the bot binary.
+    /// </summary>
+    public string VideoShortOutroSoundFile { get; set; } = "Assets/189th_outro_sfx.wav";
+
+    /// <summary>
+    /// Hashtags the upload form pre-fills, by the clip's channel id (a string:
+    /// config keys are strings). The uploader can edit them before sending; see
+    /// <see cref="Services.Hashtags"/>. A channel not listed pre-fills nothing.
+    /// appsettings.json entries are merged into these defaults, not swapped for
+    /// them: add a channel there, or set one to "" to stop it pre-filling.
+    /// </summary>
+    public Dictionary<string, string> VideoHashtagsByChannel { get; set; } = new()
+    {
+        ["1408199889879564539"] = "#Battlefield",
+        ["1549891740993982504"] = "#WARDOGS",
+    };
+
     public bool IsYouTubeConfigured =>
         !string.IsNullOrWhiteSpace(YouTubeClientId)
         && !string.IsNullOrWhiteSpace(YouTubeClientSecret)

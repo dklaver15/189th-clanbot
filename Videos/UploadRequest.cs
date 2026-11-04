@@ -6,14 +6,18 @@ using ClanGuardBot.Models;
 namespace ClanGuardBot.Services;
 
 /// <summary>
-/// Reads the upload form (start, end, title) for a video or a Short. Times are
-/// <c>m:ss</c>, <c>mm:ss</c> or whole seconds, ASCII digits only; an empty end
-/// means the end of the clip. A Short is at most <see cref="MaxShortSeconds"/>
-/// long (YouTube's Shorts limit); a video has no limit here.
+/// Reads the upload form (start, end, title, hashtags) for a video or a Short. Times
+/// are <c>m:ss</c>, <c>mm:ss</c> or whole seconds, ASCII digits only; an empty end
+/// means the end of the clip. A Short is <see cref="MinShortSeconds"/> to
+/// <see cref="MaxShortSeconds"/> long (YouTube's Shorts limit); a video has no limit
+/// here. Hashtags are cleaned, never refused (<see cref="Hashtags.Parse"/>).
 /// </summary>
 public static partial class UploadRequest
 {
     public const int MaxShortSeconds = 180;
+
+    /// <summary>Shortest Short: the outro covers up to 3 s, so at least 2 s of clip play before it.</summary>
+    public const int MinShortSeconds = 5;
 
     // [0-9], not \d: \d also matches non-ASCII digits (e.g. full-width), which
     // int.Parse with the invariant culture then rejects.
@@ -25,7 +29,7 @@ public static partial class UploadRequest
 
     /// <summary>On failure <paramref name="error"/> is the message for the uploader.</summary>
     public static bool TryParse(
-        string start, string? end, string title, VideoSubmissionKind kind, ShortLayout layout,
+        string start, string? end, string title, string? hashtags, VideoSubmissionKind kind, ShortLayout layout,
         [MaybeNullWhen(false)] out UploadSettings settings, out string error)
     {
         settings = null;
@@ -48,9 +52,15 @@ public static partial class UploadRequest
                 error = $"End ({ClipTime.Format(parsedEnd)}) must be after Start ({ClipTime.Format(from)}).";
                 return false;
             }
+            var span = $"{ClipTime.Format(from)} to {ClipTime.Format(parsedEnd)} is {ClipTime.Format(parsedEnd - from)}";
             if (kind == VideoSubmissionKind.Short && parsedEnd - from > MaxShortSeconds)
             {
-                error = $"A Short can be at most {ClipTime.Format(MaxShortSeconds)} long, and {ClipTime.Format(from)} to {ClipTime.Format(parsedEnd)} is {ClipTime.Format(parsedEnd - from)}.";
+                error = $"A Short can be at most {ClipTime.Format(MaxShortSeconds)} long, and {span}.";
+                return false;
+            }
+            if (kind == VideoSubmissionKind.Short && parsedEnd - from < MinShortSeconds)
+            {
+                error = $"A Short must be at least {ClipTime.Format(MinShortSeconds)} long, and {span}.";
                 return false;
             }
             to = parsedEnd;
@@ -63,7 +73,7 @@ public static partial class UploadRequest
             return false;
         }
 
-        settings = new UploadSettings(kind, layout, from, to, trimmedTitle);
+        settings = new UploadSettings(kind, layout, from, to, trimmedTitle) { Hashtags = Hashtags.Parse(hashtags) };
         error = string.Empty;
         return true;
     }

@@ -11,7 +11,7 @@ namespace ClanGuardBot.Handlers;
 
 /// <summary>
 /// The Upload button: Upload click → a private choice (YouTube video, or a Short
-/// and its framing) → a form (start, end, title) → prepare (<see cref="VideoUpscaler"/>)
+/// and its framing) → a form (start, end, title, hashtags) → prepare (<see cref="VideoUpscaler"/>)
 /// or render (<see cref="ShortRenderer"/>) → upload. Opening a form must be an
 /// interaction's first response, so nothing slow happens before it; the clip's
 /// size comes from the row (Discord's attachment metadata).
@@ -24,6 +24,7 @@ public sealed partial class VideoRepostHandler
     private const string StartInputId = "start";
     private const string EndInputId   = "end";
     private const string TitleInputId = "title";
+    private const string HashtagsInputId = "hashtags";
 
     private const string OldMessageReply =
         "This clip was posted before uploads moved to the upload channel, so it can't be uploaded from here.";
@@ -152,6 +153,10 @@ public sealed partial class VideoRepostHandler
                 minLength: 0, maxLength: 8, required: false)
             .AddTextInput(label: "Title", customId: TitleInputId, style: TextInputStyle.Short,
                 minLength: 1, maxLength: MaxTitleLength, required: true, value: title)
+            // Pre-filled from the clip's channel (BotConfig.VideoHashtagsByChannel).
+            .AddTextInput(label: "Hashtags", customId: HashtagsInputId, style: TextInputStyle.Short,
+                placeholder: "#Battlefield #clutch", minLength: 0, maxLength: 300, required: false,
+                value: Hashtags.DefaultFor(_config.VideoHashtagsByChannel, row.OriginalChannelId))
             .Build();
     }
 
@@ -170,7 +175,8 @@ public sealed partial class VideoRepostHandler
         var fields = modal.Data.Components.ToDictionary(c => c.CustomId, c => c.Value ?? string.Empty);
         if (!UploadRequest.TryParse(
                 fields.GetValueOrDefault(StartInputId, string.Empty), fields.GetValueOrDefault(EndInputId),
-                fields.GetValueOrDefault(TitleInputId, string.Empty), kind, layout, out var settings, out var error))
+                fields.GetValueOrDefault(TitleInputId, string.Empty), fields.GetValueOrDefault(HashtagsInputId),
+                kind, layout, out var settings, out var error))
         {
             await modal.RespondAsync($"{error} The Upload button is still live, so you can try again.", ephemeral: true);
             return;
@@ -231,18 +237,11 @@ public sealed partial class VideoRepostHandler
 
             var guildName   = _client?.GetGuild(submission.GuildId)?.Name ?? "clan";
             var description = BuildDescription(submission, guildName);
-            string fileToUpload;
-            if (isShort)
-            {
-                fileToUpload = await _shorts.RenderAsync(path, tempDir, settings);
-                description += "\n\n#Shorts";
-            }
-            else
-            {
-                fileToUpload = await _upscaler.PrepareAsync(path, tempDir, settings.StartSeconds, settings.EndSeconds);
-            }
+            var fileToUpload = isShort
+                ? await _shorts.RenderAsync(path, tempDir, settings)
+                : await _upscaler.PrepareAsync(path, tempDir, settings.StartSeconds, settings.EndSeconds);
 
-            youtubeId = await _youtube.UploadAsync(fileToUpload, settings.Title, description);
+            youtubeId = await _youtube.UploadAsync(fileToUpload, settings.Title, description, settings.YouTubeHashtags);
             await MarkUploadedAsync(submission.Id, youtubeId);
             if (reply is not null) await RefreshButtonsAsync(reply);
             await TryRemoveWorkingMessageAsync(working);

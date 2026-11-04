@@ -2526,6 +2526,9 @@ namespace ClanGuardBot.Migrations
                     b.Property<ulong>("GuildId")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("Hashtags")
+                        .HasColumnType("TEXT");
+
                     b.Property<int?>("Height")
                         .HasColumnType("INTEGER");
 
