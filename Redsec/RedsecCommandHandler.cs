@@ -32,7 +32,7 @@ public sealed partial class RedsecCommandHandler
     private const string SeasonOption = "season";
     private const string WinOption = "win";
     private const int MaxSeason = 99;
-    private const int OperatorsShown = 12;
+    private const int OperatorsShown = 25;
     private const int RecentWinsShown = 5;
     private const int RequiredClanPlayers = 3;
     private const int MaxEngagements = 500;
@@ -587,9 +587,9 @@ public sealed partial class RedsecCommandHandler
         var fileName = $"redsec-season-{season}.png";
         if (png is null)
         {
-            embed.AddField("Top operators", string.Join("\n",
-                operators.Take(10).Select(o => $"**#{o.Place}** <@{o.Member.UserId}> — {o.Wins} " +
-                    $"win{(o.Wins == 1 ? "" : "s")}{(showEngagements ? $" · {o.Engagements} eng" : "")}")));
+            // In the description, not a field: 25 rows overflow a field's 1,024 characters.
+            embed.Description += "\n\n**Top operators**\n" +
+                                 FormatOperatorList(operators.Take(OperatorsShown), showEngagements);
             embed.AddField("Recent wins", string.Join("\n", recent.Select(FormatWinLine)));
         }
         else
@@ -757,6 +757,10 @@ public sealed partial class RedsecCommandHandler
             ephemeral: true, allowedMentions: AllowedMentions.None);
         return false;
     }
+
+    internal static string FormatOperatorList(IEnumerable<RedsecOperatorLine> operators, bool showEngagements) =>
+        string.Join("\n", operators.Select(o => $"**#{o.Place}** <@{o.Member.UserId}> — {o.Wins} " +
+            $"win{(o.Wins == 1 ? "" : "s")}{(showEngagements ? $" · {o.Engagements} eng" : "")}"));
 
     private static string Truncate(string text, int max)
     {
