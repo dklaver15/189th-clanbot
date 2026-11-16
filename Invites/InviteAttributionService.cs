@@ -80,9 +80,9 @@ public sealed class InviteAttributionService
 
     private async Task OnReady()
     {
-        // Hydrate every connected guild. Keeps the bot working if it's ever
-        // run against more than one guild without any further wiring.
-        foreach (var guild in _client.Guilds)
+        // One cache for the clan's server only: hydrating or attributing in
+        // another server would overwrite it with that server's invites.
+        foreach (var guild in _client.HomeGuildOnly(_config))
         {
             await _cache.HydrateAsync(guild);
         }
@@ -90,6 +90,8 @@ public sealed class InviteAttributionService
 
     private async Task OnJoinedGuild(SocketGuild guild)
     {
+        if (!IsHomeGuild(guild)) return;
+
         // Bot was just added to a new guild; hydrate so attribution starts
         // working from the next UserJoined onward.
         await _cache.HydrateAsync(guild);
@@ -152,7 +154,7 @@ public sealed class InviteAttributionService
 
     private Task OnUserJoined(SocketGuildUser user)
     {
-        if (user.IsBot) return Task.CompletedTask;
+        if (user.IsBot || !IsHomeGuild(user.Guild)) return Task.CompletedTask;
         // Fire-and-forget; gateway handlers must not block the event loop.
         _ = AttributeAsync(user);
         return Task.CompletedTask;
@@ -281,6 +283,8 @@ public sealed class InviteAttributionService
             ? new(code, null, LabelDisboard, false)
             : new(code, inviterId, LabelUnknown, false);
     }
+
+    private bool IsHomeGuild(SocketGuild guild) => _client.GetHomeGuild(_config)?.Id == guild.Id;
 
     private async Task<string?> ResolveLabelAsync(ulong guildId, string code)
     {

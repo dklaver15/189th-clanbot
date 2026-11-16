@@ -78,7 +78,7 @@ public class HistoryBackfillService : BackgroundService
             }
         }
 
-        foreach (var guild in _client.Guilds)
+        foreach (var guild in _client.HomeGuildOnly(_config))
         {
             _logger.LogInformation("Backfilling guild {Guild}...", guild.Name);
 

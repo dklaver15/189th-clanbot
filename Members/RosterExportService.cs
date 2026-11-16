@@ -112,7 +112,7 @@ public class RosterExportService : BackgroundService
         var rankRoles = _config.GetRankRolesList();
         var now = DateTime.UtcNow;
 
-        foreach (var guild in _client.Guilds)
+        foreach (var guild in _client.HomeGuildOnly(_config))
         {
             // Download members to ensure the cache is fresh
             await guild.DownloadUsersAsync();

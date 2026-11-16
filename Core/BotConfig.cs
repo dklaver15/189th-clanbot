@@ -13,9 +13,10 @@ public class BotConfig
     public string Token { get; set; } = string.Empty;
 
     /// <summary>
-    /// The clan's Discord server. Jobs that work on a single server (weekly
-    /// briefing, roster and rank reconcilers, /health) use this one. 0 = the only
-    /// server the bot is in; with 0 and more than one server they skip.
+    /// The clan's Discord server. Background jobs (weekly briefing, AWOL check,
+    /// auto-promotion, roster export, XP, reconcilers, invite tracking) run only
+    /// here. 0 = the only server the bot is in; with 0 and more than one server
+    /// they skip.
     /// </summary>
     public ulong GuildId { get; set; }
 

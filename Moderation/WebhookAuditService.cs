@@ -158,7 +158,7 @@ public sealed class WebhookAuditService : BackgroundService
                 mode);
         }
 
-        foreach (var guild in _client.Guilds)
+        foreach (var guild in _client.HomeGuildOnly(_config))
         {
             if (ct.IsCancellationRequested) return;
 

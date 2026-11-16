@@ -289,7 +289,7 @@ public class AutoPromotionService : BackgroundService
         _logger.LogInformation("Starting auto-promotion cycle at {Time} UTC (DryRun={DryRun})",
             DateTime.UtcNow, _config.AutoPromotionDryRun);
 
-        foreach (var guild in _client.Guilds)
+        foreach (var guild in _client.HomeGuildOnly(_config))
         {
             try
             {

@@ -384,7 +384,7 @@ public class DiscordBotService : IHostedService
         var home = _client.GetHomeGuild(_config);
         if (home is null)
             _logger.LogError(
-                "Clan server not found (BotConfig:GuildId = {GuildId}); single-server jobs like the weekly briefing will not run",
+                "Clan server not found (BotConfig:GuildId = {GuildId}); background jobs like the weekly briefing will not run",
                 _config.GuildId);
         foreach (var other in _client.Guilds.Where(g => g.Id != home?.Id))
             _logger.LogWarning("Bot is also in another server: '{Name}' ({Id}, {Members} members)",
@@ -400,7 +400,7 @@ public class DiscordBotService : IHostedService
         // log, and shown on /health for as long as the problem exists.
         try
         {
-            foreach (var guild in _client.Guilds)
+            foreach (var guild in _client.HomeGuildOnly(_config))
             {
                 var roleIssues = RoleConfigValidator.Validate(_config, guild);
 

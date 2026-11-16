@@ -140,7 +140,7 @@ public sealed class XpAccrualService : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            foreach (var guild in _client.Guilds.ToList())
+            foreach (var guild in _client.HomeGuildOnly(_config))
             {
                 try { await RunGuildLockedAsync(guild, stoppingToken); }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }

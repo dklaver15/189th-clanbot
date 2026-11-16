@@ -142,7 +142,7 @@ public class AwolCheckService : BackgroundService
     {
         _logger.LogInformation("Starting AWOL check cycle at {Time}", DateTime.UtcNow);
 
-        foreach (var guild in _client.Guilds)
+        foreach (var guild in _client.HomeGuildOnly(_config))
         {
             try
             {

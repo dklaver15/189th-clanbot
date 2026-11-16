@@ -176,7 +176,7 @@ public sealed class XpLeaderboardService : BackgroundService
         await _refreshLock.WaitAsync(ct);
         try
         {
-            foreach (var guild in _client.Guilds.ToList())
+            foreach (var guild in _client.HomeGuildOnly(_config))
             {
                 if (guild.GetChannel(channelId) is not SocketTextChannel channel) continue;
                 try { await MaintainChannelAsync(guild, channel, ct); }

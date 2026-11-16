@@ -13,6 +13,10 @@ public static class HomeGuild
     public static SocketGuild? GetHomeGuild(this DiscordSocketClient client, BotConfig config) =>
         Resolve(config.GuildId, client.Guilds, g => g.Id);
 
+    /// <summary>The clan's server as a list of zero or one, for jobs that loop over servers.</summary>
+    public static IReadOnlyList<SocketGuild> HomeGuildOnly(this DiscordSocketClient client, BotConfig config) =>
+        client.GetHomeGuild(config) is { } guild ? [guild] : [];
+
     internal static T? Resolve<T>(ulong configuredId, IReadOnlyCollection<T> guilds, Func<T, ulong> idOf)
         where T : class =>
         configuredId != 0

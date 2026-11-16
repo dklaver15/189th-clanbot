@@ -113,7 +113,7 @@ public sealed class XpSeasonSchedulerService : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            foreach (var guild in _client.Guilds.ToList())
+            foreach (var guild in _client.HomeGuildOnly(_config))
             {
                 try
                 {

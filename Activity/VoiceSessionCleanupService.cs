@@ -128,7 +128,7 @@ public class VoiceSessionCleanupService : BackgroundService
 
         // ── AFK channel sessions ──
         var afkDeleted = 0;
-        foreach (var guild in _client.Guilds)
+        foreach (var guild in _client.HomeGuildOnly(_config))
         {
             if (guild.AFKChannel is not { } afk) continue;
             afkDeleted += await db.VoiceSessions
@@ -210,7 +210,7 @@ public class VoiceSessionCleanupService : BackgroundService
             .Select(v => (v.GuildId, v.UserId))
             .ToHashSet();
         var opened = 0;
-        foreach (var guild in _client.Guilds)
+        foreach (var guild in _client.HomeGuildOnly(_config))
         {
             var afkId = guild.AFKChannel?.Id;
             foreach (var member in guild.Users)
