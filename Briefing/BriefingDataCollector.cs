@@ -117,18 +117,11 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
             "Collecting briefing data for {Start:yyyy-MM-dd} → {End:yyyy-MM-dd}",
             weekStart, weekEnd);
 
-        var guild = _client.Guilds.FirstOrDefault();
-        if (guild is null)
-        {
-            _logger.LogWarning("BriefingDataCollector: no Discord guild connected — returning empty context");
-            return EmptyContext(weekStart, weekEnd);
-        }
-        if (_client.Guilds.Count > 1)
-        {
-            _logger.LogWarning(
-                "BriefingDataCollector: bot is in {Count} guilds; only operating on '{First}'",
-                _client.Guilds.Count, guild.Name);
-        }
+        // Throw rather than post a briefing of zeros; a failed scheduled run is
+        // retried by the startup catch-up.
+        var guild = _client.GetHomeGuild(_config)
+            ?? throw new InvalidOperationException(
+                $"Can't find the clan's server (BotConfig:GuildId = {_config.GuildId}; bot is in {_client.Guilds.Count} server(s)).");
 
         await guild.DownloadUsersAsync();
 
@@ -1027,16 +1020,6 @@ public sealed class BriefingDataCollector : IBriefingDataCollector
             return fallback;
         }
     }
-
-    private static BriefingContext EmptyContext(DateTime weekStart, DateTime weekEnd) => new()
-    {
-        WeekStart = weekStart,
-        WeekEnd = weekEnd,
-        ActiveMemberCount = 0,
-        EventsHeld = 0,
-        AverageAttendancePercent = 0d,
-        NewRecruits = 0
-    };
 
     private sealed record RosterCounts(
         int TotalMembers,

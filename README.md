@@ -124,7 +124,7 @@ dotnet build -c Debug
 dotnet run
 ```
 
-A local run needs a bot token (`BotConfig__Token`), a `google-credentials.json` in the working directory, and an Anthropic key (`Claude__ApiKey`); the bot doesn't start without them. Use a test server and your own bot application, not the production one.
+A local run needs a bot token (`BotConfig__Token`), a `google-credentials.json` in the working directory, and an Anthropic key (`Claude__ApiKey`); the bot doesn't start without them. Use a test server and your own bot application, not the production one, and set `BotConfig__GuildId` to the test server's ID (or `0`).
 
 To add a migration after changing an entity:
 

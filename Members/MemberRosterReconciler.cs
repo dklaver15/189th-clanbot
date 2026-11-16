@@ -138,10 +138,10 @@ public class MemberRosterReconciler : BackgroundService
 
     private async Task ReconcileAsync(CancellationToken ct)
     {
-        var guild = _client.Guilds.FirstOrDefault();
+        var guild = _client.GetHomeGuild(_config);
         if (guild is null)
         {
-            _logger.LogWarning("Roster reconciler: no guild connected — skipping sweep");
+            _logger.LogWarning("Roster reconciler: clan server not found (check BotConfig:GuildId), skipping sweep");
             return;
         }
 

@@ -208,10 +208,10 @@ public class RankReconcileService : BackgroundService
 
     private async Task SweepAsync(CancellationToken ct)
     {
-        var guild = _client.Guilds.FirstOrDefault();
+        var guild = _client.GetHomeGuild(_config);
         if (guild is null)
         {
-            _logger.LogWarning("Rank reconcile: no guild connected, skipping sweep");
+            _logger.LogWarning("Rank reconcile: clan server not found (check BotConfig:GuildId), skipping sweep");
             return;
         }
 

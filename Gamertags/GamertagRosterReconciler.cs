@@ -94,10 +94,10 @@ public sealed class GamertagRosterReconciler : BackgroundService
 
     private async Task ReconcileAsync()
     {
-        var guild = _client.Guilds.FirstOrDefault();
+        var guild = _client.GetHomeGuild(_config);
         if (guild is null)
         {
-            _logger.LogWarning("Gamertag reconcile: no guild connected — skipping sweep");
+            _logger.LogWarning("Gamertag reconcile: clan server not found (check BotConfig:GuildId), skipping sweep");
             return;
         }
 

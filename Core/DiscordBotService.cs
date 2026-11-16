@@ -381,6 +381,15 @@ public class DiscordBotService : IHostedService
         _logger.LogInformation("Bot is connected as {BotUser} to {GuildCount} guild(s)",
             _client.CurrentUser, _client.Guilds.Count);
 
+        var home = _client.GetHomeGuild(_config);
+        if (home is null)
+            _logger.LogError(
+                "Clan server not found (BotConfig:GuildId = {GuildId}); single-server jobs like the weekly briefing will not run",
+                _config.GuildId);
+        foreach (var other in _client.Guilds.Where(g => g.Id != home?.Id))
+            _logger.LogWarning("Bot is also in another server: '{Name}' ({Id}, {Members} members)",
+                other.Name, other.Id, other.MemberCount);
+
         // ── Role config sanity check ──
         // Several features resolve roles by NAME out of config (RankRoles,
         // ShortWindowRoles, ExemptRoles, AwolRoleName) and treat "no match" as

@@ -12,6 +12,13 @@ public class BotConfig
     /// <summary>Discord bot token.</summary>
     public string Token { get; set; } = string.Empty;
 
+    /// <summary>
+    /// The clan's Discord server. Jobs that work on a single server (weekly
+    /// briefing, roster and rank reconcilers, /health) use this one. 0 = the only
+    /// server the bot is in; with 0 and more than one server they skip.
+    /// </summary>
+    public ulong GuildId { get; set; }
+
     /// <summary>Name of the role to assign to inactive users.</summary>
     public string AwolRoleName { get; set; } = "AWOL";
 

@@ -145,7 +145,7 @@ public class HealthCommandHandler
         // ── Discord ──
         var gatewayState = _client.ConnectionState.ToString();
         var latency = _client.Latency;
-        var guild = _client.Guilds.FirstOrDefault();
+        var guild = _client.GetHomeGuild(_config);
         var guildLabel = guild is null
             ? "—"
             : $"{guild.Name} ({guild.MemberCount} members)";
