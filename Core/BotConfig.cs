@@ -3034,13 +3034,10 @@ public class BotConfig
     // ─── Helpers ─────────────────────────────────────────────────────
 
     /// <summary>
-    /// True if invites created by this user ID should be excluded from
-    /// the tracked-invite framework — neither surfaced in /invite list
-    /// nor recorded in InviteJoins on attribution. Currently scoped to
-    /// the Disboard bot, which creates short-lived invites as part of
-    /// its /bump directory listing flow; those joins are operational
-    /// noise rather than recruitment data and would otherwise pollute
-    /// /invite stats and the briefing's recruitment-sources section.
+    /// True if invites created by this user ID are hidden from /invite list.
+    /// Currently the Disboard bot, which creates invites for its directory
+    /// listing. Joins through them are still recorded, under the "Disboard"
+    /// label, with no member credited as the referrer.
     ///
     /// Hardcoded against DisboardBotId rather than a configurable list
     /// — if a future need arises to ignore another bot, this becomes a

@@ -45,7 +45,7 @@ internal static class BriefingInviteSection
     {
         // ── Sources by label ────────────────────────────────────────
         // Single GROUP BY on InviteJoin. We include sentinel labels
-        // ("Vanity", "Unknown", "Ambiguous", "Unattributed") in the result
+        // ("Vanity", "Disboard", "Unknown", "Ambiguous", "Unattributed") in the result
         // — the prompt decides whether to highlight them. Filtering them
         // out here would hide useful operational signal (e.g. a sudden
         // spike in "Unknown" suggests an invite was created via the UI

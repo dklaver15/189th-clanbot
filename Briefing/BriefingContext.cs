@@ -105,7 +105,7 @@ public sealed record BriefingContext
     /// Sorted descending by JoinCount in the collector. Empty when no joins
     /// happened (or none were attributable). Labels are the verbatim values
     /// from InviteJoin.LabelSnapshot — both real labels ("Website") and
-    /// sentinels ("Vanity", "Unknown", "Ambiguous", "Unattributed") all
+    /// sentinels ("Vanity", "Disboard", "Unknown", "Ambiguous", "Unattributed") all
     /// surface here. Claude can choose to call out sentinels or skip them
     /// based on the prompt guidance.
     /// </summary>
@@ -259,8 +259,8 @@ public sealed record WeekOverWeekDeltas(
 /// </summary>
 /// <param name="Label">
 /// The InviteJoin.LabelSnapshot value. Real labels ("Website", "Facebook")
-/// surface alongside sentinel values ("Vanity", "Unknown", "Ambiguous",
-/// "Unattributed") so Claude has the full picture.
+/// surface alongside sentinel values ("Vanity", "Disboard", "Unknown",
+/// "Ambiguous", "Unattributed") so Claude has the full picture.
 /// </param>
 /// <param name="JoinCount">How many joins were tagged with this label in the briefing week.</param>
 public sealed record RecruitmentSourceItem(

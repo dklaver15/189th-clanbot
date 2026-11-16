@@ -40,6 +40,7 @@ public sealed class InviteAttributionService
     public const string LabelUnknown      = "Unknown";
     public const string LabelAmbiguous    = "Ambiguous";
     public const string LabelUnattributed = "Unattributed";
+    public const string LabelDisboard     = "Disboard";
 
     private readonly IServiceProvider _services;
     private readonly DiscordSocketClient _client;
@@ -218,69 +219,19 @@ public sealed class InviteAttributionService
                                   && currentVanityUses.Value > cachedVanity.Value;
 
             // ── Resolve outcome ──────────────────────────────────────
-            string? winningCode = null;
-            ulong? inviterId = null;
-            string label;
-            bool ambiguous = false;
+            var outcome = ResolveOutcome(
+                increased.Select(i => (i.Code, i.Inviter?.Id)).ToList(),
+                vanityIncreased,
+                _config.IsIgnoredInviter);
 
-            int totalIncrements = increased.Count + (vanityIncreased ? 1 : 0);
-
-            if (totalIncrements == 1)
-            {
-                if (vanityIncreased)
-                {
-                    label = LabelVanity;
-                }
-                else
-                {
-                    var winner = increased[0];
-                    winningCode = winner.Code;
-                    inviterId = winner.Inviter?.Id;
-
-                    // Resolve label from the InviteSource row, if any.
-                    label = await ResolveLabelAsync(guild.Id, winner.Code) ?? LabelUnknown;
-                }
-            }
-            else if (totalIncrements == 0)
-            {
-                // Could be a single-use invite that was already revoked by
-                // Discord between the join and our fetch — its row vanishes
-                // from GetInvitesAsync without any visible diff. Could also
-                // be server-discovery or any future Discord join path we
-                // don't track. Either way, no signal.
-                label = LabelUnattributed;
-            }
-            else
-            {
-                // 2+ counters bumped — multiple users joined within our
-                // serialization window, or vanity AND a regular invite
-                // happened to bump together (rare race). We can't tell
-                // whose join was whose.
-                label = LabelAmbiguous;
-                ambiguous = true;
-            }
-
-            // ── Ignored-inviter short-circuit ───────────────────────
-            // Some bots (Disboard's bump flow) create short-lived invites
-            // as a side effect. Joins through those are operational noise,
-            // not recruitment data — we don't want them in /invite stats,
-            // /invite info, or the briefing. The cache must still roll
-            // forward so the *next* genuine join still diffs cleanly; we
-            // just skip writing the InviteJoin row.
-            if (inviterId.HasValue && _config.IsIgnoredInviter(inviterId.Value))
-            {
-                _cache.ReplaceAll(
-                    currentInvites.Select(i => (i.Code, i.Uses ?? 0)),
-                    currentVanityUses);
-
-                _logger.LogInformation(
-                    "Skipped attribution for {User}: invite {Code} was created by an ignored bot inviter ({InviterId})",
-                    user.Username, winningCode ?? "?", inviterId.Value);
-                return;
-            }
+            var winningCode = outcome.Code;
+            var inviterId = outcome.InviterId;
+            var label = winningCode is null
+                ? outcome.Label
+                : await ResolveLabelAsync(guild.Id, winningCode) ?? outcome.Label;
 
             // ── Persist + roll cache forward ─────────────────────────
-            await WriteJoinAsync(guild.Id, user, winningCode, label, inviterId, ambiguous);
+            await WriteJoinAsync(guild.Id, user, winningCode, label, inviterId, outcome.Ambiguous);
 
             _cache.ReplaceAll(
                 currentInvites.Select(i => (i.Code, i.Uses ?? 0)),
@@ -299,6 +250,36 @@ public sealed class InviteAttributionService
         {
             sem.Release();
         }
+    }
+
+    internal sealed record JoinOutcome(string? Code, ulong? InviterId, string Label, bool Ambiguous);
+
+    /// <summary>
+    /// Decides a join's attribution from which use counts went up. When Code is
+    /// set, Label is the fallback for a code with no InviteSource label.
+    /// </summary>
+    internal static JoinOutcome ResolveOutcome(
+        IReadOnlyList<(string Code, ulong? InviterId)> increased,
+        bool vanityIncreased,
+        Func<ulong, bool> isDisboard)
+    {
+        var totalIncrements = increased.Count + (vanityIncreased ? 1 : 0);
+
+        // No counter moved: a single-use invite Discord already deleted, or a
+        // join path we can't see (e.g. server discovery).
+        if (totalIncrements == 0) return new(null, null, LabelUnattributed, false);
+
+        // Several moved at once, so we can't tell which one this user used.
+        if (totalIncrements > 1) return new(null, null, LabelAmbiguous, true);
+
+        if (vanityIncreased) return new(null, null, LabelVanity, false);
+
+        var (code, inviterId) = increased[0];
+
+        // A DISBOARD-listing join is a real join, but not a member's referral.
+        return inviterId is { } id && isDisboard(id)
+            ? new(code, null, LabelDisboard, false)
+            : new(code, inviterId, LabelUnknown, false);
     }
 
     private async Task<string?> ResolveLabelAsync(ulong guildId, string code)

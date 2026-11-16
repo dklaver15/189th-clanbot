@@ -731,10 +731,8 @@ public class InviteCommandHandler
         // links any officer would pick up and share, just operational
         // artifacts. Identified by Inviter.Id matching the well-known
         // Disboard bot ID we already track for BumpReminderHandler.
-        // Pairs with the matching skip in
-        // InviteAttributionService.AttributeAsync — joins via Disboard
-        // codes get recorded as Unattributed rather than attributed
-        // through to a Disboard-owned code as "Unknown".
+        // Joins through them are still recorded, under the "Disboard"
+        // label (see InviteAttributionService.ResolveOutcome).
         liveInvites = liveInvites
             .Where(i => i.Inviter?.Id != _config.DisboardBotId)
             .ToList();
@@ -766,8 +764,7 @@ public class InviteCommandHandler
             // Skip invites created by ignored bots (e.g. Disboard's /bump
             // flow). They're operational noise, not recruitment data, and
             // they'd otherwise clutter /invite list with rows officers
-            // can't act on. Same filter that InviteAttributionService
-            // applies on the attribution side, kept consistent here.
+            // can't act on.
             if (live.Inviter is not null && _config.IsIgnoredInviter(live.Inviter.Id))
                 continue;
 
@@ -2282,7 +2279,8 @@ public class InviteCommandHandler
         label.Equals(InviteAttributionService.LabelVanity,       StringComparison.OrdinalIgnoreCase) ||
         label.Equals(InviteAttributionService.LabelUnknown,      StringComparison.OrdinalIgnoreCase) ||
         label.Equals(InviteAttributionService.LabelAmbiguous,    StringComparison.OrdinalIgnoreCase) ||
-        label.Equals(InviteAttributionService.LabelUnattributed, StringComparison.OrdinalIgnoreCase);
+        label.Equals(InviteAttributionService.LabelUnattributed, StringComparison.OrdinalIgnoreCase) ||
+        label.Equals(InviteAttributionService.LabelDisboard,     StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Parse simple duration strings: "7d", "12h", "30m", "3600s", or a raw

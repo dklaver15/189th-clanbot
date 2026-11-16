@@ -19,6 +19,9 @@ namespace ClanGuardBot.Models;
 /// Exactly one of these LabelSnapshot values is written:
 ///   • A real label, e.g. "Website"  — clean attribution to a known InviteSource.
 ///   • "Vanity"                       — vanity URL use count incremented by 1.
+///   • "Disboard"                     — an invite created by the DISBOARD bot for
+///                                      its directory listing. InviterDiscordId is
+///                                      null, so no member is credited.
 ///   • "Unknown"                      — a regular invite's count incremented by 1
 ///                                      but we have no InviteSource for that code.
 ///                                      Officer can run /invite assign to label it
@@ -62,7 +65,7 @@ public class InviteJoin
 
     /// <summary>
     /// Frozen copy of InviteSource.Label at join time, OR a special sentinel
-    /// ("Vanity", "Unknown", "Ambiguous", "Unattributed"). Always populated.
+    /// ("Vanity", "Disboard", "Unknown", "Ambiguous", "Unattributed"). Always populated.
     /// Reports group by this column; never join back to InviteSource for the
     /// label.
     /// </summary>
@@ -70,7 +73,7 @@ public class InviteJoin
 
     /// <summary>
     /// The Discord user who created the invite (from IInviteMetadata.Inviter).
-    /// Null for vanity, ambiguous, unknown, or any case where the inviter
+    /// Null for vanity, DISBOARD, ambiguous, unknown, or any case where the inviter
     /// couldn't be resolved. Used for the "top member referrers" briefing
     /// section so we can credit individual members for their personal links.
     /// </summary>

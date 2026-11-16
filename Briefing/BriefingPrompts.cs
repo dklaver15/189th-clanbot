@@ -188,7 +188,8 @@ internal static class BriefingPrompts
         2. ### 📨 Recruitment Sources — joins this week, broken down by labeled invite. One bullet
            per `recruitment_sources` entry: **label** — N joins. The list is the top labels only, so it can sum
            to less than `total_joins`; don't present the sum as the total. After the labels, if `top_referrers`
-           is non-empty, add a short line: "Top referrers: **gamertag** (N), **gamertag** (N)." A
+           is non-empty, add a short line: "Top referrers: **gamertag** (N), **gamertag** (N)."
+           "Disboard" means joins from the DISBOARD server listing: a real source, report it like any label. A
            large "Unknown" or "Unattributed" count is worth flagging as an aside ("4 joins via
            Unknown — likely invites created in Discord UI; consider /invite assign"). If
            `recruitment_sources` is empty, write "None this week."
