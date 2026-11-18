@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.RegularExpressions;
 using ClanGuardBot.Data;
 using ClanGuardBot.Models;
@@ -74,10 +75,11 @@ public sealed class PollPublisher
         var now      = DateTime.UtcNow;
         var closesAt = now.AddHours(Math.Clamp(d.DurationHours, MinDurationHours, MaxDurationHours));
 
-        // Native polls get their mention tokens resolved to readable names up front
-        // (see ResolveMentions), before anything is posted, persisted or announced —
-        // so the poll, the cross-post and every later echo all read identically.
-        if (d.Kind != PollKind.Anonymous) d = ResolveMentions(d);
+        // Native polls get their mention and timestamp tokens resolved to readable
+        // text up front (see PrepareNativeText), before anything is posted, persisted
+        // or announced — so the poll, the cross-post and every later echo all read
+        // identically.
+        if (d.Kind != PollKind.Anonymous) d = PrepareNativeText(d);
 
         var poll = d.Kind == PollKind.Anonymous
             ? await PublishAnonymousAsync(channel, d, now, closesAt)
@@ -96,7 +98,7 @@ public sealed class PollPublisher
 
     private async Task<Poll> PublishNativeAsync(IMessageChannel channel, PollDraft d, DateTime now, DateTime closesAt)
     {
-        // NOTE: the draft arrives already mention-resolved (PublishAsync does it
+        // NOTE: the draft arrives already mention- and timestamp-resolved (PublishAsync does it
         // before the branch, so the cross-post sees the same text).
 
         // A native poll can't share its message with an attachment, so a creator-
@@ -252,31 +254,36 @@ public sealed class PollPublisher
         return poll;
     }
 
-    // ─── Mention resolution (native only) ──────────────────────────────────
+    // ─── Mention + timestamp resolution (native only) ──────────────────────
 
     /// <summary>
     /// Returns a copy of the draft with mention tokens in the question and option
-    /// labels rewritten to readable names (<c>&lt;#123&gt;</c> → <c>#general</c>).
-    /// Description, emoji and banner are carried through untouched.
+    /// labels rewritten to readable names (<c>&lt;#123&gt;</c> → <c>#general</c>)
+    /// and timestamp tokens rewritten to Eastern time. Each timestamp is also added
+    /// to the description as a real token, so viewers still see it in their own zone.
+    /// Emoji and banner are carried through untouched.
     ///
     /// Native polls only. Discord renders a native poll's question and answers as
-    /// plain strings — no markdown, no mention resolution — so a question typed
-    /// with a channel picker would post showing the raw snowflake. Anonymous polls
-    /// render through an embed, where Discord resolves the real token into a
-    /// clickable link, so they keep the token as typed. The description is left
-    /// alone either way: it rides as ordinary message content, which also renders
-    /// the real mention.
+    /// plain strings — no markdown, no mention or timestamp rendering — so a raw
+    /// token would post as-is. Anonymous polls render through an embed, where
+    /// Discord resolves the real tokens, so they keep them as typed. The
+    /// description rides as ordinary message content, which renders both.
     /// </summary>
-    private PollDraft ResolveMentions(PollDraft d)
+    private PollDraft PrepareNativeText(PollDraft d)
     {
-        var question = PollMentionResolver.Resolve(_client, d.GuildId, d.Question) ?? d.Question;
-        var options  = d.Options
-            .Select(o => new PollOptionDraft(
-                PollMentionResolver.Resolve(_client, d.GuildId, o.Label) ?? o.Label, o.Emoji))
-            .ToList();
+        var timeLines = PollTimestampResolver.LocalTimeLines(
+            d.Options.Select(o => o.Label).Prepend(d.Question));
+
+        string Clean(string text) =>
+            PollTimestampResolver.Resolve(PollMentionResolver.Resolve(_client, d.GuildId, text)) ?? text;
+
+        var question    = Clean(d.Question);
+        var options     = d.Options.Select(o => new PollOptionDraft(Clean(o.Label), o.Emoji)).ToList();
+        var description = AppendLocalTimes(d.Description, timeLines);
 
         // Nothing to rewrite → hand back the original object rather than a clone.
         var changed = question != d.Question
+                   || description != d.Description
                    || options.Where((o, i) => o.Label != d.Options[i].Label).Any();
         if (!changed) return d;
 
@@ -286,7 +293,7 @@ public sealed class PollPublisher
             CreatorId        = d.CreatorId,
             CreatorName      = d.CreatorName,
             Question         = question,
-            Description      = d.Description,
+            Description      = description,
             Kind             = d.Kind,
             AllowMultiselect = d.AllowMultiselect,
             AnnounceOnClose  = d.AnnounceOnClose,
@@ -296,6 +303,27 @@ public sealed class PollPublisher
             ImageBytes       = d.ImageBytes,
             ImageFileName    = d.ImageFileName,
         };
+    }
+
+    /// <summary>
+    /// Adds the "in your time zone" lines under the creator's description, dropping
+    /// any that won't fit rather than cutting a token in half.
+    /// </summary>
+    internal static string? AppendLocalTimes(string? description, IReadOnlyList<string> lines)
+    {
+        if (lines.Count == 0) return description;
+
+        var sb = new StringBuilder(description?.Trim() ?? string.Empty);
+        var header = (sb.Length > 0 ? "\n\n" : "") + "🕒 **In your time zone:**";
+        var added = 0;
+        foreach (var line in lines)
+        {
+            var next = (added == 0 ? header : "") + "\n" + line;
+            if (sb.Length + next.Length > MaxDescriptionLength) break;
+            sb.Append(next);
+            added++;
+        }
+        return added == 0 ? description : sb.ToString();
     }
 
     // ─── Cross-post announcement ───────────────────────────────────────────

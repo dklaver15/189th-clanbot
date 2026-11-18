@@ -234,7 +234,8 @@ public sealed class PollReminderService : BackgroundService
                 ? string.Empty
                 : $"{MentionUtils.MentionChannel(poll.ChannelId)} · ";
 
-            eb.AddField(Trim(poll.Question, 250),
+            // Field names are plain text, so timestamps get the Eastern fallback.
+            eb.AddField(Trim(PollTimestampResolver.Resolve(poll.Question)!, 250),
                 $"{where}closes <t:{Unix(poll.ClosesAtUtc)}:R> · [Jump to the poll]({JumpLink(poll)})");
         }
 

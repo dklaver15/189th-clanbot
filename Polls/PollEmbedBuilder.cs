@@ -53,10 +53,12 @@ public static class PollEmbedBuilder
         var totalVotes = countsByOptionId.Values.Sum();
 
         var eb = new EmbedBuilder()
-            .WithTitle($"📊 {Trim(poll.Question, 250)}")
             .WithColor(closed ? Color.DarkGrey : Blurple);
 
+        // The question is a heading in the description rather than the embed title:
+        // Discord doesn't render timestamps or mentions in titles.
         var sb = new StringBuilder();
+        sb.Append("### 📊 ").Append(poll.Question.Trim()).Append("\n\n");
         var maxCount = options.Count == 0 ? 0 : options.Max(o => countsByOptionId.GetValueOrDefault(o.Id));
 
         foreach (var opt in options.OrderBy(o => o.Position))
@@ -115,7 +117,10 @@ public static class PollEmbedBuilder
         {
             var opt = ordered[i];
             var emote = ParseEmote(opt.Emoji);
-            var label = Trim(string.IsNullOrWhiteSpace(opt.Label) ? $"Option {i + 1}" : opt.Label, 80);
+            // Button labels are plain text, so timestamps get the Eastern fallback.
+            var label = Trim(string.IsNullOrWhiteSpace(opt.Label)
+                ? $"Option {i + 1}"
+                : PollTimestampResolver.Resolve(opt.Label)!, 80);
             cb.WithButton(label, VoteButtonId(poll.Id, opt.Id), ButtonStyle.Secondary,
                 emote: emote, disabled: locked, row: i / 5);
         }
